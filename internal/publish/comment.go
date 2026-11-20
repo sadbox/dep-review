@@ -1,0 +1,207 @@
+package publish
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+
+	"github.com/sadbox/dep-review/internal/gh"
+	"github.com/sadbox/dep-review/internal/model"
+)
+
+// markerPrefix starts the first line of the gate's one comment per PR. The
+// comment is found by this prefix AND the gate app's bot login; the rest
+// of the marker records which heads were already notified, so a re-run or
+// sweep never notifies twice for the same head.
+const markerPrefix = "<!-- dep-review:v1"
+
+const (
+	maxRows        = 50
+	maxMarkerShas  = 20
+	commentHardMax = 60000 // GitHub's limit is 65536
+)
+
+type marker struct {
+	Notified []string // heads a decision/merge-failure notification was sent for
+	Stuck    []string // heads a "stuck without a decision" notification was sent for
+}
+
+var markerRe = regexp.MustCompile(`^<!-- dep-review:v1((?: [a-z]+=[^ <>]*)*) -->`)
+
+func parseMarker(body string) (marker, bool) {
+	m := markerRe.FindStringSubmatch(body)
+	if m == nil {
+		return marker{}, false
+	}
+	var mk marker
+	for _, kv := range strings.Fields(m[1]) {
+		k, v, _ := strings.Cut(kv, "=")
+		var shas []string
+		for _, s := range strings.Split(v, ",") {
+			if gh.ValidSHA(s) {
+				shas = append(shas, s)
+			}
+		}
+		switch k {
+		case "notified":
+			mk.Notified = shas
+		case "stuck":
+			mk.Stuck = shas
+		}
+	}
+	return mk, true
+}
+
+func (m marker) String() string {
+	return fmt.Sprintf("%s notified=%s stuck=%s -->", markerPrefix, strings.Join(m.Notified, ","), strings.Join(m.Stuck, ","))
+}
+
+func has(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func add(list []string, s string) []string {
+	if has(list, s) {
+		return list
+	}
+	list = append(list, s)
+	if len(list) > maxMarkerShas {
+		list = list[len(list)-maxMarkerShas:]
+	}
+	return list
+}
+
+// replaceMarker swaps the marker line of one of our own comments.
+func replaceMarker(body string, m marker) string {
+	if loc := markerRe.FindStringIndex(body); loc != nil {
+		return m.String() + body[loc[1]:]
+	}
+	return m.String() + "\n" + body
+}
+
+type commentData struct {
+	Class     model.Classification
+	Evidence  *model.Evidence
+	Outcome   Outcome
+	MergeNote string // the gate's own words
+	RunURL    string // built from validated workflow env, or ""
+	Marker    marker
+}
+
+var headline = map[model.Decision]string{
+	model.DecisionMerge:   "approved",
+	model.DecisionHuman:   "needs a person",
+	model.DecisionPending: "no decision (the gate failed; it will retry on the next push or re-run)",
+}
+
+func renderComment(d commentData) string {
+	var b strings.Builder
+	o := d.Outcome
+	b.WriteString(d.Marker.String())
+	fmt.Fprintf(&b, "\n### dep-review: %s\n\n", headline[o.Decision])
+	b.WriteString("| | |\n|---|---|\n")
+	fmt.Fprintf(&b, "| Decision | `%s` |\n", o.Decision)
+	if o.Route != "" {
+		fmt.Fprintf(&b, "| Route | `%s` |\n", o.Route)
+	}
+	fmt.Fprintf(&b, "| Head | %s |\n", code(d.Class.HeadSHA))
+	fmt.Fprintf(&b, "| Reason | %s |\n", Inline(o.Reason))
+	if d.Class.Kind == model.KindDependabotUnverified && d.Class.Reason != "" {
+		fmt.Fprintf(&b, "| Classification | %s |\n", Inline(d.Class.Reason))
+	}
+	if d.RunURL != "" {
+		fmt.Fprintf(&b, "| Run | [workflow run](%s) |\n", d.RunURL)
+	}
+	if d.MergeNote != "" {
+		fmt.Fprintf(&b, "\n**Merge:** %s\n", Inline(d.MergeNote))
+	}
+
+	updates, title := d.Class.Declared, "Updates declared by Dependabot"
+	if d.Evidence != nil {
+		updates, title = d.Evidence.Updates, "Updates found by the gate"
+	}
+	if len(updates) > 0 {
+		fmt.Fprintf(&b, "\n#### %s (%d)\n\n", title, len(updates))
+		b.WriteString("| Dependency | Ecosystem | Directory | From | To | Type | Notes |\n|---|---|---|---|---|---|---|\n")
+		for i, u := range updates {
+			if i == maxRows {
+				fmt.Fprintf(&b, "| … %d more | | | | | | |\n", len(updates)-maxRows)
+				break
+			}
+			var notes []string
+			if u.Security {
+				notes = append(notes, "security")
+			}
+			if u.NoOp {
+				notes = append(notes, "no-op")
+			}
+			if !u.Direct {
+				notes = append(notes, "indirect")
+			}
+			for _, a := range u.Advisory {
+				notes = append(notes, a)
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n",
+				code(u.Name), code(string(u.Ecosystem)), code(u.Directory),
+				code(u.From), code(u.To), code(string(u.Type)), Inline(strings.Join(notes, ", ")))
+		}
+	}
+
+	if d.Evidence != nil && len(d.Evidence.Findings) > 0 {
+		fs := d.Evidence.Findings
+		fmt.Fprintf(&b, "\n#### Findings (%d)\n\n", len(fs))
+		b.WriteString("| Code | Route | Update | Detail |\n|---|---|---|---|\n")
+		for i, f := range fs {
+			if i == maxRows {
+				fmt.Fprintf(&b, "| … %d more | | | |\n", len(fs)-maxRows)
+				break
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", code(f.Code), code(string(f.Route)), code(f.Update), code(f.Detail))
+		}
+	}
+	if d.Evidence != nil && d.Evidence.Truncated {
+		b.WriteString("\nThe evidence was truncated by a size cap.\n")
+	}
+
+	if v := o.Verdict; v != nil {
+		b.WriteString("\n#### Review\n\n| | |\n|---|---|\n")
+		fmt.Fprintf(&b, "| Verdict | `%s` |\n", v.Verdict)
+		flags := make([]string, len(v.Flags))
+		for i, f := range v.Flags {
+			flags[i] = code(f)
+		}
+		if len(flags) == 0 {
+			flags = []string{"none"}
+		}
+		fmt.Fprintf(&b, "| Flags | %s |\n", strings.Join(flags, ", "))
+		if d.Class.Private {
+			if s := SanitizeSummary(v.Summary); s != "" {
+				b.WriteString("\nReviewer's summary (model output, sanitized):\n\n```text\n")
+				b.WriteString(s)
+				b.WriteString("\n```\n")
+			}
+		} else {
+			b.WriteString("\nThe reviewer's summary is not shown on public repositories; it is in the workflow run's artifacts.\n")
+		}
+	}
+
+	b.WriteString("\n<sub>dep-review applies this decision to the head commit above only. A new push starts a new review.</sub>\n")
+	s := b.String()
+	if len(s) > commentHardMax {
+		s = s[:commentHardMax] + "\n\n(comment truncated)\n"
+	}
+	return s
+}
+
+// renderStuck is sweep's comment for a head that has had no decision for
+// too long.
+func renderStuck(head string, m marker) string {
+	return m.String() + "\n### dep-review: no decision\n\n" +
+		"The gate has not decided on head " + code(head) + " within two hours. " +
+		"Check the dep-review workflow runs for this pull request, or re-run the trigger.\n"
+}

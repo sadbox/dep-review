@@ -1,0 +1,19 @@
+<!-- dep-review:v1 notified= stuck= -->
+### dep-review: approved
+
+| | |
+|---|---|
+| Decision | `merge` |
+| Route | `auto` |
+| Head | `1111111111111111111111111111111111111111` |
+| Reason | every update is a proven no-op; merging when CI is green |
+
+**Merge:** CI failed (2 failing checks)
+
+#### Updates found by the gate (1)
+
+| Dependency | Ecosystem | Directory | From | To | Type | Notes |
+|---|---|---|---|---|---|---|
+| `golang` | `docker` | `/` | `1.27` | `1.27` | `digest` | no-op |
+
+<sub>dep-review applies this decision to the head commit above only. A new push starts a new review.</sub>
