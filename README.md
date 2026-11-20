@@ -147,5 +147,32 @@ layer. CI (`ci.yml`, job `sandbox`, amd64 and arm64) runs the same setup
 against a fake upstream: isolation probes, then a scripted end-to-end
 review.
 
+## Updating pins
+
+Dependabot (`.github/dependabot.yml`) bumps the Go toolchain, the actions,
+the sandbox images' bases (`sandbox/Dockerfile`, one grouped PR) and the
+Claude Code CLI (`sandbox/package.json`, both architectures in one PR),
+daily with a three-day cooldown. Two things are by hand:
+
+- **gVisor.** `sandbox/install-gvisor.sh` pins a release and the sha512 of
+  each architecture's tarball; set `release` and copy both sums from that
+  release's `{x86_64,aarch64}/gvisor.tar.zstd.sha512` in the bucket.
+- **The proxy's allowlist after a CLI bump.** The proxy accepts only the
+  request fields, block types and betas the pinned CLI sends, and CI's
+  `sandbox` job fails on any refused request or dropped beta. To re-record,
+  run the end-to-end review from that job (`dep-review review ...
+  --test-fake-upstream canned.json`, sandboxtest build) with
+  `--test-fake-record <dir>` (a directory the container user 65532 can
+  write). The fake writes each request body as `messages-NNN.json` and its
+  forwarded headers as `messages-NNN.headers.json`. Then:
+  1. copy the last `messages-NNN.json` to
+     `internal/proxy/testdata/claude-code-request.json`;
+  2. compare the CLI's betas (in the proxy log, `dropped anthropic-beta
+     ...`) with `allowedBetas` in `internal/proxy/proxy.go`, and any
+     refusal reason with the allowlists in `internal/proxy/validate.go`;
+  3. add only what the new CLI really sends and is inert (no server tool,
+     no fetch by Anthropic), with a test, and re-run until the job is
+     green.
+
 The baseline every project follows (images, CI, Dependabot, repository
 settings) lives in [sadbox/ci](https://github.com/sadbox/ci/blob/main/STANDARDS.md).

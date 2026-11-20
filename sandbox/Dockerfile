@@ -9,6 +9,7 @@
 # postinstall script, which --ignore-scripts would skip.
 
 FROM node:26-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS install
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /opt/claude
 COPY package.json package-lock.json ./
 # Both platform packages are optional dependencies, so npm skips the one

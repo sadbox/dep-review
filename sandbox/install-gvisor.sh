@@ -7,6 +7,11 @@
 # tarball: the download must match the pinned sum, and the bucket's
 # published .sha512 must say the same thing, before anything is extracted.
 # Install steps: https://gvisor.dev/docs/user_guide/install/
+#
+# Bumped by hand (Dependabot does not cover it): pick a release from
+# https://storage.googleapis.com/storage/v1/b/gvisor/o?prefix=releases/release/&delimiter=/
+# set `release`, and copy both sums from that release's
+# {x86_64,aarch64}/gvisor.tar.zstd.sha512.
 set -euo pipefail
 
 release=20261109.0
