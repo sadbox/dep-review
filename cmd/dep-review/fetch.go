@@ -82,24 +82,7 @@ func runFetch(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "dep-review fetch: %d updates, %d findings, route %s\n", len(out.Updates), len(out.Findings), out.Route)
-	return writeGitHubOutput("route", string(out.Route))
-}
-
-// writeGitHubOutput appends key=value to $GITHUB_OUTPUT (when set).
-func writeGitHubOutput(key, value string) error {
-	p := os.Getenv("GITHUB_OUTPUT")
-	if p == "" {
-		return nil
-	}
-	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f, "%s=%s\n", key, value); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return stepOutput("route", string(out.Route))
 }
 
 // removeScratch deletes the scratch tree, first making any read-only

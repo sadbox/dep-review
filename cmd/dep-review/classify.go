@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -52,24 +51,5 @@ func runClassify(args []string) error {
 	if err := os.WriteFile(*out, append(b, '\n'), 0o644); err != nil {
 		return err
 	}
-	return appendOutput("kind", string(cl.Kind))
-}
-
-// appendOutput writes a single-line step output; value is one of our own
-// enums, never untrusted text.
-func appendOutput(name, value string) error {
-	path := os.Getenv("GITHUB_OUTPUT")
-	if path == "" {
-		fmt.Printf("%s=%s\n", name, value)
-		return nil
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f, "%s=%s\n", name, value); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return stepOutput("kind", string(cl.Kind))
 }
