@@ -14,7 +14,7 @@ func TestParseDeclaredReal(t *testing.T) {
 		want []Declared
 		dir  string
 	}{
-		{"msg_sadbox_towngear_51.txt", []Declared{{Name: "golang", Version: "1.27", DepType: "direct:production", UpdateType: "version-update:semver-patch", Group: "docker", From: "01aa404"}}, ""},
+		{"msg_sadbox_towngear_51.txt", []Declared{{Name: "golang", Version: "1.27", DepType: "direct:production", UpdateType: "version-update:semver-patch", Group: "docker", FromRef: "01aa404", ToRef: "205c763"}}, ""},
 		{"msg_sadbox_towngear_53.txt", []Declared{{Name: "actions/setup-go", Version: "7.1.0", DepType: "direct:production", UpdateType: "version-update:semver-minor", From: "7.0.0"}}, ""},
 		{"msg_sadbox_oncall-sync_87.txt", []Declared{{Name: "actions/setup-go", Version: "7.1.0", DepType: "direct:production", UpdateType: "version-update:semver-minor", From: "7.0.0"}}, ""},
 		{"msg_sadbox_oncall-sync_88.txt", []Declared{{Name: "golang", Version: "1.27.4", DepType: "direct:production", UpdateType: "version-update:semver-patch", Group: "docker", From: "1.27.3"}}, ""},
@@ -41,6 +41,35 @@ func TestParseDeclaredReal(t *testing.T) {
 				t.Errorf("dir = %q", d)
 			}
 		})
+	}
+}
+
+// The prose's "from A to B": a backticked hex side is a pin (FromRef /
+// ToRef), anything else a version.
+func TestParseDeclaredProsePins(t *testing.T) {
+	const msg = "Bump the docker group with 3 updates\n\n" +
+		"Updates `golang` from `01aa404` to `205c763`\n\n" +
+		"Updates `caddy` from `4e2425f` to `4851e54`\n\n" +
+		"Updates `busybox` from `sha256:aaaaaaaaaaaa` to `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`\n\n" +
+		"Bumps date-pkg from 20240101 to 20240102.\n\n" +
+		"---\nupdated-dependencies:\n" +
+		"- dependency-name: golang\n  dependency-version: '1.27'\n" +
+		"- dependency-name: caddy\n  dependency-version: 2.11.9\n" +
+		"- dependency-name: busybox\n  dependency-version: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" +
+		"- dependency-name: date-pkg\n  dependency-version: '20240102'\n...\n"
+	got, err := ParseDeclared(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := strings.Repeat("b", 64)
+	want := []Declared{
+		{Name: "golang", Version: "1.27", FromRef: "01aa404", ToRef: "205c763"},
+		{Name: "caddy", Version: "2.11.9", FromRef: "4e2425f", ToRef: "4851e54"},
+		{Name: "busybox", Version: full, FromRef: "aaaaaaaaaaaa", ToRef: full},
+		{Name: "date-pkg", Version: "20240102", From: "20240101"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %+v\nwant %+v", got, want)
 	}
 }
 

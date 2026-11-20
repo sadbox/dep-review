@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/evidence"
@@ -44,6 +45,43 @@ func TestCompareDeclared(t *testing.T) {
 			}
 			if len(updates) != len(real) {
 				t.Errorf("updates changed length: %d", len(updates))
+			}
+		})
+	}
+
+	// The docker fetcher's view of a digest bump (towngear#51) and of an
+	// untagged pin; Dependabot declares the tag plus abbreviated digests.
+	const (
+		dgOld = "sha256:01aa404fa56b604b6f48e90c1d6e2c79fe5cd78f9592f78d80303fbe171cdcc0"
+		dgNew = "sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf"
+	)
+	docker := []model.Update{
+		{Name: "golang", Directory: "/", From: "1.27", To: "1.27", FromRef: dgOld, ToRef: dgNew, Type: model.Digest},
+		{Name: "busybox", Directory: "/", From: dgOld, To: dgNew, FromRef: dgOld, ToRef: dgNew, Type: model.Unknown},
+	}
+	dockerTests := []struct {
+		name     string
+		declared model.Update
+		want     []string
+	}{
+		{"digest bump", model.Update{Name: "golang", To: "1.27", FromRef: "01aa404", ToRef: "205c763"}, nil},
+		{"digest bump, other new digest", model.Update{Name: "golang", To: "1.27", FromRef: "01aa404", ToRef: "205c764"}, []string{"declared.to-mismatch"}},
+		{"digest bump, other old digest", model.Update{Name: "golang", To: "1.27", FromRef: "01aa405", ToRef: "205c763"}, []string{"declared.from-mismatch"}},
+		{"digest bump, other tag", model.Update{Name: "golang", To: "1.28", FromRef: "01aa404", ToRef: "205c763"}, []string{"declared.to-mismatch"}},
+		{"digest too short to compare", model.Update{Name: "golang", To: "1.27", ToRef: "205c"}, []string{"declared.to-mismatch"}},
+		{"untagged pin, version is the digest", model.Update{Name: "busybox", To: strings.TrimPrefix(dgNew, "sha256:"), FromRef: "01aa404", ToRef: "205c763"}, nil},
+		{"untagged pin, other digest", model.Update{Name: "busybox", To: "205c763ff"}, []string{"declared.to-mismatch"}},
+		{"nothing declared for the target", model.Update{Name: "golang", FromRef: "01aa404"}, []string{"declared.to-mismatch"}},
+	}
+	for _, tt := range dockerTests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, findings := fetch.CompareDeclared([]model.Update{tt.declared}, docker)
+			var codes []string
+			for _, f := range findings {
+				codes = append(codes, f.Code)
+			}
+			if !slices.Equal(codes, tt.want) {
+				t.Errorf("codes = %q, want %q (%+v)", codes, tt.want, findings)
 			}
 		})
 	}

@@ -25,6 +25,11 @@ type Declared struct {
 	UpdateType string // version-update:semver-{patch,minor,major}
 	Group      string
 	From       string // from the "Updates `x` from A to B" / "Bumps x from A to B" prose, if found
+	// FromRef/ToRef: when the prose names a pin instead of a version
+	// (a backticked, usually abbreviated, hex digest or commit SHA:
+	// "Updates `golang` from `01aa404` to `205c763`"), that pin. A Docker
+	// digest bump declares its tag as Version and the digests only here.
+	FromRef, ToRef string
 }
 
 var (
@@ -120,10 +125,19 @@ func ParseDeclared(msg string) ([]Declared, error) {
 			return nil, fmt.Errorf("version %.80q of %s has unexpected characters", d.Version, d.Name)
 		}
 	}
-	from := parseFrom(lines[:start])
+	prose := parseProse(lines[:start])
 	for i := range out {
-		if f, ok := from[out[i].Name]; ok && versionRe.MatchString(f) {
+		p, ok := prose[out[i].Name]
+		if !ok {
+			continue
+		}
+		if ref, ok := proseRef(p.from); ok {
+			out[i].FromRef = ref
+		} else if f := strings.Trim(p.from, "`"); versionRe.MatchString(f) {
 			out[i].From = f
+		}
+		if ref, ok := proseRef(p.to); ok {
+			out[i].ToRef = ref
 		}
 	}
 	return out, nil
@@ -182,27 +196,44 @@ func scalar(s string) (string, error) {
 var (
 	// Updates `golang` from `01aa404` to `205c763`
 	// Updates `github.com/x/y` from 1.20.17 to 1.21.0
-	updatesRe = regexp.MustCompile("^Updates `([^`]+)` from `?([^` ]+)`? to `?([^` ]+)`?")
+	updatesRe = regexp.MustCompile("^Updates `([^`]+)` from (`[^` ]+`|[^` ]+) to (`[^` ]+`|[^` ]+)")
 	// Bumps [actions/setup-go](https://...) from 7.0.0 to 7.1.0.
 	// Bumps golang from 1.27.3 to 1.27.4.
-	bumpsRe = regexp.MustCompile("^Bumps \\[?([^\\] ]+)\\]?(?:\\([^)]*\\))? from `?([^` ]+?)`? to `?([^` ]+?)`?\\.?$")
+	bumpsRe = regexp.MustCompile("^Bumps \\[?([^\\] ]+)\\]?(?:\\([^)]*\\))? from (`[^` ]+?`|[^` ]+?) to (`[^` ]+?`|[^` ]+?)\\.?$")
+	// A backticked abbreviated (or full) digest or commit SHA.
+	proseRefRe = regexp.MustCompile("^`(?:sha256:)?([0-9a-f]{7,64})`$")
 )
 
-// parseFrom finds each dependency's previous version in the prose above
-// the metadata block. Best effort: fetch recomputes the real change set.
-func parseFrom(lines []string) map[string]string {
-	m := map[string]string{}
+// proseSides is one dependency's "from A to B" in the prose, each side
+// with its backticks (if any) kept.
+type proseSides struct{ from, to string }
+
+// parseProse finds each dependency's "from A to B" in the prose above the
+// metadata block. Best effort: fetch recomputes the real change set.
+func parseProse(lines []string) map[string]proseSides {
+	m := map[string]proseSides{}
 	for _, l := range lines {
 		l = strings.TrimSpace(l)
 		if s := updatesRe.FindStringSubmatch(l); s != nil {
-			m[s[1]] = s[2]
+			m[s[1]] = proseSides{s[2], s[3]}
 		} else if s := bumpsRe.FindStringSubmatch(l); s != nil {
 			if _, ok := m[s[1]]; !ok {
-				m[s[1]] = s[2]
+				m[s[1]] = proseSides{s[2], s[3]}
 			}
 		}
 	}
 	return m
+}
+
+// proseRef returns the hex of a backticked digest/SHA side. Dependabot
+// backticks pins and never versions, so "from 20240101 to 20240102" stays
+// a version.
+func proseRef(side string) (string, bool) {
+	m := proseRefRe.FindStringSubmatch(side)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
 }
 
 var dirRe = regexp.MustCompile(` in (/[A-Za-z0-9._/-]*)$`)

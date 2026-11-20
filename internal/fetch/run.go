@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -78,10 +79,16 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 
 // CompareDeclared matches Dependabot's declared updates to the real change
 // set. A declared update missing from the real set, or declared with a
-// different target version, refuses the PR. A different "from" version
-// needs a person. Undeclared real updates are expected (transitive
-// changes) and are simply reviewed. Matched updates inherit the declared
-// security flag and advisories, which only Dependabot knows.
+// different target, refuses the PR. A different "from" needs a person.
+// Undeclared real updates are expected (transitive changes) and are simply
+// reviewed. Matched updates inherit the declared security flag and
+// advisories, which only Dependabot knows.
+//
+// Each side is compared on what Dependabot declared for it: the version
+// (To/From) and, when its prose names one, the pin (ToRef/FromRef, usually
+// abbreviated). A Docker digest bump declares only the tag as its version
+// and the two digests as pins, so it matches the fetcher's tag -> tag
+// with full digests, and a different digest still refuses.
 func CompareDeclared(declared, real []model.Update) ([]model.Update, []model.Finding) {
 	updates := slices.Clone(real)
 	var findings []model.Finding
@@ -98,27 +105,27 @@ func CompareDeclared(declared, real []model.Update) ([]model.Update, []model.Fin
 		} else {
 			findings = append(findings, model.Finding{
 				Code: "declared.missing", Route: model.RouteRefuse, Update: d.Name,
-				Detail: fmt.Sprintf("Dependabot declares %s %s -> %s in %s, but the manifests and lockfiles do not change it", d.Name, d.From, d.To, dirOrRoot(d.Directory)),
+				Detail: fmt.Sprintf("Dependabot declares %s %s -> %s in %s, but the manifests and lockfiles do not change it", d.Name, side(d.From, d.FromRef), side(d.To, d.ToRef), dirOrRoot(d.Directory)),
 			})
 			continue
 		}
 		// Several copies (lockfile duplicates): prefer the one with the declared target.
 		for _, j := range matches {
-			if sameVersion(updates[j].To, d.To) {
+			if sideMatches(updates[j].To, updates[j].ToRef, d.To, d.ToRef) {
 				i = j
 				break
 			}
 		}
 		u := &updates[i]
-		if !sameVersion(u.To, d.To) {
+		if (d.To == "" && d.ToRef == "") || !sideMatches(u.To, u.ToRef, d.To, d.ToRef) {
 			findings = append(findings, model.Finding{
 				Code: "declared.to-mismatch", Route: model.RouteRefuse, Update: d.Name,
-				Detail: fmt.Sprintf("Dependabot declares %s -> %s, but the change set has %s -> %s", d.Name, d.To, u.From, u.To),
+				Detail: fmt.Sprintf("Dependabot declares %s -> %s, but the change set has %s -> %s", d.Name, side(d.To, d.ToRef), side(u.From, u.FromRef), side(u.To, u.ToRef)),
 			})
-		} else if d.From != "" && !sameVersion(u.From, d.From) {
+		} else if !sideMatches(u.From, u.FromRef, d.From, d.FromRef) {
 			findings = append(findings, model.Finding{
 				Code: "declared.from-mismatch", Route: model.RouteHuman, Update: d.Name,
-				Detail: fmt.Sprintf("Dependabot declares %s from %s, but the base has %s", d.Name, d.From, u.From),
+				Detail: fmt.Sprintf("Dependabot declares %s from %s, but the base has %s", d.Name, side(d.From, d.FromRef), side(u.From, u.FromRef)),
 			})
 		}
 		u.Security = u.Security || d.Security
@@ -154,6 +161,43 @@ func sameDir(real, declared string) bool {
 }
 
 func dirOrRoot(d string) string { return path.Clean("/" + strings.Trim(d, "/")) }
+
+// sideMatches reports whether one side (from or to) of a real update
+// agrees with what Dependabot declared for it. A declared version may also
+// be a pin (an untagged image's digest, a submodule commit), so it matches
+// the real pin too.
+func sideMatches(realVer, realRef, declVer, declRef string) bool {
+	verOK := declVer == "" || sameVersion(realVer, declVer) || sameRef(realRef, declVer)
+	refOK := declRef == "" || sameRef(realRef, declRef)
+	return verOK && refOK
+}
+
+var (
+	fullRefRe   = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+	abbrevRefRe = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+)
+
+// sameRef reports whether abbrev (Dependabot's, often 7 hex) is a prefix
+// of the full commit SHA or sha256 digest real. Both may carry "sha256:".
+func sameRef(real, abbrev string) bool {
+	real, abbrev = strings.TrimPrefix(real, "sha256:"), strings.TrimPrefix(abbrev, "sha256:")
+	return fullRefRe.MatchString(real) && abbrevRefRe.MatchString(abbrev) && strings.HasPrefix(real, abbrev)
+}
+
+// side renders a version and pin for a finding: "1.27@205c7636d74e".
+func side(ver, ref string) string {
+	ref = strings.TrimPrefix(ref, "sha256:")
+	if len(ref) > 12 {
+		ref = ref[:12]
+	}
+	switch {
+	case ref == "":
+		return ver
+	case ver == "":
+		return ref
+	}
+	return ver + "@" + ref
+}
 
 // sameVersion ignores a leading "v": Dependabot writes "1.2.3" for Go's "v1.2.3".
 func sameVersion(a, b string) bool { return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v") }

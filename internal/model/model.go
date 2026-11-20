@@ -84,7 +84,10 @@ type Classification struct {
 	Ecosystem Ecosystem `json:"ecosystem,omitempty"`
 	// Updates as declared by Dependabot's verified commit message. fetch
 	// recomputes the real change set from the manifests and lockfiles and
-	// reports any difference as a finding.
+	// reports any difference as a finding. Here FromRef/ToRef are what
+	// Dependabot's prose names (usually abbreviated hex, no "sha256:"),
+	// and From is empty when the prose names only a pin: a Docker digest
+	// bump declares To = the tag, FromRef/ToRef = the short digests.
 	Declared []Update `json:"declared,omitempty"`
 	Files    []string `json:"files,omitempty"` // paths the PR changes
 }

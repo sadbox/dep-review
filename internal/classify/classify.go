@@ -240,6 +240,8 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 			Name:      d.Name,
 			From:      d.From,
 			To:        d.Version,
+			FromRef:   d.FromRef,
+			ToRef:     d.ToRef,
 			Type:      updateType(d.UpdateType),
 			Direct:    strings.HasPrefix(d.DepType, "direct"),
 			Security:  security,
