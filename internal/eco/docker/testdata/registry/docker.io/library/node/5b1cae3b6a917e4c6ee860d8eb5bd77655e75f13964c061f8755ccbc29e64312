@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:497dfa3fe8e588e46a7287e09a748f9829a0b5af4a94442e8e521442888753bd",
+    "size": 5046
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:b90627b8f4292fd3cb63f0f27f0b11c37f04ba88ef3b78d4948ea0ace18c85e9",
+      "size": 4190595
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:0f9262622f5f8a692c344015db95dcf4cca74a2a7e82ed1b775372d256f25ada",
+      "size": 63810518
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:0ca4782e6dd87672e686fc8ad80810ab76c4bedf08102f0c3f023e3f0cf31331",
+      "size": 445
+    }
+  ],
+  "annotations": {
+    "com.docker.official-images.bashbrew.arch": "arm64v8",
+    "org.opencontainers.image.base.digest": "sha256:1829893486be257df5049ab3b7fc95afbd0fc09d89803cbc580bda1ba5386b29",
+    "org.opencontainers.image.base.name": "alpine:3.24",
+    "org.opencontainers.image.created": "2026-11-11T18:41:22Z",
+    "org.opencontainers.image.revision": "1274f3ee37d4d0e59d308ea25b83d9e21e4db862",
+    "org.opencontainers.image.source": "https://github.com/nodejs/docker-node.git#1274f3ee37d4d0e59d308ea25b83d9e21e4db862:26/alpine3.24",
+    "org.opencontainers.image.url": "https://hub.docker.com/_/node",
+    "org.opencontainers.image.version": "26-alpine"
+  }
+}

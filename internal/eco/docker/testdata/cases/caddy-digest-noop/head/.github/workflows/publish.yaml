@@ -1,0 +1,28 @@
+name: publish
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-26.04
+          - platform: linux/arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@0000000000000000000000000000000000000000 # v7
+      - name: Build for ${{ matrix.platform }}
+        uses: docker/build-push-action@0000000000000000000000000000000000000000 # v7
+        with:
+          context: proxy
+          platforms: ${{ matrix.platform }}
+  merge:
+    needs: [build]
+    runs-on: ubuntu-26.04
+    steps:
+      - run: echo merge
