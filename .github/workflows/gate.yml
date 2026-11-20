@@ -1,0 +1,293 @@
+# The Dependabot review gate (reusable workflow). See README.md for the
+# design and examples/ for what a repository adds to use it.
+#
+# Trust layout, which every change here must keep:
+#   - classify, fetch: no secrets, read-only token. fetch downloads both
+#     versions of each dependency and diffs them; it never executes
+#     anything from the PR or from a dependency.
+#   - review: the ONLY job with a model. Read-only token, no secrets; its
+#     model credential is a short-lived federated token (OIDC). Tools are
+#     Read/Grep/Glob on ./evidence and ./repo only. Its output is a
+#     schema-checked verdict, nothing else.
+#   - publish, sweep: no model and no untrusted text in any shell. They hold
+#     the gate app's token (environment `dep-review`, default branch only)
+#     and merge only a head SHA that classify verified and the verdict
+#     approved.
+name: dep-review gate
+
+on:
+  workflow_call:
+    inputs:
+      trigger_workflow_path:
+        description: The caller's no-op pull_request workflow whose completion starts the gate.
+        type: string
+        default: .github/workflows/dep-review-trigger.yaml
+      notes_path:
+        description: Repository-specific review notes, read from the default branch.
+        type: string
+        default: .github/dep-review.md
+      model:
+        type: string
+        default: claude-opus-5-5
+      anthropic_federation_rule_id:
+        type: string
+        required: true
+      anthropic_organization_id:
+        type: string
+        required: true
+      anthropic_workspace_id:
+        type: string
+        default: ""
+
+permissions: {}
+
+env:
+  # Backstops for "never run the dependencies' code".
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  CGO_ENABLED: "0"
+  npm_config_ignore_scripts: "true"
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the gate (this workflow's own commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: gate
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: gate/go.mod
+          cache: false
+      - name: Build
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -C gate -trimpath -o "$RUNNER_TEMP/bin/dep-review" ./cmd/dep-review
+          cp gate/prompts/review.md gate/schema/verdict.json "$RUNNER_TEMP/bin/"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-bin
+          path: ${{ runner.temp }}/bin
+          retention-days: 1
+
+  classify:
+    needs: build
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gate-bin
+          path: ${{ runner.temp }}/bin
+      - name: Classify
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/dep-review"
+          "$RUNNER_TEMP/bin/dep-review" classify \
+            --event "$GITHUB_EVENT_PATH" \
+            --trigger-path "$TRIGGER_PATH" \
+            --out "$RUNNER_TEMP/out/classification.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: classification
+          path: ${{ runner.temp }}/out/classification.json
+          retention-days: 7
+
+  fetch:
+    needs: [build, classify]
+    if: needs.classify.outputs.kind == 'dependabot'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      route: ${{ steps.fetch.outputs.route }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gate-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: classification
+          path: ${{ runner.temp }}/in
+      - name: Check out the PR (data only; nothing from it is executed)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch and verify
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/dep-review"
+          "$RUNNER_TEMP/bin/dep-review" fetch \
+            --classification "$RUNNER_TEMP/in/classification.json" \
+            --repo-dir pr \
+            --out "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
+
+  review:
+    needs: [build, classify, fetch]
+    if: needs.fetch.outputs.route == 'review'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # federated model credential only
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gate-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evidence
+          path: evidence
+      - name: Check out the default branch (for usage search and the review notes)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+          persist-credentials: false
+      - name: Prepare prompt and settings
+        id: prep
+        env:
+          NOTES_PATH: ${{ inputs.notes_path }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/dep-review"
+          "$RUNNER_TEMP/bin/dep-review" review-prep \
+            --prompt "$RUNNER_TEMP/bin/review.md" \
+            --schema "$RUNNER_TEMP/bin/verdict.json" \
+            --notes "repo/$NOTES_PATH" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Review
+        id: claude
+        uses: anthropics/claude-code-action@c84e279f859e2591391e95bd309286eb111c345f # v1.0.284
+        with:
+          # Our own read-only token: without it the action would fetch a
+          # token for the Claude GitHub App, which can write.
+          github_token: ${{ github.token }}
+          anthropic_federation_rule_id: ${{ inputs.anthropic_federation_rule_id }}
+          anthropic_organization_id: ${{ inputs.anthropic_organization_id }}
+          anthropic_workspace_id: ${{ inputs.anthropic_workspace_id }}
+          allowed_bots: dependabot[bot]
+          display_report: "false"
+          prompt: ${{ steps.prep.outputs.prompt }}
+          settings: ${{ steps.prep.outputs.settings }}
+          claude_args: >-
+            --model ${{ inputs.model }}
+            --tools Read,Grep,Glob
+            --permission-mode dontAsk
+            --max-turns 80
+            --json-schema ${{ steps.prep.outputs.schema_file }}
+      - name: Save verdict
+        env:
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/verdict"
+          printf '%s' "$VERDICT" >"$RUNNER_TEMP/verdict/verdict.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verdict
+          path: ${{ runner.temp }}/verdict/verdict.json
+          retention-days: 7
+
+  publish:
+    needs: [build, classify, fetch, review]
+    if: >-
+      always() && needs.build.result == 'success' &&
+      (needs.classify.outputs.kind == 'dependabot' || needs.classify.outputs.kind == 'dependabot-unverified')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    environment: dep-review
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/in
+          pattern: "{gate-bin,classification,evidence,verdict}"
+      - name: Gate app token (this repository only)
+        id: app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ vars.DEP_REVIEW_APP_ID }}
+          private-key: ${{ secrets.DEP_REVIEW_APP_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-statuses: write
+          permission-workflows: write
+          permission-checks: read
+          permission-actions: read
+      - name: Decide, comment, merge
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          FETCH_RESULT: ${{ needs.fetch.result }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          chmod +x "$RUNNER_TEMP/in/gate-bin/dep-review"
+          "$RUNNER_TEMP/in/gate-bin/dep-review" publish \
+            --in "$RUNNER_TEMP/in" \
+            --fetch-result "$FETCH_RESULT" \
+            --review-result "$REVIEW_RESULT"
+
+  sweep:
+    needs: build
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    environment: dep-review
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gate-bin
+          path: ${{ runner.temp }}/bin
+      - name: Gate app token (this repository only)
+        id: app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ vars.DEP_REVIEW_APP_ID }}
+          private-key: ${{ secrets.DEP_REVIEW_APP_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-statuses: read
+          permission-workflows: write
+          permission-checks: read
+          permission-actions: read
+      - name: Merge approved PRs whose CI finished; report stuck ones
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/dep-review"
+          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY"
