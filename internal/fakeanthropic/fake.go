@@ -158,7 +158,7 @@ func (s *Server) exchange(w http.ResponseWriter, r *http.Request) {
 	tok := fmt.Sprintf("sk-ant-oat01-fake-%d", s.minted)
 	s.tokens[tok] = time.Now().Add(ttl)
 	s.mu.Unlock()
-	json.NewEncoder(w).Encode(map[string]any{"access_token": tok, "token_type": "Bearer", "expires_in": int(ttl.Seconds()), "scope": "workspace:inference"})
+	json.NewEncoder(w).Encode(map[string]any{"access_token": tok, "token_type": "Bearer", "expires_in": int(ttl.Seconds()), "scope": "workspace:developer"})
 }
 
 type block struct {

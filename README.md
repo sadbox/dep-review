@@ -127,11 +127,20 @@ for the audience `https://api.anthropic.com`. The proxy exchanges each JWT
 at `POST /v1/oauth/token` (RFC 7523 jwt-bearer) for a short-lived
 Claude token, sends that as `Authorization: Bearer`, and exchanges again,
 with a fresh OIDC token each time, two minutes before expiry (federated
-tokens live about ten minutes; a review can take twenty). The federation
-rule pins the repositories, `event_name == "workflow_run"`, the default
-branch and `job_workflow_ref` starting with this repository's `gate.yml`,
-with scope `workspace:inference` in a workspace that has a spend limit. No
-API key is stored anywhere. Inputs: `anthropic_federation_rule_id`,
+tokens live about ten minutes; a review can take twenty). No API key is
+stored anywhere.
+
+The federation rule matches the subject pattern
+`repo:<owner>@<owner_id>/*`: GitHub's subject for these owners includes
+numeric IDs, e.g.
+`repo:Espresso-Aficionados@76916743/linkclean@1420833610:ref:refs/heads/main`.
+It also pins `event_name == "workflow_run"`, the default branch and
+`job_workflow_ref` starting with this repository's `gate.yml`. Its scope
+is `workspace:developer`, the narrowest the Claude Console offers (the
+other is `org:admin`), in a workspace that has a spend limit. That scope
+allows more than inference, but the token never enters the sandbox and
+the proxy forwards only `POST /v1/messages`, so the rest is reachable
+only from the host side. Inputs: `anthropic_federation_rule_id`,
 `anthropic_organization_id`, optional `anthropic_workspace_id` and
 `anthropic_service_account_id`; `max_model_requests` (default 200) caps
 Messages requests per review.

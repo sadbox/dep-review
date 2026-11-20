@@ -62,7 +62,7 @@ func newUpstream(t *testing.T) *upstream {
 			http.Error(w, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`, 503)
 			return
 		}
-		fmt.Fprintf(w, `{"access_token":"sk-ant-oat01-%d","token_type":"Bearer","expires_in":%d,"scope":"workspace:inference"}`, len(u.exchanged), u.ttl)
+		fmt.Fprintf(w, `{"access_token":"sk-ant-oat01-%d","token_type":"Bearer","expires_in":%d,"scope":"workspace:developer"}`, len(u.exchanged), u.ttl)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
