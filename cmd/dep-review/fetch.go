@@ -14,6 +14,7 @@ import (
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -48,6 +49,13 @@ func runFetch(args []string) error {
 		return err
 	}
 
+	// The fetch job's own read-only token (contents/pull-requests: read):
+	// REST reads of the caller repository and public upstreams.
+	ghc, err := gh.NewFromEnv()
+	if err != nil {
+		return err
+	}
+
 	scratch, err := os.MkdirTemp(os.Getenv("RUNNER_TEMP"), "dep-review-scratch-")
 	if err != nil {
 		return err
@@ -67,9 +75,7 @@ func runFetch(args []string) error {
 		RepoDir: repo,
 		Scratch: scratch,
 		HTTP:    ecoutil.NewClient(),
-		// GitHub: wired to internal/gh's read-only client when it lands
-		// (only the github_actions and docker fetchers use it).
-		GitHub: nil,
+		GitHub:  ghc,
 	}
 	out, err := fetch.Run(ctx, env, ecosystems, ev)
 	if err != nil {
