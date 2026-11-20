@@ -34,6 +34,10 @@ func (m *yMap) sub(k string) *yMap {
 	return s
 }
 
+// yFlow is a flow collection ([...] or {...}) the reader keeps as raw
+// text instead of parsing. Callers that need its content must reject it.
+type yFlow string
+
 type yParser struct {
 	lines []string
 	i     int
@@ -245,7 +249,7 @@ func (p *yParser) value(rest string, parent int) (any, error) {
 			rest += " " + strings.TrimSpace(p.lines[p.i])
 			p.i++
 		}
-		return stripComment(rest), nil
+		return yFlow(stripComment(rest)), nil
 	}
 	v := stripComment(rest)
 	// Plain multi-line scalar: more-indented continuation lines.
@@ -449,5 +453,7 @@ func flatten(prefix string, v any, out *[]string) {
 		}
 	case string:
 		*out = append(*out, prefix+" = "+strconv.Quote(t))
+	case yFlow:
+		*out = append(*out, prefix+" = (flow) "+strconv.Quote(string(t)))
 	}
 }

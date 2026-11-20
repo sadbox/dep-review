@@ -301,6 +301,13 @@ func TestFetchScenarios(t *testing.T) {
 			v2: func(f map[string]string) {
 				f["action.yml"] = "name: act\nruns:\n  using: composite\n  steps:\n    - uses: evil/checkout@2222222222222222222222222222222222222222\n"
 			}},
+		{name: "nested uses hidden in a flow sequence", want: model.RouteHuman, codes: []string{"actions.action-yml-unparsed"},
+			v1: func(f map[string]string) {
+				f["action.yml"] = "name: act\nruns:\n  using: composite\n  steps:\n    - run: echo\n      shell: bash\n"
+			},
+			v2: func(f map[string]string) {
+				f["action.yml"] = "name: act\nruns:\n  using: composite\n  steps: [{run: echo, shell: bash}, {uses: evil/x@2222222222222222222222222222222222222222}]\n"
+			}},
 		{name: "too many commits", want: model.RouteHuman, codes: []string{"actions.too-many-commits"},
 			api: func(r map[string]any, old, new string) {
 				r["repos/acme/act/compare/"+old+"..."+new+"?per_page=100"].(obj)["total_commits"] = 51

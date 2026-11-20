@@ -33,6 +33,9 @@ func parseActionMeta(text string) (*actionMeta, error) {
 	if runs == nil {
 		return nil, fmt.Errorf("no runs: mapping")
 	}
+	if err := noFlow("runs", runs); err != nil {
+		return nil, err
+	}
 	m := &actionMeta{
 		using:   runs.str("using"),
 		main:    runs.str("main"),
@@ -55,6 +58,28 @@ func parseActionMeta(text string) (*actionMeta, error) {
 		}
 	}
 	return m, nil
+}
+
+// noFlow rejects flow collections anywhere under v: the YAML subset keeps
+// them as raw text, so a uses: or image: inside one would go unseen.
+func noFlow(at string, v any) error {
+	switch t := v.(type) {
+	case yFlow:
+		return fmt.Errorf("%s: flow collections are not supported under runs", at)
+	case *yMap:
+		for _, k := range t.keys {
+			if err := noFlow(at+"."+k, t.m[k]); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for i, e := range t {
+			if err := noFlow(fmt.Sprintf("%s[%d]", at, i), e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (m *actionMeta) isNode() bool {

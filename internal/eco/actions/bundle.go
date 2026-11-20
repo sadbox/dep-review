@@ -3,10 +3,12 @@ package actions
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -84,11 +86,16 @@ type attribution struct {
 
 var webpackGutterRx = regexp.MustCompile(`^/\*+/`)
 
-var pkgJSONModuleRx = regexp.MustCompile(`^\s*module\.exports = (?:/\*#__PURE__\*/)?JSON\.parse\('\{"name":"((?:@[a-z0-9._~-]+/)?[a-z0-9._~-]+)","version":"([0-9A-Za-z.+-]+)"`)
-
 // jsonModulePackage recognizes a numbered module that is only an npm
 // package's package.json (bundled for its version string) whose name and
-// version match a changed locked package.
+// version match a changed locked package. It fails closed: the one code
+// line must be exactly
+//
+//	module.exports = [/*#__PURE__*/]JSON.parse('<json>');
+//
+// with a single-quoted string literal holding a JSON object whose "name"
+// and "version" equal a changed locked package. Anything else is not
+// attributed.
 func (a attribution) jsonModulePackage(body string) bool {
 	var code []string
 	for _, l := range strings.Split(body, "\n") {
@@ -102,8 +109,82 @@ func (a attribution) jsonModulePackage(body string) bool {
 	if len(code) != 1 {
 		return false
 	}
-	m := pkgJSONModuleRx.FindStringSubmatch(code[0])
-	return m != nil && strings.HasSuffix(code[0], "');") && a.lockChanged[m[1]] && a.lockNew[m[1]][m[2]]
+	line := strings.TrimSpace(code[0])
+	rest, ok := strings.CutPrefix(line, "module.exports = ")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimPrefix(rest, "/*#__PURE__*/")
+	if rest, ok = strings.CutPrefix(rest, "JSON.parse('"); !ok {
+		return false
+	}
+	lit, tail, ok := jsSingleQuoted(rest)
+	if !ok || tail != ");" {
+		return false
+	}
+	var pj map[string]any
+	dec := json.NewDecoder(strings.NewReader(lit))
+	if err := dec.Decode(&pj); err != nil || dec.More() {
+		return false
+	}
+	name, _ := pj["name"].(string)
+	version, _ := pj["version"].(string)
+	return name != "" && version != "" && a.lockChanged[name] && a.lockNew[name][version]
+}
+
+// jsSingleQuoted decodes the body of a JS single-quoted string literal
+// (the opening quote already consumed) and returns its value and the text
+// after the closing quote. ok is false on an unterminated literal, a raw
+// newline, or an escape it does not know.
+func jsSingleQuoted(s string) (val, tail string, ok bool) {
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\'':
+			return sb.String(), s[i+1:], true
+		case '\n', '\r':
+			return "", "", false
+		case '\\':
+			if i+1 >= len(s) {
+				return "", "", false
+			}
+			i++
+			switch e := s[i]; e {
+			case '\'', '"', '\\', '/':
+				sb.WriteByte(e)
+			case 'n':
+				sb.WriteByte('\n')
+			case 't':
+				sb.WriteByte('\t')
+			case 'r':
+				sb.WriteByte('\r')
+			case 'b':
+				sb.WriteByte('\b')
+			case 'f':
+				sb.WriteByte('\f')
+			case 'u', 'x':
+				w := 4
+				if e == 'x' {
+					w = 2
+				}
+				if i+w >= len(s) {
+					return "", "", false
+				}
+				r, err := strconv.ParseUint(s[i+1:i+1+w], 16, 32)
+				if err != nil {
+					return "", "", false
+				}
+				sb.WriteRune(rune(r))
+				i += w
+			default:
+				return "", "", false
+			}
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	return "", "", false
 }
 
 // firstPartyChanged reports whether a bundled first-party module path
@@ -122,29 +203,42 @@ func (a attribution) firstPartyChanged(bundleDir, p string) bool {
 			}
 		}
 	}
-	// lib/foo.js compiled from src/foo.ts: compare without the top
-	// directory and the extension.
-	st := stem(cands[0])
-	st2 := stem(cands[1])
-	for _, f := range a.firstParty {
-		if s := stem(f); s != "" && (s == st || s == st2) {
-			return true
+	// A compiled path for a changed source: lib/x.js or dist/x.js from
+	// src/x.ts or src/x.js. Only that directory and extension mapping is
+	// allowed; the rest of the path must match exactly.
+	for _, c := range cands {
+		for _, f := range a.firstParty {
+			if compiledFrom(c, f) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func stem(p string) string {
-	p = strings.TrimPrefix(p, "./")
-	for strings.HasPrefix(p, "../") {
-		p = p[3:]
+var (
+	compiledExts = map[string]bool{".js": true, ".cjs": true, ".mjs": true}
+	sourceExts   = map[string]bool{".ts": true, ".js": true}
+)
+
+// compiledFrom reports whether module path c (lib/a/b.js, dist/a/b.cjs)
+// is the compiled form of source file f (src/a/b.ts).
+func compiledFrom(c, f string) bool {
+	var rest string
+	switch {
+	case strings.HasPrefix(c, "lib/"):
+		rest = c[len("lib/"):]
+	case strings.HasPrefix(c, "dist/"):
+		rest = c[len("dist/"):]
+	default:
+		return false
 	}
-	if i := strings.Index(p, "/"); i >= 0 {
-		p = p[i+1:]
-	} else {
-		return ""
+	src, ok := strings.CutPrefix(f, "src/")
+	if !ok || !compiledExts[path.Ext(rest)] || !sourceExts[path.Ext(src)] {
+		return false
 	}
-	return strings.TrimSuffix(p, path.Ext(p))
+	a, b := strings.TrimSuffix(rest, path.Ext(rest)), strings.TrimSuffix(src, path.Ext(src))
+	return a != "" && a == b
 }
 
 func (a attribution) classify(bundleDir, name string) (attributed bool, reason, group string) {
@@ -335,42 +429,6 @@ func analyzeModules(r *bundleReport, oldText, newText string, a attribution) {
 	}
 }
 
-var tokRx = regexp.MustCompile(`[A-Za-z_$][\w$]*|\s+|.`)
-
-func isIdent(t string) bool { return t != "" && isIdentStart(t[0]) }
-
-// pureRename reports whether a and b differ only by a consistent
-// one-to-one renaming of identifiers.
-func pureRename(a, b string) bool {
-	ta, tb := tokRx.FindAllString(a, -1), tokRx.FindAllString(b, -1)
-	if len(ta) != len(tb) {
-		return false
-	}
-	fwd, rev := map[string]string{}, map[string]string{}
-	for i := range ta {
-		x, y := ta[i], tb[i]
-		_, fx := fwd[x]
-		_, ry := rev[y]
-		if x == y && !fx && !ry {
-			if isIdent(x) {
-				fwd[x], rev[y] = y, x
-			}
-			continue
-		}
-		if !isIdent(x) || !isIdent(y) {
-			return false
-		}
-		if v, ok := fwd[x]; ok && v != y {
-			return false
-		}
-		if v, ok := rev[y]; ok && v != x {
-			return false
-		}
-		fwd[x], rev[y] = y, x
-	}
-	return true
-}
-
 // ---- source-map mode (minified esbuild bundles) ----
 
 func relInPackage(p string) string {
@@ -399,54 +457,73 @@ func analyzeSourceMap(r *bundleReport, oldJS string, oldMap *sourceMap, newJS st
 	dir := path.Dir(r.path)
 	root := path.Join(dir, newMap.SourceRoot)
 
-	// Relocation: a source removed at one node_modules nesting and added
-	// at another with the same content and output is unchanged.
+	// Counterparts: the same source path, or a source removed at one
+	// node_modules nesting and added at another with the same content.
 	type relKey struct {
 		rel       string
-		src, gen  [32]byte
+		src       [32]byte
 		hasSource bool
 	}
 	removed := map[relKey][]string{}
-	for p, o := range ob.sources {
+	for _, p := range ob.order {
 		if _, ok := nb.sources[p]; !ok {
-			k := relKey{relInPackage(p), o.srcHash, o.genNorm, o.content != nil}
+			o := ob.sources[p]
+			k := relKey{relInPackage(p), o.srcHash, o.content != nil}
 			removed[k] = append(removed[k], p)
 		}
 	}
-	relocated := map[string]bool{}
-	relocatedOld := map[string]bool{}
+	added := map[relKey][]string{}
 	for _, p := range nb.order {
-		if _, ok := ob.sources[p]; ok {
-			continue
+		if _, ok := ob.sources[p]; !ok {
+			n := nb.sources[p]
+			k := relKey{relInPackage(p), n.srcHash, n.content != nil}
+			added[k] = append(added[k], p)
 		}
-		n := nb.sources[p]
-		k := relKey{relInPackage(p), n.srcHash, n.genNorm, n.content != nil}
-		if l := removed[k]; len(l) > 0 {
-			relocated[p] = true
-			relocatedOld[l[len(l)-1]] = true
-			removed[k] = l[:len(l)-1]
+	}
+	counterpart := map[string]*mappedSource{}
+	for _, p := range nb.order {
+		if o, ok := ob.sources[p]; ok {
+			counterpart[p] = o
+		}
+	}
+	// Only an unambiguous move (one removed, one added) is paired: with
+	// several copies of a package the pairing would be a guess, and a
+	// wrong pair would feed bogus renames into the bundle-wide check.
+	for k, l := range added {
+		if len(l) == 1 && len(removed[k]) == 1 {
+			counterpart[l[0]] = ob.sources[removed[k][0]]
 		}
 	}
 
+	// Same-source chunks are compared token by token. Identifiers may
+	// differ only by renames that form one consistent bijection across the
+	// whole bundle (see renames).
+	rn := newRenames()
+	srcSame := func(o, n *mappedSource) bool {
+		if o.content == nil || n.content == nil {
+			return o.content == nil && n.content == nil
+		}
+		return o.srcHash == n.srcHash
+	}
+	aligned := map[string][]identPair{}
+	alignedOK := map[string]bool{}
+	for _, p := range nb.order {
+		if o := counterpart[p]; o != nil && srcSame(o, nb.sources[p]) {
+			aligned[p], alignedOK[p] = rn.align(chunkOf(ob, o.tokIdx), chunkOf(nb, nb.sources[p].tokIdx))
+		}
+	}
+	rn.settle()
+
 	for _, p := range nb.order {
 		n := nb.sources[p]
-		if relocated[p] {
-			r.unchanged += n.genLen
-			continue
-		}
-		o := ob.sources[p]
+		o := counterpart[p]
 		srcKnown := n.content != nil && (o == nil || o.content != nil)
-		if o != nil {
-			genSame := o.genNorm == n.genNorm
-			if srcKnown && o.srcHash == n.srcHash && genSame {
+		if o != nil && srcSame(o, n) {
+			if alignedOK[p] && rn.consistent(aligned[p]) {
 				r.unchanged += n.genLen
 				continue
 			}
-			if !srcKnown && genSame {
-				r.unchanged += n.genLen
-				continue
-			}
-			if srcKnown && o.srcHash == n.srcHash {
+			if srcKnown {
 				// Same source, different output: the bundler, its
 				// configuration or the map changed, or the map lies.
 				r.residual += n.genLen
@@ -489,26 +566,32 @@ func analyzeSourceMap(r *bundleReport, oldJS string, oldMap *sourceMap, newJS st
 		r.diffs = append(r.diffs, namedDiff{group, p, text})
 	}
 
-	// Unmapped generated code: count chunks that are new by normalized
-	// content (the bundler runtime and glue moves around between builds).
+	// Unmapped generated code (bundler runtime and glue): an old chunk
+	// matches a new one when the bundle-wide renames turn it into exactly
+	// the new text. New chunks without a match are residual.
 	oldChunks := map[string]int{}
-	for _, c := range ob.unmapped {
-		oldChunks[normalizeMinified(c)]++
+	for _, idx := range ob.unmappedIdx {
+		oldChunks[rn.canon(chunkOf(ob, idx), true)]++
 	}
 	unm := 0
 	var samples []string
-	for _, c := range nb.unmapped {
-		k := normalizeMinified(c)
-		if oldChunks[k] > 0 {
+	for _, idx := range nb.unmappedIdx {
+		c := chunkOf(nb, idx)
+		if k := rn.canon(c, false); oldChunks[k] > 0 {
 			oldChunks[k]--
 			continue
 		}
-		if strings.TrimSpace(c) == "" {
+		var sb strings.Builder
+		for _, t := range c.toks {
+			sb.WriteString(t.text)
+		}
+		text := sb.String()
+		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		unm += len(c)
+		unm += len(text)
 		if len(samples) < 20 {
-			samples = append(samples, truncate(c, 300))
+			samples = append(samples, truncate(text, 300))
 		}
 	}
 	if unm > 0 {

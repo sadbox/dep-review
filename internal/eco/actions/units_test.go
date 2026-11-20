@@ -220,7 +220,7 @@ runs:
 		t.Fatalf("scalars: %q %q", m.str("name"), m.str("description"))
 	}
 	in := m.sub("inputs")
-	if in.sub("a").str("description") != `q "x" é` || in.sub("a").str("default") != "1" || in.str("b") != "{required: true}" {
+	if in.sub("a").str("description") != `q "x" é` || in.sub("a").str("default") != "1" || in.get("b") != yFlow("{required: true}") {
 		t.Fatalf("inputs: %+v", in.m)
 	}
 	l := m.get("list").([]any)
@@ -456,18 +456,192 @@ func TestDecodeVLQ(t *testing.T) {
 	}
 }
 
-func TestPureRenameAndNormalize(t *testing.T) {
-	if !pureRename("var a = b(a);", "var x = y(x);") {
-		t.Error("consistent rename rejected")
+func TestPureRename(t *testing.T) {
+	tests := []struct {
+		name, a, b string
+		want       bool
+	}{
+		{"declared locals", "var a = f(1), c = a;", "var x = f(1), z = x;", true},
+		{"function and params", "function q(a, b) { return a + b }", "function w(x, y) { return x + y }", true},
+		{"arrow params", "const g = (a) => a * 2; h(b => b)", "const k = (x) => x * 2; h(y => y)", true},
+		{"bundler aliases", "var core = __webpack_require__(1); _core__WEBPACK_IMPORTED_MODULE_0__.x()", "var core = __nccwpck_require__(1); _core__WEBPACK_IMPORTED_MODULE_3__.x()", true},
+		{"inconsistent", "var a = 1; a(a);", "var x = 1; x(z);", false},
+		{"literal", "f(1)", "f(2)", false},
+		{"hex literal", "f(0x1F)", "f(0x2F)", false},
+		{"string", "f('a')", "f('b')", false},
+		// Regressions: these were accepted as renames and hidden.
+		{"free global swap", "fetch(u)", "eval(u)", false},
+		{"free name swap", "var a = 1; log(a)", "var a = 1; exec(a)", false},
+		{"bound local to global", "function f(atob) { return atob(x) }", "function f(y) { return eval(x) }", false},
+		{"property rename", "var o = {}; o.read(1)", "var o = {}; o.exec(1)", false},
+		{"object key rename", "var o = { safe: 1 }", "var o = { evil: 1 }", false},
+		{"keyword swap", "var a = true", "var a = false", false},
+		{"to a dangerous global name", "var a = 1; a()", "var require = 1; require()", false},
 	}
-	if pureRename("var a = b(a);", "var x = y(z);") {
-		t.Error("inconsistent rename accepted")
+	for _, tt := range tests {
+		if got := pureRename(tt.a, tt.b); got != tt.want {
+			t.Errorf("%s: pureRename = %v, want %v", tt.name, got, tt.want)
+		}
 	}
-	if pureRename("f(1)", "f(2)") {
-		t.Error("literal change accepted")
+}
+
+// minifiedPair builds old and new minified bundles with one source per
+// chunk (same sourcesContent on both sides) and reports which chunks the
+// source-map analysis counts as unchanged.
+func minifiedPair(chunks [][2]string) []bool {
+	var sources []string
+	var contents []*string
+	var oc, nc []chunk
+	for i, c := range chunks {
+		sources = append(sources, fmt.Sprintf("../node_modules/p%d/index.js", i))
+		contents = append(contents, sp(fmt.Sprintf("source %d", i)))
+		oc = append(oc, chunk{i, c[0] + ";"})
+		nc = append(nc, chunk{i, c[1] + ";"})
 	}
-	if normalizeMinified("a.foo(b)") != normalizeMinified("c.foo(d)") || normalizeMinified("a.foo") == normalizeMinified("a.bar") {
-		t.Error("normalizeMinified")
+	oldJS, oldMap := minified(sources, contents, oc)
+	newJS, newMap := minified(sources, contents, nc)
+	r := analyzeBundle(bundleInput{path: "dist/index.cjs", old: []byte(oldJS), new: []byte(newJS), oldMap: []byte(oldMap), newMap: []byte(newMap)}, attribution{})
+	out := make([]bool, len(chunks))
+	for i := range out {
+		out[i] = true
+	}
+	for _, it := range r.residuals {
+		var i int
+		if _, err := fmt.Sscanf(it.name, "../node_modules/p%d/index.js", &i); err == nil {
+			out[i] = false
+		}
+	}
+	return out
+}
+
+func TestMinifiedRenames(t *testing.T) {
+	tests := []struct {
+		name      string
+		chunks    [][2]string
+		unchanged []bool
+	}{
+		{"consistent bundle-wide renames",
+			[][2]string{{"function ab(a){return a+1}", "function xy(b){return b+1}"}, {"ab(2);cd(3)", "xy(2);zw(3)"}, {"function cd(){}", "function zw(){}"}},
+			[]bool{true, true, true}},
+		// Regressions: the old short-identifier normalization accepted these.
+		{"swap to a dangerous global", [][2]string{{"function q(a){return atob(a)}", "function q(a){return eval(a)}"}}, []bool{false}},
+		{"swap to an unbound name", [][2]string{{"function q(a){return ab(a)}", "function q(a){return zz(a)}"}}, []bool{false}},
+		{"selective swap between bundle symbols",
+			[][2]string{{"function ab(){}function cd(){}", "function ab(){}function cd(){}"}, {"ab(1)", "cd(1)"}, {"ab(2)", "ab(2)"}},
+			[]bool{true, false, true}}, // only the swapped call site is changed
+		{"consistent swap of two bundle symbols at every use",
+			[][2]string{{"function ab(){}function cd(){}", "function ab(){}function cd(){}"}, {"ab(1);cd(2)", "cd(1);ab(2)"}},
+			[]bool{true, false}},
+		{"selective swap, declaration in an unaligned chunk",
+			[][2]string{{"ab(1)", "cd(1)"}, {"ab(2)", "ab(2)"}, {"ab(3)", "ab(3)"}, {"var ab,cd;", "var ab,cd;"}},
+			[]bool{false, true, true, true}},
+		{"per-scope local renames",
+			[][2]string{{"function ab(t){return t}function cd(t,e){return e}", "function ab(e){return e}function cd(e,t){return t}"}, {"ab(1),cd(2)", "ab(1),cd(2)"}},
+			[]bool{true, true}},
+		{"private members and class fields", [][2]string{{"var ab=class{#x(){}w;y(){return this.#x()}}", "var ab=class{#q(){}w;y(){return this.#q()}}"}}, []bool{true}},
+		{"public method rename", [][2]string{{"var ab,y;ab=class{y(){}}", "var ab,z;ab=class{z(){}}"}}, []bool{false}},
+		{"property rename", [][2]string{{"var ab;ab.foo()", "var ab;ab.bar()"}}, []bool{false}},
+		{"object key rename", [][2]string{{"var ab,cd;f({ab:1})", "var ab,cd;f({cd:1})"}}, []bool{false}},
+		{"string change", [][2]string{{"var ab;ab('x')", "var ab;ab('y')"}}, []bool{false}},
+	}
+	for _, tt := range tests {
+		got := minifiedPair(tt.chunks)
+		if fmt.Sprint(got) != fmt.Sprint(tt.unchanged) {
+			t.Errorf("%s: unchanged %v, want %v", tt.name, got, tt.unchanged)
+		}
+	}
+}
+
+func TestJSONModuleStrict(t *testing.T) {
+	a := attribution{lockChanged: map[string]bool{"left-pad": true}, lockNew: lockSet{"left-pad": {"1.0.1": true}}}
+	wrap := func(line string) string {
+		return "/***/ ((module) => {\n\n" + line + "\n\n/***/ })\n"
+	}
+	tests := []struct {
+		name, line string
+		want       bool
+	}{
+		{"package.json", `module.exports = /*#__PURE__*/JSON.parse('{"name":"left-pad","version":"1.0.1","description":"it\'s"}');`, true},
+		{"without pure", `module.exports = JSON.parse('{"name":"left-pad","version":"1.0.1"}');`, true},
+		{"version not locked", `module.exports = JSON.parse('{"name":"left-pad","version":"9.9.9"}');`, false},
+		{"other package", `module.exports = JSON.parse('{"name":"evil","version":"1.0.1"}');`, false},
+		// Regressions: these matched the old prefix regex and "');" suffix.
+		{"code after the literal", `module.exports = JSON.parse('{"name":"left-pad","version":"1.0.1"}' + require('child_process').execSync('id') + '');`, false},
+		{"second statement", `module.exports = JSON.parse('{"name":"left-pad","version":"1.0.1"}'); require('x')('');`, false},
+		{"trailing json", `module.exports = JSON.parse('{"name":"left-pad","version":"1.0.1"} {}');`, false},
+		{"not an object", `module.exports = JSON.parse('["left-pad"]');`, false},
+	}
+	for _, tt := range tests {
+		if got := a.jsonModulePackage(wrap(tt.line)); got != tt.want {
+			t.Errorf("%s: %v, want %v", tt.name, got, tt.want)
+		}
+	}
+	// A hostile numbered module is residual even though its package's
+	// lock changed.
+	old := "/***/ 1:\n" + wrap(`module.exports = JSON.parse('{"name":"left-pad","version":"1.0.0"}');`) + ";// CONCATENATED MODULE: ./src/a.ts\nx()\n;// CONCATENATED MODULE: ./src/b.ts\ny()\n"
+	new := strings.Replace(old, `"version":"1.0.0"}');`, `"version":"1.0.1"}' + require('child_process').execSync('id') + '');`, 1)
+	r := analyzeBundle(bundleInput{path: "dist/index.js", old: []byte(old), new: []byte(new)}, a)
+	if r.residual == 0 || r.residuals[0].name != "webpack#1" {
+		t.Fatalf("hostile JSON module not residual: %+v", r.residuals)
+	}
+}
+
+func TestHostileRenameModule(t *testing.T) {
+	old := ";// CONCATENATED MODULE: ./node_modules/other/index.js\nfunction other(u) {\n  return fetch(u);\n}\n;// CONCATENATED MODULE: ./src/main.ts\nother(1)\n"
+	new := strings.Replace(old, "return fetch(u);", "return eval(u);", 1)
+	r := analyzeBundle(bundleInput{path: "dist/index.js", old: []byte(old), new: []byte(new)}, attribution{})
+	if r.residual == 0 {
+		t.Fatalf("global swap counted as a rename: %+v", r)
+	}
+	if !strings.Contains(renderBundle(r), "+  return eval(u);") {
+		t.Fatal("the swap is not in the reviewer's diff")
+	}
+}
+
+func TestCompiledFrom(t *testing.T) {
+	a := attribution{firstParty: []string{"src/main.ts", "docs/evil.md", "src/util/x.js", "scripts/evil.ts"}}
+	tests := []struct {
+		mod  string
+		want bool
+	}{
+		{"./src/main.ts", true},
+		{"./lib/main.js", true},
+		{"./dist/main.cjs", true},
+		{"./lib/util/x.mjs", true},
+		// Regressions: the old stem match accepted these.
+		{"./lib/evil.js", false},   // docs/evil.md is not source code
+		{"./out/main.js", false},   // unknown output directory
+		{"./lib/main.json", false}, // not a compiled extension
+		{"./lib/x.js", false},      // src/util/x.js: directories must match
+		{"./src/other/main.ts", false},
+		{"./lib/evil.js", false}, // scripts/evil.ts is not under src/
+	}
+	for _, tt := range tests {
+		if got := a.firstPartyChanged("dist", tt.mod); got != tt.want {
+			t.Errorf("firstPartyChanged(%q) = %v, want %v", tt.mod, got, tt.want)
+		}
+	}
+}
+
+func TestActionMetaFailsClosed(t *testing.T) {
+	bad := map[string]string{
+		"flow steps":         "runs:\n  using: composite\n  steps: [{uses: evil/x@1111111111111111111111111111111111111111}]\n",
+		"flow step item":     "runs:\n  using: composite\n  steps:\n    - {uses: evil/x@1111111111111111111111111111111111111111}\n",
+		"flow in step value": "runs:\n  using: composite\n  steps:\n    - run: echo\n      with: {a: b}\n",
+		"flow runs":          "runs: {using: node24, main: x.js}\n",
+		"anchor":             "runs:\n  using: composite\n  steps: &s\n    - run: echo\n",
+		"alias":              "x: &a\n  - uses: evil/x@1\nruns:\n  using: composite\n  steps: *a\n",
+		"merge":              "runs:\n  <<: {using: node24}\n",
+		"second document":    "runs:\n  using: node24\n  main: a.js\n---\nruns:\n  using: composite\n",
+		"document end":       "runs:\n  using: node24\n  main: a.js\n...\nruns: x\n",
+	}
+	for name, y := range bad {
+		if _, err := parseActionMeta(y); err == nil {
+			t.Errorf("%s: parsed without error", name)
+		}
+	}
+	if _, err := parseActionMeta("name: x\nbranding: {icon: a}\nruns:\n  using: node24\n  main: a.js\n"); err != nil {
+		t.Errorf("flow outside runs rejected: %v", err)
 	}
 }
 
@@ -523,5 +697,18 @@ func TestIsNotFound(t *testing.T) {
 		if got := isNotFound(tt.err); got != tt.want {
 			t.Errorf("isNotFound(%v) = %v", tt.err, got)
 		}
+	}
+}
+
+// Regression: with the old normalization (identifiers of up to four
+// characters replaced), atob -> eval in a same-source chunk compared equal.
+func TestSourceMapGlobalSwap(t *testing.T) {
+	sources := []string{"../node_modules/other/index.js"}
+	contents := []*string{sp("module.exports = (x) => atob(x)")}
+	oldJS, oldMap := minified(sources, contents, []chunk{{0, "var o=function(x){return atob(x)};"}})
+	newJS, newMap := minified(sources, contents, []chunk{{0, "var o=function(x){return eval(x)};"}})
+	r := analyzeBundle(bundleInput{path: "dist/index.cjs", old: []byte(oldJS), new: []byte(newJS), oldMap: []byte(oldMap), newMap: []byte(newMap)}, attribution{})
+	if r.mode != "sourcemap" || len(r.residuals) != 1 || r.residuals[0].reason != resGenSrcSame {
+		t.Fatalf("mode %s residuals %+v", r.mode, r.residuals)
 	}
 }

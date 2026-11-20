@@ -36,7 +36,7 @@ type mappedSource struct {
 	gen     strings.Builder
 	genLen  int
 	srcHash [32]byte
-	genNorm [32]byte
+	tokIdx  []int // indexes into mappedBundle.toks of the tokens starting in this source's code
 }
 
 // mappedBundle is a bundle split by its source map.
@@ -45,6 +45,13 @@ type mappedBundle struct {
 	sources  map[string]*mappedSource // by source path
 	order    []string
 	unmapped []string // generated chunks mapped to no source
+	// The whole bundle lexed once, so literals that span mapping
+	// segments and bracket context are read correctly; each token belongs
+	// to the source (or unmapped span) its first byte is mapped to.
+	toks        []jsTok
+	ren         []bool          // renameable at bundle level (see renameable)
+	bound       map[string]bool // names the bundle binds anywhere
+	unmappedIdx [][]int         // token indexes per unmapped span
 }
 
 const b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -142,10 +149,25 @@ func splitByMap(js string, m *sourceMap) (*mappedBundle, error) {
 		}
 		idx[i] = ms
 	}
+	type span struct {
+		start, end int // absolute byte offsets
+		owner      *mappedSource
+	}
+	var spans []span
+	addSpan := func(start, end int, owner *mappedSource) {
+		if end > start {
+			spans = append(spans, span{start, end, owner})
+		}
+	}
 	lines := strings.Split(js, "\n")
 	mapLines := strings.Split(m.Mappings, ";")
 	src := 0
+	lineStart := 0
 	for ln, text := range lines {
+		lineEnd := lineStart + len(text)
+		if ln < len(lines)-1 {
+			lineEnd++ // the line break
+		}
 		var segs []string
 		if ln < len(mapLines) && mapLines[ln] != "" {
 			segs = strings.Split(mapLines[ln], ",")
@@ -180,6 +202,7 @@ func splitByMap(js string, m *sourceMap) (*mappedBundle, error) {
 		for k, p := range ps {
 			if p.start > pos {
 				mb.unmapped = append(mb.unmapped, text[pos:p.start])
+				addSpan(lineStart+pos, lineStart+p.start, nil)
 			}
 			if p.start < pos {
 				p.start = pos // overlapping/unsorted segments: never double count
@@ -192,21 +215,57 @@ func splitByMap(js string, m *sourceMap) (*mappedBundle, error) {
 				end = p.start
 			}
 			chunk := text[p.start:end]
+			if end == len(text) && ln < len(lines)-1 {
+				// Keep the line break with the code that ends the line:
+				// it can sit inside a template literal.
+				chunk += "\n"
+			}
+			spanEnd := lineStart + end
+			if end == len(text) {
+				spanEnd = lineEnd
+			}
 			if p.src < 0 {
 				mb.unmapped = append(mb.unmapped, chunk)
+				addSpan(lineStart+p.start, spanEnd, nil)
 			} else {
 				idx[p.src].gen.WriteString(chunk)
+				addSpan(lineStart+p.start, spanEnd, idx[p.src])
 			}
 			pos = end
 		}
-		if pos < len(text) && len(ps) == 0 {
-			mb.unmapped = append(mb.unmapped, text[pos:])
+		if len(ps) == 0 {
+			if pos < len(text) {
+				mb.unmapped = append(mb.unmapped, text[pos:])
+			}
+			addSpan(lineStart+pos, lineEnd, nil)
 		}
+		lineStart = lineEnd
+	}
+	mb.toks = lexJS(js)
+	mb.bound = boundIdents(mb.toks)
+	mb.ren = renameable(mb.toks, mb.bound)
+	si := 0
+	lastUnmapped := -1
+	for i, t := range mb.toks {
+		for si < len(spans) && spans[si].end <= t.off {
+			si++
+		}
+		if si >= len(spans) || spans[si].start > t.off {
+			continue // a byte no span covers (overlapping segments)
+		}
+		if o := spans[si].owner; o != nil {
+			o.tokIdx = append(o.tokIdx, i)
+			continue
+		}
+		if lastUnmapped != si {
+			mb.unmappedIdx = append(mb.unmappedIdx, nil)
+			lastUnmapped = si
+		}
+		mb.unmappedIdx[len(mb.unmappedIdx)-1] = append(mb.unmappedIdx[len(mb.unmappedIdx)-1], i)
 	}
 	for _, ms := range mb.sources {
 		g := ms.gen.String()
 		ms.genLen = len(g)
-		ms.genNorm = sha256.Sum256([]byte(normalizeMinified(g)))
 		if ms.content != nil {
 			ms.srcHash = sha256.Sum256([]byte(*ms.content))
 		}
@@ -214,45 +273,8 @@ func splitByMap(js string, m *sourceMap) (*mappedBundle, error) {
 	return mb, nil
 }
 
-var jsShortKeywords = map[string]bool{
-	"var": true, "let": true, "new": true, "for": true, "if": true, "in": true, "do": true,
-	"try": true, "void": true, "this": true, "null": true, "true": true, "else": true,
-	"case": true, "with": true, "enum": true,
-}
-
 func isIdentStart(c byte) bool {
 	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 func isIdentPart(c byte) bool { return isIdentStart(c) || (c >= '0' && c <= '9') }
-
-// normalizeMinified replaces short identifiers (what a minifier renames)
-// with a placeholder, so a module whose only change is renamed locals
-// compares equal. Property accesses (x.ab) keep their names; spreads
-// (...ab) do not.
-func normalizeMinified(s string) string {
-	var sb strings.Builder
-	sb.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		c := s[i]
-		if !isIdentStart(c) || (i > 0 && isIdentPart(s[i-1])) {
-			sb.WriteByte(c)
-			i++
-			continue
-		}
-		j := i + 1
-		for j < len(s) && isIdentPart(s[j]) {
-			j++
-		}
-		id := s[i:j]
-		prop := i > 0 && s[i-1] == '.' && !(i >= 3 && s[i-3:i] == "...")
-		if len(id) <= 4 && !prop && !jsShortKeywords[id] {
-			sb.WriteByte(0)
-		} else {
-			sb.WriteString(id)
-		}
-		i = j
-	}
-	return sb.String()
-}
