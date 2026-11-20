@@ -1,0 +1,153 @@
+package publish
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/sadbox/dep-review/internal/gh"
+	"github.com/sadbox/dep-review/internal/model"
+)
+
+const dependabotLogin = "dependabot[bot]"
+
+type ghStatus struct {
+	Context string `json:"context"`
+	State   string `json:"state"`
+	Creator *struct {
+		Login string `json:"login"`
+	} `json:"creator"`
+}
+
+// Sweep merges Dependabot PRs whose current head the gate approved and
+// whose CI has since finished green, and reports heads that have had no
+// decision for too long. It never reviews anything and never decides:
+// it acts only on a `success` status the gate app itself set on that
+// exact head.
+func Sweep(ctx context.Context, cfg Config, repo string) error {
+	cfg.defaults()
+	if !gh.ValidRepo(repo) {
+		return fmt.Errorf("invalid repository %.100q", repo)
+	}
+	prs, err := gh.List[ghPull](ctx, cfg.GitHub, fmt.Sprintf("repos/%s/pulls?state=open", repo))
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, pr := range prs {
+		if pr.User == nil || pr.User.Login != dependabotLogin || pr.Head.Repo == nil ||
+			!strings.EqualFold(pr.Head.Repo.FullName, repo) || !gh.ValidSHA(pr.Head.SHA) || pr.Number <= 0 {
+			continue
+		}
+		if err := sweepOne(ctx, cfg, repo, pr.Number, pr.Head.SHA); err != nil {
+			cfg.Logf("#%d: %v", pr.Number, err)
+			errs = append(errs, fmt.Errorf("#%d: %w", pr.Number, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// gateStatus returns the newest dep-review status the gate app set on sha,
+// or nil. Statuses from anyone else are ignored.
+func gateStatus(ctx context.Context, cfg Config, repo, sha string) (*ghStatus, error) {
+	all, err := gh.List[ghStatus](ctx, cfg.GitHub, fmt.Sprintf("repos/%s/commits/%s/statuses", repo, sha))
+	if err != nil {
+		return nil, err
+	}
+	for i := range all { // newest first
+		s := &all[i]
+		if s.Context == statusContext && s.Creator != nil && s.Creator.Login == cfg.BotLogin {
+			return s, nil
+		}
+	}
+	return nil, nil
+}
+
+func sweepOne(ctx context.Context, cfg Config, repo string, pr int, head string) error {
+	st, err := gateStatus(ctx, cfg, repo, head)
+	if err != nil {
+		return err
+	}
+	switch {
+	case st != nil && st.State == StateSuccess:
+		ci, note, err := ciState(ctx, cfg.GitHub, repo, head)
+		if err != nil {
+			return err
+		}
+		switch ci {
+		case ciPending:
+			cfg.Logf("#%d: approved, %s", pr, note)
+			return nil
+		case ciRed:
+			cfg.Logf("#%d: approved but %s", pr, note)
+			return notifyOnce(ctx, cfg, repo, pr, head, model.DecisionHuman, "approved but not merged: "+note, false)
+		}
+		res, err := merge(ctx, cfg, repo, pr, head)
+		if err != nil {
+			return err
+		}
+		cfg.Logf("#%d: %s", pr, res.Note)
+		if res.Failed {
+			return notifyOnce(ctx, cfg, repo, pr, head, model.DecisionHuman, "approved but not merged: "+res.Note, false)
+		}
+		return nil
+	case st != nil && st.State == StateFailure:
+		return nil // a person decides; publish already notified
+	}
+	// No decision (no status, or the gate's last attempt errored).
+	var commit struct {
+		Commit struct {
+			Committer struct {
+				Date time.Time `json:"date"`
+			} `json:"committer"`
+		} `json:"commit"`
+	}
+	if err := cfg.GitHub.Get(ctx, fmt.Sprintf("repos/%s/commits/%s", repo, head), &commit); err != nil {
+		return err
+	}
+	if age := cfg.Now().Sub(commit.Commit.Committer.Date); age < cfg.StuckAfter {
+		return nil
+	}
+	cfg.Logf("#%d: no decision for head %s", pr, head[:12])
+	return notifyOnce(ctx, cfg, repo, pr, head, model.DecisionPending, "stuck without a decision", true)
+}
+
+// notifyOnce records the notification in our comment's marker, so each
+// head is reported once. stuck selects the "stuck" record and rewrites the
+// comment; otherwise only the marker changes.
+func notifyOnce(ctx context.Context, cfg Config, repo string, pr int, head string, d model.Decision, reason string, stuck bool) error {
+	prev, err := findComment(ctx, cfg, repo, pr)
+	if err != nil {
+		return err
+	}
+	var mk marker
+	if prev != nil {
+		mk, _ = parseMarker(prev.Body)
+	}
+	list := &mk.Notified
+	if stuck {
+		list = &mk.Stuck
+	}
+	if has(*list, head) {
+		return nil
+	}
+	if cfg.Notifier != nil {
+		if err := cfg.Notifier.Notify(ctx, notification(cfg, repo, pr, d, reason)); err != nil {
+			return fmt.Errorf("notify: %w", err)
+		}
+	}
+	*list = add(*list, head)
+	var body string
+	switch {
+	case stuck:
+		body = renderStuck(head, mk)
+	case prev != nil:
+		body = replaceMarker(prev.Body, mk)
+	default:
+		body = mk.String() + "\n### dep-review: " + Inline(reason) + "\n"
+	}
+	_, err = upsertComment(ctx, cfg, repo, pr, prev, body)
+	return err
+}
