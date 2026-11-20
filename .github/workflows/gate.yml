@@ -71,7 +71,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           go build -C gate -trimpath -o "$RUNNER_TEMP/bin/dep-review" ./cmd/dep-review
-          cp gate/prompts/review.md gate/schema/verdict.json "$RUNNER_TEMP/bin/"
+          # go.mod: the fetch job sets up the gate's Go version from it.
+          cp gate/prompts/review.md gate/schema/verdict.json gate/go.mod "$RUNNER_TEMP/bin/"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gate-bin
@@ -129,6 +130,15 @@ jobs:
         with:
           name: classification
           path: ${{ runner.temp }}/in
+      # The go_modules fetcher runs `go mod download` (downloads and sum
+      # checks only, in an empty module of its own). The version comes
+      # from the gate's go.mod, never the PR's; no cache, since a cache
+      # restored into a job that handles untrusted code can be poisoned.
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: ${{ runner.temp }}/bin/go.mod
+          cache: false
       - name: Check out the PR (data only; nothing from it is executed)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
