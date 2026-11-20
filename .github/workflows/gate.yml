@@ -71,7 +71,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           go build -C gate -trimpath -o "$RUNNER_TEMP/bin/dep-review" ./cmd/dep-review
-          cp gate/prompts/review.md gate/schema/verdict.json "$RUNNER_TEMP/bin/"
+          # go.mod: the fetch job sets up the gate's Go version from it.
+          cp gate/prompts/review.md gate/schema/verdict.json gate/go.mod "$RUNNER_TEMP/bin/"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gate-bin
@@ -129,6 +130,15 @@ jobs:
         with:
           name: classification
           path: ${{ runner.temp }}/in
+      # The go_modules fetcher runs `go mod download` (downloads and sum
+      # checks only, in an empty module of its own). The version comes
+      # from the gate's go.mod, never the PR's; no cache, since a cache
+      # restored into a job that handles untrusted code can be poisoned.
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: ${{ runner.temp }}/bin/go.mod
+          cache: false
       - name: Check out the PR (data only; nothing from it is executed)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -197,14 +207,29 @@ jobs:
           anthropic_workspace_id: ${{ inputs.anthropic_workspace_id }}
           allowed_bots: dependabot[bot]
           display_report: "false"
+          # The action writes `prompt` to a file itself, and merges
+          # `settings` (a JSON string) into ~/.claude/settings.json: the
+          # permission rules, deny list and telemetry-off env that
+          # review-prep generated.
           prompt: ${{ steps.prep.outputs.prompt }}
           settings: ${{ steps.prep.outputs.settings }}
+          # claude_args is split with shell-quote, not a shell, and handed
+          # to the CLI. --json-schema takes the schema inline, so it is
+          # one single-quoted token; review-prep emits it on one line and
+          # refuses a schema containing a single quote. --setting-sources
+          # user loads only the settings above (no project/local settings
+          # from the workspace); --strict-mcp-config ignores any .mcp.json.
           claude_args: >-
             --model ${{ inputs.model }}
             --tools Read,Grep,Glob
             --permission-mode dontAsk
+            --setting-sources user
+            --strict-mcp-config
             --max-turns 80
-            --json-schema ${{ steps.prep.outputs.schema_file }}
+            --json-schema '${{ steps.prep.outputs.json_schema }}'
+      # structured_output is JSON.stringify of the schema-validated object;
+      # the action fails the step when the model returns none, so this
+      # step is skipped and publish sees no verdict (=> human).
       - name: Save verdict
         env:
           VERDICT: ${{ steps.claude.outputs.structured_output }}
@@ -247,6 +272,8 @@ jobs:
       - name: Decide, comment, merge
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          # "<slug>[bot]" is how publish recognises its own comment.
+          DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           FETCH_RESULT: ${{ needs.fetch.result }}
           REVIEW_RESULT: ${{ needs.review.result }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
@@ -286,6 +313,8 @@ jobs:
       - name: Merge approved PRs whose CI finished; report stuck ones
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          # Only a dep-review status created by "<slug>[bot]" counts as approval.
+          DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |

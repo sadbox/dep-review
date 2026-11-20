@@ -1,0 +1,16 @@
+<!-- dep-review:v1 notified= stuck= -->
+### dep-review: no decision (the gate failed; it will retry on the next push or re-run)
+
+| | |
+|---|---|
+| Decision | `pending` |
+| Head | `1111111111111111111111111111111111111111` |
+| Reason | the evidence job did not finish (failure) |
+
+#### Updates declared by Dependabot (1)
+
+| Dependency | Ecosystem | Directory | From | To | Type | Notes |
+|---|---|---|---|---|---|---|
+| `github.com/x/y` | `go_modules` |  | `1.2.3` | `1.2.4` | `patch` |  |
+
+<sub>dep-review applies this decision to the head commit above only. A new push starts a new review.</sub>
