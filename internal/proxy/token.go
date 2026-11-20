@@ -19,9 +19,9 @@ import (
 // docs ("Workload Identity Federation", "WIF reference", "Use WIF with
 // GitHub Actions"):
 //
-//   - GitHub OIDC: GET $ACTIONS_ID_TOKEN_REQUEST_URL&audience=<aud> with
-//     "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"; the JWT is
-//     the "value" field. claude-code-action asks for the audience
+//   - GitHub OIDC (GitHubOIDC, on the host): GET
+//     $ACTIONS_ID_TOKEN_REQUEST_URL&audience=<aud> with "Authorization:
+//     Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"; the JWT is the "value" field. claude-code-action asks for the audience
 //     https://api.anthropic.com.
 //   - Exchange: POST <base>/v1/oauth/token, JSON body {grant_type:
 //     urn:ietf:params:oauth:grant-type:jwt-bearer, assertion,
@@ -53,13 +53,12 @@ const (
 	exchangeAttempts = 3
 )
 
-// Federation is what the exchange needs. The IDs are not secrets; the two
-// OIDC request values are, and they never leave this process except to
-// the OIDC endpoint.
+// Federation is what the exchange needs. The IDs are not secrets.
+// IdentityToken returns a fresh GitHub OIDC JWT for DefaultAudience on
+// every call: in the proxy, SocketIdentity (the host helper; see
+// identity.go).
 type Federation struct {
-	OIDCRequestURL   string // ACTIONS_ID_TOKEN_REQUEST_URL
-	OIDCRequestToken string // ACTIONS_ID_TOKEN_REQUEST_TOKEN
-	Audience         string // default DefaultAudience
+	IdentityToken    func(context.Context) (string, error)
 	RuleID           string // fdrl_...
 	OrganizationID   string // UUID
 	WorkspaceID      string // wrkspc_..., optional
@@ -68,8 +67,8 @@ type Federation struct {
 
 func (f Federation) validate() error {
 	switch {
-	case f.OIDCRequestURL == "" || f.OIDCRequestToken == "":
-		return errors.New("no GitHub OIDC request URL/token (does the job have id-token: write?)")
+	case f.IdentityToken == nil:
+		return errors.New("no identity token source")
 	case f.RuleID == "" || f.OrganizationID == "":
 		return errors.New("federation rule ID and organization ID are required")
 	}
@@ -94,9 +93,6 @@ type TokenSource struct {
 func NewTokenSource(fed Federation, upstream *url.URL, client *http.Client, logf func(string, ...any)) (*TokenSource, error) {
 	if err := fed.validate(); err != nil {
 		return nil, err
-	}
-	if fed.Audience == "" {
-		fed.Audience = DefaultAudience
 	}
 	// Never follow a redirect with an assertion or a request token.
 	c := *client
@@ -154,7 +150,7 @@ func (s *TokenSource) mint(ctx context.Context) (string, time.Duration, error) {
 			case <-time.After(s.backoff << (i - 1)):
 			}
 		}
-		jwt, err := s.identityToken(ctx)
+		jwt, err := s.fed.IdentityToken(ctx)
 		if err != nil {
 			last = err
 			if retryable(err) {
@@ -194,44 +190,6 @@ func retryable(err error) bool {
 		return he.status >= 500 || he.status == http.StatusTooManyRequests
 	}
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
-}
-
-func (s *TokenSource) identityToken(ctx context.Context) (string, error) {
-	u, err := url.Parse(s.fed.OIDCRequestURL)
-	if err != nil {
-		return "", errors.New("ACTIONS_ID_TOKEN_REQUEST_URL is not a URL")
-	}
-	q := u.Query()
-	q.Set("audience", s.fed.Audience)
-	u.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.fed.OIDCRequestToken)
-	req.Header.Set("Accept", "application/json")
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("GitHub OIDC token request: %w", scrub(err))
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponse))
-	if err != nil {
-		return "", fmt.Errorf("GitHub OIDC token response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", &httpError{what: "GitHub OIDC token request", status: resp.StatusCode}
-	}
-	var v struct {
-		Value string `json:"value"`
-	}
-	if err := json.Unmarshal(body, &v); err != nil || v.Value == "" {
-		return "", errors.New("GitHub OIDC token response has no value")
-	}
-	if len(v.Value) > maxAssertion {
-		return "", fmt.Errorf("GitHub OIDC token is %d bytes, over the 16 KiB assertion limit", len(v.Value))
-	}
-	return v.Value, nil
 }
 
 func (s *TokenSource) exchangeJWT(ctx context.Context, jwt string) (string, time.Duration, error) {

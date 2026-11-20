@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/fakeanthropic"
+	"github.com/sadbox/dep-review/internal/proxy"
 	"github.com/sadbox/dep-review/internal/sandbox"
 )
 
@@ -70,9 +72,18 @@ func init() {
 					sc.Args = append([]string{"--mount", "type=bind,src=" + r + ",dst=/record"}, sc.Args...)
 				}
 				c.ProxyExtraArgs = append(c.ProxyExtraArgs, "--test-upstream", "http://"+fakeName+":9000")
-				// The docker CLI hands these to the proxy container by name.
-				os.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "http://"+fakeName+":9000/oidc/token?api-version=2.0")
-				os.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", fakeanthropic.OIDCRequestToken)
+				// A fake GitHub OIDC endpoint on the host's loopback, for the
+				// real host-side helper (proxy.GitHubOIDC) to call.
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					return err
+				}
+				go http.Serve(ln, (&fakeanthropic.Server{}).Handler())
+				c.Identity = proxy.GitHubOIDC{
+					RequestURL:   "http://" + ln.Addr().String() + "/oidc/token?api-version=2.0",
+					RequestToken: fakeanthropic.OIDCRequestToken,
+					Client:       http.DefaultClient,
+				}.Token
 			}
 			if *probe {
 				// This (static, linux) binary, since the reviewer image has

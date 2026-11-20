@@ -115,11 +115,10 @@ func newProxy(t *testing.T, u *upstream, maxReq int64) (*Proxy, *TokenSource, *l
 	base, _ := url.Parse(u.srv.URL)
 	lb := &logbuf{}
 	ts, err := NewTokenSource(Federation{
-		OIDCRequestURL:   u.srv.URL + "/oidc?api-version=2.0",
-		OIDCRequestToken: "req-token",
-		RuleID:           "fdrl_1",
-		OrganizationID:   "org-1",
-		WorkspaceID:      "wrkspc_1",
+		IdentityToken:  GitHubOIDC{RequestURL: u.srv.URL + "/oidc?api-version=2.0", RequestToken: "req-token", Client: http.DefaultClient}.Token,
+		RuleID:         "fdrl_1",
+		OrganizationID: "org-1",
+		WorkspaceID:    "wrkspc_1",
 	}, base, http.DefaultClient, lb.logf)
 	if err != nil {
 		t.Fatal(err)
@@ -467,12 +466,12 @@ func TestRetryOn401(t *testing.T) {
 }
 
 func TestTokenSourceConfig(t *testing.T) {
+	idf := func(context.Context) (string, error) { return "jwt", nil }
 	base, _ := url.Parse("https://api.anthropic.com")
 	for _, f := range []Federation{
-		{OIDCRequestToken: "t", RuleID: "r", OrganizationID: "o"},
-		{OIDCRequestURL: "u", RuleID: "r", OrganizationID: "o"},
-		{OIDCRequestURL: "u", OIDCRequestToken: "t", OrganizationID: "o"},
-		{OIDCRequestURL: "u", OIDCRequestToken: "t", RuleID: "r"},
+		{RuleID: "r", OrganizationID: "o"},
+		{IdentityToken: idf, OrganizationID: "o"},
+		{IdentityToken: idf, RuleID: "r"},
 	} {
 		if _, err := NewTokenSource(f, base, http.DefaultClient, t.Logf); err == nil {
 			t.Errorf("accepted %+v", f)
@@ -492,7 +491,7 @@ func TestExchangeErrorsRedacted(t *testing.T) {
 	}))
 	defer srv.Close()
 	base, _ := url.Parse(srv.URL)
-	ts, _ := NewTokenSource(Federation{OIDCRequestURL: srv.URL + "/oidc", OIDCRequestToken: "t", RuleID: "r", OrganizationID: "o"}, base, http.DefaultClient, t.Logf)
+	ts, _ := NewTokenSource(Federation{IdentityToken: GitHubOIDC{RequestURL: srv.URL + "/oidc", RequestToken: "t", Client: http.DefaultClient}.Token, RuleID: "r", OrganizationID: "o"}, base, http.DefaultClient, t.Logf)
 	_, err := ts.Token(context.Background())
 	if err == nil || strings.Contains(err.Error(), "secret-jwt") || !strings.Contains(err.Error(), "Authentication failed") || !strings.Contains(err.Error(), "req_1") {
 		t.Errorf("err = %v", err)
@@ -505,7 +504,7 @@ func TestAgainstFake(t *testing.T) {
 	srv := httptest.NewServer(fake.Handler())
 	defer srv.Close()
 	base, _ := url.Parse(srv.URL)
-	ts, err := NewTokenSource(Federation{OIDCRequestURL: srv.URL + "/oidc/token?api-version=2.0", OIDCRequestToken: fakeanthropic.OIDCRequestToken, RuleID: "fdrl_1", OrganizationID: "org-1"}, base, http.DefaultClient, t.Logf)
+	ts, err := NewTokenSource(Federation{IdentityToken: GitHubOIDC{RequestURL: srv.URL + "/oidc/token?api-version=2.0", RequestToken: fakeanthropic.OIDCRequestToken, Client: http.DefaultClient}.Token, RuleID: "fdrl_1", OrganizationID: "org-1"}, base, http.DefaultClient, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}

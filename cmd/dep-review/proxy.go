@@ -24,13 +24,14 @@ var testUpstream = func(*flag.FlagSet) *string { return nil }
 
 // runProxy: dep-review proxy --model <m> --federation-rule-id <id> --organization-id <id> [...]
 //
-// Runs in its own container, outside the reviewer sandbox. Reads
-// ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN, mints the first token before it
-// listens (so a broken federation setup fails fast), prints "proxy: ready"
+// Runs in its own container, outside the reviewer sandbox. Gets GitHub OIDC
+// JWTs from the host helper on --identity-socket (it never sees the job's
+// ACTIONS_* tokens), mints the first Claude token before it listens (so a broken federation setup fails fast), prints "proxy: ready"
 // and serves until killed.
 func runProxy(args []string) error {
 	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
 	listen := fs.String("listen", ":8080", "listen address")
+	socket := fs.String("identity-socket", "", "unix socket of the host's OIDC helper (dep-review review)")
 	model := fs.String("model", "", "the only model requests may name")
 	rule := fs.String("federation-rule-id", "", "workload identity federation rule (fdrl_...)")
 	org := fs.String("organization-id", "", "Anthropic organization ID")
@@ -41,8 +42,8 @@ func runProxy(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *model == "" || fs.NArg() > 0 {
-		return errors.New("proxy: --model is required")
+	if *model == "" || *socket == "" || fs.NArg() > 0 {
+		return errors.New("proxy: --model and --identity-socket are required")
 	}
 	upstream, _ := url.Parse(proxy.DefaultUpstream)
 	if override != nil && *override != "" {
@@ -62,8 +63,7 @@ func runProxy(args []string) error {
 		ForceAttemptHTTP2:   true,
 	}}
 	tokens, err := proxy.NewTokenSource(proxy.Federation{
-		OIDCRequestURL:   os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL"),
-		OIDCRequestToken: os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+		IdentityToken:    proxy.SocketIdentity(*socket),
 		RuleID:           *rule,
 		OrganizationID:   *org,
 		WorkspaceID:      *ws,

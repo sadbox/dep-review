@@ -1,8 +1,9 @@
 // Package proxy is the reviewer sandbox's only way out: a reverse proxy
 // that holds the Claude credential, forwards POST /v1/messages to the
 // Claude API and nothing else. It runs outside the sandbox (its own
-// container, on the internal network and a normal bridge) and is the only
-// process that sees the job's OIDC request token.
+// container, on the internal network and a normal bridge). It gets GitHub
+// OIDC JWTs for the Claude audience from the host helper (identity.go)
+// and never sees the job's ACTIONS_* tokens.
 //
 // Per request it: allows only POST /v1/messages (optionally ?beta=true,
 // which the Claude Code CLI appends); allows only bodies built from an

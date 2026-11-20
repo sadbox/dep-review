@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -24,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sadbox/dep-review/internal/proxy"
 )
 
 const (
@@ -36,6 +40,10 @@ const (
 	workDir      = "/work"
 	proxyPort    = 8080
 	readyLine    = "proxy: ready"
+
+	identityMount = "/run/dep-review-identity"
+	identitySock  = "oidc.sock"
+	maxIdentity   = 64 // JWTs per run; the proxy needs one per ~8 minutes
 )
 
 // Config is one review run.
@@ -57,7 +65,11 @@ type Config struct {
 	MaxTurns    int
 	MaxRequests int
 	Federation  Federation
-	Subnet      netip.Prefix // internal network; the proxy takes .2
+	// Identity mints GitHub OIDC JWTs for the Claude audience, on the host
+	// (proxy.GitHubOIDC); the proxy gets them through a unix socket.
+	Identity   func(context.Context) (string, error)
+	SocketRoot string       // where the socket directory is made; default os.TempDir()
+	Subnet     netip.Prefix // internal network; the proxy takes .2
 
 	Timeout time.Duration // the reviewer container's wall clock
 
@@ -69,6 +81,8 @@ type Config struct {
 	Command        []string // nil: claude -p ...
 	ExtraMounts    []Mount
 	Stderr         io.Writer // default os.Stderr
+
+	identityDir string
 }
 
 type Federation struct {
@@ -153,9 +167,9 @@ func (c *Config) NetworkArgs() [][]string {
 }
 
 // ProxyArgs is the `docker create` for the proxy. It runs under runc
-// (it must reach the internet), as the distroless nonroot user, read-only,
-// and is the only container that gets the OIDC request variables, by name
-// from the docker CLI's environment so their values never appear in argv.
+// (it must reach the internet), as the distroless nonroot user, read-only.
+// It gets no ACTIONS_* variable: its OIDC JWTs come from the host helper
+// (startIdentity) over a unix socket in the read-only identity mount.
 func (c *Config) ProxyArgs() []string {
 	a := []string{"create", "--name", c.proxyName(),
 		"--runtime", "runc",
@@ -164,12 +178,12 @@ func (c *Config) ProxyArgs() []string {
 		"--user", "65532:65532",
 		"--pids-limit", "64", "--memory", "256m",
 		"--mount", "type=bind,src=" + c.GateBinary + ",dst=/dep-review,readonly",
-		"--env", "ACTIONS_ID_TOKEN_REQUEST_URL",
-		"--env", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+		"--mount", "type=bind,src=" + c.identityDir + ",dst=" + identityMount + ",readonly",
 		"--entrypoint", "/dep-review",
 		c.ProxyImage,
 		"proxy",
 		"--listen", ":" + strconv.Itoa(proxyPort),
+		"--identity-socket", identityMount + "/" + identitySock,
 		"--model", c.Model,
 		"--federation-rule-id", c.Federation.RuleID,
 		"--organization-id", c.Federation.OrganizationID,
@@ -273,6 +287,11 @@ func Run(ctx context.Context, c Config) (Result, error) {
 			return res, err
 		}
 	}
+	stopIdentity, err := c.startIdentity()
+	if err != nil {
+		return res, err
+	}
+	defer stopIdentity()
 	if err := c.startProxy(ctx); err != nil {
 		return res, err
 	}
@@ -381,8 +400,7 @@ func (c *Config) prompt() (io.Reader, error) {
 
 func (c *Config) startProxy(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, c.Docker, c.ProxyArgs()...)
-	// The only place the OIDC request variables are passed on.
-	cmd.Env = dockerEnv([]string{"ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"})
+	cmd.Env = dockerEnv(nil)
 	cmd.Stdout, cmd.Stderr = io.Discard, c.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("creating the proxy: %w", err)
@@ -565,4 +583,47 @@ func (p *prefixWriter) Flush() {
 	if p.buf.Len() > 0 {
 		p.emit()
 	}
+}
+
+// startIdentity serves proxy.IdentityHandler on a unix socket in a fresh
+// directory, which ProxyArgs mounts read-only into the proxy container.
+// The job's OIDC request token stays in this process.
+func (c *Config) startIdentity() (func(), error) {
+	if c.Identity == nil {
+		return nil, errors.New("sandbox: no identity source")
+	}
+	root := c.SocketRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(root, "dep-review-identity-")
+	if err != nil {
+		return nil, err
+	}
+	// The proxy runs as 65532: it must traverse the directory and connect
+	// to the socket, and nothing else lives here.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		os.Remove(dir)
+		return nil, err
+	}
+	sock := filepath.Join(dir, identitySock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		os.Remove(dir)
+		return nil, err
+	}
+	if err := os.Chmod(sock, 0o666); err != nil {
+		ln.Close()
+		os.Remove(dir)
+		return nil, err
+	}
+	c.identityDir = dir
+	logf := func(f string, a ...any) { fmt.Fprintf(c.Stderr, f+"\n", a...) }
+	srv := &http.Server{Handler: proxy.IdentityHandler(c.Identity, maxIdentity, logf), ReadHeaderTimeout: 10 * time.Second}
+	go srv.Serve(ln)
+	return func() {
+		srv.Close()
+		os.Remove(sock)
+		os.Remove(dir)
+	}, nil
 }

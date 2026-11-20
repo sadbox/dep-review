@@ -2,11 +2,16 @@ package sandbox
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sadbox/dep-review/internal/proxy"
 )
 
 func testConfig(t *testing.T) Config {
@@ -117,21 +122,21 @@ func TestReviewerArgs(t *testing.T) {
 
 func TestProxyArgs(t *testing.T) {
 	c := testConfig(t)
+	c.identityDir = "/w/id"
 	a := c.ProxyArgs()
 	s := strings.Join(a, " ")
 	for _, want := range []string{
 		"--runtime runc", "--network dr-test-egress", "--read-only", "--cap-drop ALL", "--user 65532:65532",
-		"--env ACTIONS_ID_TOKEN_REQUEST_URL --env ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-		"proxy --listen :8080 --model claude-opus-5-5 --federation-rule-id fdrl_1 --organization-id org --workspace-id wrkspc_1 --max-requests 150",
+		"type=bind,src=/w/id,dst=/run/dep-review-identity,readonly",
+		"--listen :8080 --identity-socket /run/dep-review-identity/oidc.sock",
+		"--model claude-opus-5-5 --federation-rule-id fdrl_1 --organization-id org --workspace-id wrkspc_1 --max-requests 150",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("proxy args lack %q", want)
 		}
 	}
-	for _, e := range values(a, "--env") {
-		if strings.Contains(e, "=") {
-			t.Errorf("proxy env %q puts a value in argv", e)
-		}
+	if len(values(a, "--env")) != 0 || strings.Contains(s, "ACTIONS_") {
+		t.Errorf("the proxy gets environment variables: %v", values(a, "--env"))
 	}
 	n := c.NetworkArgs()
 	if !slices.Contains(n[0], "--internal") || !slices.Contains(n[0], "com.docker.network.bridge.inhibit_ipv4=true") || slices.Contains(n[1], "--internal") {
@@ -163,10 +168,6 @@ func TestDockerEnv(t *testing.T) {
 		if strings.Contains(e, "secret") {
 			t.Errorf("docker env has %s", e)
 		}
-	}
-	got := dockerEnv([]string{"ACTIONS_ID_TOKEN_REQUEST_TOKEN"})
-	if !slices.Contains(got, "ACTIONS_ID_TOKEN_REQUEST_TOKEN=secret") || slices.ContainsFunc(got, func(s string) bool { return strings.Contains(s, "secret2") || strings.Contains(s, "secret3") }) {
-		t.Errorf("proxy docker env %v", got)
 	}
 }
 
@@ -249,5 +250,40 @@ func TestPrefixWriter(t *testing.T) {
 		if !strings.HasPrefix(l, "reviewer| ") {
 			t.Errorf("unprefixed line %q", l)
 		}
+	}
+}
+
+func TestStartIdentity(t *testing.T) {
+	c := testConfig(t)
+	// Short: unix socket paths are limited to about 100 bytes.
+	root, err := os.MkdirTemp("/tmp", "sb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(root)
+	c.SocketRoot = root
+	c.Identity = func(context.Context) (string, error) { return "jwt-1", nil }
+	stop, err := c.startIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(c.identityDir, identitySock)
+	fi, err := os.Stat(sock)
+	if err != nil || fi.Mode()&os.ModeSocket == 0 || fi.Mode().Perm() != 0o666 {
+		t.Fatalf("socket %v %v", fi, err)
+	}
+	if di, _ := os.Stat(c.identityDir); di.Mode().Perm() != 0o755 {
+		t.Errorf("dir mode %v", di.Mode())
+	}
+	if jwt, err := proxy.SocketIdentity(sock)(context.Background()); err != nil || jwt != "jwt-1" {
+		t.Errorf("%q %v", jwt, err)
+	}
+	stop()
+	if _, err := os.Stat(c.identityDir); !os.IsNotExist(err) {
+		t.Errorf("socket dir left behind: %v", err)
+	}
+	c.Identity = nil
+	if _, err := c.startIdentity(); err == nil {
+		t.Error("started without an identity source")
 	}
 }

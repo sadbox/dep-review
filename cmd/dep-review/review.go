@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -83,6 +84,14 @@ func runReview(args []string) error {
 		Federation:    sandbox.Federation{RuleID: *rule, OrganizationID: *org, WorkspaceID: *ws, ServiceAccountID: *svac},
 		Subnet:        pfx,
 		Timeout:       *timeout,
+		// The job's OIDC request token stays in this process; the proxy
+		// gets Claude-audience JWTs from it over a unix socket.
+		Identity: proxy.GitHubOIDC{
+			RequestURL:   os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL"),
+			RequestToken: os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+			Client:       &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}},
+		}.Token,
+		SocketRoot: os.Getenv("RUNNER_TEMP"),
 	}
 	if err := applyTest(&c); err != nil {
 		return err

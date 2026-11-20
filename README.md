@@ -33,7 +33,7 @@ PR opened/synchronized
             fetch    real change set, downloads, diffs, findings,   (read-only)
                      route: auto | review | human | refuse
             review   model reads ./evidence and ./repo → verdict    (gVisor sandbox;
-                     only the credential proxy holds OIDC)
+                     proxy holds the Claude token)
             publish  decide, comment, status, merge on green CI     (gate app)
   schedule → sweep   merge approved PRs whose CI finished later;    (gate app)
                      report PRs stuck without a decision (including
@@ -100,9 +100,13 @@ one is reviewed by this gate too.
 ## Model credential
 
 Claude API workload identity federation, done by the credential proxy
-(`dep-review proxy`), never by the reviewer. The proxy requests the job's
-GitHub OIDC token itself (audience `https://api.anthropic.com`), exchanges
-it at `POST /v1/oauth/token` (RFC 7523 jwt-bearer) for a short-lived
+(`dep-review proxy`), never by the reviewer. The job's OIDC request token
+(`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, which in actions/runner is also the
+job's runtime token: it can replace the run's artifacts and write caches)
+never leaves the host process `dep-review review`. That process serves
+the proxy container one thing over a unix socket: a fresh GitHub OIDC JWT
+for the audience `https://api.anthropic.com`. The proxy exchanges each JWT
+at `POST /v1/oauth/token` (RFC 7523 jwt-bearer) for a short-lived
 Claude token, sends that as `Authorization: Bearer`, and exchanges again,
 with a fresh OIDC token each time, two minutes before expiry (federated
 tokens live about ten minutes; a review can take twenty). The federation
