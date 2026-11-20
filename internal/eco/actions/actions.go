@@ -144,7 +144,11 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 		}
 		ch, errs := usesChanges(fc.path, kind, string(oldText), string(newText))
 		for _, e := range errs {
-			fs.add(model.RouteRefuse, "actions.non-uses-change", "", "%s: %s", safePath(e.file), e.reason)
+			code := e.code
+			if code == "" {
+				code = "actions.non-uses-change"
+			}
+			fs.add(model.RouteRefuse, code, "", "%s: %s", safePath(e.file), e.reason)
 		}
 		all = append(all, ch...)
 	}
@@ -340,8 +344,15 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 	if err != nil {
 		return u, err
 	}
-	if branch == "" {
+	switch branch {
+	case "":
 		fs.add(model.RouteRefuse, "actions.not-on-default-branch", name, "the new SHA is not an ancestor of %s or of a release branch (a fork or unmerged commit?)", info.DefaultBranch)
+	case info.DefaultBranch:
+	default:
+		// A release-named branch, a vX.Y.Z tag and a published release all
+		// prove only push access to upstream, not that the commit went
+		// through whatever review the default branch gets.
+		fs.add(model.RouteHuman, "actions.release-branch-only", name, "the new SHA is reachable from release branch %s but not from the default branch %s", safePath(branch), info.DefaultBranch)
 	}
 	cmp, err := up.compare(ctx, p.oldRef, p.newRef, 100)
 	if err != nil && !errors.Is(err, gh.ErrNotFound) {
@@ -409,8 +420,14 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		for _, c := range p.changes {
 			parts, ok := versionComment(c.new.comment)
 			if !ok {
-				if c.new.comment != "" {
-					fs.add(model.RouteReview, "actions.version-comment-unparsed", name, "%s:%d: the comment after the pin is not a version", safePath(c.file), c.line)
+				switch {
+				case c.new.comment != c.old.comment:
+					// Dependabot writes a version here or leaves the comment
+					// alone; anything else (including deleting it) is not its
+					// edit, and unparsed text is where structure can hide.
+					fs.add(model.RouteRefuse, "actions.version-comment-unparsed", name, "%s:%d: the comment after the pin changed and is not a version", safePath(c.file), c.line)
+				case c.new.comment != "":
+					fs.add(model.RouteReview, "actions.version-comment-unparsed", name, "%s:%d: the comment after the pin is not a version (unchanged by the PR)", safePath(c.file), c.line)
 				}
 				continue
 			}
@@ -624,6 +641,15 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 			return nil
 		}
 	}
+	for _, r := range []string{p.oldRef, p.newRef} {
+		hits, err := archiveAttributes(ctx, up, r)
+		if err != nil {
+			return err
+		}
+		if len(hits) > 0 {
+			fs.add(model.RouteHuman, "actions.archive-attributes", name, "at %s, .gitattributes sets attributes that make the tarball the runner downloads differ from the blobs the gate read: %s", short(r), strings.Join(hits, ", "))
+		}
+	}
 	changed, err := up.changedFiles(ctx, p.oldRef, p.newRef)
 	if err != nil {
 		return err
@@ -646,6 +672,9 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		}
 		om, err1 := parseActionMeta(string(oldY))
 		nm, err2 := parseActionMeta(string(newY))
+		if errors.Is(err1, errLineBreak) || errors.Is(err2, errLineBreak) {
+			fs.add(model.RouteRefuse, codeLineBreak, name, "%s: %s", safePath(where), errLineBreak)
+		}
 		if err1 != nil || err2 != nil {
 			fs.add(model.RouteHuman, "actions.action-yml-unparsed", name, "%s could not be read by the gate's YAML subset reader", safePath(where))
 			metaText.WriteString(unifiedDiff("a/"+oldPath, "b/"+newPath, string(oldY), string(newY), 3))
@@ -954,4 +983,56 @@ func readBundle(ctx context.Context, g git, p *pair, c fileChange) (bundleInput,
 	in.newMap = load(p.newRef, in.new)
 	in.oldMap = load(p.oldRef, in.old)
 	return in, nil
+}
+
+// archiveAttributes lists the .gitattributes files at rev that name an
+// attribute git archive applies: export-subst and ident rewrite file
+// content, export-ignore drops files, eol=crlf and working-tree-encoding
+// convert them. The runner downloads the action as GitHub's tarball of
+// the pinned commit, which honors them; the gate reads raw blobs. Their
+// effect cannot be replayed deterministically (export-subst expands
+// %d/%cr and friends, which change as refs move and time passes), so
+// their presence routes to a human instead.
+//
+// The scan is deliberately coarse: every whitespace-separated token of
+// every line, comments and patterns included, is checked. Go splits on a
+// superset of git's attribute separators, so a token git reads is never
+// missed; the cost is an occasional false positive.
+func archiveAttributes(ctx context.Context, g git, rev string) ([]string, error) {
+	out, err := g.run(ctx, "ls-tree", "-r", "-z", "--full-tree", "--name-only", rev)
+	if err != nil {
+		return nil, err
+	}
+	var hits []string
+	for _, f := range strings.Split(string(out), "\x00") {
+		if path.Base(f) != ".gitattributes" {
+			continue
+		}
+		data, err := g.show(ctx, rev, f)
+		if err != nil {
+			return nil, err
+		}
+		found := map[string]bool{}
+		for _, tok := range strings.Fields(string(data)) {
+			name, val, _ := strings.Cut(strings.TrimLeft(tok, "-!"), "=")
+			switch {
+			case name == "export-subst", name == "export-ignore", name == "ident", name == "working-tree-encoding",
+				name == "eol" && val == "crlf":
+				found[name] = true
+			}
+		}
+		for _, n := range sortedKeys(found) {
+			hits = append(hits, safePath(f)+" ("+n+")")
+		}
+	}
+	return hits, nil
+}
+
+func sortedKeys(m map[string]bool) []string {
+	var ks []string
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }

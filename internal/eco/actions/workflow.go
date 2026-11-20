@@ -14,6 +14,10 @@ const (
 	kindAction   = "action"
 )
 
+// codeLineBreak is the finding for YAML (a caller workflow or action.yml,
+// or an upstream action.yml) that checkYAMLText refuses.
+const codeLineBreak = "actions.yaml-line-break"
+
 // fileKind classifies a path in the caller repository: a workflow
 // (.github/workflows/*.yml|yaml, top level only, as GitHub reads them) or an
 // action metadata file (action.yml|yaml anywhere). Anything else is "".
@@ -36,7 +40,9 @@ type usesRef struct {
 	comment string // text after '#', trimmed; "" when absent
 }
 
-var usesLineRx = regexp.MustCompile(`^(\s*(?:-\s+)?uses:\s*)(['"]?)([^@\s'"#]+)@([^\s'"#]+)(['"]?)\s*(?:#\s*(.*?))?\s*$`)
+// A comment needs whitespace before its '#' (YAML reads "@sha#v1" as one
+// scalar), so a '#' straight after the ref does not match at all.
+var usesLineRx = regexp.MustCompile(`^(\s*(?:-\s+)?uses:\s*)(['"]?)([^@\s'"#]+)@([^\s'"#]+)(['"]?)(?:\s+#\s*(.*?))?\s*$`)
 
 // parseUsesLine reads the value as raw text, so it refuses a backslash
 // anywhere in it: inside double quotes GitHub decodes it as an escape
@@ -276,20 +282,31 @@ type usesChange struct {
 }
 
 // fileDiffError is a reason a changed caller file is not a pure `uses:`
-// rewrite.
+// rewrite. code is the finding code; "" means actions.non-uses-change.
 type fileDiffError struct {
-	file, reason string
+	file, reason, code string
 }
 
 // usesChanges diffs one workflow/action file and returns the rewritten
 // `uses:` lines, or the reasons the change is something else.
 func usesChanges(file, kind, oldText, newText string) ([]usesChange, []fileDiffError) {
-	a, b := splitLines(oldText), splitLines(newText)
 	var out []usesChange
 	var errs []fileDiffError
 	bad := func(format string, args ...any) {
-		errs = append(errs, fileDiffError{file, fmt.Sprintf(format, args...)})
+		errs = append(errs, fileDiffError{file: file, reason: fmt.Sprintf(format, args...)})
 	}
+	// The diff below is line-based: refuse line breaks it would not split
+	// on (see checkYAMLText), then read CRLF as LF.
+	for _, side := range []struct{ name, text string }{{"base", oldText}, {"head", newText}} {
+		if err := checkYAMLText(side.text); err != nil {
+			errs = append(errs, fileDiffError{file: file, reason: side.name + ": " + err.Error(), code: codeLineBreak})
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	oldText, newText = strings.ReplaceAll(oldText, "\r\n", "\n"), strings.ReplaceAll(newText, "\r\n", "\n")
+	a, b := splitLines(oldText), splitLines(newText)
 	if strings.HasSuffix(oldText, "\n") != strings.HasSuffix(newText, "\n") {
 		bad("trailing newline changed")
 	}
