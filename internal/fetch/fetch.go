@@ -36,7 +36,9 @@ type Writer interface {
 
 // GitHub is the subset of the REST client the fetchers need.
 type GitHub interface {
-	// Get decodes GET https://api.github.com/<path> into v.
+	// Get decodes GET https://api.github.com/<path> into v. A 404 is
+	// errors.Is(err, gh.ErrNotFound) (internal/gh); every other failure is
+	// a plain error.
 	Get(ctx context.Context, path string, v any) error
 }
 

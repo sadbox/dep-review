@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -13,29 +12,12 @@ import (
 	"strings"
 
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 )
 
-// notFoundRx finds a standalone 404 in an error message ("…: 404 Not
-// Found"); a 404 inside a hex SHA in the path does not match.
-var notFoundRx = regexp.MustCompile(`\b404\b`)
-
-// isNotFound reports whether err is a 404 from fetch.GitHub. fetch.GitHub
-// does not define an error type, so this accepts an error exposing
-// StatusCode() int, or else a standalone "404" in the message (the gate's
-// internal/gh client formats errors as "github: GET <path>: 404 …").
-func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	var sc interface{ StatusCode() int }
-	if errors.As(err, &sc) {
-		return sc.StatusCode() == http.StatusNotFound
-	}
-	return notFoundRx.MatchString(err.Error())
-}
-
 // upstream is the REST view of one action repository. All endpoints used
-// are public and read-only.
+// are public and read-only. A missing object is errors.Is(err,
+// gh.ErrNotFound).
 type upstream struct {
 	gh          fetch.GitHub
 	owner, repo string
@@ -211,7 +193,7 @@ type release struct {
 func (u *upstream) releaseFor(ctx context.Context, tag string) (*release, error) {
 	var r release
 	if err := u.get(ctx, "releases/tags/"+url.PathEscape(tag), &r); err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, gh.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -233,7 +215,7 @@ func (u *upstream) releaseAttestations(ctx context.Context, sha string) (int, er
 		} `json:"attestations"`
 	}
 	if err := u.get(ctx, "attestations/sha1:"+sha+"?per_page=100", &resp); err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, gh.ErrNotFound) {
 			return 0, nil
 		}
 		return 0, err
@@ -294,10 +276,10 @@ var ghsaRx = regexp.MustCompile(`^GHSA(-[23456789cfghjmpqrvwx]{4}){3}$`)
 
 // advisories returns the reviewed GitHub advisories affecting
 // owner/repo@version in the actions ecosystem.
-func advisories(ctx context.Context, gh fetch.GitHub, name, version string) ([]advisory, error) {
+func advisories(ctx context.Context, c fetch.GitHub, name, version string) ([]advisory, error) {
 	var all []advisory
 	q := "advisories?ecosystem=actions&per_page=100&affects=" + url.QueryEscape(name+"@"+version)
-	if err := gh.Get(ctx, q, &all); err != nil {
+	if err := c.Get(ctx, q, &all); err != nil {
 		return nil, err
 	}
 	var out []advisory
@@ -357,7 +339,7 @@ func (u *upstream) onReleaseBranch(ctx context.Context, def, sha string) (string
 func (u *upstream) contains(ctx context.Context, branch, sha string) (bool, error) {
 	c, err := u.compare(ctx, branch, sha, 1)
 	if err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, gh.ErrNotFound) {
 			return false, nil
 		}
 		return false, err

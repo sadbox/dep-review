@@ -26,6 +26,7 @@ import (
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -283,7 +284,7 @@ func (f Fetcher) crossCheckPyPI(ctx context.Context, env fetch.Env, c change) ([
 		base = "https://pypi.org"
 	}
 	b, err := ecoutil.GetBytes(ctx, env.HTTP, base+"/pypi/"+u.Name+"/"+u.To+"/json", ecoutil.MetadataLimit, map[string][]string{"Accept": {"application/json"}})
-	if errors.Is(err, ecoutil.ErrNotFound) {
+	if errors.Is(err, gh.ErrNotFound) {
 		return []model.Finding{human("uv.not-on-pypi", u.Name, fmt.Sprintf("%s==%s is not on PyPI (deleted release?)", u.Name, u.To))}, nil
 	}
 	if err != nil {
@@ -478,7 +479,7 @@ func (f Fetcher) fetchArtifact(ctx context.Context, env fetch.Env, dst string, a
 	}
 	dl := dst + ".dl"
 	if err := ecoutil.GetFile(ctx, env.HTTP, a.URL, dl, ecoutil.ArtifactLimit); err != nil {
-		if errors.Is(err, ecoutil.ErrNotFound) {
+		if errors.Is(err, gh.ErrNotFound) {
 			return nil, &model.Finding{Code: "uv.artifact-missing", Route: model.RouteHuman, Detail: artifactName(a.URL) + " is not on " + filesHost}, nil
 		}
 		return nil, nil, err

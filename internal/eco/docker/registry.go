@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sadbox/dep-review/internal/gh"
 )
 
 // A minimal, read-only OCI distribution client: anonymous bearer tokens,
@@ -84,9 +86,9 @@ type statusError struct {
 
 func (e *statusError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.What, e.Code) }
 
-func isNotFound(err error) bool {
-	var se *statusError
-	return errors.As(err, &se) && se.Code == http.StatusNotFound
+// Is makes errors.Is(err, gh.ErrNotFound) true for a 404.
+func (e *statusError) Is(target error) bool {
+	return target == gh.ErrNotFound && e.Code == http.StatusNotFound
 }
 
 // errDigestMismatch means the registry served bytes that do not hash to

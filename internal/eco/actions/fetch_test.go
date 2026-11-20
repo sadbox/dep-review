@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/policy"
 )
@@ -109,7 +110,7 @@ func (f *fakeGH) Get(_ context.Context, p string, v any) error {
 	f.seen = append(f.seen, p)
 	r, ok := f.resp[p]
 	if !ok {
-		return &statusError{404, p}
+		return &gh.Error{Method: "GET", Path: p, StatusCode: 404}
 	}
 	if e, ok := r.(error); ok {
 		return e
@@ -208,12 +209,12 @@ func runScenario(t *testing.T, sc scenario) {
 	if sc.api != nil {
 		sc.api(api, old, new)
 	}
-	gh := &fakeGH{resp: api}
+	ghc := &fakeGH{resp: api}
 	ev := &memEvidence{}
 	f := New(Config{CloneBase: "file://" + filepath.Join(root, "upstream") + "/"})
 	res, err := f.Fetch(context.Background(), fetch.Env{
 		Class:   model.Classification{Repo: "me/caller", BaseSHA: base, HeadSHA: head, Ecosystem: model.GitHubActions},
-		RepoDir: caller, Scratch: filepath.Join(root, "scratch"), Evidence: ev, GitHub: gh,
+		RepoDir: caller, Scratch: filepath.Join(root, "scratch"), Evidence: ev, GitHub: ghc,
 	})
 	if err != nil {
 		t.Fatal(err)

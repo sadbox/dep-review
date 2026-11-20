@@ -92,6 +92,18 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("github: %s %s: %d", e.Method, e.Path, e.StatusCode)
 }
 
+// ErrNotFound is the gate's one "does not exist" sentinel, checked with
+// errors.Is. A *Error matches it for a 404. The fetchers' other HTTP
+// clients (registries, package indexes, the OCI client) wrap it for their
+// own not-found statuses, so a fetcher never inspects status codes or
+// error text to tell "missing" from "failed".
+var ErrNotFound = errors.New("not found")
+
+// Is makes errors.Is(err, ErrNotFound) true for a 404.
+func (e *Error) Is(target error) bool {
+	return target == ErrNotFound && e.StatusCode == http.StatusNotFound
+}
+
 // StatusCode returns the HTTP status of a *Error anywhere in err's chain,
 // or 0.
 func StatusCode(err error) int {

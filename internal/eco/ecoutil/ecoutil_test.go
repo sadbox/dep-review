@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -207,7 +209,7 @@ func TestGetRetriesAndLimits(t *testing.T) {
 	if _, err := GetBytes(ctx, srv.Client(), srv.URL+"/big", 10, nil); err == nil {
 		t.Error("size limit not enforced")
 	}
-	if _, err := GetBytes(ctx, srv.Client(), srv.URL+"/gone", 10, nil); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := GetBytes(ctx, srv.Client(), srv.URL+"/gone", 10, nil); !errors.Is(err, gh.ErrNotFound) {
 		t.Errorf("404: %v", err)
 	}
 	if _, err := GetBytes(ctx, srv.Client(), srv.URL+"/forbidden", 10, nil); err == nil {

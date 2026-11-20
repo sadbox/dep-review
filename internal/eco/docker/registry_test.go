@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/policy"
 )
@@ -79,6 +81,15 @@ func TestRegistryTokenFlowAndVerification(t *testing.T) {
 	reg.endpoint = func(string) string { return f.srv.URL }
 	if _, _, _, err := reg.manifest(ctx, golang, dgB); err == nil || !strings.Contains(err.Error(), "realm") {
 		t.Errorf("default realm allowlist: %v", err)
+	}
+}
+
+func TestStatusErrorNotFound(t *testing.T) {
+	for code, want := range map[int]bool{404: true, 401: false, 500: false} {
+		err := fmt.Errorf("manifest: %w", &statusError{Code: code, What: "GET x"})
+		if got := errors.Is(err, gh.ErrNotFound); got != want {
+			t.Errorf("HTTP %d: errors.Is(gh.ErrNotFound) = %v, want %v", code, got, want)
+		}
 	}
 }
 

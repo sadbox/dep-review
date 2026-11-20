@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -77,7 +78,7 @@ func (u *updateResult) classify(err error, what string) bool {
 		u.find(model.RouteHuman, codeLayerUnsupported, "%s: %v", what, err)
 	case errors.Is(err, errZstd):
 		u.find(model.RouteHuman, codeZstdLayer, "%s: zstd layers cannot be read with the standard library", what)
-	case isNotFound(err):
+	case errors.Is(err, gh.ErrNotFound):
 		u.find(model.RouteHuman, codeNotFound, "%s: %v", what, err)
 	default:
 		return false
@@ -324,7 +325,7 @@ func (a *analyzer) tagCheck(ctx context.Context, ref imageRef, pinned *manifestD
 		if same {
 			return tagResult{State: tagEquivalent, Current: cur, Detail: "the tag's current index (" + cur + ") has the same manifests for every built platform"}, nil
 		}
-	case !isNotFound(err):
+	case !errors.Is(err, gh.ErrNotFound):
 		return tagResult{}, err
 	}
 	name, official := ref.officialImage()

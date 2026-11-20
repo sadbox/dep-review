@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -323,7 +324,7 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 	up := &upstream{gh: env.GitHub, owner: p.owner, repo: p.repo, tagDeref: map[string]string{}}
 	var info repoInfo
 	if err := up.get(ctx, "", &info); err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, gh.ErrNotFound) {
 			fs.add(model.RouteRefuse, "actions.repo-not-found", name, "upstream repository not found")
 			return u, nil
 		}
@@ -343,7 +344,7 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		fs.add(model.RouteRefuse, "actions.not-on-default-branch", name, "the new SHA is not an ancestor of %s or of a release branch (a fork or unmerged commit?)", info.DefaultBranch)
 	}
 	cmp, err := up.compare(ctx, p.oldRef, p.newRef, 100)
-	if err != nil && !isNotFound(err) {
+	if err != nil && !errors.Is(err, gh.ErrNotFound) {
 		return u, err
 	}
 	commits := 0
@@ -557,10 +558,10 @@ func provenance(ctx context.Context, up *upstream, p *pair, oldRel, newRel *rele
 	if pf.newAttest, err = up.releaseAttestations(ctx, p.newRef); err != nil {
 		return nil, err
 	}
-	if pf.oldVerified, err = up.commitVerification(ctx, p.oldRef); err != nil && !isNotFound(err) {
+	if pf.oldVerified, err = up.commitVerification(ctx, p.oldRef); err != nil && !errors.Is(err, gh.ErrNotFound) {
 		return nil, err
 	}
-	if pf.newVerified, err = up.commitVerification(ctx, p.newRef); err != nil && !isNotFound(err) {
+	if pf.newVerified, err = up.commitVerification(ctx, p.newRef); err != nil && !errors.Is(err, gh.ErrNotFound) {
 		return nil, err
 	}
 	return pf, nil

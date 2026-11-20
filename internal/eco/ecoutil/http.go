@@ -10,6 +10,8 @@ import (
 	"os"
 	"slices"
 	"time"
+
+	"github.com/sadbox/dep-review/internal/gh"
 )
 
 // Download limits. Every fetch is bounded in time and size.
@@ -21,10 +23,8 @@ const (
 	firstRetryDelay = time.Second
 )
 
-// ErrNotFound is returned for an HTTP 404 or 410.
-var ErrNotFound = errors.New("not found")
-
-// HTTPError is a non-retryable, non-404 status.
+// HTTPError is a non-retryable status other than 404/410 (those wrap
+// gh.ErrNotFound).
 type HTTPError struct {
 	URL    string
 	Status int
@@ -93,7 +93,7 @@ func getOnce(ctx context.Context, c *http.Client, rawURL string, limit int64, w 
 	switch {
 	case resp.StatusCode == http.StatusOK:
 	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
-		return false, fmt.Errorf("GET %s: %w", rawURL, ErrNotFound)
+		return false, fmt.Errorf("GET %s: HTTP %d: %w", rawURL, resp.StatusCode, gh.ErrNotFound)
 	case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
 		return true, &HTTPError{rawURL, resp.StatusCode}
 	default:

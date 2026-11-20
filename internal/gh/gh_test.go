@@ -3,6 +3,7 @@ package gh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,6 +119,27 @@ func TestErrorMessage(t *testing.T) {
 	err := c.Put(context.Background(), "repos/o/r/pulls/1/merge", nil, nil)
 	if !strings.Contains(err.Error(), "409 Head branch was modified") {
 		t.Fatal(err)
+	}
+}
+
+func TestErrNotFound(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/missing":
+			w.WriteHeader(404)
+		case "/forbidden":
+			w.WriteHeader(403)
+		case "/gone":
+			w.WriteHeader(410)
+		}
+	}))
+	defer srv.Close()
+	c, _ := testClient(srv)
+	for path, want := range map[string]bool{"missing": true, "forbidden": false, "gone": false} {
+		err := c.Get(context.Background(), path, nil)
+		if got := errors.Is(fmt.Errorf("wrapped: %w", err), ErrNotFound); got != want {
+			t.Errorf("%s: errors.Is(ErrNotFound) = %v, want %v (%v)", path, got, want, err)
+		}
 	}
 }
 

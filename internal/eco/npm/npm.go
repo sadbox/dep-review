@@ -27,6 +27,7 @@ import (
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -391,7 +392,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 			continue
 		}
 		doc, _, err := f.versionDoc(ctx, env, u.Name, s.ver)
-		if errors.Is(err, ecoutil.ErrNotFound) {
+		if errors.Is(err, gh.ErrNotFound) {
 			add(model.RouteHuman, "npm.not-on-registry", fmt.Sprintf("%s is not on %s (unpublished?)", s.ver, registryHost))
 			return findings, nil
 		}

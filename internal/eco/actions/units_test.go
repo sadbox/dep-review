@@ -1,12 +1,14 @@
 package actions
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
 
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -678,24 +680,15 @@ func TestMapReference(t *testing.T) {
 	}
 }
 
-type plainErr string
-
-func (e plainErr) Error() string { return string(e) }
-
-func TestIsNotFound(t *testing.T) {
-	tests := []struct {
-		err  error
-		want bool
-	}{
-		{&statusError{404, "x"}, true},
-		{&statusError{500, "x"}, false},
-		{plainErr("github: GET repos/a/b/releases/tags/v1.0.0: 404 Not Found"), true},
-		{plainErr("github: GET repos/a/b/compare/a404b...c: 502"), false},
-		{nil, false},
-	}
-	for _, tt := range tests {
-		if got := isNotFound(tt.err); got != tt.want {
-			t.Errorf("isNotFound(%v) = %v", tt.err, got)
+// A 404 means "absent"; any other API error (including one whose path
+// happens to contain "404") must fail the fetch, not read as absent.
+func TestNotFoundOnlyFor404(t *testing.T) {
+	const p = "repos/a/b/releases/tags/v1.0.0"
+	for status, wantErr := range map[int]bool{404: false, 403: true, 502: true} {
+		u := &upstream{gh: &fakeGH{resp: map[string]any{p: &gh.Error{Method: "GET", Path: "repos/a/b/compare/a404b...c", StatusCode: status}}}, owner: "a", repo: "b"}
+		rel, err := u.releaseFor(context.Background(), "v1.0.0")
+		if (err != nil) != wantErr || rel != nil {
+			t.Errorf("status %d: release %v, err %v; want err=%v", status, rel, err, wantErr)
 		}
 	}
 }

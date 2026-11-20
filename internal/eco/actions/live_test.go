@@ -5,8 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,9 +12,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/policy"
 )
@@ -49,7 +47,7 @@ func TestLiveSample(t *testing.T) {
 	if err := json.Unmarshal(data, &prs); err != nil {
 		t.Fatal(err)
 	}
-	gh := &restClient{token: token, http: &http.Client{Timeout: 60 * time.Second}}
+	ghc := gh.New(token)
 	scratch := t.TempDir()
 	callerRoot := t.TempDir()
 	callers := map[string]string{}
@@ -70,7 +68,7 @@ func TestLiveSample(t *testing.T) {
 					Repo: pr.Repo, PR: pr.PR, BaseSHA: pr.Base, HeadSHA: pr.Head,
 					Kind: model.KindDependabot, Ecosystem: model.GitHubActions,
 				},
-				RepoDir: dir, Scratch: scratch, Evidence: ev, GitHub: gh,
+				RepoDir: dir, Scratch: scratch, Evidence: ev, GitHub: ghc,
 			}
 			res, err := f.Fetch(context.Background(), env)
 			if err != nil {
@@ -118,40 +116,6 @@ func cloneCaller(t *testing.T, token, repo, dir string) {
 	// A full (not blobless) clone: the fetcher reads it with credentials
 	// disabled, as it reads the job's checkout.
 	gitT(t, token, filepath.Dir(dir), "clone", "-q", "--no-checkout", "https://github.com/"+repo, dir)
-}
-
-type statusError struct {
-	code int
-	path string
-}
-
-func (e *statusError) Error() string   { return fmt.Sprintf("GET %s: HTTP %d", e.path, e.code) }
-func (e *statusError) StatusCode() int { return e.code }
-
-// restClient is a minimal fetch.GitHub for the live test.
-type restClient struct {
-	token string
-	http  *http.Client
-}
-
-func (c *restClient) Get(ctx context.Context, p string, v any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/"+p, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
-		return &statusError{resp.StatusCode, p}
-	}
-	return json.NewDecoder(resp.Body).Decode(v)
 }
 
 // memEvidence is an in-memory fetch.Writer.
