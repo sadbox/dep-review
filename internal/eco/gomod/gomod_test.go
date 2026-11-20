@@ -213,8 +213,29 @@ func TestCheckTrees(t *testing.T) {
 		{"long prose literal", nil, map[string]string{"b.go": "package p\nvar s = \"" + strings.Repeat("lorem ipsum ", 100) + "\"\n"}, nil},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\nRET\n"}, []string{codeAsm}},
 		{"binary", nil, map[string]string{"x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
-		{"testdata binary ignored", nil, map[string]string{"testdata/x.bin": "\x00\x01"}, nil},
-		{"vendor ignored", nil, map[string]string{"vendor/x/x.go": "package x\nimport \"os/exec\"\n"}, nil},
+		{"testdata binary fixture", nil, map[string]string{"testdata/x.bin": "\x00\x01"}, nil},
+		{"testdata syso", nil, map[string]string{"testdata/p/x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
+		{"vendor checked", nil, map[string]string{"vendor/x/x.go": "package x\nimport \"os/exec\"\n"}, []string{codeImport}},
+		{"c source", map[string]string{"x.c": "int f(void) { return 0; }\n"}, map[string]string{"x.c": "int f(void) { return 1; }\n"}, []string{codeCSource}},
+		{"net subpackage", nil, map[string]string{"h.go": "package p\nimport \"net/http/httputil\"\nvar _ httputil.BufferPool\n"}, []string{codeImport}},
+		{"x/sys subpackage", nil, map[string]string{"h.go": "package p\nimport \"golang.org/x/sys/cpu\"\nvar _ = cpu.X86\n"}, []string{codeImport}},
+		{"net/url is parse-only", nil, map[string]string{"h.go": "package p\nimport \"net/url\"\nvar _ url.URL\n"}, nil},
+		{"os", map[string]string{"a.go": plain}, map[string]string{"a.go": "package p\nimport \"os\"\nfunc F() { os.Remove(\"x\") }\n"}, []string{codeImport}},
+		{"reflect", nil, map[string]string{"a.go": "package p\nimport \"reflect\"\nvar _ reflect.Value\n"}, []string{codeImport}},
+		{"new blank import", map[string]string{"a.go": plain}, map[string]string{"a.go": "package p\nimport _ \"example.com/q\"\n"}, []string{codeBlank}},
+		{"blank embed is fine", nil, map[string]string{"a.go": "package p\nimport _ \"embed\"\n"}, nil},
+		{"var initializer call", map[string]string{"a.go": "package p\nimport \"os\"\nvar x = 1\nvar _ = os.Args\n"},
+			map[string]string{"a.go": "package p\nimport \"os\"\nvar x = 1\nvar _ = os.Remove(\"/tmp/x\")\n"}, []string{codeVarInit}},
+		{"var initializer unchanged", map[string]string{"a.go": "package p\nvar x = setup()\nfunc setup() int { return 1 }\n"},
+			map[string]string{"a.go": "package p\nvar x = setup()\nfunc setup() int { return 2 }\n"}, nil},
+		{"called func literal", nil, map[string]string{"a.go": "package p\nvar _ = func() int { return 1 }()\n"}, []string{codeVarInit}},
+		{"stored func literal", nil, map[string]string{"a.go": "package p\nvar f = func() int { return g() }\nfunc g() int { return 1 }\n"}, nil},
+		{"channel receive", nil, map[string]string{"a.go": "package p\nvar c chan int\nvar x = <-c\n"}, []string{codeVarInit}},
+		{"pure initializers", nil, map[string]string{"a.go": "package p\nimport (\"errors\"; \"regexp\")\nvar ErrX = errors.New(\"x\")\nvar re = regexp.MustCompile(\"a+\")\nvar m = make(map[string]int, len(\"ab\"))\nvar b = []byte(\"x\")\nvar n = int64(3)\n"}, nil},
+		{"aliased errors package", nil, map[string]string{"a.go": "package p\nimport errors \"example.com/evil\"\nvar _ = errors.New(\"x\")\n"}, []string{codeVarInit}},
+		{"shadowed builtin", nil, map[string]string{"a.go": "package p\nvar n = len(\"x\")\n", "b.go": "package p\nfunc len(s string) int { return 0 }\n"}, []string{codeVarInit}},
+		{"call through pointer", nil, map[string]string{"a.go": "package p\nvar f = g\nvar pf = &f\nvar _ = (*pf)()\nfunc g() int { return 1 }\n"}, []string{codeVarInit}},
+		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
 	}
 	for _, tt := range tests {
@@ -233,6 +254,65 @@ func TestCheckTrees(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("codes = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReproVendorSkip is the security review's PoC (finding 7): the module
+// zip keeps top-level vendor/*.go, and vendor/ or testdata/ packages
+// compile when imported by path. The checks used to skip both and found
+// nothing; a var initializer calling os.StartProcess was also invisible.
+func TestReproVendorSkip(t *testing.T) {
+	gomod := "module example.com/dep\n\ngo 1.24\n"
+	old := writeTree(t, map[string]string{"go.mod": gomod, "a.go": "package dep\nfunc F(){}\n"})
+	evil := "package vendor\nimport \"os/exec\"\nfunc init(){ exec.Command(\"sh\",\"-c\",\"id\").Run() }\n"
+	cur := writeTree(t, map[string]string{"go.mod": gomod,
+		"a.go":                 "package dep\nimport _ \"example.com/dep/vendor\"\nimport _ \"example.com/dep/internal/vendor\"\nimport _ \"example.com/dep/testdata/td\"\nfunc F(){}\n",
+		"vendor/x.go":          evil,
+		"internal/vendor/y.go": evil,
+		"testdata/td/z.go":     "package td\nimport \"os/exec\"\nfunc init(){ exec.Command(\"id\").Run() }\n"})
+	h := CheckTrees(old, cur)
+	for _, want := range []string{"vendor/x.go", "internal/vendor/y.go", "testdata/td/z.go"} {
+		if !slices.Contains(h[codeInit], want) || !slices.Contains(h[codeImport], want+" (os/exec)") {
+			t.Errorf("%s: init/import not flagged: %v", want, h)
+		}
+	}
+	if len(h[codeBlank]) != 3 {
+		t.Errorf("blank imports = %q", h[codeBlank])
+	}
+
+	cur = writeTree(t, map[string]string{"go.mod": gomod,
+		"a.go": "package dep\nimport \"os\"\nvar _, _ = os.StartProcess(\"/bin/sh\", []string{\"sh\",\"-c\",\"id\"}, &os.ProcAttr{})\nfunc F(){}\n"})
+	h = CheckTrees(old, cur)
+	if !slices.Equal(h[codeVarInit], []string{"a.go"}) || !slices.Equal(h[codeImport], []string{"a.go (os)"}) {
+		t.Errorf("StartProcess initializer: %v", h)
+	}
+}
+
+// TestSumHashChanged: a go.sum hash for a version on both sides changed
+// (finding 9). Every such line is refused, module zip and /go.mod alike,
+// whether or not the module is otherwise part of the change set.
+func TestSumHashChanged(t *testing.T) {
+	base := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "base"))
+	head := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "head"))
+	for _, line := range []string{
+		"github.com/1password/onepassword-sdk-go v0.4.1 h1:My/Q2QXemep0I0qHgGrOs7EEzpPh2QZ1/II+S3YqOG0=",
+		"github.com/1password/onepassword-sdk-go v0.4.1/go.mod h1:j/CbzhucTywjlYrd6SE6k0LcQaFZ2l8OLBsAsOYtvD0=",
+	} {
+		t.Run(line[strings.Index(line, " ")+1:strings.LastIndex(line, " ")], func(t *testing.T) {
+			if !strings.Contains(string(head["go.sum"]), line+"\n") {
+				t.Fatalf("fixture lacks %q", line)
+			}
+			sum := strings.Replace(string(head["go.sum"]), line, line[:len(line)-5]+"AAAA=", 1)
+			dir, b, hs := gittest.Repo(t, base, map[string][]byte{"go.mod": head["go.mod"], "go.sum": []byte(sum)})
+			var buf bytes.Buffer
+			_, findings, err := moduleChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, hs, ".", &buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings) != 1 || findings[0].Code != "gomod.sum-changed" || findings[0].Route != model.RouteRefuse {
+				t.Errorf("findings = %+v", findings)
 			}
 		})
 	}

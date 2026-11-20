@@ -209,6 +209,20 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 		human("gomod.directive-changed", fmt.Sprintf("replace/exclude/godebug/tool/ignore directives changed; added %q, removed %q", added, removed))
 	}
 
+	// A hash is a property of a version: it can only change if someone
+	// rewrote go.sum (or the module's history). The rest of this function
+	// skips versions present on both sides, so check them here, for the
+	// module zip and the /go.mod lines alike.
+	for _, key := range slices.Sorted(maps.Keys(bsf)) {
+		if h, ok := hsf[key]; ok && h != bsf[key] {
+			mod, _, _ := strings.Cut(key, " ")
+			findings = append(findings, model.Finding{
+				Code: "gomod.sum-changed", Route: model.RouteRefuse, Update: mod,
+				Detail: fmt.Sprintf("%s: go.sum hash for %s changed from %s to %s; a version's hash never changes", depDir, key, bsf[key], h),
+			})
+		}
+	}
+
 	var changes []change
 	mk := func(name, from, to string, direct, sumsOnly bool) change {
 		return change{
@@ -399,7 +413,8 @@ func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, 
 	if err != nil {
 		return err
 	}
-	text, _ := ecoutil.JoinDiffs(diffs, isVendor)
+	// Nothing is left out: vendor/ and testdata/ can hold compiled code.
+	text, _ := ecoutil.JoinDiffs(diffs, nil)
 	if cut {
 		text = append(text, "\n[dep-review: diff exceeded the gate's read limit]\n"...)
 	}
