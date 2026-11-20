@@ -97,6 +97,24 @@ one is reviewed by this gate too.
    to tokens that may edit the ruleset), so keeping that list to
    Dependabot alone is the owner's job.
 
+### Trust boundaries
+
+Each owner has one gate GitHub App: sadbox uses app 5855685 (installed on
+sadbox.org, homelab-configs, towngear, oncall-sync), Espresso-Aficionados
+uses app 5855747 (sprobot, linkclean). Its private key sits in the
+`dep-review` environment of every repository it is installed on. So
+anyone who can run a job in one repository's `dep-review` environment, in
+practice anyone who can get a workflow change onto its default branch,
+can mint contents- and workflows-write tokens for every repository that
+app is installed on, and can forge the `dep-review` status that sweep
+merges on.
+
+Accepted: write access on those repositories is limited to trusted
+people (the owner, plus sprobot's collaborators), so write on one of an
+owner's gated repositories already means write on all of them. Revisit,
+by moving to one app per repository, if a gated repository gains
+collaborators who should not have write on the others.
+
 ## Model credential
 
 Claude API workload identity federation, done by the credential proxy
