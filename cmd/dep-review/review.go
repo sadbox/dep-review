@@ -44,6 +44,7 @@ func runReview(args []string) error {
 	ws := fs.String("workspace-id", "", "workspace (wrkspc_...), optional")
 	svac := fs.String("service-account-id", "", "service account (svac_...), optional")
 	maxReq := fs.Int("max-requests", proxy.DefaultMaxRequests, "Messages requests the proxy allows")
+	maxTokens := fs.Int("max-tokens", proxy.DefaultMaxTokens, "largest max_tokens the proxy allows per request")
 	maxTurns := fs.Int("max-turns", 80, "claude --max-turns")
 	timeout := fs.Duration("timeout", 15*time.Minute, "reviewer wall clock")
 	subnet := fs.String("subnet", "10.213.7.0/24", "internal network")
@@ -81,6 +82,7 @@ func runReview(args []string) error {
 		Model:         *model,
 		MaxTurns:      *maxTurns,
 		MaxRequests:   *maxReq,
+		MaxTokens:     *maxTokens,
 		Federation:    sandbox.Federation{RuleID: *rule, OrganizationID: *org, WorkspaceID: *ws, ServiceAccountID: *svac},
 		Subnet:        pfx,
 		Timeout:       *timeout,

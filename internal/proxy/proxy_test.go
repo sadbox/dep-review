@@ -311,7 +311,7 @@ func TestBodyChecks(t *testing.T) {
 	}
 	good := map[string]string{
 		"custom tools": msgBody(`,"tools":[{"name":"Read","input_schema":{"type":"object"}},{"name":"X","type":"custom","input_schema":{}},{"name":"D","defer_loading":true,"input_schema":{}}]`),
-		"inline image": `{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
+		"inline image": `{"model":"` + model + `","max_tokens":1,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
 	}
 	for name, body := range good {
 		if st, resp := do(t, "POST", front.URL+"/v1/messages", body, nil); st != 200 {

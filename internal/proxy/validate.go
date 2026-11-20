@@ -350,3 +350,26 @@ func optString(raw json.RawMessage) (string, error) {
 	err := json.Unmarshal(raw, &s)
 	return s, err
 }
+
+// checkMaxTokens requires a max_tokens between 1 and limit: the CLI asks
+// for the model's full output (128000 for claude-opus-5-5 at 2.1.329), so
+// the default limit is that, and anything larger is not the CLI.
+func checkMaxTokens(raw []byte, limit int64) error {
+	var req struct {
+		MaxTokens json.RawMessage `json:"max_tokens"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil || len(req.MaxTokens) == 0 {
+		return errors.New("max_tokens missing")
+	}
+	if c := req.MaxTokens[0]; c < '0' || c > '9' {
+		return errors.New("max_tokens is not a positive integer")
+	}
+	n, err := json.Number(req.MaxTokens).Int64()
+	if err != nil || n < 1 {
+		return errors.New("max_tokens is not a positive integer")
+	}
+	if n > limit {
+		return fmt.Errorf("max_tokens %d is over the proxy's limit of %d", n, limit)
+	}
+	return nil
+}

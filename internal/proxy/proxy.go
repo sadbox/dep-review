@@ -13,6 +13,7 @@
 // sends never leaves; injects its own bearer token; counts requests against
 // a per-run cap; and logs the path, status and token usage, never headers
 // or bodies. Refusals are 403 (413 for an oversized body), reason logged.
+// Requests may not ask for more than MaxTokens output tokens.
 package proxy
 
 import (
@@ -34,6 +35,7 @@ const (
 	DefaultUpstream    = "https://api.anthropic.com"
 	DefaultMaxRequests = 200
 	DefaultMaxBody     = 32 << 20
+	DefaultMaxTokens   = 128000
 	messagesPath       = "/v1/messages"
 )
 
@@ -43,6 +45,7 @@ type Config struct {
 	Model       string
 	MaxRequests int64
 	MaxBody     int64
+	MaxTokens   int64 // per-request max_tokens limit
 	Tokens      *TokenSource
 	Transport   http.RoundTripper // nil: a default transport
 	Logf        func(string, ...any)
@@ -70,6 +73,9 @@ func New(cfg Config) (*Proxy, error) {
 	}
 	if cfg.MaxBody <= 0 {
 		cfg.MaxBody = DefaultMaxBody
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = DefaultMaxTokens
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -118,6 +124,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.refuse(w, http.StatusForbidden, "permission_error", "POST /v1/messages", err.Error())
 		return
 	}
+	if err := checkMaxTokens(body, p.cfg.MaxTokens); err != nil {
+		p.refuse(w, http.StatusForbidden, "permission_error", "POST /v1/messages", err.Error())
+		return
+	}
 	if v := r.Header.Values("Anthropic-Version"); len(v) != 1 || v[0] != apiVersion {
 		p.refuse(w, http.StatusForbidden, "permission_error", "POST /v1/messages", "anthropic-version must be "+apiVersion)
 		return
@@ -145,12 +155,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.rp.ServeHTTP(w, r)
 }
 
-// Request headers. Only these three pass, by value; Anthropic-Beta is
-// rebuilt from the allowlist below. Everything else, including any
-// Authorization, X-Api-Key, Cookie, proxy or workspace header the client
-// sends, is dropped; Accept-Encoding too, so the transport negotiates gzip
+// Request headers. Only these two pass, by value; Content-Type is always
+// application/json and Anthropic-Beta is rebuilt from the allowlist below.
+// Everything else, including any Authorization, X-Api-Key, Cookie, proxy
+// or workspace header the client sends, is dropped; Accept-Encoding too, so the transport negotiates gzip
 // itself and the usage reader sees plain text.
-var passHeaders = []string{"Accept", "Anthropic-Version", "Content-Type"}
+var passHeaders = []string{"Accept", "Anthropic-Version"}
 
 // The anthropic-version and betas the pinned CLI (2.1.329) sends. A beta
 // can switch on API features, so any other is dropped (and logged).
@@ -194,6 +204,8 @@ func (p *Proxy) rewrite(pr *httputil.ProxyRequest) {
 			out[h] = append([]string(nil), v...)
 		}
 	}
+	// The body passed checkBody, so it is JSON whatever the client said.
+	out.Set("Content-Type", "application/json")
 	if keep, _ := filterBetas(in); len(keep) > 0 {
 		out.Set("Anthropic-Beta", strings.Join(keep, ","))
 	}

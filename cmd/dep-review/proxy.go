@@ -38,6 +38,7 @@ func runProxy(args []string) error {
 	ws := fs.String("workspace-id", "", "workspace (wrkspc_...), optional")
 	svac := fs.String("service-account-id", "", "service account (svac_...), optional")
 	maxReq := fs.Int64("max-requests", proxy.DefaultMaxRequests, "Messages requests allowed per run")
+	maxTokens := fs.Int64("max-tokens", proxy.DefaultMaxTokens, "largest max_tokens a request may ask for")
 	override := testUpstream(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -80,7 +81,7 @@ func runProxy(args []string) error {
 	if err != nil {
 		return fmt.Errorf("proxy: first token: %w", err)
 	}
-	p, err := proxy.New(proxy.Config{Upstream: upstream, Model: *model, MaxRequests: *maxReq, Tokens: tokens, Logf: logger.Printf})
+	p, err := proxy.New(proxy.Config{Upstream: upstream, Model: *model, MaxRequests: *maxReq, MaxTokens: *maxTokens, Tokens: tokens, Logf: logger.Printf})
 	if err != nil {
 		return err
 	}

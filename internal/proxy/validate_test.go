@@ -187,3 +187,36 @@ func TestHeaderAllowlist(t *testing.T) {
 		t.Errorf("drop not logged:\n%s", lb)
 	}
 }
+
+func TestMaxTokensAndContentType(t *testing.T) {
+	u := newUpstream(t)
+	p, _, lb, front := newProxy(t, u, 0)
+	if p.cfg.MaxTokens != 128000 {
+		t.Errorf("default max_tokens limit %d, want what the CLI asks for (128000)", p.cfg.MaxTokens)
+	}
+	p.cfg.MaxTokens = 1000
+	for name, body := range map[string]string{
+		"over":     strings.Replace(msgBody(""), `"max_tokens":1`, `"max_tokens":1001`, 1),
+		"missing":  strings.Replace(msgBody(""), `"max_tokens":1,`, ``, 1),
+		"zero":     strings.Replace(msgBody(""), `"max_tokens":1`, `"max_tokens":0`, 1),
+		"fraction": strings.Replace(msgBody(""), `"max_tokens":1`, `"max_tokens":1.5`, 1),
+		"string":   strings.Replace(msgBody(""), `"max_tokens":1`, `"max_tokens":"1"`, 1),
+		"huge":     strings.Replace(msgBody(""), `"max_tokens":1`, `"max_tokens":1e400`, 1),
+	} {
+		if st, _ := do(t, "POST", front.URL+"/v1/messages", body, nil); st != http.StatusForbidden {
+			t.Errorf("%s: %d", name, st)
+		}
+	}
+	if !strings.Contains(lb.String(), "max_tokens 1001 is over the proxy's limit of 1000") {
+		t.Errorf("not logged:\n%s", lb)
+	}
+	at := strings.Replace(msgBody(""), `"max_tokens":1`, `"max_tokens":1000`, 1)
+	if st, _ := do(t, "POST", front.URL+"/v1/messages", at, map[string]string{"Content-Type": "text/plain; charset=evil"}); st != 200 {
+		t.Fatalf("at the limit: %d", st)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if ct := u.msgs[0].Header.Values("Content-Type"); len(ct) != 1 || ct[0] != "application/json" {
+		t.Errorf("forwarded Content-Type %q", ct)
+	}
+}

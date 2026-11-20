@@ -64,6 +64,7 @@ type Config struct {
 	Model       string
 	MaxTurns    int
 	MaxRequests int
+	MaxTokens   int
 	Federation  Federation
 	// Identity mints GitHub OIDC JWTs for the Claude audience, on the host
 	// (proxy.GitHubOIDC); the proxy gets them through a unix socket.
@@ -196,6 +197,9 @@ func (c *Config) ProxyArgs() []string {
 	}
 	if c.MaxRequests > 0 {
 		a = append(a, "--max-requests", strconv.Itoa(c.MaxRequests))
+	}
+	if c.MaxTokens > 0 {
+		a = append(a, "--max-tokens", strconv.Itoa(c.MaxTokens))
 	}
 	return append(a, c.ProxyExtraArgs...)
 }
