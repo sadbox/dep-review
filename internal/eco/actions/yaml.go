@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // A deliberately small YAML reader for action.yml: block mappings, block
@@ -125,7 +126,10 @@ func (p *yParser) mapping(n int) (*yMap, error) {
 		if mm == nil {
 			return nil, fmt.Errorf("line %d: expected a mapping key", p.i+1)
 		}
-		key := unquoteKey(strings.TrimSpace(mm[1]))
+		key, err := keyName(mm)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %v", p.i+1, err)
+		}
 		if key == "" || strings.HasPrefix(key, "<<") || strings.ContainsAny(key[:1], "&*!") {
 			return nil, fmt.Errorf("line %d: unsupported key %q", p.i+1, key)
 		}
@@ -238,7 +242,17 @@ func (p *yParser) value(rest string, parent int) (any, error) {
 			if p.i >= len(p.lines) {
 				return nil, fmt.Errorf("unterminated quoted scalar")
 			}
-			rest += " " + strings.TrimSpace(p.lines[p.i])
+			// Folding a line break into one space is right only for a
+			// plain break: an escaped break ("\" at the end of the line)
+			// joins without a space and a blank line is a newline, so the
+			// gate would read a different main/pre/post/uses than GitHub.
+			// Refuse those; trailing blanks before the break are dropped.
+			rest = strings.TrimRight(rest, " \t")
+			next := strings.TrimSpace(p.lines[p.i])
+			if next == "" || (rest[0] == '"' && strings.HasSuffix(rest, `\`)) {
+				return nil, fmt.Errorf("line %d: unsupported line folding in a quoted scalar", p.i+1)
+			}
+			rest += " " + next
 			p.i++
 		}
 	case rest[0] == '[' || rest[0] == '{':
@@ -252,21 +266,22 @@ func (p *yParser) value(rest string, parent int) (any, error) {
 		return yFlow(stripComment(rest)), nil
 	}
 	v := stripComment(rest)
+	// A comment ends a plain scalar: a continuation after one is not YAML.
+	commented := v != strings.TrimSpace(rest)
 	// Plain multi-line scalar: more-indented continuation lines.
 	for p.i < len(p.lines) {
 		l := p.lines[p.i]
 		if blankOrComment(l) {
 			if strings.TrimSpace(l) == "" {
-				// A blank line inside a plain scalar is a newline; only
-				// keep going if a continuation follows.
+				// A blank line inside a plain scalar is a newline (one per
+				// blank line, and no folding space). Rather than model that,
+				// refuse it if a continuation follows.
 				j := p.i
 				for j < len(p.lines) && strings.TrimSpace(p.lines[j]) == "" {
 					j++
 				}
 				if j < len(p.lines) && lineIndent(p.lines[j]) > parent && !blankOrComment(p.lines[j]) && !yamlKeyRx.MatchString(p.lines[j][lineIndent(p.lines[j]):]) {
-					v += "\n"
-					p.i = j
-					continue
+					return nil, fmt.Errorf("line %d: blank line inside a plain scalar", p.i+1)
 				}
 			}
 			break
@@ -278,7 +293,12 @@ func (p *yParser) value(rest string, parent int) (any, error) {
 		if yamlKeyRx.MatchString(t) || isDash(t) {
 			return nil, fmt.Errorf("line %d: unexpected structure inside a plain scalar", p.i+1)
 		}
-		v += " " + stripComment(t)
+		if commented {
+			return nil, fmt.Errorf("line %d: plain scalar continues after a comment", p.i+1)
+		}
+		c := stripComment(t)
+		commented = c != t
+		v += " " + c
 		p.i++
 	}
 	return v, nil
@@ -366,7 +386,9 @@ func unquote(s string) (val, tail string, ok bool, err error) {
 					return "", "", false, fmt.Errorf("bad escape")
 				}
 				r, perr := strconv.ParseUint(s[i+1:i+1+w], 16, 32)
-				if perr != nil {
+				// A surrogate or out-of-range code point is not a character;
+				// refuse it rather than decode it to U+FFFD.
+				if perr != nil || !utf8.ValidRune(rune(r)) || r > utf8.MaxRune {
 					return "", "", false, fmt.Errorf("bad escape")
 				}
 				sb.WriteRune(rune(r))
@@ -415,18 +437,21 @@ func stripComment(v string) string {
 }
 
 // splitKeyValue splits "key: value # c" into key and the value text with a
-// plain-scalar comment removed.
-func splitKeyValue(content string) (key, val string) {
+// plain-scalar comment removed. The key follows keyName's rule.
+func splitKeyValue(content string) (key, val string, err error) {
 	content = strings.TrimLeft(content, " ")
 	m := yamlKeyRx.FindStringSubmatch(content)
 	if m == nil {
-		return "", strings.TrimSpace(content)
+		return "", strings.TrimSpace(content), nil
+	}
+	if key, err = keyName(m); err != nil {
+		return "", "", err
 	}
 	rest := strings.TrimSpace(content[len(m[0]):])
 	if rest != "" && (rest[0] == '"' || rest[0] == '\'') {
-		return unquoteKey(strings.TrimSpace(m[1])), rest
+		return key, rest, nil
 	}
-	return unquoteKey(strings.TrimSpace(m[1])), stripComment(rest)
+	return key, stripComment(rest), nil
 }
 
 // flatten renders a parsed value as sorted "path = value" lines, for

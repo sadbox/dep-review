@@ -183,3 +183,109 @@ func TestSplitAction(t *testing.T) {
 		}
 	}
 }
+
+// bs is one backslash, so escape sequences in the cases below are built
+// rather than written out.
+const bs = `\`
+
+// A quoted key GitHub would decode differently from the gate's literal
+// reading must fail closed, in both parsers.
+var differentialKeys = map[string]string{
+	`double-quoted \u escape`: `"p` + bs + `u006fst"`,
+	`double-quoted \x escape`: `"p\x6fst"`,
+	`single-quoted ''`:        `'r''uns'`,
+	`space before colon`:      `"post" `,
+	`junk after quote`:        `"post"x`,
+}
+
+func TestKeyNameRefusesDecodedKeys(t *testing.T) {
+	for name, k := range differentialKeys {
+		line := k + ": b.js"
+		if _, err := lineTokens("  " + line); err == nil && yamlKeyRx.MatchString(line) {
+			t.Errorf("%s: lineTokens accepted %q", name, line)
+		}
+		if _, _, err := splitKeyValue(line); err == nil && yamlKeyRx.MatchString(line) {
+			t.Errorf("%s: splitKeyValue accepted %q", name, line)
+		}
+		if m, err := parseActionMeta("runs:\n  using: node24\n  main: a.js\n  " + line + "\n"); err == nil {
+			t.Errorf("%s: action.yml parsed, post=%q keys=%q", name, m.post, m.raw.(*yMap).sub("runs").keys)
+		}
+	}
+	for _, k := range []string{`"post"`, `'post'`, `post`} {
+		m, err := parseActionMeta("runs:\n  using: node24\n  main: a.js\n  " + k + ": b.js\n")
+		if err != nil || m.post != "b.js" {
+			t.Errorf("%s: post=%q err=%v", k, m.post, err)
+		}
+		ts, err := lineTokens("  " + k + ": b.js")
+		if err != nil || len(ts) != 1 || ts[0].name != "post" {
+			t.Errorf("%s: tokens %+v err %v", k, ts, err)
+		}
+		if key, v, err := splitKeyValue(k + ": b.js # c"); err != nil || key != "post" || v != "b.js" {
+			t.Errorf("%s: splitKeyValue = %q %q %v", k, key, v, err)
+		}
+	}
+}
+
+// On the workflow side a refused key on the path to a uses: line makes
+// the path unknown, so the rewrite is refused instead of trusted.
+func TestUsesChangesRefusesDecodedAncestorKey(t *testing.T) {
+	const a, b = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
+	bump := func(s string) string {
+		return strings.Replace(s, "acme/act@"+a+" # v1.0.0\n      - name: test", "acme/act@"+b+" # v1.0.1\n      - name: test", 1)
+	}
+	for name, k := range map[string]string{
+		`double-quoted \u escape`: `"j` + bs + `u006fbs"`,
+		`double-quoted \x escape`: `"j\x6fbs"`,
+		`single-quoted ''`:        `'jo''bs'`,
+		`space before colon`:      `"jobs" `,
+	} {
+		base := strings.Replace(wfBase, "\njobs:\n", "\n"+k+":\n", 1)
+		ch, errs := usesChanges(".github/workflows/ci.yml", kindWorkflow, base, bump(base))
+		if len(ch) != 0 || len(errs) != 1 {
+			t.Errorf("%s: changes=%d errs=%+v, want the rewrite refused", name, len(ch), errs)
+		}
+	}
+	quoted := strings.Replace(wfBase, "\njobs:\n", "\n\"jobs\":\n", 1)
+	if ch, errs := usesChanges(".github/workflows/ci.yml", kindWorkflow, quoted, bump(quoted)); len(ch) != 1 || len(errs) != 0 {
+		t.Errorf(`literal "jobs": changes=%d errs=%+v`, len(ch), errs)
+	}
+}
+
+// Values that drive a decision must read as GitHub reads them, or fail.
+func TestValueDifferentials(t *testing.T) {
+	const sha = "2222222222222222222222222222222222222222"
+	for _, l := range []string{
+		`      - uses: "acme/act/p` + bs + `u0061th@` + sha + `"`,
+		`      - uses: "acme/act@\x32` + sha[1:] + `"`,
+	} {
+		if _, ok := parseUsesLine(l); ok {
+			t.Errorf("parseUsesLine accepted %q", l)
+		}
+	}
+	if u, ok := parseUsesLine(`      - uses: "acme/act/path@` + sha + `" # v1`); !ok || u.action != "acme/act/path" {
+		t.Errorf("quoted uses: %+v %v", u, ok)
+	}
+	for name, runs := range map[string]string{
+		"escaped line break":      "  main: \"dist/ind\\\n    ex.js\"\n",
+		"blank line in quoted":    "  main: 'dist/a\n\n    b.js'\n",
+		"blank line in plain":     "  main: dist/a\n\n    b.js\n",
+		"plain after comment":     "  main: dist/a # x\n    b.js\n",
+		"surrogate escape":        "  main: \"dist/\\ud800.js\"\n",
+		"out-of-range \\U escape": "  main: \"dist/\\U00110000.js\"\n",
+	} {
+		if m, err := parseActionMeta("runs:\n  using: node24\n" + runs); err == nil {
+			t.Errorf("%s: parsed, main=%q", name, m.main)
+		}
+	}
+	for runs, want := range map[string]string{
+		"  main: \"dist/index.js\"\n":       "dist/index.js",
+		"  main: \"dist/\\x69ndex.js\"\n":   "dist/index.js",
+		"  main: 'dist/it''s.js'\n":         "dist/it's.js",
+		"  main: \"dist/a   \n    b.js\"\n": "dist/a b.js",
+		"  main: dist/a\n    b.js\n":        "dist/a b.js",
+	} {
+		if m, err := parseActionMeta("runs:\n  using: node24\n" + runs); err != nil || m.main != want {
+			t.Errorf("%q: main=%q err=%v, want %q", runs, m.main, err, want)
+		}
+	}
+}

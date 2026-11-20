@@ -1,6 +1,7 @@
 package actions
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -37,9 +38,13 @@ type usesRef struct {
 
 var usesLineRx = regexp.MustCompile(`^(\s*(?:-\s+)?uses:\s*)(['"]?)([^@\s'"#]+)@([^\s'"#]+)(['"]?)\s*(?:#\s*(.*?))?\s*$`)
 
+// parseUsesLine reads the value as raw text, so it refuses a backslash
+// anywhere in it: inside double quotes GitHub decodes it as an escape
+// ("acme/act/path@..." is acme/act/path) and no real action name,
+// path or ref contains one.
 func parseUsesLine(line string) (usesRef, bool) {
 	m := usesLineRx.FindStringSubmatch(line)
-	if m == nil || m[2] != m[5] {
+	if m == nil || m[2] != m[5] || strings.ContainsRune(m[3]+m[4], '\\') {
 		return usesRef{}, false
 	}
 	return usesRef{prefix: m[1] + m[2], action: m[3], ref: m[4], comment: m[6]}, true
@@ -101,7 +106,7 @@ type token struct {
 	name string
 }
 
-func lineTokens(s string) []token {
+func lineTokens(s string) ([]token, error) {
 	var ts []token
 	col := lineIndent(s)
 	rest := s[col:]
@@ -119,35 +124,55 @@ func lineTokens(s string) []token {
 		break
 	}
 	if m := yamlKeyRx.FindStringSubmatch(rest); m != nil {
-		ts = append(ts, token{col, unquoteKey(strings.TrimSpace(m[1]))})
+		k, err := keyName(m)
+		if err != nil {
+			return nil, err
+		}
+		ts = append(ts, token{col, k})
 	}
-	return ts
+	return ts, nil
 }
 
-func unquoteKey(k string) string {
-	if len(k) >= 2 && (k[0] == '"' || k[0] == '\'') && k[len(k)-1] == k[0] {
-		return k[1 : len(k)-1]
+// keyName returns the key of a yamlKeyRx match (m from FindStringSubmatch).
+// A quoted key is accepted only when its text is literal: no backslash
+// (double-quoted escapes such as s or \x73), no doubled ” (single-
+// quoted escape), and ':' straight after the closing quote. Anything else
+// is an error rather than a guess, because GitHub decodes such a key
+// (`"post":` is post) and a key the gate reads differently could hide
+// a runs.post hook or a runs.using change.
+func keyName(m []string) (string, error) {
+	k := strings.TrimSpace(m[1])
+	if k == "" || (k[0] != '"' && k[0] != '\'') {
+		return k, nil
 	}
-	return k
+	inner := k[1 : len(k)-1]
+	if strings.ContainsRune(inner, '\\') || strings.Contains(inner, "''") {
+		return "", errors.New("quoted mapping key with an escape sequence")
+	}
+	if !strings.HasPrefix(m[0][len(m[1]):], ":") {
+		return "", errors.New("text between a quoted mapping key and its ':'")
+	}
+	return inner, nil
 }
 
 // keyOnly reports whether a line is exactly "key:" (optionally with a
 // comment), i.e. a key whose value is the following block.
-func keyOnly(s string) bool {
-	ts := lineTokens(s)
-	if len(ts) != 1 || ts[0].name == "-" {
-		return false
+func keyOnly(s string) (bool, error) {
+	ts, err := lineTokens(s)
+	if err != nil || len(ts) != 1 || ts[0].name == "-" {
+		return false, err
 	}
-	_, v := splitKeyValue(strings.TrimSpace(s))
-	return v == ""
+	_, v, err := splitKeyValue(strings.TrimSpace(s))
+	return v == "", err
 }
 
 // yamlPath returns the chain of mapping keys and sequence dashes leading
 // to line i, from the document root, by indentation alone. It returns nil
-// when line i is inside a block scalar or otherwise not a structural line.
+// when line i is inside a block scalar or otherwise not a structural line,
+// or when a line on the way up has a key keyName refuses.
 func yamlPath(lines []string, i int) []string {
-	own := lineTokens(lines[i])
-	if len(own) == 0 {
+	own, err := lineTokens(lines[i])
+	if err != nil || len(own) == 0 {
 		return nil
 	}
 	var rev []string
@@ -162,18 +187,25 @@ func yamlPath(lines []string, i int) []string {
 			continue
 		}
 		ind := lineIndent(l)
-		parent := ind < c || (dash && ind == c && keyOnly(l))
+		parent := ind < c
+		if !parent && dash && ind == c {
+			ko, err := keyOnly(l)
+			if err != nil {
+				return nil
+			}
+			parent = ko
+		}
 		if !parent {
 			continue
 		}
-		ts := lineTokens(l)
-		if len(ts) == 0 {
-			return nil // a scalar continuation or block scalar owns line i
+		ts, err := lineTokens(l)
+		if err != nil || len(ts) == 0 {
+			return nil // a refused key, or a scalar continuation or block scalar owns line i
 		}
 		// A parent key with an inline value (a block scalar header, or a
 		// plain scalar being continued) owns line i as text.
 		if last := ts[len(ts)-1]; last.name != "-" && last.col < c {
-			if _, v := splitKeyValue(l[last.col:]); v != "" {
+			if _, v, err := splitKeyValue(l[last.col:]); err != nil || v != "" {
 				return nil
 			}
 		}
