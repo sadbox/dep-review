@@ -1,0 +1,9 @@
+{
+  "name": "dep-review-reviewer",
+  "private": true,
+  "description": "The Claude Code CLI for the reviewer sandbox. Only the native platform packages: the wrapper package needs its postinstall to copy the binary into place, and the image installs with --ignore-scripts.",
+  "optionalDependencies": {
+    "@anthropic-ai/claude-code-linux-arm64": "2.1.329",
+    "@anthropic-ai/claude-code-linux-x64": "2.1.329"
+  }
+}

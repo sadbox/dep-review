@@ -1,25 +1,12 @@
-// Package reviewprep renders the reviewer's prompt and the Claude Code
-// settings for the review job, and writes them as step outputs for
-// anthropics/claude-code-action.
-//
-// How the action takes them (verified against its source at
-// c84e279f859e2591391e95bd309286eb111c345f):
-//   - prompt: the `prompt` input, any text; the action writes it to a file.
-//   - settings: the `settings` input, a JSON string (or a file path); the
-//     action merges it into ~/.claude/settings.json, i.e. user settings.
-//   - --json-schema: inside `claude_args`, which the action splits with
-//     shell-quote and passes to the CLI; the CLI takes the schema inline
-//     (not a path). So the schema must be one single-quoted token: we emit
-//     it compacted on one line and refuse a schema containing a single
-//     quote.
-//   - structured_output: JSON.stringify of the validated object; the step
-//     fails when the model returns none.
+// Package reviewprep renders the reviewer's prompt, the Claude Code user
+// settings and the compact verdict schema for the review sandbox
+// (internal/sandbox): files that the sandbox hands to the CLI as its
+// stdin, a read-only ~/.claude/settings.json and the --json-schema
+// argument.
 package reviewprep
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +14,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -38,13 +24,15 @@ const (
 	noNotes          = "(This repository has no review notes.)"
 )
 
-// Settings is the Claude Code settings for the review session. Paths are
-// relative to the job's working directory, which holds ./evidence and
+// Settings is the Claude Code settings for the review session, loaded as
+// user settings (--setting-sources user). Paths are relative to the
+// sandbox's working directory, /work, which holds exactly ./evidence and
 // ./repo. Grep and Glob take no path rules of their own (Claude Code
 // ignores Grep(path)/Glob(path)); Read rules govern what they search, and
 // blockReadsOutsideWorkingDirectories keeps every file tool inside the
-// working directory in every mode.
-func Settings(runnerTemp string) map[string]any {
+// working directory in every mode. The sandbox already confines what the
+// CLI could reach; these rules are the second layer.
+func Settings() map[string]any {
 	deny := []string{
 		"Read(./repo/.git/**)",
 		"Read(./repo/.git)",
@@ -56,9 +44,7 @@ func Settings(runnerTemp string) map[string]any {
 		"Read(//dev/**)",
 		"Read(//run/**)",
 		"Read(//var/**)",
-		// The workspace is under $HOME (/home/runner/work/...), so //home/**
-		// would deny the evidence too; deny the home directory's dotfiles
-		// (credentials, Claude's own config) instead.
+		"Read(//home/**)",
 		"Read(~/.*)",
 		"Read(~/.*/**)",
 		"Edit",
@@ -68,10 +54,6 @@ func Settings(runnerTemp string) map[string]any {
 		"WebFetch",
 		"WebSearch",
 		"mcp__*",
-	}
-	if p, ok := safeAbs(runnerTemp); ok {
-		// The runner's temp dir holds the OIDC identity token file.
-		deny = append(deny, "Read(/"+p+"/**)")
 	}
 	return map[string]any{
 		"permissions": map[string]any{
@@ -92,16 +74,6 @@ func Settings(runnerTemp string) map[string]any {
 			"CLAUDE_CODE_DISABLE_WEB_FETCH":            "1",
 		},
 	}
-}
-
-var absRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
-
-func safeAbs(p string) (string, bool) {
-	p = filepath.Clean(p)
-	if !absRe.MatchString(p) || strings.Contains(p, "..") || p == "/" {
-		return "", false
-	}
-	return p, true
 }
 
 // RenderPrompt substitutes the notes into the prompt template.
@@ -165,8 +137,9 @@ func ReadNotes(path string) (string, error) {
 	return s, nil
 }
 
-// CompactSchema validates the verdict schema and returns it on one line,
-// fit for a single-quoted --json-schema argument.
+// CompactSchema validates the verdict schema and returns it on one line
+// for --json-schema. (The sandbox passes it as one argv element; the
+// single-quote rule dates from shell-quoted arguments and costs nothing.)
 func CompactSchema(raw []byte) (string, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -186,27 +159,9 @@ func CompactSchema(raw []byte) (string, error) {
 	return s, nil
 }
 
-// WriteOutputs appends name=value pairs to a GITHUB_OUTPUT file, using a
-// random heredoc delimiter for every value.
-func WriteOutputs(w io.Writer, kv [][2]string) error {
-	var b strings.Builder
-	for _, p := range kv {
-		var rnd [16]byte
-		if _, err := rand.Read(rnd[:]); err != nil {
-			return err
-		}
-		delim := "DEP_REVIEW_" + hex.EncodeToString(rnd[:])
-		if strings.Contains(p[1], delim) {
-			return errors.New("value contains the delimiter")
-		}
-		fmt.Fprintf(&b, "%s<<%s\n%s\n%s\n", p[0], delim, p[1], delim)
-	}
-	_, err := io.WriteString(w, b.String())
-	return err
-}
-
-// Run does the whole review-prep step.
-func Run(promptPath, schemaPath, notesPath, outPath, runnerTemp string) error {
+// Run does the whole review-prep step: outDir gets prompt.md,
+// settings.json and schema.json.
+func Run(promptPath, schemaPath, notesPath, outDir string) error {
 	tmpl, err := os.ReadFile(promptPath)
 	if err != nil {
 		return err
@@ -227,21 +182,18 @@ func Run(promptPath, schemaPath, notesPath, outPath, runnerTemp string) error {
 	if err != nil {
 		return err
 	}
-	settings, err := json.Marshal(Settings(runnerTemp))
+	settings, err := json.Marshal(Settings())
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(outPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
-	if err := WriteOutputs(f, [][2]string{
-		{"prompt", prompt},
-		{"settings", string(settings)},
-		{"json_schema", schema},
-	}); err != nil {
-		f.Close()
-		return err
+	for name, data := range map[string]string{"prompt.md": prompt, "settings.json": string(settings), "schema.json": schema} {
+		// Readable by the sandbox's user, which is not the runner's.
+		if err := os.WriteFile(filepath.Join(outDir, name), []byte(data), 0o644); err != nil {
+			return err
+		}
 	}
-	return f.Close()
+	return nil
 }

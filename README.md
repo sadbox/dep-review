@@ -32,7 +32,8 @@ PR opened/synchronized
             classify Dependabot's alone? head still current?        (read-only)
             fetch    real change set, downloads, diffs, findings,   (read-only)
                      route: auto | review | human | refuse
-            review   model reads ./evidence and ./repo → verdict    (read-only + OIDC)
+            review   model reads ./evidence and ./repo → verdict    (gVisor sandbox;
+                     only the credential proxy holds OIDC)
             publish  decide, comment, status, merge on green CI     (gate app)
   schedule → sweep   merge approved PRs whose CI finished later;    (gate app)
                      report PRs stuck without a decision (including
@@ -59,7 +60,7 @@ a newer head can never be merged on an old verdict.
 | Path | What |
 |---|---|
 | `.github/workflows/gate.yml` | the reusable workflow |
-| `cmd/dep-review` | entry point: `classify`, `fetch`, `review-prep`, `publish`, `sweep` |
+| `cmd/dep-review` | entry point: `classify`, `fetch`, `review-prep`, `review`, `proxy`, `publish`, `sweep` |
 | `internal/model` | the JSON contract between jobs (read this first) |
 | `internal/policy` | version policy and route combination |
 | `internal/gh` | minimal GitHub REST client (no GraphQL) |
@@ -67,6 +68,8 @@ a newer head can never be merged on an old verdict.
 | `internal/fetch`, `internal/eco/*` | per-ecosystem change sets, downloads, diffs, findings |
 | `internal/evidence` | evidence directory writer, size caps, untrusted/ split |
 | `internal/publish` | decision, comment rendering, status, merge, notifications, sweep |
+| `internal/sandbox`, `internal/proxy` | the reviewer sandbox (docker, gVisor, networks) and its credential proxy |
+| `sandbox/` | reviewer image (Dockerfile, pinned CLI lockfile), gVisor installer, CI isolation probes |
 | `prompts/review.md`, `schema/verdict.json` | the reviewer's instructions and output schema |
 | `examples/` | what a repository adds to use the gate |
 
@@ -96,12 +99,52 @@ one is reviewed by this gate too.
 
 ## Model credential
 
-Claude API workload identity federation: the review job exchanges its
-GitHub OIDC token for a short-lived Claude token. The federation rule pins
-the repositories, `event_name == "workflow_run"`, the default branch and
-`job_workflow_ref` starting with this repository's `gate.yml`, with scope
-`workspace:inference` in a workspace that has a spend limit. No API key is
-stored anywhere.
+Claude API workload identity federation, done by the credential proxy
+(`dep-review proxy`), never by the reviewer. The proxy requests the job's
+GitHub OIDC token itself (audience `https://api.anthropic.com`), exchanges
+it at `POST /v1/oauth/token` (RFC 7523 jwt-bearer) for a short-lived
+Claude token, sends that as `Authorization: Bearer`, and exchanges again,
+with a fresh OIDC token each time, two minutes before expiry (federated
+tokens live about ten minutes; a review can take twenty). The federation
+rule pins the repositories, `event_name == "workflow_run"`, the default
+branch and `job_workflow_ref` starting with this repository's `gate.yml`,
+with scope `workspace:inference` in a workspace that has a spend limit. No
+API key is stored anywhere. Inputs: `anthropic_federation_rule_id`,
+`anthropic_organization_id`, optional `anthropic_workspace_id` and
+`anthropic_service_account_id`; `max_model_requests` (default 200) caps
+Messages requests per review.
+
+## Sandbox
+
+The reviewer is the Claude Code CLI (pinned in `sandbox/package-lock.json`)
+in a container run under gVisor (`runsc`, pinned and sha512-checked by
+`sandbox/install-gvisor.sh`), so even code execution inside it gets:
+
+- **No credentials.** Its environment is a fixed list (`internal/sandbox`):
+  the proxy URL, a placeholder API key, telemetry and updates off. No
+  `GITHUB_*`, `ACTIONS_*` or `RUNNER_*` variable, no token, no OIDC.
+- **No network but the Messages API.** It is attached only to a
+  `docker network create --internal` network with no host gateway; its only
+  peer is the proxy, at a fixed IP (no DNS). The proxy (its own runc
+  container, also on a normal bridge) forwards only `POST /v1/messages`,
+  only for the gate's model, refuses server tools, the MCP connector and
+  URL/file content sources (each would make Anthropic fetch something for
+  the caller), drops the client's headers but a short allowlist, injects the
+  token, caps the request count and logs path, status and token usage only.
+- **No writable persistent state.** Read-only root, `--cap-drop=ALL`,
+  `no-new-privileges`, non-root, pids and memory limits; `./evidence`,
+  `./repo` and the settings file are read-only mounts; `` and `/tmp` are
+  tmpfs.
+- **Only data we already publish**: the evidence and the default branch.
+
+Its answer comes back only on stdout: one `claude -p --output-format json`
+result, at most 64 KB, whose `structured_output` must pass the verdict
+schema before `verdict.json` is written. Anything else is no verdict, which
+sends the PR to a human. The Read/Grep/Glob-only tool set and the
+permission settings from `review-prep` still apply inside, as a second
+layer. CI (`ci.yml`, job `sandbox`, amd64 and arm64) runs the same setup
+against a fake upstream: isolation probes, then a scripted end-to-end
+review.
 
 The baseline every project follows (images, CI, Dependabot, repository
 settings) lives in [sadbox/ci](https://github.com/sadbox/ci/blob/main/STANDARDS.md).

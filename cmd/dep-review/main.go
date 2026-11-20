@@ -1,5 +1,6 @@
 // Command dep-review is the gate's deterministic half: classify, fetch,
-// review-prep, publish and sweep. See README.md.
+// review-prep, review (the sandboxed reviewer), proxy (its credential
+// proxy), publish and sweep. See README.md.
 package main
 
 import (
@@ -11,13 +12,16 @@ import (
 	"unicode/utf8"
 )
 
+// extraCommands holds the sandboxtest build's test-only commands.
+var extraCommands = map[string]func([]string) error{}
+
 func main() {
 	// Errors and log lines can carry text from a dependency, a registry or
 	// git's stderr. Everything that reaches the job log goes through
 	// logLine: one line, no control characters, no workflow commands.
 	log.SetOutput(lineWriter{os.Stderr})
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review-prep|publish|sweep [flags]")
+		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review-prep|review|proxy|publish|sweep [flags]")
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -29,12 +33,20 @@ func main() {
 		err = runFetch(args)
 	case "review-prep":
 		err = runReviewPrep(args)
+	case "review":
+		err = runReview(args)
+	case "proxy":
+		err = runProxy(args)
 	case "publish":
 		err = runPublish(args)
 	case "sweep":
 		err = runSweep(args)
 	default:
-		err = fmt.Errorf("unknown command %q", cmd)
+		if f, ok := extraCommands[cmd]; ok {
+			err = f(args)
+		} else {
+			err = fmt.Errorf("unknown command %q", cmd)
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, logLine("dep-review: "+err.Error()))

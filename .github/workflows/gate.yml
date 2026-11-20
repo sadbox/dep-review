@@ -5,10 +5,12 @@
 #   - classify, fetch: no secrets, read-only token. fetch downloads both
 #     versions of each dependency and diffs them; it never executes
 #     anything from the PR or from a dependency.
-#   - review: the ONLY job with a model. Read-only token, no secrets; its
-#     model credential is a short-lived federated token (OIDC). Tools are
-#     Read/Grep/Glob on ./evidence and ./repo only. Its output is a
-#     schema-checked verdict, nothing else.
+#   - review: the ONLY job with a model. Read-only token, no secrets. The
+#     model runs in a gVisor sandbox with no credentials and no network
+#     except a proxy that holds the short-lived federated token (OIDC) and
+#     forwards only POST /v1/messages. Tools are Read/Grep/Glob on
+#     ./evidence and ./repo only. Its output is a schema-checked verdict,
+#     nothing else.
 #   - publish, sweep: no model and no untrusted text in any shell. They hold
 #     the gate app's token (environment `dep-review`, default branch only)
 #     and merge only a head SHA that classify verified and the verdict
@@ -38,6 +40,14 @@ on:
       anthropic_workspace_id:
         type: string
         default: ""
+      anthropic_service_account_id:
+        description: Service account (svac_...) the federated token acts as; optional.
+        type: string
+        default: ""
+      max_model_requests:
+        description: Messages API requests the credential proxy allows per review.
+        type: number
+        default: 200
 
 permissions: {}
 
@@ -72,7 +82,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           go build -C gate -trimpath -o "$RUNNER_TEMP/bin/dep-review" ./cmd/dep-review
           # go.mod: the fetch job sets up the gate's Go version from it.
+          # sandbox/: the review job's Dockerfile, CLI lockfile and gVisor
+          # installer.
           cp gate/prompts/review.md gate/schema/verdict.json gate/go.mod "$RUNNER_TEMP/bin/"
+          mkdir "$RUNNER_TEMP/bin/sandbox"
+          cp gate/sandbox/Dockerfile gate/sandbox/package.json gate/sandbox/package-lock.json gate/sandbox/install-gvisor.sh "$RUNNER_TEMP/bin/sandbox/"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gate-bin
@@ -166,10 +180,12 @@ jobs:
     needs: [build, classify, fetch]
     if: needs.fetch.outputs.route == 'review'
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write # federated model credential only
+      # The credential proxy's federated token. Only the proxy container
+      # is given the OIDC request variables; the reviewer gets none.
+      id-token: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -184,8 +200,16 @@ jobs:
         with:
           path: repo
           persist-credentials: false
+      - name: Install gVisor
+        run: bash "$RUNNER_TEMP/bin/sandbox/install-gvisor.sh"
+      # Built here, only when a review runs, from the gate's own pinned
+      # Dockerfile: base images by digest, the CLI by package-lock
+      # integrity, installed with --ignore-scripts. No build cache.
+      - name: Build the sandbox images
+        run: |
+          docker build --no-cache -t dep-review-reviewer:local "$RUNNER_TEMP/bin/sandbox"
+          docker build --no-cache --target proxy -t dep-review-proxy:local "$RUNNER_TEMP/bin/sandbox"
       - name: Prepare prompt and settings
-        id: prep
         env:
           NOTES_PATH: ${{ inputs.notes_path }}
         run: |
@@ -194,48 +218,36 @@ jobs:
             --prompt "$RUNNER_TEMP/bin/review.md" \
             --schema "$RUNNER_TEMP/bin/verdict.json" \
             --notes "repo/$NOTES_PATH" \
-            --github-output "$GITHUB_OUTPUT"
-      - name: Review
-        id: claude
-        uses: anthropics/claude-code-action@c84e279f859e2591391e95bd309286eb111c345f # v1.0.284
-        with:
-          # Our own read-only token: without it the action would fetch a
-          # token for the Claude GitHub App, which can write.
-          github_token: ${{ github.token }}
-          anthropic_federation_rule_id: ${{ inputs.anthropic_federation_rule_id }}
-          anthropic_organization_id: ${{ inputs.anthropic_organization_id }}
-          anthropic_workspace_id: ${{ inputs.anthropic_workspace_id }}
-          allowed_bots: dependabot[bot]
-          display_report: "false"
-          # The action writes `prompt` to a file itself, and merges
-          # `settings` (a JSON string) into ~/.claude/settings.json: the
-          # permission rules, deny list and telemetry-off env that
-          # review-prep generated.
-          prompt: ${{ steps.prep.outputs.prompt }}
-          settings: ${{ steps.prep.outputs.settings }}
-          # claude_args is split with shell-quote, not a shell, and handed
-          # to the CLI. --json-schema takes the schema inline, so it is
-          # one single-quoted token; review-prep emits it on one line and
-          # refuses a schema containing a single quote. --setting-sources
-          # user loads only the settings above (no project/local settings
-          # from the workspace); --strict-mcp-config ignores any .mcp.json.
-          claude_args: >-
-            --model ${{ inputs.model }}
-            --tools Read,Grep,Glob
-            --permission-mode dontAsk
-            --setting-sources user
-            --strict-mcp-config
-            --max-turns 80
-            --json-schema '${{ steps.prep.outputs.json_schema }}'
-      # structured_output is JSON.stringify of the schema-validated object;
-      # the action fails the step when the model returns none, so this
-      # step is skipped and publish sees no verdict (=> human).
-      - name: Save verdict
+            --out-dir "$RUNNER_TEMP/review"
+      # The reviewer runs under gVisor on an internal network whose only
+      # other member is the credential proxy (see README.md, "Sandbox").
+      # Its verdict comes back on stdout and is validated before
+      # verdict.json is written; with no valid verdict this step fails,
+      # the upload is skipped and publish sends the PR to a human.
+      - name: Review (sandboxed)
         env:
-          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          MODEL: ${{ inputs.model }}
+          RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
+          ORG_ID: ${{ inputs.anthropic_organization_id }}
+          WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
+          SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
+          MAX_REQUESTS: ${{ inputs.max_model_requests }}
         run: |
-          mkdir -p "$RUNNER_TEMP/verdict"
-          printf '%s' "$VERDICT" >"$RUNNER_TEMP/verdict/verdict.json"
+          "$RUNNER_TEMP/bin/dep-review" review \
+            --prep-dir "$RUNNER_TEMP/review" \
+            --evidence evidence \
+            --repo repo \
+            --out "$RUNNER_TEMP/verdict/verdict.json" \
+            --reviewer-image dep-review-reviewer:local \
+            --proxy-image dep-review-proxy:local \
+            --model "$MODEL" \
+            --federation-rule-id "$RULE_ID" \
+            --organization-id "$ORG_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --service-account-id "$SERVICE_ACCOUNT_ID" \
+            --max-requests "$MAX_REQUESTS" \
+            --max-turns 80 \
+            --timeout 20m
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verdict
