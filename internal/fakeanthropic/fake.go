@@ -330,11 +330,20 @@ func (s *Server) stream(w http.ResponseWriter, model, stop string, start map[str
 	w.Header().Set("Request-Id", "req_fake")
 	msg := map[string]any{"id": "msg_fake", "type": "message", "role": "assistant", "model": model, "content": []any{},
 		"stop_reason": nil, "stop_sequence": nil, "usage": map[string]any{"input_tokens": 100, "output_tokens": 1}}
+	// Like a real turn with adaptive thinking (display omitted): a thinking
+	// block with only a signature, a short text, then the answer block, so
+	// the CLI replays all three kinds in its next request.
 	events := []map[string]any{
 		{"type": "message_start", "message": msg},
-		{"type": "content_block_start", "index": 0, "content_block": start},
-		{"type": "content_block_delta", "index": 0, "delta": delta},
+		{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""}},
+		{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "signature_delta", "signature": "ZmFrZS1zaWduYXR1cmU="}},
 		{"type": "content_block_stop", "index": 0},
+		{"type": "content_block_start", "index": 1, "content_block": map[string]any{"type": "text", "text": ""}},
+		{"type": "content_block_delta", "index": 1, "delta": map[string]any{"type": "text_delta", "text": "Checking."}},
+		{"type": "content_block_stop", "index": 1},
+		{"type": "content_block_start", "index": 2, "content_block": start},
+		{"type": "content_block_delta", "index": 2, "delta": delta},
+		{"type": "content_block_stop", "index": 2},
 		{"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 20}},
 		{"type": "message_stop"},
 	}

@@ -10,7 +10,8 @@ import (
 
 // A real request from Claude Code 2.1.329 (recorded by the CI end-to-end
 // run's fake upstream: --tools Read,Grep,Glob, --json-schema, after four
-// tool calls) passes as is.
+// turns of thinking, text and a tool call, replayed by the CLI) passes as
+// is.
 func TestRecordedRequestPasses(t *testing.T) {
 	raw, err := os.ReadFile("testdata/claude-code-request.json")
 	if err != nil {
