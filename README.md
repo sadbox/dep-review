@@ -66,7 +66,6 @@ a newer head can never be merged on an old verdict.
 | `internal/publish` | decision, comment rendering, status, merge, notifications, sweep |
 | `prompts/review.md`, `schema/verdict.json` | the reviewer's instructions and output schema |
 | `examples/` | what a repository adds to use the gate |
-| `STANDARDS.md` | the baseline every project follows |
 
 Dependencies: the standard library unless there is a strong reason; each
 one is reviewed by this gate too.
@@ -92,3 +91,6 @@ the repositories, `event_name == "workflow_run"`, the default branch and
 `job_workflow_ref` starting with this repository's `gate.yml`, with scope
 `workspace:inference` in a workspace that has a spend limit. No API key is
 stored anywhere.
+
+The baseline every project follows (images, CI, Dependabot, repository
+settings) lives in [sadbox/ci](https://github.com/sadbox/ci/blob/main/STANDARDS.md).
