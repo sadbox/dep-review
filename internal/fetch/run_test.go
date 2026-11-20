@@ -35,7 +35,7 @@ func TestCompareDeclared(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			updates, findings := fetch.CompareDeclared(tt.declared, real)
+			updates, findings := fetch.CompareDeclared(model.GoModules, tt.declared, real)
 			var codes []string
 			for _, f := range findings {
 				codes = append(codes, f.Code)
@@ -75,7 +75,7 @@ func TestCompareDeclared(t *testing.T) {
 	}
 	for _, tt := range dockerTests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, findings := fetch.CompareDeclared([]model.Update{tt.declared}, docker)
+			_, findings := fetch.CompareDeclared(model.Docker, []model.Update{tt.declared}, docker)
 			var codes []string
 			for _, f := range findings {
 				codes = append(codes, f.Code)
@@ -86,7 +86,7 @@ func TestCompareDeclared(t *testing.T) {
 		})
 	}
 
-	updates, _ := fetch.CompareDeclared([]model.Update{{Name: "lodash", To: "4.17.21", Security: true, Advisory: []string{"GHSA-xxxx"}}}, real)
+	updates, _ := fetch.CompareDeclared(model.NPM, []model.Update{{Name: "lodash", To: "4.17.21", Security: true, Advisory: []string{"GHSA-xxxx"}}}, real)
 	if !updates[2].Security || !slices.Equal(updates[2].Advisory, []string{"GHSA-xxxx"}) || real[2].Security {
 		t.Errorf("security not carried over (or real mutated): %+v / %+v", updates[2], real[2])
 	}

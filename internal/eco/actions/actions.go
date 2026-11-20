@@ -185,7 +185,7 @@ func groupPairs(all []usesChange, fs *findings) (map[string]*pair, []string) {
 			fs.add(model.RouteRefuse, "actions.non-uses-change", "", "%s:%d: only the comment changed; the pin is the same", safePath(c.file), c.line)
 			continue
 		}
-		key := strings.ToLower(owner+"/"+repo) + "@" + c.old.ref + ".." + c.new.ref
+		key := fetch.NormalizeName(model.GitHubActions, owner+"/"+repo) + "@" + c.old.ref + ".." + c.new.ref
 		p := pairs[key]
 		if p == nil {
 			dir := "/"
@@ -242,7 +242,7 @@ func short(sha string) string {
 
 func declaredHints(class model.Classification, name string) (from, to []string) {
 	for _, d := range class.Declared {
-		if strings.EqualFold(d.Name, name) {
+		if fetch.SameName(model.GitHubActions, d.Name, name) {
 			if d.From != "" {
 				from = append(from, "v"+strings.TrimPrefix(d.From, "v"))
 			}
@@ -299,7 +299,7 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		Direct:    true,
 	}
 	for _, d := range env.Class.Declared {
-		if strings.EqualFold(d.Name, name) {
+		if fetch.SameName(model.GitHubActions, d.Name, name) {
 			u.Security = u.Security || d.Security
 			u.Advisory = append(u.Advisory, d.Advisory...)
 		}

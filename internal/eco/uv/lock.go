@@ -2,8 +2,9 @@ package uv
 
 import (
 	"fmt"
-	"regexp"
-	"strings"
+
+	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/model"
 )
 
 // Artifact is one sdist or wheel pinned in uv.lock.
@@ -120,7 +121,5 @@ func depNames(v any) []string {
 	return out
 }
 
-var normRE = regexp.MustCompile(`[-_.]+`)
-
-// Normalize is the PEP 503 project name normalization.
-func Normalize(name string) string { return strings.ToLower(normRE.ReplaceAllString(name, "-")) }
+// Normalize is the PEP 503 project name normalization (fetch.NormalizeName).
+func Normalize(name string) string { return fetch.NormalizeName(model.UV, name) }

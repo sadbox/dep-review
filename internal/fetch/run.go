@@ -49,7 +49,7 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 			}},
 		}
 	}
-	updates, findings := CompareDeclared(env.Class.Declared, res.Updates)
+	updates, findings := CompareDeclared(env.Class.Ecosystem, env.Class.Declared, res.Updates)
 	findings = append(res.Findings, findings...)
 	findings = append(findings, NewDependencies(updates)...)
 	findings = append(findings, ev.Findings()...)
@@ -82,21 +82,21 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 // different target, refuses the PR. A different "from" needs a person.
 // Undeclared real updates are expected (transitive changes) and are simply
 // reviewed. Matched updates inherit the declared security flag and
-// advisories, which only Dependabot knows.
+// advisories, which only Dependabot knows. Names match per NormalizeName.
 //
 // Each side is compared on what Dependabot declared for it: the version
 // (To/From) and, when its prose names one, the pin (ToRef/FromRef, usually
 // abbreviated). A Docker digest bump declares only the tag as its version
 // and the two digests as pins, so it matches the fetcher's tag -> tag
 // with full digests, and a different digest still refuses.
-func CompareDeclared(declared, real []model.Update) ([]model.Update, []model.Finding) {
+func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]model.Update, []model.Finding) {
 	updates := slices.Clone(real)
 	var findings []model.Finding
 	for _, d := range declared {
 		i := -1
 		var matches []int
 		for j, u := range updates {
-			if u.Name == d.Name && sameDir(u.Directory, d.Directory) {
+			if SameName(eco, u.Name, d.Name) && sameDir(u.Directory, d.Directory) {
 				matches = append(matches, j)
 			}
 		}

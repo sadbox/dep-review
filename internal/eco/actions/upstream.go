@@ -13,6 +13,7 @@ import (
 
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/gh"
+	"github.com/sadbox/dep-review/internal/model"
 )
 
 // upstream is the REST view of one action repository. All endpoints used
@@ -288,7 +289,7 @@ func advisories(ctx context.Context, c fetch.GitHub, name, version string) ([]ad
 			continue
 		}
 		for _, v := range a.Vulnerabilities {
-			if strings.EqualFold(v.Package.Ecosystem, "actions") && strings.EqualFold(v.Package.Name, name) {
+			if strings.EqualFold(v.Package.Ecosystem, "actions") && fetch.SameName(model.GitHubActions, v.Package.Name, name) {
 				out = append(out, a)
 				break
 			}
