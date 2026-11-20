@@ -14,21 +14,6 @@ import (
 // Registry maps each ecosystem to its fetcher (see cmd/dep-review).
 type Registry map[model.Ecosystem]Ecosystem
 
-// NotVerified is the placeholder for an ecosystem the gate cannot verify
-// yet: it passes Dependabot's declaration through and forces RouteHuman.
-type NotVerified struct{}
-
-func (NotVerified) Fetch(_ context.Context, env Env) (Result, error) {
-	return Result{
-		Updates: slices.Clone(env.Class.Declared),
-		Findings: []model.Finding{{
-			Code:   "ecosystem.not-verified",
-			Route:  model.RouteHuman,
-			Detail: fmt.Sprintf("ecosystem %q not verified yet", env.Class.Ecosystem),
-		}},
-	}, nil
-}
-
 // EvidenceDir is what Run needs from the evidence writer beyond Writer.
 type EvidenceDir interface {
 	Writer

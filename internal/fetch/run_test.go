@@ -88,7 +88,6 @@ func TestRun(t *testing.T) {
 		{"finding wins", model.GoModules, model.KindDependabot, fetch.Registry{model.GoModules: fakeEco{res: fetch.Result{
 			Updates: []model.Update{patch}, Findings: []model.Finding{{Code: "x", Route: model.RouteRefuse}}}}}, model.RouteRefuse, []string{"x"}, false},
 		{"no updates", model.GoModules, model.KindDependabot, fetch.Registry{model.GoModules: fakeEco{}}, model.RouteRefuse, []string{"declared.missing"}, false},
-		{"placeholder", model.Docker, model.KindDependabot, fetch.Registry{model.Docker: fetch.NotVerified{}}, model.RouteHuman, []string{"ecosystem.not-verified"}, false},
 		{"unknown ecosystem", "pip", model.KindDependabot, fetch.Registry{}, model.RouteHuman, []string{"ecosystem.unknown"}, false},
 		{"infra error", model.GoModules, model.KindDependabot, fetch.Registry{model.GoModules: fakeEco{err: errors.New("proxy down")}}, "", nil, true},
 		{"not dependabot", model.GoModules, model.KindDependabotUnverified, fetch.Registry{}, "", nil, true},
