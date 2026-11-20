@@ -48,6 +48,22 @@ on:
         description: Messages API requests the credential proxy allows per review.
         type: number
         default: 200
+    # Declared so callers pass these and nothing else (no `secrets: inherit`).
+    # publish and sweep run in the caller's `dep-review` environment, and an
+    # environment secret of the same name takes precedence over a passed one,
+    # so the usual setup (all three as environment secrets) works with the
+    # pass-through in examples/dep-review.yaml; none is required at call time
+    # for that reason. publish and sweep fail without DEP_REVIEW_APP_KEY.
+    secrets:
+      DEP_REVIEW_APP_KEY:
+        description: The gate app's private key (normally a `dep-review` environment secret).
+        required: false
+      PUSHOVER_APP_TOKEN:
+        description: Optional Pushover notifications.
+        required: false
+      PUSHOVER_USER_KEY:
+        description: Optional Pushover notifications.
+        required: false
 
 permissions: {}
 

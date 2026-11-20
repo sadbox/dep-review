@@ -27,7 +27,12 @@ jobs:
       contents: read
       pull-requests: read
       id-token: write
-    secrets: inherit
+    # Only the gate's own secrets; never `secrets: inherit`, which would hand
+    # the reusable workflow every secret this repository has.
+    secrets:
+      DEP_REVIEW_APP_KEY: ${{ secrets.DEP_REVIEW_APP_KEY }}
+      PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+      PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
     with:
       anthropic_federation_rule_id: fdrl_REPLACE
       anthropic_organization_id: REPLACE
