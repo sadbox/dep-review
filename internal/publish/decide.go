@@ -3,7 +3,7 @@
 // of the exact classified head once CI is green, and notifications. It
 // also implements sweep. No model or dependency text reaches a
 // notification, and the only model text in a comment is the sanitized
-// summary on private repositories.
+// summary (SanitizeSummary), on every repository.
 package publish
 
 import (

@@ -135,8 +135,8 @@ func TestCommentGolden(t *testing.T) {
 			if strings.Contains(got, "@sadbox") || strings.Contains(got, "@attacker") || strings.Contains(got, "<script") || strings.Contains(got, "<img") {
 				t.Error("hostile text survived")
 			}
-			if !tt.d.Class.Private && strings.Contains(got, "I read every diff") {
-				t.Error("summary shown on a public repository")
+			if tt.d.Outcome.Verdict != nil && !strings.Contains(got, "I read every diff") {
+				t.Error("sanitized summary missing (it is shown on every repository)")
 			}
 		})
 	}

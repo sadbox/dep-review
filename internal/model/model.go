@@ -158,7 +158,7 @@ const (
 type Verdict struct {
 	Verdict VerdictValue `json:"verdict"`
 	Flags   []string     `json:"flags"`   // values from schema/verdict.json's enum only
-	Summary string       `json:"summary"` // shown only on private repos, after sanitizing
+	Summary string       `json:"summary"` // shown in the PR comment after sanitizing
 }
 
 // Decision is publish's final, deterministic result.

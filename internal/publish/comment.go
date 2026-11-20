@@ -179,14 +179,10 @@ func renderComment(d commentData) string {
 			flags = []string{"none"}
 		}
 		fmt.Fprintf(&b, "| Flags | %s |\n", strings.Join(flags, ", "))
-		if d.Class.Private {
-			if s := SanitizeSummary(v.Summary); s != "" {
-				b.WriteString("\nReviewer's summary (model output, sanitized):\n\n```text\n")
-				b.WriteString(s)
-				b.WriteString("\n```\n")
-			}
-		} else {
-			b.WriteString("\nThe reviewer's summary is not shown on public repositories; it is in the workflow run's artifacts.\n")
+		if s := SanitizeSummary(v.Summary); s != "" {
+			b.WriteString("\nReviewer's summary (model output, sanitized):\n\n```text\n")
+			b.WriteString(s)
+			b.WriteString("\n```\n")
 		}
 	}
 

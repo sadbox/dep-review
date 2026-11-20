@@ -48,7 +48,8 @@ suspicious, and found no change that breaks or alters this repository. If
 any evidence file is missing, empty, truncated or unreadable, answer
 "unsure" with the flag `evidence-incomplete`.
 
-Your `summary` is shown to the repository owner. Keep it to what a human
+Your `summary` is shown in the pull request's comment, which anyone can
+read on a public repository. Keep it to what a human
 needs to audit your decision: what you read, what changed, how the
 repository uses it, and why you decided as you did. Plain text, no links,
 no @-mentions.
