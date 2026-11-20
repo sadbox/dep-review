@@ -14,8 +14,10 @@ on:
 
 permissions: {}
 
+# Keyed on the head repository too, so a fork PR on a same-named branch can't
+# share (and displace a queued run in) a Dependabot PR's group.
 concurrency:
-  group: dep-review-${{ github.event.workflow_run.head_branch || 'sweep' }}
+  group: dep-review-${{ github.event.workflow_run.head_repository.full_name || 'sweep' }}-${{ github.event.workflow_run.head_branch || 'sweep' }}
   cancel-in-progress: false
 
 jobs:
