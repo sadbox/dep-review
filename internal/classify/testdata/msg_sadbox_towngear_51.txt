@@ -1,0 +1,17 @@
+build(deps): bump golang from `01aa404` to `205c763` in the docker group
+
+Bumps the docker group with 1 update: golang.
+
+
+Updates `golang` from `01aa404` to `205c763`
+
+---
+updated-dependencies:
+- dependency-name: golang
+  dependency-version: '1.27'
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+  dependency-group: docker
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
