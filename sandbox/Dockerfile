@@ -23,7 +23,7 @@ RUN npm ci --ignore-scripts --no-audit --no-fund \
  && mkdir -p /out/usr/local/bin /out/work /out/home/reviewer \
  && cp "$pkg/claude" /out/usr/local/bin/claude \
  && ldd /out/usr/local/bin/claude \
- && ! ldd /out/usr/local/bin/claude | grep -vE '^\s*(linux-vdso\.so\.1|/lib/ld-linux[^ ]*|(libc|libm|libdl|librt|libpthread)\.so\.[0-9]+ => )'
+ && ! ldd /out/usr/local/bin/claude | grep -vE '^\s*(linux-vdso\.so\.1|/lib(64)?/ld-linux[^ ]*|(libc|libm|libdl|librt|libpthread)\.so\.[0-9]+ => )'
 
 # The credential proxy runs the gate's own static binary (bind-mounted at
 # run time) on distroless; this stage only pins the base.
