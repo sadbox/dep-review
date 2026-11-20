@@ -117,7 +117,8 @@ Messages requests per review.
 ## Sandbox
 
 The reviewer is the Claude Code CLI (pinned in `sandbox/package-lock.json`)
-in a container run under gVisor (`runsc`, pinned and sha512-checked by
+alone on a glibc distroless image (no shell, no Node, no npm, no package
+manager), in a container run under gVisor (`runsc`, pinned and sha512-checked by
 `sandbox/install-gvisor.sh`), so even code execution inside it gets:
 
 - **No credentials.** Its environment is a fixed list (`internal/sandbox`):
@@ -133,7 +134,7 @@ in a container run under gVisor (`runsc`, pinned and sha512-checked by
   token, caps the request count and logs path, status and token usage only.
 - **No writable persistent state.** Read-only root, `--cap-drop=ALL`,
   `no-new-privileges`, non-root, pids and memory limits; `./evidence`,
-  `./repo` and the settings file are read-only mounts; `` and `/tmp` are
+  `./repo` and the settings file are read-only mounts; `$HOME` and `/tmp` are
   tmpfs.
 - **Only data we already publish**: the evidence and the default branch.
 

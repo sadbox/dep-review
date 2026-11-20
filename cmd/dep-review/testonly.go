@@ -25,17 +25,22 @@ func init() {
 		return fs.String("test-upstream", "", "TEST ONLY: upstream base URL instead of https://api.anthropic.com")
 	}
 	extraCommands["fake-anthropic"] = runFakeAnthropic
+	extraCommands["probe"] = runProbe
 	reviewTestFlags = func(fs *flag.FlagSet) func(*sandbox.Config) error {
 		fake := fs.String("test-fake-upstream", "", "TEST ONLY: run the fake upstream with this verdict JSON file")
 		record := fs.String("test-fake-record", "", "TEST ONLY: directory where the fake upstream records request bodies")
-		probe := fs.String("test-probe", "", "TEST ONLY: run this probe script (node) instead of claude")
+		probe := fs.Bool("test-probe", false, "TEST ONLY: run the isolation probes (dep-review probe) instead of claude")
 		gateBin := fs.String("test-gate-binary", "", "TEST ONLY: linux dep-review binary for the containers (default: this one)")
 		runtime := fs.String("test-runtime", "", "TEST ONLY: container runtime instead of runsc (local runs without gVisor)")
 		var probeArgs stringList
 		fs.Var(&probeArgs, "test-probe-arg", "TEST ONLY: probe argument (repeatable)")
 		return func(c *sandbox.Config) error {
 			if *gateBin != "" {
-				c.GateBinary = *gateBin
+				abs, err := filepath.Abs(*gateBin)
+				if err != nil {
+					return err
+				}
+				c.GateBinary = abs
 			}
 			if *runtime != "" {
 				c.Runtime = *runtime
@@ -69,13 +74,11 @@ func init() {
 				os.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "http://"+fakeName+":9000/oidc/token?api-version=2.0")
 				os.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", fakeanthropic.OIDCRequestToken)
 			}
-			if *probe != "" {
-				p, err := filepath.Abs(*probe)
-				if err != nil {
-					return err
-				}
-				c.ExtraMounts = append(c.ExtraMounts, sandbox.Mount{Src: p, Dst: "/probe/probe.mjs"})
-				c.Command = append([]string{"node", "/probe/probe.mjs", "--proxy", c.ProxyAddr(), "--model", c.Model}, probeArgs...)
+			if *probe {
+				// This (static, linux) binary, since the reviewer image has
+				// no shell or interpreter to run a script with.
+				c.ExtraMounts = append(c.ExtraMounts, sandbox.Mount{Src: c.GateBinary, Dst: "/probe/dep-review"})
+				c.Command = append([]string{"/probe/dep-review", "probe", "--proxy", c.ProxyAddr(), "--model", c.Model}, probeArgs...)
 			}
 			return nil
 		}

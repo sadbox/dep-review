@@ -187,7 +187,7 @@ func (c *Config) ProxyArgs() []string {
 }
 
 // reviewerEnv is the reviewer's whole environment (beyond the image's own
-// PATH and NODE_VERSION). Nothing is inherited from the runner.
+// PATH and SSL_CERT_FILE). Nothing is inherited from the runner.
 func (c *Config) reviewerEnv() []string {
 	return []string{
 		"HOME=" + reviewerHome,

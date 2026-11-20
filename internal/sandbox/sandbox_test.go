@@ -101,16 +101,16 @@ func TestReviewerArgs(t *testing.T) {
 		t.Errorf("command\n got %s\nwant %s", got, want)
 	}
 
-	c.Command = []string{"node", "/probe/probe.mjs", "--x"}
-	c.ExtraMounts = []Mount{{"/p.mjs", "/probe/probe.mjs"}}
+	c.Command = []string{"/probe/dep-review", "probe", "--x"}
+	c.ExtraMounts = []Mount{{"/gate/dep-review", "/probe/dep-review"}}
 	b := c.ReviewerArgs()
 	probeFlags := slices.Clone(b[:slices.Index(b, "--entrypoint")])
-	m := slices.Index(probeFlags, "type=bind,src=/p.mjs,dst=/probe/probe.mjs,readonly")
+	m := slices.Index(probeFlags, "type=bind,src=/gate/dep-review,dst=/probe/dep-review,readonly")
 	probeFlags = slices.Delete(probeFlags, m-1, m+1)
 	if !slices.Equal(a[:i], probeFlags) {
 		t.Errorf("probe args differ from the review's beyond the command and its mount:\n%v\n%v", a, b)
 	}
-	if strings.Join(b[slices.Index(b, "--entrypoint"):], " ") != "--entrypoint node reviewer:x /probe/probe.mjs --x" {
+	if strings.Join(b[slices.Index(b, "--entrypoint"):], " ") != "--entrypoint /probe/dep-review reviewer:x probe --x" {
 		t.Errorf("probe command %v", b)
 	}
 }

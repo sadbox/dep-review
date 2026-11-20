@@ -92,7 +92,7 @@ jobs:
             --reviewer-image dep-review-reviewer:ci --proxy-image dep-review-proxy:ci \
             --model "$MODEL" --federation-rule-id fdrl_ci --organization-id 00000000-0000-0000-0000-000000000000 \
             --test-fake-upstream canned.json \
-            --test-probe "$GITHUB_WORKSPACE/sandbox/probe.mjs" \
+            --test-probe \
             --test-probe-arg --deny-dns --test-probe-arg api.anthropic.com \
             --test-probe-arg --deny-dns --test-probe-arg github.com \
             --test-probe-arg --deny-tcp --test-probe-arg "$api_ip:443" \

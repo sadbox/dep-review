@@ -303,7 +303,16 @@ func denied(b block) error {
 // working directory), then answer.
 var script = []scriptStep{
 	{"Read", map[string]any{"file_path": "/work/evidence/evidence.json"}, hasMarker},
-	{"Grep", map[string]any{"pattern": Marker, "path": "/work/repo", "output_mode": "content"}, hasMarker},
+	{"Grep", map[string]any{"pattern": Marker, "path": "/work/repo", "output_mode": "content"}, func(b block) error {
+		// A real match line (ripgrep ran), not an error echoing the pattern.
+		if err := hasMarker(b); err != nil {
+			return err
+		}
+		if !strings.Contains(string(b.Content), "main.go:1:") {
+			return errors.New("want a match in repo/main.go")
+		}
+		return nil
+	}},
 	{"Read", map[string]any{"file_path": "/proc/self/environ"}, denied},
 	// Inside the working directory, so only the settings' deny rule
 	// (Read(./repo/.git/**)) refuses it: proof the settings are in force.
