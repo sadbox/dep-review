@@ -40,7 +40,7 @@ var usesLineRx = regexp.MustCompile(`^(\s*(?:-\s+)?uses:\s*)(['"]?)([^@\s'"#]+)@
 
 // parseUsesLine reads the value as raw text, so it refuses a backslash
 // anywhere in it: inside double quotes GitHub decodes it as an escape
-// ("acme/act/path@..." is acme/act/path) and no real action name,
+// ("acme/act/p\x61th@..." is acme/act/path) and no real action name,
 // path or ref contains one.
 func parseUsesLine(line string) (usesRef, bool) {
 	m := usesLineRx.FindStringSubmatch(line)
@@ -135,11 +135,11 @@ func lineTokens(s string) ([]token, error) {
 
 // keyName returns the key of a yamlKeyRx match (m from FindStringSubmatch).
 // A quoted key is accepted only when its text is literal: no backslash
-// (double-quoted escapes such as s or \x73), no doubled ” (single-
-// quoted escape), and ':' straight after the closing quote. Anything else
-// is an error rather than a guess, because GitHub decodes such a key
-// (`"post":` is post) and a key the gate reads differently could hide
-// a runs.post hook or a runs.using change.
+// (double-quoted escapes such as \x73 or \u-escapes), no doubled single
+// quote (the single-quoted escape), and ':' straight after the closing quote.
+// Anything else is an error rather than a guess, because GitHub decodes
+// such a key (`"p\x6fst":` is post) and a key the gate reads
+// differently could hide a runs.post hook or a runs.using change.
 func keyName(m []string) (string, error) {
 	k := strings.TrimSpace(m[1])
 	if k == "" || (k[0] != '"' && k[0] != '\'') {
