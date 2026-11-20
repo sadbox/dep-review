@@ -130,11 +130,16 @@ with a fresh OIDC token each time, two minutes before expiry (federated
 tokens live about ten minutes; a review can take twenty). No API key is
 stored anywhere.
 
-The federation rule matches the subject pattern
-`repo:<owner>@<owner_id>/*`: GitHub's subject for these owners includes
-numeric IDs, e.g.
-`repo:Espresso-Aficionados@76916743/linkclean@1420833610:ref:refs/heads/main`.
-It also pins `event_name == "workflow_run"`, the default branch and
+Each federation rule's subject pattern is the owner's prefix in whatever
+subject format that owner uses (check the Console's authentication log):
+the sadbox user account has GitHub's default
+(`repo:sadbox/towngear:ref:refs/heads/main`), so its pattern is
+`repo:sadbox/*`; the Espresso-Aficionados org has a customized template
+with numeric IDs
+(`repo:Espresso-Aficionados@76916743/linkclean@1420833610:ref:...`), so its
+pattern is `repo:Espresso-Aficionados@76916743/*`. Rename safety comes
+from the rule's CEL checks on `repository_id`, not the subject. The rule
+also pins `event_name == "workflow_run"`, the default branch and
 `job_workflow_ref` starting with this repository's `gate.yml`. Its scope
 is `workspace:developer`, the narrowest the Claude Console offers (the
 other is `org:admin`), in a workspace that has a spend limit. That scope
