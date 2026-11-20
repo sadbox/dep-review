@@ -188,10 +188,14 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 	fmt.Fprintf(summary, "## %s (%s lockfile)\n\n", depDir, hl.Kind)
 
 	type key struct{ name, version string }
-	index := func(l *Lock) (map[string][]string, map[key]Entry) {
+	// Every copy is kept: a lockfile can hold one name@version at several
+	// locations, and each copy is installed from its own resolved URL.
+	index := func(l *Lock) (map[string][]string, map[key][]Entry, map[string]Entry) {
 		vers := map[string][]string{}
-		byKey := map[key]Entry{}
+		byKey := map[key][]Entry{}
+		byLoc := map[string]Entry{}
 		for _, e := range l.Entries {
+			byLoc[e.Location] = e
 			if e.Bundled {
 				continue // inside its parent's tarball, diffed with it
 			}
@@ -199,33 +203,56 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			if _, ok := byKey[k]; !ok {
 				vers[e.Name] = append(vers[e.Name], e.Version)
 			}
-			byKey[k] = e
+			byKey[k] = append(byKey[k], e)
 		}
-		return vers, byKey
+		return vers, byKey, byLoc
 	}
-	bv, bk := index(bl)
-	hv, hk := index(hl)
+	bv, bk, bloc := index(bl)
+	hv, hk, hloc := index(hl)
+	origin := func(e Entry) string { return e.Integrity + " " + stripFragment(e.Resolved) }
+	refuse := func(code, name, detail string) {
+		findings = append(findings, model.Finding{Code: code, Route: model.RouteRefuse, Update: name, Detail: depDir + ": " + detail})
+	}
 
-	// Same name@version with different bytes or origin is never legitimate.
-	for k, h := range hk {
-		if b, ok := bk[k]; ok && (b.Integrity != h.Integrity || stripFragment(b.Resolved) != stripFragment(h.Resolved)) {
-			findings = append(findings, model.Finding{Code: "npm.same-version-changed", Route: model.RouteRefuse, Update: k.name,
-				Detail: fmt.Sprintf("%s: %s@%s keeps its version but its integrity or resolved URL changed", depDir, k.name, k.version)})
+	// All copies of one name@version must be the same bytes from the same place.
+	for _, k := range slices.SortedFunc(maps.Keys(hk), func(a, b key) int { return strings.Compare(a.name+"@"+a.version, b.name+"@"+b.version) }) {
+		copies := hk[k]
+		for _, e := range copies[1:] {
+			if origin(e) != origin(copies[0]) {
+				refuse("npm.duplicate-disagrees", k.name, fmt.Sprintf("%s@%s at %s and %s has different integrity or resolved URL", k.name, k.version, copies[0].Location, e.Location))
+				break
+			}
+		}
+		// Same name@version as the base, different bytes or origin: never legitimate.
+		if base, ok := bk[k]; ok {
+			known := map[string]bool{}
+			for _, b := range base {
+				known[origin(b)] = true
+			}
+			for _, e := range copies {
+				if !known[origin(e)] {
+					refuse("npm.same-version-changed", k.name, fmt.Sprintf("%s@%s at %s keeps its version but its integrity or resolved URL changed", k.name, k.version, e.Location))
+					break
+				}
+			}
 		}
 	}
-	// Every new or changed entry must come from the public registry, pinned by integrity.
-	for k, h := range hk {
-		if _, ok := bk[k]; ok {
+	// Every entry that is new or different at its location must come from
+	// the public registry, pinned by sha512, whatever other copies exist.
+	for _, loc := range slices.Sorted(maps.Keys(hloc)) {
+		h := hloc[loc]
+		if b, ok := bloc[loc]; ok && b == h {
 			continue
 		}
 		switch {
 		case h.Link:
-			findings = append(findings, human("npm.link", k.name, fmt.Sprintf("%s: %s is a workspace link", depDir, k.name)))
+			findings = append(findings, human("npm.link", h.Name, fmt.Sprintf("%s: %s is a workspace link (%s)", depDir, h.Name, loc)))
+		case h.Bundled:
+			findings = append(findings, human("npm.bundled-changed", h.Name, fmt.Sprintf("%s: %s@%s at %s is bundled inside its parent and not verified on its own", depDir, h.Name, h.Version, loc)))
 		case !registryURL(h.Resolved, hl.Kind):
-			findings = append(findings, model.Finding{Code: "npm.resolved-off-registry", Route: model.RouteRefuse, Update: k.name,
-				Detail: fmt.Sprintf("%s: %s@%s resolves to %q, not %s", depDir, k.name, k.version, h.Resolved, registryHost)})
+			refuse("npm.resolved-off-registry", h.Name, fmt.Sprintf("%s@%s at %s resolves to %q, not %s", h.Name, h.Version, loc, h.Resolved, registryHost))
 		case sha512Of(h.Integrity) == nil:
-			findings = append(findings, human("npm.weak-integrity", k.name, fmt.Sprintf("%s: %s@%s has no sha512 integrity in the lockfile", depDir, k.name, k.version)))
+			findings = append(findings, human("npm.weak-integrity", h.Name, fmt.Sprintf("%s: %s@%s at %s has no sha512 integrity in the lockfile", depDir, h.Name, h.Version, loc)))
 		}
 	}
 
@@ -245,12 +272,13 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 				Ecosystem: model.NPM, Directory: depDir, Name: name, From: p[0], To: p[1],
 				Type: ecoutil.TypeOf(p[0], p[1]), Direct: hl.Direct[name],
 			}
-			c := change{update: u, head: hk[key{name, p[1]}], lockKind: hl.Kind}
+			// Copies agree or the PR is refused above, so the first stands for all.
+			c := change{update: u, head: hk[key{name, p[1]}][0], lockKind: hl.Kind}
 			if p[0] != "" {
 				if e, ok := bk[key{name, p[0]}]; ok {
-					c.base = e
+					c.base = e[0]
 				} else {
-					c.base = hk[key{name, p[0]}] // a kept copy
+					c.base = hk[key{name, p[0]}][0] // a kept copy
 				}
 			}
 			kind := "transitive"

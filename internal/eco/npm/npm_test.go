@@ -397,3 +397,55 @@ func TestFetchNetwork(t *testing.T) {
 		}
 	}
 }
+
+// TestDuplicateCopiesValidated: one name@version at several locations;
+// every copy is checked, not just the last one the index saw.
+func TestDuplicateCopiesValidated(t *testing.T) {
+	const good = "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="
+	const other = "sha512-HV1Cm0Q3ZrpCR93tkWOYiuYIgLxZXZFVG2VgK+MBWjUqZTundupbfx2aXarXuw5Ko5aMcjtJgbSs4vUGBS5v6g=="
+	const reg = "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+	lock := func(entries ...string) []byte {
+		return []byte(`{"lockfileVersion":3,"packages":{"":{"dependencies":{"a":"^1","lodash":"^4"}},` + strings.Join(entries, ",") + `}}`)
+	}
+	entry := func(loc, version, resolved, integrity string) string {
+		return fmt.Sprintf(`%q:{"version":%q,"resolved":%q,"integrity":%q}`, loc, version, resolved, integrity)
+	}
+	base := lock(entry("node_modules/lodash", "4.17.21", reg, good))
+	tests := []struct {
+		name string
+		head []byte
+		want string
+	}{
+		{"off-registry copy shadowed by a good one", lock(
+			entry("node_modules/a/node_modules/lodash", "4.17.21", "https://evil.example/lodash-4.17.21.tgz", good),
+			entry("node_modules/lodash", "4.17.21", reg, good)), "npm.resolved-off-registry"},
+		{"copies disagree on integrity", lock(
+			entry("node_modules/lodash", "4.17.21", reg, good),
+			entry("node_modules/z/node_modules/lodash", "4.17.21", reg, other)), "npm.duplicate-disagrees"},
+		{"new copy differs from the unchanged base copy", lock(
+			entry("node_modules/lodash", "4.17.21", reg, good),
+			entry("node_modules/b/node_modules/lodash", "4.17.21", reg, other)), "npm.same-version-changed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, b, h := gittest.Repo(t, map[string][]byte{"package-lock.json": base}, map[string][]byte{"package-lock.json": tt.head})
+			var sum bytes.Buffer
+			_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, f := range findings {
+				if f.Code == tt.want {
+					found = true
+					if f.Route != model.RouteRefuse {
+						t.Errorf("%s route %s, want refuse", f.Code, f.Route)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("findings %+v lack %s", findings, tt.want)
+			}
+		})
+	}
+}

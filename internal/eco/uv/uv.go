@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -40,6 +42,8 @@ const (
 type Fetcher struct {
 	// AllowHost overrides files.pythonhosted.org (tests only).
 	AllowHost string
+	// PyPI overrides https://pypi.org (tests only).
+	PyPI string
 }
 
 type change struct {
@@ -106,6 +110,13 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		work = work[:MaxPackages]
 	}
 	summary.WriteString("## Downloads (files.pythonhosted.org)\n\n")
+	for _, c := range work {
+		fs, err := f.crossCheckPyPI(ctx, env, c)
+		if err != nil {
+			return fetch.Result{}, err
+		}
+		res.Findings = append(res.Findings, fs...)
+	}
 	for i, c := range work {
 		fs, err := f.verifyAndDiff(ctx, env, home, filepath.Join(env.Scratch, "uv", fmt.Sprint(i)), c, &summary)
 		if err != nil {
@@ -163,9 +174,11 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 		}
 	}
 	type key struct{ name, version string }
-	index := func(l *Lock) (map[string][]string, map[key]Package) {
+	// Every copy is kept: uv.lock can list one name==version more than once
+	// (resolution forks), and each copy's artifacts are installable.
+	index := func(l *Lock) (map[string][]string, map[key][]Package) {
 		vers := map[string][]string{}
-		byKey := map[key]Package{}
+		byKey := map[key][]Package{}
 		for _, p := range l.Packages {
 			if p.IsProject() {
 				continue
@@ -175,24 +188,46 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			if _, ok := byKey[k]; !ok {
 				vers[n] = append(vers[n], p.Version)
 			}
-			byKey[k] = p
+			byKey[k] = append(byKey[k], p)
 		}
 		return vers, byKey
 	}
 	bv, bk := index(bl)
 	hv, hk := index(hl)
-	for k, h := range hk {
-		b, existed := bk[k]
-		if existed {
-			if fmt.Sprint(b.Sdist, b.Wheels, b.Source) != fmt.Sprint(h.Sdist, h.Wheels, h.Source) {
-				findings = append(findings, model.Finding{Code: "uv.same-version-changed", Route: model.RouteRefuse, Update: k.name,
-					Detail: fmt.Sprintf("%s: %s==%s keeps its version but its source or artifacts changed", depDir, k.name, k.version)})
+	refuse := func(code, name, detail string) {
+		findings = append(findings, model.Finding{Code: code, Route: model.RouteRefuse, Update: name, Detail: depDir + ": " + detail})
+	}
+	for _, k := range slices.SortedFunc(maps.Keys(hk), func(a, b key) int { return strings.Compare(a.name+"=="+a.version, b.name+"=="+b.version) }) {
+		copies := hk[k]
+		for _, p := range copies[1:] {
+			if pkgOrigin(p) != pkgOrigin(copies[0]) {
+				refuse("uv.duplicate-disagrees", k.name, fmt.Sprintf("%s==%s is listed more than once with different source or artifacts", k.name, k.version))
+				break
 			}
-			continue
 		}
-		if h.Registry() != pypiRegistry {
-			findings = append(findings, model.Finding{Code: "uv.source-off-registry", Route: model.RouteRefuse, Update: k.name,
-				Detail: fmt.Sprintf("%s: %s==%s comes from %v, not %s", depDir, k.name, k.version, h.Source, pypiRegistry)})
+		known := map[string]bool{}
+		for _, b := range bk[k] {
+			known[pkgOrigin(b)] = true
+		}
+		for _, p := range copies {
+			if known[pkgOrigin(p)] {
+				continue // unchanged since the base
+			}
+			if len(bk[k]) > 0 {
+				refuse("uv.same-version-changed", k.name, fmt.Sprintf("%s==%s keeps its version but its source or artifacts changed", k.name, k.version))
+			}
+			// New or changed: the source and every artifact, downloaded or not.
+			if p.Registry() != pypiRegistry {
+				refuse("uv.source-off-registry", k.name, fmt.Sprintf("%s==%s comes from %v, not %s", k.name, k.version, p.Source, pypiRegistry))
+			}
+			for _, a := range p.Artifacts() {
+				if err := ecoutil.CheckHost(a.URL, filesHost); err != nil {
+					refuse("uv.artifact-off-registry", k.name, fmt.Sprintf("%s==%s: %v", k.name, k.version, err))
+				}
+				if !sha256RE.MatchString(a.Hash) {
+					refuse("uv.weak-hash", k.name, fmt.Sprintf("%s==%s: %s has hash %q, not sha256", k.name, k.version, artifactName(a.URL), a.Hash))
+				}
+			}
 		}
 	}
 
@@ -209,12 +244,13 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 		for _, p := range pairs {
 			u := model.Update{Ecosystem: model.UV, Directory: depDir, Name: name, From: p[0], To: p[1],
 				Type: ecoutil.TypeOf(p[0], p[1]), Direct: direct[name]}
-			c := change{update: u, head: hk[key{name, p[1]}]}
+			// Copies agree or the PR is refused above, so the first stands for all.
+			c := change{update: u, head: hk[key{name, p[1]}][0]}
 			if p[0] != "" {
 				if b, ok := bk[key{name, p[0]}]; ok {
-					c.base = b
+					c.base = b[0]
 				} else {
-					c.base = hk[key{name, p[0]}]
+					c.base = hk[key{name, p[0]}][0]
 				}
 			}
 			kind := "transitive"
@@ -227,6 +263,59 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 	}
 	summary.WriteString("\n")
 	return changes, findings, nil
+}
+
+var (
+	pyNameRE    = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+	pyVersionRE = regexp.MustCompile(`^[0-9A-Za-z.+!_-]+$`)
+)
+
+// crossCheckPyPI compares every artifact the lock pins for the new version
+// (wheels for every platform, not only the one the gate downloads) with
+// PyPI's own file list and sha256 digests for that release.
+func (f Fetcher) crossCheckPyPI(ctx context.Context, env fetch.Env, c change) ([]model.Finding, error) {
+	u := c.update
+	if !pyNameRE.MatchString(u.Name) || !pyVersionRE.MatchString(u.To) {
+		return []model.Finding{{Code: "uv.bad-name", Route: model.RouteRefuse, Update: u.Name, Detail: fmt.Sprintf("refusing package %q version %q", u.Name, u.To)}}, nil
+	}
+	base := f.PyPI
+	if base == "" {
+		base = "https://pypi.org"
+	}
+	b, err := ecoutil.GetBytes(ctx, env.HTTP, base+"/pypi/"+u.Name+"/"+u.To+"/json", ecoutil.MetadataLimit, map[string][]string{"Accept": {"application/json"}})
+	if errors.Is(err, ecoutil.ErrNotFound) {
+		return []model.Finding{human("uv.not-on-pypi", u.Name, fmt.Sprintf("%s==%s is not on PyPI (deleted release?)", u.Name, u.To))}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		URLs []struct {
+			Filename string `json:"filename"`
+			Digests  struct {
+				SHA256 string `json:"sha256"`
+			} `json:"digests"`
+		} `json:"urls"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return nil, fmt.Errorf("PyPI JSON for %s==%s: %w", u.Name, u.To, err)
+	}
+	onPyPI := map[string]string{}
+	for _, f := range doc.URLs {
+		onPyPI[f.Filename] = "sha256:" + strings.ToLower(f.Digests.SHA256)
+	}
+	var bad []string
+	for _, a := range c.head.Artifacts() {
+		name := artifactName(a.URL)
+		if got, ok := onPyPI[name]; !ok || got != a.Hash {
+			bad = append(bad, name)
+		}
+	}
+	if len(bad) > 0 {
+		return []model.Finding{{Code: "uv.hash-not-on-pypi", Route: model.RouteRefuse, Update: u.Name,
+			Detail: fmt.Sprintf("%s==%s: lock artifacts missing from PyPI's release or with a different sha256: %s", u.Name, u.To, ecoutil.List(bad, 10))}}, nil
+	}
+	return nil, nil
 }
 
 // pick chooses what to download for one version: the pure-Python wheel if
@@ -425,6 +514,11 @@ func (f Fetcher) fetchArtifact(ctx context.Context, env fetch.Env, dst string, a
 	}
 	return t, nil, nil
 }
+
+var sha256RE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// pkgOrigin is what must not differ between two copies of one version.
+func pkgOrigin(p Package) string { return fmt.Sprint(p.Source, p.Sdist, p.Wheels) }
 
 func human(code, update, detail string) model.Finding {
 	return model.Finding{Code: code, Route: model.RouteHuman, Update: update, Detail: detail}

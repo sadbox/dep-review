@@ -34,6 +34,15 @@ func (p Package) IsProject() bool {
 // Registry returns the registry URL, or "" for a non-registry source.
 func (p Package) Registry() string { return p.Source["registry"] }
 
+// Artifacts is the sdist (if any) and every wheel.
+func (p Package) Artifacts() []Artifact {
+	var out []Artifact
+	if p.Sdist != nil {
+		out = append(out, *p.Sdist)
+	}
+	return append(out, p.Wheels...)
+}
+
 // Lock is the part of uv.lock the gate uses.
 type Lock struct {
 	Packages []Package

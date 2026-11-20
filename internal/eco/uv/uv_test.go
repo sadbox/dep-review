@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -345,5 +346,135 @@ func TestFetchNetwork(t *testing.T) {
 	}
 	if res.Route != model.RouteReview {
 		t.Errorf("route = %s, want review", res.Route)
+	}
+}
+
+// TestEveryCopyAndArtifactValidated: duplicate [[package]] entries and
+// wheels the gate does not download are all checked.
+func TestEveryCopyAndArtifactValidated(t *testing.T) {
+	head, err := os.ReadFile("testdata/homelab/head/uv.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const resolvelib = "[[package]]\nname = \"resolvelib\"\nversion = \"1.2.1\"\n"
+	i := bytes.Index(head, []byte(resolvelib))
+	if i < 0 {
+		t.Fatal("fixture changed")
+	}
+	block := string(head[i:])
+	dup := func(edit func(string) string) []byte {
+		return append(append([]byte(nil), head...), []byte("\n"+edit(block))...)
+	}
+	tests := []struct {
+		name string
+		lock []byte
+		want string
+	}{
+		{"shadowed duplicate off PyPI", dup(func(b string) string {
+			return strings.Replace(b, "https://files.pythonhosted.org/packages/e2/23", "https://evil.example/packages/e2/23", 1)
+		}), "uv.artifact-off-registry"},
+		{"duplicates disagree", dup(func(b string) string {
+			return strings.Replace(b, "sha256:fb06b66c", "sha256:00000000", 1)
+		}), "uv.duplicate-disagrees"},
+		{"duplicate from git", dup(func(b string) string {
+			return strings.Replace(b, `source = { registry = "https://pypi.org/simple" }`, `source = { git = "https://github.com/evil/x" }`, 1)
+		}), "uv.source-off-registry"},
+		{"changed package's undownloaded sdist off PyPI", bytes.Replace(head,
+			[]byte("https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz"),
+			[]byte("https://evil.example/packaging-26.3.tar.gz"), 1), "uv.artifact-off-registry"},
+		{"unchanged version, one platform wheel moved", bytes.Replace(head,
+			[]byte("https://files.pythonhosted.org/packages/de/94/980b50a6531b3019e45ddeada0626d45fa85cbe22300844a7983285bed3b/pyyaml"),
+			[]byte("https://evil.example/pyyaml"), 1), "uv.same-version-changed"},
+		{"weak hash on a changed package's other artifact", bytes.Replace(head,
+			[]byte("sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79"), []byte("md5:0123"), 1), "uv.weak-hash"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, class := fixtureRepo(t, func(h map[string][]byte) { h["uv.lock"] = tt.lock })
+			var sum bytes.Buffer
+			_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: repo, Home: t.TempDir()}, class.BaseSHA, class.HeadSHA, "ansible", &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := tt.want
+			found := false
+			for _, f := range findings {
+				if f.Code == want {
+					found = true
+				}
+				if f.Route != model.RouteRefuse {
+					t.Errorf("%s route %s", f.Code, f.Route)
+				}
+			}
+			if !found {
+				t.Errorf("findings %+v lack %s", findings, want)
+			}
+		})
+	}
+}
+
+func TestCrossCheckPyPI(t *testing.T) {
+	b, _ := os.ReadFile("testdata/homelab/head/uv.lock")
+	l, err := ParseLock(string(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pyyaml Package
+	for _, p := range l.Packages {
+		if p.Name == "pyyaml" {
+			pyyaml = p
+		}
+	}
+	release := func(skip string, tamper string) []byte {
+		var urls []map[string]any
+		for _, a := range pyyaml.Artifacts() {
+			name := artifactName(a.URL)
+			if name == skip {
+				continue
+			}
+			h := strings.TrimPrefix(a.Hash, "sha256:")
+			if name == tamper {
+				h = strings.Repeat("0", 64)
+			}
+			urls = append(urls, map[string]any{"filename": name, "digests": map[string]string{"sha256": h}})
+		}
+		out, _ := json.Marshal(map[string]any{"urls": urls})
+		return out
+	}
+	win := artifactName(pyyaml.Wheels[len(pyyaml.Wheels)-1].URL) // never downloaded by the gate
+	tests := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"matches", release("", ""), ""},
+		{"lock has a file PyPI lacks", release(win, ""), "uv.hash-not-on-pypi"},
+		{"lock hash differs from PyPI", release("", win), "uv.hash-not-on-pypi"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/pypi/pyyaml/6.0.3/json" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Write(tt.body)
+			}))
+			defer srv.Close()
+			c := change{update: model.Update{Name: "pyyaml", From: "6.0.2", To: "6.0.3"}, head: pyyaml}
+			fs, err := Fetcher{PyPI: srv.URL}.crossCheckPyPI(context.Background(), fetch.Env{HTTP: srv.Client()}, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want == "" {
+				if len(fs) != 0 {
+					t.Errorf("findings %+v", fs)
+				}
+				return
+			}
+			if len(fs) != 1 || fs[0].Code != tt.want || fs[0].Route != model.RouteRefuse {
+				t.Errorf("findings %+v, want %s refuse", fs, tt.want)
+			}
+		})
 	}
 }
