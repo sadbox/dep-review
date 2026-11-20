@@ -141,6 +141,7 @@ func msgBody(extra string) string {
 func do(t *testing.T, method, url, body string, hdr map[string]string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(method, url, strings.NewReader(body))
+	req.Header.Set("Anthropic-Version", apiVersion)
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
@@ -201,6 +202,7 @@ func TestAbsoluteFormAndConnect(t *testing.T) {
 	// A proxy-style absolute-form request: the authority is ignored, the
 	// request goes to the configured upstream or nowhere.
 	req, _ := http.NewRequest("POST", "http://example.invalid/v1/messages", strings.NewReader(msgBody("")))
+	req.Header.Set("Anthropic-Version", apiVersion)
 	tr := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse(front.URL) }}
 	resp, err := tr.RoundTrip(req)
 	if err != nil {
@@ -228,7 +230,7 @@ func TestHeaders(t *testing.T) {
 		"X-Api-Key":           "client-key",
 		"Cookie":              "c=1",
 		"Proxy-Authorization": "Basic x",
-		"Anthropic-Beta":      "claude-code-20250219,context-management-2025-06-27",
+		"Anthropic-Beta":      "claude-code-20250219, files-api-2025-04-14,context-management-2025-06-27,mcp-client-2025-04-04",
 		"Anthropic-Version":   "2023-06-01",
 		"Anthropic-Dangerous-Direct-Browser-Access": "true",
 		"Anthropic-Workspace-Id":                    "wrkspc_other",
@@ -249,12 +251,12 @@ func TestHeaders(t *testing.T) {
 	if got := h.Get("Anthropic-Beta"); got != "claude-code-20250219,context-management-2025-06-27,"+oauthBeta {
 		t.Errorf("Anthropic-Beta = %q", got)
 	}
-	for _, k := range []string{"X-Api-Key", "Cookie", "Proxy-Authorization", "Anthropic-Dangerous-Direct-Browser-Access", "Anthropic-Workspace-Id", "X-Forwarded-For", "X-Custom"} {
+	for _, k := range []string{"X-Api-Key", "Cookie", "Proxy-Authorization", "Anthropic-Dangerous-Direct-Browser-Access", "Anthropic-Workspace-Id", "X-Forwarded-For", "X-Custom", "X-Stainless-Retry-Count"} {
 		if v := h.Values(k); len(v) > 0 {
 			t.Errorf("%s reached the upstream: %q", k, v)
 		}
 	}
-	for k, want := range map[string]string{"Anthropic-Version": "2023-06-01", "X-Stainless-Retry-Count": "0", "User-Agent": "claude-cli/2.1.329"} {
+	for k, want := range map[string]string{"Anthropic-Version": "2023-06-01", "User-Agent": "dep-review-proxy"} {
 		if h.Get(k) != want {
 			t.Errorf("%s = %q, want %q", k, h.Get(k), want)
 		}
@@ -264,6 +266,9 @@ func TestHeaders(t *testing.T) {
 	}
 	// The log has the path, status and usage; never a header or a token.
 	log := lb.String()
+	if !strings.Contains(log, "dropped anthropic-beta files-api-2025-04-14,mcp-client-2025-04-04") {
+		t.Errorf("dropped betas not logged:\n%s", log)
+	}
 	if !strings.Contains(log, "#1 POST /v1/messages 200 in=11 out=42 cache_read=7 cache_write=0") {
 		t.Errorf("usage not logged:\n%s", log)
 	}
@@ -306,9 +311,8 @@ func TestBodyChecks(t *testing.T) {
 		}
 	}
 	good := map[string]string{
-		"custom tools":  msgBody(`,"tools":[{"name":"Read","input_schema":{"type":"object"}},{"name":"X","type":"custom","input_schema":{}},{"name":"D","defer_loading":true,"input_schema":{}}]`),
-		"inline image":  `{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
-		"search result": `{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"search_result","source":"https://x.example","title":"t","content":[]}]}]}`,
+		"custom tools": msgBody(`,"tools":[{"name":"Read","input_schema":{"type":"object"}},{"name":"X","type":"custom","input_schema":{}},{"name":"D","defer_loading":true,"input_schema":{}}]`),
+		"inline image": `{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
 	}
 	for name, body := range good {
 		if st, resp := do(t, "POST", front.URL+"/v1/messages", body, nil); st != 200 {

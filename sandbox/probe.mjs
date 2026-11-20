@@ -99,7 +99,7 @@ async function http(method, url, { body, headers = {}, raw } = {}) {
     });
     s.on("connect", () => {
       const b = body === undefined ? "" : typeof body === "string" ? body : JSON.stringify(body);
-      const h = { Host: proxy, Connection: "close", "Content-Type": "application/json", "Content-Length": Buffer.byteLength(b), ...headers };
+      const h = { Host: proxy, Connection: "close", "Content-Type": "application/json", "Anthropic-Version": "2023-06-01", "Content-Length": Buffer.byteLength(b), ...headers };
       s.write(raw || `${method} ${url} HTTP/1.1\r\n${Object.entries(h).map(([k, v]) => `${k}: ${v}`).join("\r\n")}\r\n\r\n${b}`);
     });
   });
@@ -162,6 +162,8 @@ for (const u of opt("--deny-http")) {
     ["POST", "/v1/messages", msg({ mcp_servers: [{ type: "url", url: "https://example.com/mcp", name: "x" }] })],
     ["POST", "/v1/messages", msg({ messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "https://example.com/x.png" } }] }] })],
     ["POST", "/v1/messages", msg({ messages: [{ role: "user", content: [{ type: "document", source: { type: "file", file_id: "file_x" } }] }] })],
+    ["POST", "/v1/messages", msg({ frobnicate: true })],
+    ["POST", "/v1/messages", `{"model":"${model}","max_tokens":1,"messages":[],"tools":[],"tools":[{"type":"web_fetch_20250910","name":"web_fetch"}]}`],
   ];
   for (const [m, p, b] of refused) {
     const r = await http(m, p, { body: b });

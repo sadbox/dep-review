@@ -19,6 +19,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,7 @@ type Server struct {
 	Verdict        json.RawMessage // StructuredOutput input the script returns
 	TokenTTL       time.Duration   // default 10 minutes
 	Logf           func(string, ...any)
+	RecordDir      string // if set, every Messages request body is written here
 
 	mu       sync.Mutex
 	jwts     int
@@ -196,9 +199,18 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		Stream   bool      `json:"stream"`
 		Messages []message `json:"messages"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(&req); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil || json.Unmarshal(raw, &req) != nil {
 		s.fail(w, http.StatusBadRequest, "messages: body")
 		return
+	}
+	if s.RecordDir != "" {
+		s.mu.Lock()
+		n := s.Stats.Messages + 1
+		s.mu.Unlock()
+		os.WriteFile(filepath.Join(s.RecordDir, fmt.Sprintf("messages-%03d.json", n)), raw, 0o644)
+		h, _ := json.Marshal(map[string][]string{"Anthropic-Beta": r.Header.Values("Anthropic-Beta"), "Anthropic-Version": r.Header.Values("Anthropic-Version"), "Accept": r.Header.Values("Accept"), "Content-Type": r.Header.Values("Content-Type")})
+		os.WriteFile(filepath.Join(s.RecordDir, fmt.Sprintf("messages-%03d.headers.json", n)), h, 0o644)
 	}
 	if req.Model != s.Model {
 		s.fail(w, http.StatusBadRequest, "messages: model "+req.Model)

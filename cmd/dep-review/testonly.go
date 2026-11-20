@@ -27,6 +27,7 @@ func init() {
 	extraCommands["fake-anthropic"] = runFakeAnthropic
 	reviewTestFlags = func(fs *flag.FlagSet) func(*sandbox.Config) error {
 		fake := fs.String("test-fake-upstream", "", "TEST ONLY: run the fake upstream with this verdict JSON file")
+		record := fs.String("test-fake-record", "", "TEST ONLY: directory where the fake upstream records request bodies")
 		probe := fs.String("test-probe", "", "TEST ONLY: run this probe script (node) instead of claude")
 		gateBin := fs.String("test-gate-binary", "", "TEST ONLY: linux dep-review binary for the containers (default: this one)")
 		runtime := fs.String("test-runtime", "", "TEST ONLY: container runtime instead of runsc (local runs without gVisor)")
@@ -54,6 +55,15 @@ func init() {
 					"fake-anthropic", "--listen", ":9000", "--verdict", "/verdict.json",
 					"--model", c.Model, "--federation-rule-id", c.Federation.RuleID, "--organization-id", c.Federation.OrganizationID,
 				}})
+				if *record != "" {
+					r, err := filepath.Abs(*record)
+					if err != nil {
+						return err
+					}
+					sc := &c.EgressSidecars[len(c.EgressSidecars)-1]
+					sc.Args = append(sc.Args[:len(sc.Args):len(sc.Args)], "--record", "/record")
+					sc.Args = append([]string{"--mount", "type=bind,src=" + r + ",dst=/record"}, sc.Args...)
+				}
 				c.ProxyExtraArgs = append(c.ProxyExtraArgs, "--test-upstream", "http://"+fakeName+":9000")
 				// The docker CLI hands these to the proxy container by name.
 				os.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "http://"+fakeName+":9000/oidc/token?api-version=2.0")
@@ -86,6 +96,7 @@ func runFakeAnthropic(args []string) error {
 	rule := fs.String("federation-rule-id", "", "expected rule")
 	org := fs.String("organization-id", "", "expected organization")
 	ttl := fs.Duration("token-ttl", 10*time.Minute, "minted token lifetime")
+	record := fs.String("record", "", "directory to record Messages request bodies in")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -96,7 +107,7 @@ func runFakeAnthropic(args []string) error {
 	if !json.Valid(v) {
 		return errors.New("fake-anthropic: verdict is not JSON")
 	}
-	s := &fakeanthropic.Server{Model: *model, RuleID: *rule, OrganizationID: *org, Verdict: v, TokenTTL: *ttl,
+	s := &fakeanthropic.Server{Model: *model, RuleID: *rule, OrganizationID: *org, Verdict: v, TokenTTL: *ttl, RecordDir: *record,
 		Logf: log.New(os.Stderr, "", log.LUTC|log.Ltime).Printf}
 	log.Printf("fake-anthropic: listening on %s", *listen)
 	return http.ListenAndServe(*listen, s.Handler())

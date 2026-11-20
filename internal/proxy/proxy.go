@@ -5,12 +5,13 @@
 // process that sees the job's OIDC request token.
 //
 // Per request it: allows only POST /v1/messages (optionally ?beta=true,
-// which the Claude Code CLI appends); rejects any model but the gate's and
-// any body feature that would make Anthropic reach the network for the
-// caller (see checkBody); drops every client header except a short
-// allowlist, so whatever auth the client sends never leaves; injects its
-// own bearer token; counts requests against a per-run cap; and logs the
-// path, status and token usage, never headers or bodies.
+// which the Claude Code CLI appends); allows only bodies built from an
+// allowlist of fields, client tools and content blocks, with no duplicate
+// keys, for the gate's model alone (see checkBody); forwards only three
+// request headers and the allowlisted betas, so whatever auth the client
+// sends never leaves; injects its own bearer token; counts requests against
+// a per-run cap; and logs the path, status and token usage, never headers
+// or bodies. Refusals are 403 (413 for an oversized body), reason logged.
 package proxy
 
 import (
@@ -116,6 +117,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.refuse(w, http.StatusForbidden, "permission_error", "POST /v1/messages", err.Error())
 		return
 	}
+	if v := r.Header.Values("Anthropic-Version"); len(v) != 1 || v[0] != apiVersion {
+		p.refuse(w, http.StatusForbidden, "permission_error", "POST /v1/messages", "anthropic-version must be "+apiVersion)
+		return
+	}
+	if _, drop := filterBetas(r.Header); len(drop) > 0 {
+		for i, b := range drop {
+			drop[i] = safeToken(b)
+		}
+		p.logf("dropped anthropic-beta %s", strings.Join(drop, ","))
+	}
 	n := p.n.Add(1)
 	if n > p.cfg.MaxRequests {
 		p.refuse(w, http.StatusForbidden, "permission_error", "POST /v1/messages", fmt.Sprintf("request cap of %d reached", p.cfg.MaxRequests))
@@ -133,11 +144,46 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.rp.ServeHTTP(w, r)
 }
 
-// Request headers that may pass through. Everything else, including any
-// Authorization, X-Api-Key, Cookie or proxy header the client sends, is
-// dropped; Accept-Encoding too, so the transport negotiates gzip itself
-// and the usage reader sees plain text.
-var passHeaders = []string{"Accept", "Anthropic-Beta", "Anthropic-Version", "Content-Type", "User-Agent", "X-App", "X-Claude-Code-Session-Id"}
+// Request headers. Only these three pass, by value; Anthropic-Beta is
+// rebuilt from the allowlist below. Everything else, including any
+// Authorization, X-Api-Key, Cookie, proxy or workspace header the client
+// sends, is dropped; Accept-Encoding too, so the transport negotiates gzip
+// itself and the usage reader sees plain text.
+var passHeaders = []string{"Accept", "Anthropic-Version", "Content-Type"}
+
+// The anthropic-version and betas the pinned CLI (2.1.329) sends. A beta
+// can switch on API features, so any other is dropped (and logged).
+const apiVersion = "2023-06-01"
+
+var allowedBetas = set(
+	"claude-code-20250219",
+	"interleaved-thinking-2025-05-14",
+	"context-management-2025-06-27",
+	"per-turn-control-2026-07-01",
+	"mid-conversation-tool-changes-2026-07-01",
+	"thinking-token-count-2026-05-13",
+	"effort-2025-11-24",
+)
+
+// filterBetas returns the allowed betas, in order, and the dropped ones.
+func filterBetas(h http.Header) (keep, drop []string) {
+	seen := map[string]bool{}
+	for _, v := range h.Values("Anthropic-Beta") {
+		for _, b := range strings.Split(v, ",") {
+			b = strings.TrimSpace(b)
+			if b == "" || seen[b] {
+				continue
+			}
+			seen[b] = true
+			if allowedBetas[b] {
+				keep = append(keep, b)
+			} else {
+				drop = append(drop, b)
+			}
+		}
+	}
+	return keep, drop
+}
 
 func (p *Proxy) rewrite(pr *httputil.ProxyRequest) {
 	in := pr.In.Header
@@ -147,11 +193,10 @@ func (p *Proxy) rewrite(pr *httputil.ProxyRequest) {
 			out[h] = append([]string(nil), v...)
 		}
 	}
-	for k, v := range in {
-		if strings.HasPrefix(k, "X-Stainless-") {
-			out[k] = append([]string(nil), v...)
-		}
+	if keep, _ := filterBetas(in); len(keep) > 0 {
+		out.Set("Anthropic-Beta", strings.Join(keep, ","))
 	}
+	out.Set("User-Agent", "dep-review-proxy")
 	pr.Out.Header = out
 	pr.SetURL(p.cfg.Upstream)
 	pr.Out.Host = p.cfg.Upstream.Host
