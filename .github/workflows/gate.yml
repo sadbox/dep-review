@@ -64,6 +64,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      gate_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - name: Check out the gate (this workflow's own commit)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,6 +89,15 @@ jobs:
           cp gate/prompts/review.md gate/schema/verdict.json gate/go.mod "$RUNNER_TEMP/bin/"
           mkdir "$RUNNER_TEMP/bin/sandbox"
           cp gate/sandbox/Dockerfile gate/sandbox/package.json gate/sandbox/package-lock.json gate/sandbox/install-gvisor.sh "$RUNNER_TEMP/bin/sandbox/"
+      - name: Checksum the gate's files
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gate-bin
@@ -108,13 +119,22 @@ jobs:
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          chmod +x dep-review
       - name: Classify
         id: classify
         env:
           GH_TOKEN: ${{ github.token }}
           TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
           "$RUNNER_TEMP/bin/dep-review" classify \
             --event "$GITHUB_EVENT_PATH" \
             --trigger-path "$TRIGGER_PATH" \
@@ -140,6 +160,16 @@ jobs:
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          chmod +x dep-review
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: classification
@@ -165,7 +195,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
           "$RUNNER_TEMP/bin/dep-review" fetch \
             --classification "$RUNNER_TEMP/in/classification.json" \
             --repo-dir pr \
@@ -193,6 +222,16 @@ jobs:
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          chmod +x dep-review
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: evidence
@@ -215,7 +254,6 @@ jobs:
         env:
           NOTES_PATH: ${{ inputs.notes_path }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
           "$RUNNER_TEMP/bin/dep-review" review-prep \
             --prompt "$RUNNER_TEMP/bin/review.md" \
             --schema "$RUNNER_TEMP/bin/verdict.json" \
@@ -270,6 +308,16 @@ jobs:
         with:
           path: ${{ runner.temp }}/in
           pattern: "{gate-bin,classification,evidence,verdict}"
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/in/gate-bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          chmod +x dep-review
       - name: Gate app token (this repository only)
         id: app
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
@@ -293,7 +341,6 @@ jobs:
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
-          chmod +x "$RUNNER_TEMP/in/gate-bin/dep-review"
           "$RUNNER_TEMP/in/gate-bin/dep-review" publish \
             --in "$RUNNER_TEMP/in" \
             --fetch-result "$FETCH_RESULT" \
@@ -311,6 +358,16 @@ jobs:
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          chmod +x dep-review
       - name: Gate app token (this repository only)
         id: app
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
@@ -332,5 +389,4 @@ jobs:
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
           "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY"
