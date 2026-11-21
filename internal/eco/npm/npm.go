@@ -136,6 +136,11 @@ func readAt(ctx context.Context, git ecoutil.Git, sha, p string) ([]byte, error)
 	return b, err
 }
 
+// errMultipleLocks: the directory has more than one lockfile. dirChanges
+// refuses when the PR changes any of them, since the gate cannot know which
+// one CI installs; with only package.json changed a person decides.
+var errMultipleLocks = errors.New("more than one lockfile")
+
 var lockNames = []string{"npm-shrinkwrap.json", "package-lock.json", "yarn.lock"}
 
 // loadLock parses the directory's lockfile. With more than one lockfile
@@ -154,7 +159,7 @@ func loadLock(ctx context.Context, git ecoutil.Git, sha, dir string) (*Lock, err
 		}
 	}
 	if len(present) > 1 {
-		return nil, ambiguous("more than one lockfile (%s); which one CI installs from is unknown", strings.Join(present, ", "))
+		return nil, fmt.Errorf("%w (%s); which one CI installs from is unknown", errMultipleLocks, strings.Join(present, ", "))
 	}
 	for _, name := range present {
 		b, err := readAt(ctx, git, sha, path.Join(dir, name))
@@ -201,6 +206,18 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			var exit interface{ ExitCode() int }
 			if errors.As(e, &exit) {
 				return nil, nil, e // git itself failed
+			}
+			if errors.Is(e, errMultipleLocks) {
+				changed, err := locksChanged(ctx, git, base, head, dir)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !changed {
+					findings = append(findings, human("npm.multiple-lockfiles", "", depDir+": "+e.Error()+"; only package.json changed"))
+					return nil, findings, nil
+				}
+				findings = append(findings, model.Finding{Code: "npm.lockfile-ambiguous", Route: model.RouteRefuse, Detail: depDir + ": " + e.Error() + ", and the PR changes one"})
+				return nil, findings, nil
 			}
 			if isAmbiguous(e) {
 				findings = append(findings, model.Finding{Code: "npm.lockfile-ambiguous", Route: model.RouteRefuse, Detail: depDir + ": " + e.Error()})
@@ -587,4 +604,23 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 
 func human(code, update, detail string) model.Finding {
 	return model.Finding{Code: code, Route: model.RouteHuman, Update: update, Detail: detail}
+}
+
+// locksChanged reports whether any lockfile in dir differs between base
+// and head (added, removed or edited).
+func locksChanged(ctx context.Context, git ecoutil.Git, base, head, dir string) (bool, error) {
+	for _, name := range lockNames {
+		b, err := readAt(ctx, git, base, path.Join(dir, name))
+		if err != nil {
+			return false, err
+		}
+		h, err := readAt(ctx, git, head, path.Join(dir, name))
+		if err != nil {
+			return false, err
+		}
+		if (b == nil) != (h == nil) || !bytes.Equal(b, h) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
