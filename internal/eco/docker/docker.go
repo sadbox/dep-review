@@ -64,6 +64,7 @@ const (
 	codeOtherPlatforms        = "docker.unbuilt-platforms-changed"
 	codeOSVUnavailable        = "docker.osv-unavailable"
 	codePlatformAmbiguous     = "docker.platform-ambiguous"
+	codeStagePlatformArg      = "docker.stage-platform-arg"
 )
 
 // maxDownload bounds the bytes one Fetch pulls from registries.
@@ -237,6 +238,11 @@ func run(ctx context.Context, env fetch.Env, src source, a *analyzer) (fetch.Res
 				return res, fmt.Errorf("%s:%d %s: %w", f, ch.Line, ch.New, err)
 			}
 			u.Notes = append(u.Notes, platformNotes(pi, ch.Stage)...)
+			if len(a.platforms) > 0 && platformFromArg(ch.Stage.Platform) {
+				// The declared set only covers what the build pulls if
+				// the stage's platform is one of them; an ARG can name any.
+				u.find(model.RouteHuman, codeStagePlatformArg, "%s:%d: FROM --platform=%s comes from a build argument, so docker_platforms does not say which platform this stage pulls", f, ch.Line, sanitize(ch.Stage.Platform))
+			}
 			results = append(results, u)
 			seen[key] = u
 			if err := ew.write(len(results), u, stages, newBody); err != nil {
@@ -250,6 +256,19 @@ func run(ctx context.Context, env fetch.Env, src source, a *analyzer) (fetch.Res
 	}
 	sort.SliceStable(res.Findings, func(i, j int) bool { return res.Findings[i].Code < res.Findings[j].Code })
 	return res, nil
+}
+
+// platformFromArg reports a FROM --platform value that uses a variable
+// other than BuildKit's own $BUILDPLATFORM / $TARGETPLATFORM.
+func platformFromArg(flag string) bool {
+	if !strings.Contains(flag, "$") {
+		return false
+	}
+	switch strings.TrimSpace(flag) {
+	case "$BUILDPLATFORM", "${BUILDPLATFORM}", "$TARGETPLATFORM", "${TARGETPLATFORM}":
+		return false
+	}
+	return true
 }
 
 func platformNotes(pi platformInfo, st stage) []string {

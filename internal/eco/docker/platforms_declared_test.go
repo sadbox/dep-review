@@ -2,10 +2,13 @@ package docker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/policy"
 )
@@ -115,5 +118,48 @@ func TestDeclaredPlatforms(t *testing.T) {
 	// A declared platform the index lacks needs a person.
 	if u, r := run(f.index(repo, amd), f.index(repo, amd), declared); u.Update.NoOp || r != model.RouteHuman || !strings.Contains(codes(u.Findings), codePlatformMissing) {
 		t.Errorf("arm64 missing: NoOp=%v route=%s %s", u.Update.NoOp, r, codes(u.Findings))
+	}
+}
+
+// Re-review R2: with docker_platforms, a stage whose platform comes from a
+// build argument may pull a platform outside the declared set.
+func TestDeclaredPlatformsStageArg(t *testing.T) {
+	wf, err := os.ReadFile("testdata/cases/golang-digest-noop/head/.github/workflows/publish.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		flag  string
+		human bool
+	}{
+		{"$P", true},
+		{"${TARGETOS}/${TARGETARCH}", true},
+		{"linux/$ARCH", true},
+		{"$BUILDPLATFORM", false},
+		{"${TARGETPLATFORM}", false},
+		{"linux/amd64", false},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			root := t.TempDir()
+			for side, dg := range map[string]string{"base": dgA, "head": dgB} {
+				df := "ARG P=linux/riscv64\nFROM --platform=" + tc.flag + " golang:1.27@" + dg + " AS b\nRUN true\n"
+				os.MkdirAll(filepath.Join(root, side, ".github", "workflows"), 0o755)
+				os.WriteFile(filepath.Join(root, side, "Dockerfile"), []byte(df), 0o644)
+				os.WriteFile(filepath.Join(root, side, ".github", "workflows", "publish.yaml"), wf, 0o644)
+			}
+			cl := model.Classification{Repo: "example/app", BaseSHA: "base", HeadSHA: "head", Files: []string{"Dockerfile"}, Ecosystem: model.Docker, Kind: model.KindDependabot}
+			src := dirSource{root: root, base: "base", head: "head", files: cl.Files}
+			f := newFakeRegistry(t)
+			a := f.analyzer(nil)
+			a.platforms = []string{"linux/amd64", "linux/arm64"}
+			res, err := run(context.Background(), fetch.Env{Class: cl, Evidence: newMemWriter()}, src, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Contains(codes(res.Findings), codeStagePlatformArg+"=human")
+			if got != tc.human {
+				t.Errorf("findings %s; want %s: %v", codes(res.Findings), codeStagePlatformArg, tc.human)
+			}
+		})
 	}
 }
