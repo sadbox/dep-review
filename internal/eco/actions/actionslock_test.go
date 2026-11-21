@@ -380,6 +380,13 @@ func TestParseActionsLockRefuses(t *testing.T) {
 	}
 }
 
+// helperBump is synthBumped with acme/act 1.0.1 using acme/helper 2.0.1
+// (recorded with repo_id), while ci.yml keeps its own acme/helper 2.0.0.
+func helperBump(repoID string) string {
+	s := strings.Replace(synthBumped(), "uses:\n            - 'acme/helper@v2.0.0'\n", "uses:\n            - 'acme/helper@v2.0.1'\n", 1)
+	return strings.Replace(s, "    'other/tool@v3.0.0':\n", "    'acme/helper@v2.0.1':\n        ref: 'v2.0.1'\n        commit: 'sha1-8888888888888888888888888888888888888888'\n        owner_id: 1\n        repo_id: "+repoID+"\n    'other/tool@v3.0.0':\n", 1)
+}
+
 func TestActionsLockDelta(t *testing.T) {
 	const lp = ".github/workflows/actions.lock"
 	const wfp = ".github/workflows/ci.yml"
@@ -395,20 +402,26 @@ func TestActionsLockDelta(t *testing.T) {
 			before: map[string]string{lp: synthLock, wfp: strings.Replace(synthWorkflow("v1.0.0"), "uses: acme/act@", "uses: Acme/Act@", 1)},
 			after:  map[string]string{lp: synthBumped(), wfp: strings.Replace(synthWorkflow("v1.0.1"), "uses: acme/act@", "uses: Acme/Act@", 1)}},
 		{name: "uses and lockfile disagree", after: map[string]string{lp: synthBumped(), wfp: synthWorkflow("v1.0.2")},
-			codes: map[string]model.Route{"actions.lock-uses-mismatch": model.RouteRefuse, "actions.lock-unexplained-change": model.RouteHuman}},
+			codes: map[string]model.Route{"actions.lock-uses-mismatch": model.RouteRefuse, "actions.lock-unexplained-change": model.RouteHuman, "actions.lock-step-unlocked": model.RouteHuman}},
 		{name: "lockfile not updated", after: map[string]string{lp: synthLock, wfp: synthWorkflow("v1.0.1")},
 			codes: map[string]model.Route{"actions.lock-not-updated": model.RouteRefuse}},
 		{name: "lockfile only", after: map[string]string{lp: synthBumped(), wfp: synthWorkflow("v1.0.0")},
 			codes: map[string]model.Route{"actions.lock-unexpected-change": model.RouteRefuse}},
 		{name: "unrelated entry moves", after: map[string]string{lp: strings.Replace(synthBumped(), "sha1-3333333333333333333333333333333333333333", "sha1-6666666666666666666666666666666666666666", 1), wfp: synthWorkflow("v1.0.1")},
-			codes: map[string]model.Route{"actions.lock-unexplained-change": model.RouteHuman}},
+			codes: map[string]model.Route{"actions.lock-entry-moved": model.RouteHuman}},
 		{name: "unrelated entry added", after: map[string]string{lp: strings.Replace(synthBumped(), "    'other/tool@v3.0.0':\n", "    'other/new@v1.0.0':\n        ref: 'v1.0.0'\n        commit: 'sha1-7777777777777777777777777777777777777777'\n        owner_id: 4\n        repo_id: 9\n    'other/tool@v3.0.0':\n", 1), wfp: synthWorkflow("v1.0.1")},
 			codes: map[string]model.Route{"actions.lock-unexplained-change": model.RouteHuman}},
-		// A transitive entry at a new commit is a pair Fetch analyzes.
+		// A bumped composite moving to another tag of its transitive
+		// action is a pair Fetch analyzes.
+		{name: "transitive bump", after: map[string]string{lp: helperBump("3"), wfp: synthWorkflow("v1.0.1")},
+			pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.1"}},
+		{name: "transitive bump to another repository's IDs", after: map[string]string{lp: helperBump("30"), wfp: synthWorkflow("v1.0.1")},
+			codes: map[string]model.Route{"actions.lock-identity-changed": model.RouteHuman}, pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.1"}},
+		// The same key at another commit is a moved tag, not a bump: it
+		// moves every step that uses it (here ci.yml's own, unbumped
+		// acme/helper@v2.0.0), so it is never a pair.
 		{name: "transitive entry moves", after: map[string]string{lp: strings.Replace(synthBumped(), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), wfp: synthWorkflow("v1.0.1")},
-			pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.0"}},
-		{name: "transitive entry moves to another repository's IDs", after: map[string]string{lp: strings.Replace(strings.Replace(synthBumped(), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), "        repo_id: 3\n", "        repo_id: 30\n", 1), wfp: synthWorkflow("v1.0.1")},
-			codes: map[string]model.Route{"actions.lock-identity-changed": model.RouteHuman}, pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.0"}},
+			codes: map[string]model.Route{"actions.lock-entry-moved": model.RouteHuman}},
 		// A pin the bumped entry dropped, or a pair's old key, explains only
 		// its own removal: if it stays in the lockfile at another commit,
 		// that change is not analyzed and must not be accepted.
@@ -488,5 +501,83 @@ func TestActionsLockSkipsJobLevelUses(t *testing.T) {
 	}
 	if len(all) != 1 || !all[0].job || all[0].lock != nil {
 		t.Errorf("changes %+v", all)
+	}
+}
+
+// A key the base locked at one commit and the head at another is a moved
+// tag, even when a bump's transitive pair names it: (a) the shared key
+// that ci.yml pins directly and acme/act's composite uses; (b) the pair's
+// new key, which ci.yml already pinned directly at another commit.
+func TestActionsLockDeltaMovedSharedKey(t *testing.T) {
+	const lp = ".github/workflows/actions.lock"
+	const wfp = ".github/workflows/ci.yml"
+	h201 := "    'acme/helper@v2.0.1':\n        ref: 'v2.0.1'\n        commit: 'sha1-%s'\n        owner_id: 1\n        repo_id: 3\n"
+	wfB := strings.Replace(synthWF, "      - uses: other/tool@v3.0.0\n", "      - uses: acme/helper@v2.0.1\n      - uses: other/tool@v3.0.0\n", 1)
+	lockB := func(s, sha string) string {
+		s = strings.Replace(s, "        - 'acme/helper@v2.0.0'\n", "        - 'acme/helper@v2.0.0'\n        - 'acme/helper@v2.0.1'\n", 1)
+		return strings.Replace(s, "    'other/tool@v3.0.0':\n", strings.Replace(h201, "%s", sha, 1)+"    'other/tool@v3.0.0':\n", 1)
+	}
+	cases := []struct {
+		name          string
+		before, after map[string]string
+	}{
+		{"shared key moves",
+			map[string]string{lp: synthLock, wfp: synthWorkflow("v1.0.0")},
+			map[string]string{lp: strings.Replace(synthBumped(), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), wfp: synthWorkflow("v1.0.1")}},
+		{"pair's new key pre-existed at another commit",
+			map[string]string{lp: lockB(synthLock, "9999999999999999999999999999999999999999"), wfp: strings.Replace(wfB, "%s", "v1.0.0", 1)},
+			map[string]string{lp: strings.Replace(lockB(synthBumped(), "8888888888888888888888888888888888888888"), "uses:\n            - 'acme/helper@v2.0.0'\n", "uses:\n            - 'acme/helper@v2.0.1'\n", 1), wfp: strings.Replace(wfB, "%s", "v1.0.1", 1)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, _, _ := lockRunMax(t, tc.before, tc.after, 8)
+			if got, lines := codesOf(fs); got["actions.lock-entry-moved"] != model.RouteHuman {
+				t.Errorf("findings %v: a key now resolving to another commit was not flagged\n%s", got, lines)
+			}
+		})
+	}
+}
+
+// ci.yml keeps its own step `uses: acme/helper@v2.0.0`, but the head
+// lockfile drops that key (the old key of a transitive pair) from ci.yml's
+// list and from dependencies: the step is no longer locked.
+func TestActionsLockDeltaUnbumpedStepLosesEntry(t *testing.T) {
+	const lp = ".github/workflows/actions.lock"
+	const wfp = ".github/workflows/ci.yml"
+	after := synthBumped()
+	after = strings.Replace(after, "        - 'acme/helper@v2.0.0'\n", "        - 'acme/helper@v2.0.1'\n", 1)
+	after = strings.Replace(after, "uses:\n            - 'acme/helper@v2.0.0'\n", "uses:\n            - 'acme/helper@v2.0.1'\n", 1)
+	after = strings.Replace(after, "    'acme/helper@v2.0.0':\n        ref: 'v2.0.0'\n        commit: 'sha1-2222222222222222222222222222222222222222'\n",
+		"    'acme/helper@v2.0.1':\n        ref: 'v2.0.1'\n        commit: 'sha1-8888888888888888888888888888888888888888'\n", 1)
+	fs, _, _ := lockRunMax(t, map[string]string{lp: synthLock, wfp: synthWorkflow("v1.0.0")}, map[string]string{lp: after, wfp: synthWorkflow("v1.0.1")}, 8)
+	if got, lines := codesOf(fs); got["actions.lock-step-unlocked"] != model.RouteHuman {
+		t.Errorf("findings %v: an unbumped step lost its lock entry unflagged\n%s", got, lines)
+	}
+}
+
+// A pair's old key dropped from an unbumped workflow's list: only the
+// bumped workflows' lists may lose a pair's old key.
+func TestActionsLockDeltaUnbumpedWorkflowList(t *testing.T) {
+	mk := func(act, actRef, helper, helperRef, b string) string {
+		return "version: 'v0.0.3'\nworkflows:\n    '.github/workflows/a.yml':\n        - 'acme/act@" + actRef + "'\n    '.github/workflows/b.yml':" + b + "\n" +
+			"dependencies:\n    'acme/act@" + actRef + "':\n        ref: '" + actRef + "'\n        commit: 'sha1-" + act + "'\n        owner_id: 1\n        repo_id: 2\n        uses:\n            - 'acme/helper@" + helperRef + "'\n" +
+			"    'acme/helper@" + helperRef + "':\n        ref: '" + helperRef + "'\n        commit: 'sha1-" + helper + "'\n        owner_id: 1\n        repo_id: 3\n"
+	}
+	old, err := parseActionsLock([]byte(mk(strings.Repeat("1", 40), "v1.0.0", strings.Repeat("2", 40), "v2.0.0", "\n        - 'acme/helper@v2.0.0'")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	new, err := parseActionsLock([]byte(mk(strings.Repeat("3", 40), "v1.0.1", strings.Repeat("4", 40), "v2.0.1", " []")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bumps := []lockBump{{workflow: ".github/workflows/a.yml", oldKey: "acme/act@v1.0.0", newKey: "acme/act@v1.0.1"}}
+	_, wk, _ := transitiveWalk(old, new, bumps)
+	var codes []string
+	for _, f := range lockDelta(old, new, bumps, wk) {
+		codes = append(codes, string(f.route)+" "+f.code+": "+f.detail)
+	}
+	if !strings.Contains(strings.Join(codes, "\n"), "human actions.lock-transitive-changed: .github/workflows/b.yml") {
+		t.Errorf("b.yml lost acme/helper@v2.0.0 unflagged:\n%s", strings.Join(codes, "\n"))
 	}
 }

@@ -337,6 +337,15 @@ func TestFetchScenarios(t *testing.T) {
 			caller: func(old, new string) (map[string]string, map[string]string) {
 				return lockedCaller("v1.0.0", old, "v1.0.1", new, lockIDs)
 			}},
+		{name: "locked old tag moved", want: model.RouteHuman, codes: []string{"actions.lock-old-tag-moved"},
+			api: func(r map[string]any, old, new string) {
+				r["repos/acme/act/git/matching-refs/tags/v"] = []obj{
+					{"ref": "refs/tags/v1.0.0", "object": obj{"sha": "abababababababababababababababababababab", "type": "commit"}},
+					{"ref": "refs/tags/v1.0.1", "object": obj{"sha": new, "type": "commit"}}}
+			},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				return lockedCaller("v1.0.0", old, "v1.0.1", new, lockIDs)
+			}},
 		{name: "locked annotated tag", want: model.RouteReview, notCodes: []string{"actions.lock-tag-mismatch"},
 			api: func(r map[string]any, old, new string) {
 				r["repos/acme/act/git/matching-refs/tags/v"] = []obj{

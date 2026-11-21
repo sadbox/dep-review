@@ -574,7 +574,7 @@ func lockDelta(old, new *lockFile, bumps []lockBump, wk *walkKeys) []lockFinding
 		nl := new.workflows[wf]
 		for _, k := range setMinus(nl, ol) {
 			switch {
-			case bumpHas(byWF[wf], func(b lockBump) bool { return b.newKey == k }), listAdd(k):
+			case bumpHas(byWF[wf], func(b lockBump) bool { return b.newKey == k }), len(byWF[wf]) > 0 && listAdd(k):
 			case transitive(k):
 				add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(k), "%s: transitive pin %s added to the workflow's list", safePath(wf), k)
 			default:
@@ -583,7 +583,7 @@ func lockDelta(old, new *lockFile, bumps []lockBump, wk *walkKeys) []lockFinding
 		}
 		for _, k := range setMinus(ol, nl) {
 			switch {
-			case bumpHas(byWF[wf], func(b lockBump) bool { return b.oldKey == k }), gone(k):
+			case bumpHas(byWF[wf], func(b lockBump) bool { return b.oldKey == k }), len(byWF[wf]) > 0 && gone(k):
 			case transitive(k):
 				add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(k), "%s: transitive pin %s dropped from the workflow's list", safePath(wf), k)
 			default:
@@ -597,13 +597,14 @@ func lockDelta(old, new *lockFile, bumps []lockBump, wk *walkKeys) []lockFinding
 		ne, oe := new.deps[k], old.deps[k]
 		switch {
 		case oe != nil && oe.equal(ne):
-		case analyzedNew(k) && !newKeys[k]:
+		case oe != nil && oe.commit != ne.commit:
+			// The same key now resolves elsewhere (a moved tag): whatever
+			// else uses that key, an unbumped step included, now runs other
+			// code. No pair explains that.
+			add(model.RouteHuman, "actions.lock-entry-moved", nameOf(k), "the entry for %s changed (commit %s -> %s): the same ref now resolves elsewhere", k, short(oe.commit), short(ne.commit))
 		case oe != nil:
-			if newKeys[k] || transitive(k) {
-				add(model.RouteHuman, "actions.lock-entry-moved", nameOf(k), "the entry for %s changed (commit %s -> %s): the same ref now resolves elsewhere", k, short(oe.commit), short(ne.commit))
-			} else {
-				add(model.RouteHuman, "actions.lock-unexplained-change", nameOf(k), "the entry for %s changed, but no bumped action uses it", k)
-			}
+			add(model.RouteHuman, "actions.lock-unexplained-change", nameOf(k), "the entry for %s changed at the same commit", k)
+		case analyzedNew(k) && !newKeys[k]:
 		case newKeys[k]:
 		case transitive(k):
 			add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(k), "transitive pin %s added (%s), and the gate did not analyze it as a transitive pair", k, short(ne.commit))
@@ -757,6 +758,10 @@ func transitiveWalk(old, new *lockFile, bumps []lockBump) ([]*transPair, *walkKe
 			default:
 				ok, nk := olds[0], news[0]
 				o2, n2 := old.deps[ok], new.deps[nk]
+				if ok == nk && o2.commit != n2.commit {
+					// A moved tag, not a bump: lockDelta reports it.
+					continue
+				}
 				if ok == nk && o2.equal(n2) {
 					if !seen[[2]string{ok, nk}] {
 						seen[[2]string{ok, nk}] = true
@@ -791,6 +796,38 @@ func transitiveWalk(old, new *lockFile, bumps []lockBump) ([]*transPair, *walkKe
 // that the base locked identically. A nil pairNew means no walk.
 type walkKeys struct {
 	pairNew, pairOld, dropped, kept map[string]bool
+}
+
+// unlockedSteps returns the lockfile keys of the step-level uses: lines of
+// workflow wf that lf does not lock for it (not in its list, or no
+// entry). ok is false when the text is not something the line scanner
+// reads reliably.
+func unlockedSteps(wf, text string, lf *lockFile) (missing []string, ok bool) {
+	if checkYAMLText(text) != nil {
+		return nil, false
+	}
+	lines := splitLines(strings.ReplaceAll(text, "\r\n", "\n"))
+	for i, l := range lines {
+		u, isUses := parseUsesLine(l)
+		if !isUses {
+			continue
+		}
+		p := yamlPath(lines, i)
+		if !usesContext(kindWorkflow, p) || len(p) != 5 {
+			continue // job-level reusable workflow: not locked
+		}
+		owner, repo, _, err := splitAction(u.action)
+		if err != nil {
+			continue // docker:// or a local action
+		}
+		k := pinKey(owner, repo, u.ref)
+		if lf.deps[k] == nil || !contains(lf.workflows[wf], k) {
+			if !contains(missing, k) {
+				missing = append(missing, k)
+			}
+		}
+	}
+	return missing, true
 }
 
 // checkActionsLock reads actions.lock at both commits. Without one on
@@ -896,6 +933,25 @@ func checkActionsLock(ctx context.Context, caller git, env fetch.Env, base, head
 		}
 		for _, x := range lockDelta(oldLock, newLock, bumps, wk) {
 			fs.add(x.route, x.code, x.update, "%s", x.detail)
+		}
+		// Every locked step at head must still have its entry, bumped
+		// workflow or not.
+		for _, wf := range sortedMapKeys(newLock.workflows) {
+			text, err := caller.show(ctx, head, wf)
+			if errors.Is(err, errMissing) {
+				continue // a deleted workflow is refused as actions.unexpected-file
+			}
+			if err != nil {
+				return nil, fmt.Errorf("reading %s at head: %w", wf, err)
+			}
+			missing, ok := unlockedSteps(wf, string(text), newLock)
+			if !ok {
+				fs.add(model.RouteHuman, "actions.lock-step-unlocked", "", "%s: the gate could not read its uses: lines to check them against %s", safePath(wf), actionsLockPath)
+			}
+			for _, k := range missing {
+				n, _, _ := splitPin(k)
+				fs.add(model.RouteHuman, "actions.lock-step-unlocked", n, "%s: a step uses %s, which the new %s does not lock for this workflow", safePath(wf), safePin(k), actionsLockPath)
+			}
 		}
 	}
 	if lockChanged {

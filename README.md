@@ -67,15 +67,19 @@ must be upstream's. The lockfile is read only in the exact form
 refuses.
 
 A bumped composite can change its own pinned actions. Each transitive
-entry that moves to another commit of the same repository, under the same
-parent, is analyzed as a bump of its own (`Direct: false`, evidence under
-`actions/transitive/`), with the same identity checks. A nested `uses:`
-change that such a pair explains no longer forces a human; the PR's route
-is the worst of all pairs. These go to a human: a transitive action from a
-repository the old version did not use (no baseline), two pins of one
-repository under one parent, more than 8 transitive pairs, and any other
-lockfile change. Job-level reusable workflows and workflows not in the
-lockfile keep SHA pins.
+entry that moves to another key and commit of the same repository, under
+the same parent, at a subpath the parent's old version ran, is analyzed
+as a bump of its own (`Direct: false`, evidence under
+`actions/transitive/`), with the same identity checks; the old exact tag
+must still name the old commit. A nested `uses:` change that such a pair
+explains no longer forces a human; the PR's route is the worst of all
+pairs. These go to a human: the same key at another commit (a moved tag),
+a subpath the parent did not run before, a transitive action from a
+repository the old version did not use, two pins of one repository under
+one parent, more than 8 transitive pairs, a step of any onboarded
+workflow whose pin the new lockfile does not lock, and any other lockfile
+change. Job-level reusable workflows and workflows not in the lockfile
+keep SHA pins.
 
 ## Layout
 
