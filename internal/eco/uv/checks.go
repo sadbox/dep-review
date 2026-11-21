@@ -98,10 +98,8 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 		if s := cur.sdist.ReadFile("setup.py"); s != nil && !bytes.Equal(s, old.sdist.ReadFile("setup.py")) {
 			add("uv.setup-py-changed", "sdist setup.py added or changed (runs at build time)")
 		}
-		if cur.buildable {
-			if files := sdistBuildChanges(old.sdist, cur.sdist, cur.imports); len(files) > 0 {
-				add("uv.build-code-changed", "uv may build this sdist (no wheel for every platform), and it changes outside the package's import directories: %s", ecoutil.List(files, 10))
-			}
+		if files := sdistDiff(old.sdist, cur.sdist); len(files) > 0 {
+			add("uv.sdist-changed", "the sdist (which uv builds wherever no wheel fits) differs from the previous version's outside PKG-INFO: %s", ecoutil.List(files, 10))
 		}
 		ob, err1 := buildSystem(old.sdist.ReadFile("pyproject.toml"))
 		cb, err2 := buildSystem(cur.sdist.ReadFile("pyproject.toml"))
