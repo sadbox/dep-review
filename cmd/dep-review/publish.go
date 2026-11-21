@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/gh"
@@ -16,8 +15,8 @@ import (
 const triggerPathUsage = "the caller's trigger workflow (required), whose runs never count as CI"
 
 func runPublish(args []string) error {
-	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
-	in := fs.String("in", "", "directory holding the classification, evidence and verdict artifacts")
+	fs := newFlagSet("publish")
+	in := fs.String("in", "", "directory holding the classification, evidence and verdict artifacts (required)")
 	fetchResult := fs.String("fetch-result", "", "needs.fetch.result")
 	reviewResult := fs.String("review-result", "", "needs.review.result")
 	trigger := fs.String("trigger-path", "", triggerPathUsage)
@@ -46,8 +45,8 @@ func runPublish(args []string) error {
 }
 
 func runSweep(args []string) error {
-	fs := flag.NewFlagSet("sweep", flag.ContinueOnError)
-	repo := fs.String("repo", "", "owner/name")
+	fs := newFlagSet("sweep")
+	repo := fs.String("repo", "", "owner/name (required)")
 	trigger := fs.String("trigger-path", "", triggerPathUsage)
 	if err := fs.Parse(args); err != nil {
 		return err

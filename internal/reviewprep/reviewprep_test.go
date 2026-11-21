@@ -1,41 +1,12 @@
 package reviewprep
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// parseOutputs reads a GITHUB_OUTPUT file the way the runner does.
-func parseOutputs(t *testing.T, path string) map[string]string {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	out := map[string]string{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for sc.Scan() {
-		line := sc.Text()
-		name, delim, ok := strings.Cut(line, "<<")
-		if !ok {
-			k, v, _ := strings.Cut(line, "=")
-			out[k] = v
-			continue
-		}
-		var val []string
-		for sc.Scan() && sc.Text() != delim {
-			val = append(val, sc.Text())
-		}
-		out[name] = strings.Join(val, "\n")
-	}
-	return out
-}
 
 func chdir(t *testing.T, dir string) {
 	t.Helper()
@@ -54,10 +25,18 @@ func TestRun(t *testing.T) {
 	os.WriteFile("repo/.github/dep-review.md", []byte(notes), 0o644)
 	prompt := filepath.Join(pkgdir, "../../prompts/review.md")
 	schema := filepath.Join(pkgdir, "../../schema/verdict.json")
-	if err := Run(prompt, schema, "repo/.github/dep-review.md", "out", "/home/runner/work/_temp"); err != nil {
+	if err := Run(prompt, schema, "repo/.github/dep-review.md", "out"); err != nil {
 		t.Fatal(err)
 	}
-	out := parseOutputs(t, "out")
+	out := map[string]string{}
+	for _, f := range []string{"prompt.md", "settings.json", "schema.json"} {
+		b, err := os.ReadFile(filepath.Join("out", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[strings.TrimSuffix(f, filepath.Ext(f))] = string(b)
+	}
+	out["json_schema"] = out["schema"]
 	if !strings.Contains(out["prompt"], "- Deploys on merge.") || strings.Contains(out["prompt"], "{{NOTES}}") {
 		t.Errorf("prompt not rendered:\n%s", out["prompt"])
 	}
@@ -74,13 +53,10 @@ func TestRun(t *testing.T) {
 		t.Errorf("allow = %v", allow)
 	}
 	deny := strings.Join(toStrings(perms["deny"].([]any)), " ")
-	for _, want := range []string{"Read(./repo/.git/**)", "Read(//proc/**)", "Read(//sys/**)", "Read(//etc/**)", "Read(//tmp/**)", "Read(//root/**)", "Read(//home/runner/work/_temp/**)", "Bash", "WebFetch"} {
+	for _, want := range []string{"Read(./repo/.git/**)", "Read(//proc/**)", "Read(//sys/**)", "Read(//etc/**)", "Read(//tmp/**)", "Read(//root/**)", "Read(//home/**)", "Read(~/.*)", "Bash", "WebFetch"} {
 		if !strings.Contains(deny, want) {
 			t.Errorf("deny lacks %s", want)
 		}
-	}
-	if strings.Contains(deny, "Read(//home/**)") {
-		t.Error("//home/** would deny the workspace itself")
 	}
 	if perms["blockReadsOutsideWorkingDirectories"] != true {
 		t.Error("reads outside the working directory not blocked")
@@ -141,40 +117,10 @@ func TestCompactSchema(t *testing.T) {
 	}
 }
 
-func TestSettingsRunnerTemp(t *testing.T) {
-	for _, p := range []string{"", "relative", "/", "/a/../b", "/a b", "/a*"} {
-		deny := toStrings(anySlice(Settings(p)["permissions"].(map[string]any)["deny"].([]string)))
-		for _, d := range deny {
-			if strings.Contains(d, "a b") || strings.Contains(d, "a*") || d == "Read(///**)" || strings.Contains(d, "relative") {
-				t.Errorf("Settings(%q) produced %s", p, d)
-			}
-		}
-	}
-}
-
-func TestWriteOutputsDelimiters(t *testing.T) {
-	var b strings.Builder
-	if err := WriteOutputs(&b, [][2]string{{"a", "x"}, {"b", "y"}}); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(b.String(), "\n")
-	if !strings.HasPrefix(lines[0], "a<<DEP_REVIEW_") || lines[2] != strings.TrimPrefix(lines[0], "a<<") || lines[0][3:] == lines[3][3:] {
-		t.Errorf("output %q", b.String())
-	}
-}
-
 func toStrings(v []any) []string {
 	var s []string
 	for _, x := range v {
 		s = append(s, x.(string))
-	}
-	return s
-}
-
-func anySlice(v []string) []any {
-	var s []any
-	for _, x := range v {
-		s = append(s, x)
 	}
 	return s
 }

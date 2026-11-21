@@ -33,3 +33,100 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race ./...
+
+  # The review sandbox, for real: gVisor on the hosted runner, the reviewer
+  # image, the credential proxy and the internal network, all set up by the
+  # same code the gate runs (dep-review review). The binary is the
+  # sandboxtest build, which adds only a fake upstream (fake OIDC, token
+  # exchange and Messages API) and a probe mode.
+  sandbox:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      MODEL: claude-opus-5-5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build (sandboxtest)
+        run: go build -tags sandboxtest -trimpath -o "$RUNNER_TEMP/dep-review" ./cmd/dep-review
+      - name: Install gVisor
+        run: bash sandbox/install-gvisor.sh
+      - name: Build the sandbox images
+        run: |
+          docker build --no-cache -t dep-review-reviewer:ci sandbox
+          docker build --no-cache --target proxy -t dep-review-proxy:ci sandbox
+      - name: Fixtures
+        run: |
+          set -euo pipefail
+          f="$RUNNER_TEMP/fixture"
+          mkdir -p "$f/evidence" "$f/repo/.git" "$f/repo/.github"
+          echo '{"note":"dep-review-e2e-marker"}' >"$f/evidence/evidence.json"
+          echo 'package main // dep-review-e2e-marker' >"$f/repo/main.go"
+          printf '[core]\n\tmarker = dep-review-e2e-marker\n' >"$f/repo/.git/config"
+          echo '- Test notes.' >"$f/repo/.github/dep-review.md"
+          echo '{"verdict":"pass","flags":[],"summary":"canned verdict from the fake upstream"}' >"$f/canned.json"
+          cd "$f"
+          "$RUNNER_TEMP/dep-review" review-prep --prompt "$GITHUB_WORKSPACE/prompts/review.md" \
+            --schema "$GITHUB_WORKSPACE/schema/verdict.json" --notes repo/.github/dep-review.md --out-dir prep
+      - name: Isolation probes
+        run: |
+          set -euo pipefail
+          # Something listening on every host address, for the probes to fail to reach.
+          nohup node -e "require('http').createServer((q,s)=>s.end('host')).listen(18080,'0.0.0.0')" >/dev/null 2>&1 &
+          # The runner's primary address (the interface is not always eth0).
+          host_ip=$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
+          test -n "$host_ip"
+          api_ip=$(getent ahostsv4 api.anthropic.com | awk 'NR==1{print $1}')
+          gh_ip=$(getent ahostsv4 github.com | awk 'NR==1{print $1}')
+          for _ in $(seq 50); do curl -fsS -o /dev/null "http://$host_ip:18080/" && break; sleep 0.2; done
+          curl -fsS -o /dev/null "http://$host_ip:18080/"   # the listener is up
+          cd "$RUNNER_TEMP/fixture"
+          "$RUNNER_TEMP/dep-review" review --prep-dir prep --evidence evidence --repo repo \
+            --reviewer-image dep-review-reviewer:ci --proxy-image dep-review-proxy:ci \
+            --model "$MODEL" --federation-rule-id fdrl_ci --organization-id 00000000-0000-0000-0000-000000000000 \
+            --test-fake-upstream canned.json \
+            --test-probe \
+            --test-probe-arg --deny-dns --test-probe-arg api.anthropic.com \
+            --test-probe-arg --deny-dns --test-probe-arg github.com \
+            --test-probe-arg --deny-tcp --test-probe-arg "$api_ip:443" \
+            --test-probe-arg --deny-tcp --test-probe-arg "$gh_ip:443" \
+            --test-probe-arg --deny-tcp --test-probe-arg 169.254.169.254:80 \
+            --test-probe-arg --deny-tcp --test-probe-arg 168.63.129.16:80 \
+            --test-probe-arg --deny-tcp --test-probe-arg "$host_ip:18080" \
+            --test-probe-arg --deny-tcp --test-probe-arg "$host_ip:22" \
+            --test-probe-arg --deny-tcp --test-probe-arg 172.17.0.1:18080 \
+            --test-probe-arg --deny-tcp --test-probe-arg 172.18.0.1:18080 \
+            --test-probe-arg --deny-tcp --test-probe-arg 172.18.0.2:9000 \
+            --test-probe-arg --deny-tcp --test-probe-arg 172.18.0.3:9000 \
+            --test-probe-arg --deny-tcp --test-probe-arg 10.213.7.1:18080 \
+            --test-probe-arg --deny-tcp --test-probe-arg 10.213.7.2:22 \
+            --test-probe-arg --deny-http --test-probe-arg https://api.anthropic.com/ \
+            --test-probe-arg --deny-http --test-probe-arg https://github.com/ \
+            --test-probe-arg --readonly --test-probe-arg /work/evidence \
+            --test-probe-arg --readonly --test-probe-arg /work/repo
+      - name: End to end against the fake Messages API
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/fixture"
+          "$RUNNER_TEMP/dep-review" review --prep-dir prep --evidence evidence --repo repo --out out/verdict.json \
+            --reviewer-image dep-review-reviewer:ci --proxy-image dep-review-proxy:ci \
+            --model "$MODEL" --federation-rule-id fdrl_ci --organization-id 00000000-0000-0000-0000-000000000000 \
+            --test-fake-upstream canned.json --timeout 5m 2>&1 | tee run.log
+          # The canned verdict came back through the CLI's structured
+          # output and the gate's validation, unchanged.
+          test "$(jq -cS . out/verdict.json)" = "$(jq -cS . canned.json)"
+          # The fake answers only requests carrying a token it minted, and
+          # its script fails unless the reviewer read the evidence, grepped
+          # the repo and was denied .git and /proc. The proxy refused
+          # nothing the CLI sent (no other model, path or feature).
+          grep -q '#5 POST /v1/messages 200' run.log
+          if grep -E 'proxy: .*(refused|dropped)|REJECT' run.log; then exit 1; fi

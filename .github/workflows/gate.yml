@@ -5,10 +5,12 @@
 #   - classify, fetch: no secrets, read-only token. fetch downloads both
 #     versions of each dependency and diffs them; it never executes
 #     anything from the PR or from a dependency.
-#   - review: the ONLY job with a model. Read-only token, no secrets; its
-#     model credential is a short-lived federated token (OIDC). Tools are
-#     Read/Grep/Glob on ./evidence and ./repo only. Its output is a
-#     schema-checked verdict, nothing else.
+#   - review: the ONLY job with a model. Read-only token, no secrets. The
+#     model runs in a gVisor sandbox with no credentials and no network
+#     except a proxy that holds the short-lived federated token (OIDC) and
+#     forwards only POST /v1/messages. Tools are Read/Grep/Glob on
+#     ./evidence and ./repo only. Its output is a schema-checked verdict,
+#     nothing else.
 #   - publish, sweep: no model and no untrusted text in any shell. They hold
 #     the gate app's token (environment `dep-review`, default branch only)
 #     and merge only a head SHA that classify verified and the verdict
@@ -26,6 +28,14 @@ on:
         description: Repository-specific review notes, read from the default branch.
         type: string
         default: .github/dep-review.md
+      docker_platforms:
+        description: >-
+          Comma-separated platforms the repository builds its images for
+          (e.g. linux/amd64,linux/arm64). The docker fetcher proves a digest
+          refresh a no-op only for these. Empty: every platform in the image
+          index must be unchanged.
+        type: string
+        default: ""
       model:
         type: string
         default: claude-opus-5-5
@@ -38,6 +48,30 @@ on:
       anthropic_workspace_id:
         type: string
         default: ""
+      anthropic_service_account_id:
+        description: Service account (svac_...) the federated token acts as; optional.
+        type: string
+        default: ""
+      max_model_requests:
+        description: Messages API requests the credential proxy allows per review.
+        type: number
+        default: 200
+    # Declared so callers pass these and nothing else (no `secrets: inherit`).
+    # publish and sweep run in the caller's `dep-review` environment, and an
+    # environment secret of the same name takes precedence over a passed one,
+    # so the usual setup (all three as environment secrets) works with the
+    # pass-through in examples/dep-review.yaml; none is required at call time
+    # for that reason. publish and sweep fail without DEP_REVIEW_APP_KEY.
+    secrets:
+      DEP_REVIEW_APP_KEY:
+        description: The gate app's private key (normally a `dep-review` environment secret).
+        required: false
+      PUSHOVER_APP_TOKEN:
+        description: Optional Pushover notifications.
+        required: false
+      PUSHOVER_USER_KEY:
+        description: Optional Pushover notifications.
+        required: false
 
 permissions: {}
 
@@ -54,6 +88,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      gate_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - name: Check out the gate (this workflow's own commit)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,7 +108,20 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           go build -C gate -trimpath -o "$RUNNER_TEMP/bin/dep-review" ./cmd/dep-review
           # go.mod: the fetch job sets up the gate's Go version from it.
+          # sandbox/: the review job's Dockerfile, CLI lockfile and gVisor
+          # installer.
           cp gate/prompts/review.md gate/schema/verdict.json gate/go.mod "$RUNNER_TEMP/bin/"
+          mkdir "$RUNNER_TEMP/bin/sandbox"
+          cp gate/sandbox/Dockerfile gate/sandbox/package.json gate/sandbox/package-lock.json gate/sandbox/install-gvisor.sh "$RUNNER_TEMP/bin/sandbox/"
+      - name: Checksum the gate's files
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gate-bin
@@ -89,22 +138,44 @@ jobs:
       pull-requests: read
     outputs:
       kind: ${{ steps.classify.outputs.kind }}
+      classification_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact). The
+      # same holds for every artifact below: each is checked against its
+      # producer's job output.
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
+          chmod +x dep-review
       - name: Classify
         id: classify
         env:
           GH_TOKEN: ${{ github.token }}
           TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
           "$RUNNER_TEMP/bin/dep-review" classify \
             --event "$GITHUB_EVENT_PATH" \
             --trigger-path "$TRIGGER_PATH" \
             --out "$RUNNER_TEMP/out/classification.json"
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/out"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: classification
@@ -121,15 +192,35 @@ jobs:
       pull-requests: read
     outputs:
       route: ${{ steps.fetch.outputs.route }}
+      evidence_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
+          chmod +x dep-review
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: classification
           path: ${{ runner.temp }}/in
+      - name: Verify the classification artifact
+        env:
+          SUMS: ${{ needs.classify.outputs.classification_sums }}
+        run: |
+          cd "$RUNNER_TEMP/in"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       # The go_modules fetcher runs `go mod download` (downloads and sum
       # checks only, in an empty module of its own). The version comes
       # from the gate's go.mod, never the PR's; no cache, since a cache
@@ -150,12 +241,22 @@ jobs:
         id: fetch
         env:
           GH_TOKEN: ${{ github.token }}
+          DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
           "$RUNNER_TEMP/bin/dep-review" fetch \
             --classification "$RUNNER_TEMP/in/classification.json" \
             --repo-dir pr \
-            --out "$RUNNER_TEMP/evidence"
+            --out "$RUNNER_TEMP/evidence" \
+            --docker-platforms "$DOCKER_PLATFORMS"
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/evidence"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence
@@ -166,76 +267,105 @@ jobs:
     needs: [build, classify, fetch]
     if: needs.fetch.outputs.route == 'review'
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    outputs:
+      verdict_sums: ${{ steps.sums.outputs.sums }}
     permissions:
       contents: read
-      id-token: write # federated model credential only
+      # The federated model credential. The OIDC request token (which is
+      # also the job's runtime token) stays in `dep-review review` on the
+      # host; the proxy container gets only Claude-audience JWTs from it
+      # over a unix socket, and the reviewer gets nothing.
+      id-token: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
+          chmod +x dep-review
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: evidence
           path: evidence
+      - name: Verify the evidence artifact
+        env:
+          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+        run: |
+          cd "evidence"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       - name: Check out the default branch (for usage search and the review notes)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: repo
           persist-credentials: false
+      - name: Install gVisor
+        run: bash "$RUNNER_TEMP/bin/sandbox/install-gvisor.sh"
+      # Built here, only when a review runs, from the gate's own pinned
+      # Dockerfile: base images by digest, the CLI by package-lock
+      # integrity, installed with --ignore-scripts. No build cache.
+      - name: Build the sandbox images
+        run: |
+          docker build --no-cache -t dep-review-reviewer:local "$RUNNER_TEMP/bin/sandbox"
+          docker build --no-cache --target proxy -t dep-review-proxy:local "$RUNNER_TEMP/bin/sandbox"
       - name: Prepare prompt and settings
-        id: prep
         env:
           NOTES_PATH: ${{ inputs.notes_path }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
           "$RUNNER_TEMP/bin/dep-review" review-prep \
             --prompt "$RUNNER_TEMP/bin/review.md" \
             --schema "$RUNNER_TEMP/bin/verdict.json" \
             --notes "repo/$NOTES_PATH" \
-            --github-output "$GITHUB_OUTPUT"
-      - name: Review
-        id: claude
-        uses: anthropics/claude-code-action@c84e279f859e2591391e95bd309286eb111c345f # v1.0.284
-        with:
-          # Our own read-only token: without it the action would fetch a
-          # token for the Claude GitHub App, which can write.
-          github_token: ${{ github.token }}
-          anthropic_federation_rule_id: ${{ inputs.anthropic_federation_rule_id }}
-          anthropic_organization_id: ${{ inputs.anthropic_organization_id }}
-          anthropic_workspace_id: ${{ inputs.anthropic_workspace_id }}
-          allowed_bots: dependabot[bot]
-          display_report: "false"
-          # The action writes `prompt` to a file itself, and merges
-          # `settings` (a JSON string) into ~/.claude/settings.json: the
-          # permission rules, deny list and telemetry-off env that
-          # review-prep generated.
-          prompt: ${{ steps.prep.outputs.prompt }}
-          settings: ${{ steps.prep.outputs.settings }}
-          # claude_args is split with shell-quote, not a shell, and handed
-          # to the CLI. --json-schema takes the schema inline, so it is
-          # one single-quoted token; review-prep emits it on one line and
-          # refuses a schema containing a single quote. --setting-sources
-          # user loads only the settings above (no project/local settings
-          # from the workspace); --strict-mcp-config ignores any .mcp.json.
-          claude_args: >-
-            --model ${{ inputs.model }}
-            --tools Read,Grep,Glob
-            --permission-mode dontAsk
-            --setting-sources user
-            --strict-mcp-config
-            --max-turns 80
-            --json-schema '${{ steps.prep.outputs.json_schema }}'
-      # structured_output is JSON.stringify of the schema-validated object;
-      # the action fails the step when the model returns none, so this
-      # step is skipped and publish sees no verdict (=> human).
-      - name: Save verdict
+            --out-dir "$RUNNER_TEMP/review"
+      # The reviewer runs under gVisor on an internal network whose only
+      # other member is the credential proxy (see README.md, "Sandbox").
+      # Its verdict comes back on stdout and is validated before
+      # verdict.json is written; with no valid verdict this step fails,
+      # the upload is skipped and publish sends the PR to a human.
+      - name: Review (sandboxed)
         env:
-          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          MODEL: ${{ inputs.model }}
+          RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
+          ORG_ID: ${{ inputs.anthropic_organization_id }}
+          WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
+          SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
+          MAX_REQUESTS: ${{ inputs.max_model_requests }}
         run: |
-          mkdir -p "$RUNNER_TEMP/verdict"
-          printf '%s' "$VERDICT" >"$RUNNER_TEMP/verdict/verdict.json"
+          "$RUNNER_TEMP/bin/dep-review" review \
+            --prep-dir "$RUNNER_TEMP/review" \
+            --evidence evidence \
+            --repo repo \
+            --out "$RUNNER_TEMP/verdict/verdict.json" \
+            --reviewer-image dep-review-reviewer:local \
+            --proxy-image dep-review-proxy:local \
+            --model "$MODEL" \
+            --federation-rule-id "$RULE_ID" \
+            --organization-id "$ORG_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --service-account-id "$SERVICE_ACCOUNT_ID" \
+            --max-requests "$MAX_REQUESTS" \
+            --max-turns 80 \
+            --timeout 20m
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/verdict"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verdict
@@ -256,6 +386,47 @@ jobs:
         with:
           path: ${{ runner.temp }}/in
           pattern: "{gate-bin,classification,evidence,verdict}"
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/in/gate-bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
+          chmod +x dep-review
+      - name: Verify the classification artifact
+        env:
+          SUMS: ${{ needs.classify.outputs.classification_sums }}
+        run: |
+          cd "$RUNNER_TEMP/in/classification"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+      - name: Verify the evidence artifact
+        env:
+          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+        run: |
+          # None if the job that makes it did not succeed; then there must
+          # be no artifact either.
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/evidence"; exit; fi
+          cd "$RUNNER_TEMP/in/evidence"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+      - name: Verify the verdict artifact
+        env:
+          SUMS: ${{ needs.review.outputs.verdict_sums }}
+        run: |
+          # None if the job that makes it did not succeed; then there must
+          # be no artifact either.
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/verdict"; exit; fi
+          cd "$RUNNER_TEMP/in/verdict"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       - name: Gate app token (this repository only)
         id: app
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
@@ -276,14 +447,15 @@ jobs:
           DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           FETCH_RESULT: ${{ needs.fetch.result }}
           REVIEW_RESULT: ${{ needs.review.result }}
+          TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
-          chmod +x "$RUNNER_TEMP/in/gate-bin/dep-review"
           "$RUNNER_TEMP/in/gate-bin/dep-review" publish \
             --in "$RUNNER_TEMP/in" \
             --fetch-result "$FETCH_RESULT" \
-            --review-result "$REVIEW_RESULT"
+            --review-result "$REVIEW_RESULT" \
+            --trigger-path "$TRIGGER_PATH"
 
   sweep:
     needs: build
@@ -297,6 +469,17 @@ jobs:
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
+          chmod +x dep-review
       - name: Gate app token (this repository only)
         id: app
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
@@ -315,8 +498,9 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           # Only a dep-review status created by "<slug>[bot]" counts as approval.
           DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          # The caller's trigger workflow: its no-op check is not CI.
+          TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/dep-review"
-          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY"
+          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY" --trigger-path "$TRIGGER_PATH"
