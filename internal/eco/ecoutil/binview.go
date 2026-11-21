@@ -399,43 +399,144 @@ func sectionBytes(raw []byte, off, size uint64) []byte {
 }
 
 // elfNameCost is what ImportedLibraries and ImportedSymbols would spend
-// building names: each .dynsym entry's name and each DT_NEEDED string.
-// .symtab is never read (only counted).
-func elfNameCost(f *elf.File, raw []byte) uint64 {
-	var cost uint64
-	for _, s := range f.Sections {
+// building names, mirroring debug/elf: the first section of each type
+// (SectionByType), fixed record sizes whatever a section's Entsize says
+// (24/16 bytes per symbol, 16/8 per dynamic entry), every .dynsym name and
+// DT_NEEDED string exactly, and, when a .gnu.version table makes
+// ImportedSymbols read them, the .gnu.version_d and .gnu.version_r names
+// walked exactly as debug/elf walks them (each counted at its upper bound,
+// the rest of the string table). A section debug/elf would read but that
+// is not in the file (SHT_NOBITS, or past its end) would make it allocate
+// its declared size: that costs more than any limit. The walk stops once
+// the cost passes limit, so it is bounded however the tables are built.
+func elfNameCost(f *elf.File, raw []byte, limit uint64) uint64 {
+	over := limit + 1
+	data := func(s *elf.Section) ([]byte, bool) {
+		if s == nil {
+			return nil, true
+		}
+		if s.Type == elf.SHT_NOBITS {
+			return nil, s.Size == 0
+		}
+		b := sectionBytes(raw, s.Offset, s.Size)
+		return b, b != nil
+	}
+	strOf := func(s *elf.Section) ([]byte, bool) {
+		if s == nil {
+			return nil, true
+		}
 		if int(s.Link) >= len(f.Sections) {
-			continue
+			return nil, true // debug/elf fails; nothing built
 		}
-		strtab := sectionBytes(raw, f.Sections[s.Link].Offset, f.Sections[s.Link].Size)
-		data := sectionBytes(raw, s.Offset, s.Size)
-		if strtab == nil || data == nil {
-			continue
+		return data(f.Sections[s.Link])
+	}
+	symSize, dynSize := uint64(24), uint64(16)
+	if f.Class == elf.ELFCLASS32 {
+		symSize, dynSize = 16, 8
+	}
+	var cost uint64
+	dynsym := f.SectionByType(elf.SHT_DYNSYM)
+	syms, ok1 := data(dynsym)
+	dynstr, ok2 := strOf(dynsym)
+	if !ok1 || !ok2 {
+		return over
+	}
+	var offs []uint64
+	for at := uint64(0); at+symSize <= uint64(len(syms)); at += symSize {
+		offs = append(offs, uint64(f.ByteOrder.Uint32(syms[at:])))
+	}
+	cost += nameBytes(dynstr, offs) + uint64(len(offs))
+
+	dyn := f.SectionByType(elf.SHT_DYNAMIC)
+	dd, ok1 := data(dyn)
+	dstr, ok2 := strOf(dyn)
+	if !ok1 || !ok2 {
+		return over
+	}
+	offs = offs[:0]
+	for at := uint64(0); at+dynSize <= uint64(len(dd)); at += dynSize {
+		var tag, val uint64
+		if dynSize == 16 {
+			tag, val = f.ByteOrder.Uint64(dd[at:]), f.ByteOrder.Uint64(dd[at+8:])
+		} else {
+			tag, val = uint64(f.ByteOrder.Uint32(dd[at:])), uint64(f.ByteOrder.Uint32(dd[at+4:]))
 		}
-		var offs []uint64
-		switch {
-		case s.Type == elf.SHT_DYNSYM && s.Entsize > 0:
-			for at := uint64(0); at+4 <= uint64(len(data)); at += s.Entsize {
-				offs = append(offs, uint64(f.ByteOrder.Uint32(data[at:])))
-			}
-		case s.Type == elf.SHT_DYNAMIC:
-			ent := uint64(16)
-			if f.Class == elf.ELFCLASS32 {
-				ent = 8
-			}
-			for at := uint64(0); at+ent <= uint64(len(data)); at += ent {
-				var tag, val uint64
-				if ent == 16 {
-					tag, val = f.ByteOrder.Uint64(data[at:]), f.ByteOrder.Uint64(data[at+8:])
-				} else {
-					tag, val = uint64(f.ByteOrder.Uint32(data[at:])), uint64(f.ByteOrder.Uint32(data[at+4:]))
-				}
-				if elf.DynTag(tag) == elf.DT_NEEDED {
-					offs = append(offs, val)
-				}
-			}
+		if elf.DynTag(tag) == elf.DT_NEEDED {
+			offs = append(offs, val)
 		}
-		cost += nameBytes(strtab, offs) + uint64(len(offs))
+	}
+	cost += nameBytes(dstr, offs) + uint64(len(offs))
+	if cost > limit || f.SectionByType(elf.SHT_GNU_VERSYM) == nil {
+		return cost
+	}
+	if _, ok := data(f.SectionByType(elf.SHT_GNU_VERSYM)); !ok {
+		return over
+	}
+	name := func(off uint64) uint64 { // upper bound of one getString, plus one
+		if off >= uint64(len(dynstr)) {
+			return 1
+		}
+		return uint64(len(dynstr)) - off + 1
+	}
+	// dynamicVersions (.gnu.version_d): 20-byte entries, 8-byte aux.
+	vd, ok := data(f.SectionByType(elf.SHT_GNU_VERDEF))
+	if !ok {
+		return over
+	}
+	for i := 0; i+20 <= len(vd); {
+		if f.ByteOrder.Uint16(vd[i:]) != 1 {
+			break // debug/elf fails here
+		}
+		cnt := int(f.ByteOrder.Uint16(vd[i+6:]))
+		aux := int(f.ByteOrder.Uint32(vd[i+12:]))
+		next := int(f.ByteOrder.Uint32(vd[i+16:]))
+		if cnt == 0 {
+			break
+		}
+		for c, j := 0, i+aux; c < cnt && j >= 0 && j+8 <= len(vd); c++ {
+			if cost += name(uint64(f.ByteOrder.Uint32(vd[j:]))); cost > limit {
+				return cost
+			}
+			vnext := int(f.ByteOrder.Uint32(vd[j+4:]))
+			if vnext == 0 {
+				break
+			}
+			j += vnext
+		}
+		if next == 0 {
+			break
+		}
+		i += next
+	}
+	// dynamicVersionNeeds (.gnu.version_r): 16-byte entries, 16-byte aux.
+	vn, ok := data(f.SectionByType(elf.SHT_GNU_VERNEED))
+	if !ok {
+		return over
+	}
+	for i := 0; i+16 <= len(vn); {
+		if f.ByteOrder.Uint16(vn[i:]) != 1 {
+			break
+		}
+		cnt := int(f.ByteOrder.Uint16(vn[i+2:]))
+		if cost += name(uint64(f.ByteOrder.Uint32(vn[i+4:]))); cost > limit {
+			return cost
+		}
+		aux := int(f.ByteOrder.Uint32(vn[i+8:]))
+		next := int(f.ByteOrder.Uint32(vn[i+12:]))
+		for c, j := 0, i+aux; c < cnt && j >= 0 && j+16 <= len(vn); c++ {
+			if cost += name(uint64(f.ByteOrder.Uint32(vn[j+8:]))); cost > limit {
+				return cost
+			}
+			anext := int(f.ByteOrder.Uint32(vn[j+12:]))
+			if anext == 0 {
+				break
+			}
+			j += anext
+		}
+		if next == 0 {
+			break
+		}
+		i += next
 	}
 	return cost
 }
@@ -475,7 +576,7 @@ func describeELF(raw []byte, r io.ReaderAt) (string, bool) {
 		b.WriteString("  imported libraries and symbols: not read (a section is compressed)\n")
 		return b.String(), false
 	}
-	if c := elfNameCost(f, raw); c > maxNameBytes {
+	if c := elfNameCost(f, raw, maxNameBytes); c > maxNameBytes {
 		fmt.Fprintf(&b, "  imported libraries and symbols: not read (their names would cost %d bytes to build)\n", c)
 		return b.String(), false
 	}

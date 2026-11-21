@@ -135,13 +135,20 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"C source with a NUL", nil, map[string]string{"x.c": "\x00int f(void) { system(\"id\"); }\n", "p.go": "package p\n"}, codeCSource, "x.c", true},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\n\tRET\n", "p.go": "package p\n"}, codeAsm, "x_amd64.s", true},
 		{"wrapped base64 of an ELF", nil, map[string]string{"b.go": "package p\n\nvar blob = `" + wrapped(minimalELF()) + "`\n"}, codeBlob, "b.go", true},
-		{"blob of text", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 300) + "\"\n"}, codeBlob, "b.go", false},
+		{"blob of text", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 300) + "\"\n"}, codeBlob, "b.go", true},
+		{"blob of DER bytes", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString(append([]byte{0x30, 0x82, 0x03, 0x00}, bytes.Repeat([]byte{0x02, 0x01, 0x00}, 300)...)) + "\"\n"}, codeBlob, "b.go", false},
+		{"blob of text over the file cap", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 140<<10) + "\"\n"}, codeBlob, "b.go", false},
 		{"blob no decoder reads", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD\\x01", 300) + "\"\n"}, codeBlob, "b.go", false},
 		{"COFF .syso", nil, map[string]string{"w_windows_amd64.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, codeBinary, "w_windows_amd64.syso", true},
 		{"linked Go ELF .syso", nil, map[string]string{"g_linux_amd64.syso": "", "p.go": "package p\n"}, codeBinary, "g_linux_amd64.syso", true},
 		{"embedded Go ELF", nil, map[string]string{"bin/tool": "", "e.go": "package p\n\nimport _ \"embed\"\n\n//go:embed bin/tool\nvar tool []byte\n"}, codeBinary, "bin/tool", true},
 		{"truncated ELF .syso", nil, map[string]string{"x.syso": "\x7fELF\x02\x01\x01 truncated", "p.go": "package p\n"}, codeBinary, "x.syso", false},
-		{"image nothing parses", nil, map[string]string{"logo.png": "\x89PNG\r\n\x1a\n\x00\x00", "p.go": "package p\n"}, codeBinary, "logo.png", false},
+		// Round 5: inert binaries. An image nothing parses stays on review
+		// only while the gate proves it never reaches the build.
+		{"inert PNG only a test mentions", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", true},
+		{"PNG a non-test file mentions", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", false},
+		{"PNG embedded by non-test code", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed fixtures/*.png\nvar logo []byte\n"}, codeBinary, "fixtures/logo.png", false},
+		{"PNG with the reference search capped", nil, capped(map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}), codeBinary, "fixtures/logo.png", false},
 		{"COFF listing fewer sections than it has", nil, map[string]string{"x.syso": string(coffSections(5, 2)), "p.go": "package p\n"}, codeBinary, "x.syso", false},
 	}
 	elfBytes := builtGoELF(t)
@@ -173,20 +180,32 @@ func TestInvariantShownInFull(t *testing.T) {
 					t.Errorf("declaration not shown whole:\n%s", ctx)
 				}
 			case codeBinary:
-				if !strings.Contains(ctx, "(the gate read this structure to its end)") {
-					t.Errorf("binary on review without a complete rendering:\n%s", ctx)
+				// Review-eligible: rendered in full, or proven inert.
+				if !strings.Contains(ctx, "(the gate read this structure to its end)") && !strings.Contains(ctx, "INERT, PROVEN by the gate") {
+					t.Errorf("binary on review neither rendered in full nor proven inert:\n%s", ctx)
 				}
 			default:
 				f := fileOf(tc.item)
 				if !strings.Contains(out, quote("full text of the new version of "+f, tc.cur[f])) {
 					t.Errorf("the full text of %s is not in the focused evidence:\n%.3000s", f, out)
 				}
-				if tc.code == codeBlob && strings.Count(ctx, "(the gate read this structure to its end)") < 1 {
-					t.Errorf("blob on review without a complete rendering of its bytes:\n%s", ctx)
+				if tc.code == codeBlob && !strings.Contains(ctx, "(the gate read this structure to its end)") && !strings.Contains(ctx, "the decoded text, in full") {
+					t.Errorf("blob on review without its bytes shown in full:\n%s", ctx)
 				}
 			}
 		})
 	}
+}
+
+const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+// capped adds enough files that the reference search stops before the
+// end (maxRefFiles), sorting after everything else.
+func capped(files map[string]string) map[string]string {
+	for i := range maxRefFiles {
+		files[fmt.Sprintf("zz/f%05d.txt", i)] = "x\n"
+	}
+	return files
 }
 
 func writeTreeOrNil(t *testing.T, files map[string]string) *ecoutil.Tree {

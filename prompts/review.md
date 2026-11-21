@@ -88,6 +88,9 @@ Hold these items to a stricter bar than ordinary changes:
   plainly explains it.
 - C, assembly and `//go:linkname` must match what the release says it
   changes; anything you cannot follow is unclear.
+- A binary marked "INERT, PROVEN by the gate" never reaches the build:
+  the gate searched every file and found no link, non-test embed or
+  non-test mention. Still say what it is (usually a test fixture).
 - A binary or blob is benign only if you can say what it is and why it
   changed: a test fixture used only by `_test.go` files, a regenerated
   table whose rendering matches its purpose, an updated version of the

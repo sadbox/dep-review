@@ -210,8 +210,8 @@ func TestCheckTrees(t *testing.T) {
 		{"net/http", nil, map[string]string{"h.go": "package p\nimport \"net/http\"\nvar _ = http.Get\n"}, []string{codeImport}},
 		{"go:generate", nil, map[string]string{"g.go": "package p\n//go:generate sh -c evil\n"}, []string{codeGenerate}},
 		{"go:embed", nil, map[string]string{"e.go": "package p\nimport _ \"embed\"\n//go:embed testdata/x\nvar s string\n"}, []string{codeEmbed}},
-		// "ABC"... decodes to text nothing parses: not shown in full.
-		{"blob", nil, map[string]string{"b.go": "package p\nvar s = " + blob + "\n"}, []string{codeBlob, codeIncomplete}},
+		// "ABC"... decodes to plain text, quoted in full.
+		{"blob", nil, map[string]string{"b.go": "package p\nvar s = " + blob + "\n"}, []string{codeBlob}},
 		{"long prose literal", nil, map[string]string{"b.go": "package p\nvar s = \"" + strings.Repeat("lorem ipsum ", 100) + "\"\n"}, nil},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\nRET\n"}, []string{codeAsm}},
 		// A linked .syso whose ELF structure cannot be read goes to a person.
@@ -273,7 +273,8 @@ func TestCheckTrees(t *testing.T) {
 			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 1 }\n"},
 			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 2 }\n"},
 			[]string{codeInitCallee}},
-		{"binary-looking test file", nil, map[string]string{"x_test.go": "\x00\x01\x02"}, []string{codeBinary, codeIncomplete}},
+		// Nothing mentions it: proven inert.
+		{"binary-looking test file", nil, map[string]string{"x_test.go": "\x00\x01\x02"}, []string{codeBinary}},
 		{"plus-build without space", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "//+build linux\n\npackage p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
 		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},

@@ -81,8 +81,8 @@ func TestBlobNotDecodedGoesToPerson(t *testing.T) {
 		want      bool
 	}{
 		{"budget spent", blob, 0, true},
-		// Decodes, but to text nothing parses: not shown in full either.
-		{"budget left, nothing to parse", blob, 1 << 20, true},
+		// Decodes to plain text, quoted in full (round 5).
+		{"budget left, decodes to text", blob, 1 << 20, false},
 		// No escape hatch: a flagged literal no decoder reads is a person's.
 		{"not an encoding", strings.Replace(notEncoded, "!", "\\x01", -1), 1 << 20, true},
 	} {

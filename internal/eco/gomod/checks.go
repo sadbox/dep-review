@@ -11,7 +11,6 @@ import (
 	"go/token"
 	"maps"
 	"path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -504,6 +503,12 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 	return h
 }
 
+// binaryShown is the completeness rule for a binary: its rendering read
+// to the end, or the gate's complete proof that it never reaches the
+// build (refIndex.refs). Anything short of that proof means "possibly
+// reaching the build", and then only a complete rendering will do.
+func binaryShown(d ecoutil.Description, inert bool) bool { return d.Complete || inert }
+
 // binaries builds each flagged binary's context: the gate's rendering and
 // where the module refers to it, from one index of the tree. When the
 // module is over the cap, the context is skipped (a person decides). A
@@ -530,10 +535,9 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins []string) {
 			prev = old.ReadFile(rel)
 		}
 		d := ecoutil.DescribeBinary(data, prev, hadOld, r.budget)
-		refs, linked := ix.refs(rel)
+		refs, inert, _ := ix.refs(rel)
 		item := safeFile(rel)
-		_ = linked // stated in refs; routing rests on the rendering alone
-		r.add(codeBinary, item, d.Complete,
+		r.add(codeBinary, item, binaryShown(d, inert),
 			quote("the gate's rendering of "+item+" (the module diff cannot show binary content)", d.Text),
 			quote("where the module refers to "+item+" (found by the gate)", refs))
 	}
@@ -1257,20 +1261,42 @@ func blobContext(where, lit string, budget *ecoutil.Budget) (text string, done b
 		fmt.Fprintf(&b, "%s, to %d bytes, more than the gate renders (%d)\n", how, len(dec), maxBlobDecode)
 		return b.String(), false
 	}
+	if plainText(dec) {
+		if len(dec) > evidence.DefaultFileCap {
+			fmt.Fprintf(&b, "%s, to %d bytes of text, more than an evidence file holds (%d)\n", how, len(dec), evidence.DefaultFileCap)
+			return b.String(), false
+		}
+		// Text is shown whole, so it is shown in full.
+		b.WriteString(quote(how+"; the decoded text, in full", string(dec)))
+		return b.String(), true
+	}
 	d := ecoutil.DescribeBinary(dec, nil, false, budget)
 	b.WriteString(quote(how+"; the gate's rendering of those bytes", d.Text))
 	return b.String(), d.Complete
 }
 
-// Bounds for indexRefs: files and bytes read, the largest file, the
-// tokens looked at per line, the mentions kept per name and kind of file,
-// and the //go:embed patterns kept per directive and in all.
+// plainText: valid UTF-8 with no control character but tab, newline and
+// carriage return (C0, DEL and C1 all count as control).
+func plainText(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+// Bounds for indexRefs: files and bytes read, the mentions shown per name
+// and kind of file, the non-test files remembered per name, and the
+// //go:embed patterns kept per directive and in all.
 const (
 	maxRefFiles      = 5000
-	maxRefFileLen    = 1 << 20
 	maxRefScan       = 64 << 20
-	maxLineTokens    = 256
 	maxRefs          = 15
+	maxNonTestFiles  = 64
 	maxDirectivePats = 64
 	maxEmbedPatterns = 4096
 	maxSkippedListed = 5
@@ -1278,18 +1304,18 @@ const (
 
 // refIndex is one pass over a module tree for the flagged binaries'
 // references: the //go:embed patterns by package directory, the non-test
-// Go files per directory, and the lines that mention a flagged binary's
-// base name (only those are kept), test and non-test files apart.
+// Go files per directory, and, for each flagged binary's base name, the
+// files that mention it. Every file is searched, text or binary, by one
+// linear tokenizer, so "searched everything" can be a fact (complete).
 type refIndex struct {
 	embeds   map[string][]embedPat // package directory -> its patterns
 	goFiles  map[string]int        // directory -> non-test .go files
 	mentions map[string]*mentionList
-	// embedsComplete is false when a Go file or //go:embed patterns were
-	// not searched; then a binary counts as possibly embedded. Skipped
-	// files of other kinds only make "not found" mean "not found in the
-	// files searched" (notes says which).
-	embedsComplete bool
-	notes          []string
+	// complete: every file was searched and every //go:embed pattern
+	// kept. Only then can a binary be proven inert. embedsComplete is the
+	// part about Go files and patterns.
+	complete, embedsComplete bool
+	notes                    []string
 }
 
 type embedPat struct {
@@ -1299,87 +1325,95 @@ type embedPat struct {
 	test bool
 }
 
-type mentionList struct{ test, nonTest []string }
+// mentionList is what the index keeps for one name: shown entries per
+// kind, and the raw paths of non-test files that mention it (up to
+// maxNonTestFiles; any one besides the binary itself means "mentioned").
+type mentionList struct {
+	test, nonTest []string
+	nonTestFiles  []string
+}
 
-// tokenRE is a file-name-like token. A wanted name it cannot match whole
-// is reported as not searchable (searchable).
-var tokenRE = regexp.MustCompile(`[A-Za-z0-9_.+@=~-]+(/[A-Za-z0-9_.+@=~-]+)*`)
+// isTokenByte is the file-name alphabet tokens are made of.
+func isTokenByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '_' || c == '.' || c == '+' || c == '@' || c == '=' || c == '~' || c == '-' || c == '/'
+}
 
-func searchable(name string) bool { return tokenRE.FindString(name) == name }
+// searchable: the name is one token, so a mention of it is found.
+func searchable(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if !isTokenByte(name[i]) || name[i] == '/' {
+			return false
+		}
+	}
+	return true
+}
 
 func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
-	ix := &refIndex{embeds: map[string][]embedPat{}, goFiles: map[string]int{}, mentions: map[string]*mentionList{}, embedsComplete: true}
+	ix := &refIndex{embeds: map[string][]embedPat{}, goFiles: map[string]int{}, mentions: map[string]*mentionList{}, complete: true, embedsComplete: true}
 	skipped := map[string][]string{} // reason -> files
-	skip := func(why, f string) {
-		if path.Ext(strings.SplitN(f, ":", 2)[0]) == ".go" {
+	skip := func(why, f string, embeds bool) {
+		ix.complete = false
+		if embeds {
 			ix.embedsComplete = false
 		}
 		skipped[why] = append(skipped[why], f)
 	}
 	scanned, patterns := 0, 0
 	for i, f := range t.Files {
-		if path.Ext(f) == ".go" && !strings.HasSuffix(f, "_test.go") {
+		isGo := path.Ext(f) == ".go"
+		if isGo && !strings.HasSuffix(f, "_test.go") {
 			ix.goFiles[path.Dir(f)]++
 		}
 		if i >= maxRefFiles || scanned >= maxRefScan {
-			skip(fmt.Sprintf("past the search limit (%d files, %d bytes)", maxRefFiles, maxRefScan), f)
+			skip(fmt.Sprintf("past the search limit (%d files, %d bytes)", maxRefFiles, maxRefScan), f, isGo)
 			continue
 		}
 		src := t.ReadFile(f)
-		switch {
-		case len(src) > maxRefFileLen:
-			skip(fmt.Sprintf("larger than %d bytes", maxRefFileLen), f)
-			continue
-		case evidence.IsBinary(src):
-			skip("not text", f)
-			continue
-		}
 		scanned += len(src)
 		test := strings.HasSuffix(f, "_test.go")
-		mark := ""
-		if test {
-			mark = " (test file)"
+		binary := evidence.IsBinary(src)
+		if binary && isGo {
+			// Its directives are not read: possibly an embed.
+			ix.embedsComplete = false
 		}
-		for n, line := range strings.Split(string(src), "\n") {
-			tl := strings.TrimSpace(line)
-			if path.Ext(f) == ".go" && strings.HasPrefix(tl, "//go:embed") {
+		lineNo, lineStart := 1, 0
+		for at := 0; at <= len(src); {
+			// One line at a time for text; a binary file is one "line".
+			end := len(src)
+			if !binary {
+				if j := bytes.IndexByte(src[at:], '\n'); j >= 0 {
+					end = at + j
+				}
+			}
+			line := src[at:end]
+			tl := ""
+			if !binary {
+				tl = strings.TrimSpace(string(line))
+			}
+			if isGo && !binary && strings.HasPrefix(tl, "//go:embed") {
 				pats := embedPatterns(strings.TrimPrefix(tl, "//go:embed"))
 				if len(pats) > maxDirectivePats || patterns+len(pats) > maxEmbedPatterns {
-					ix.embedsComplete = false
-					skip("//go:embed patterns past the limit", fmt.Sprintf("%s:%d", f, n+1))
+					skip("//go:embed patterns past the limit", fmt.Sprintf("%s:%d", f, lineNo), true)
 					pats = pats[:max(0, min(len(pats), maxDirectivePats, maxEmbedPatterns-patterns))]
 				}
 				patterns += len(pats)
 				for _, p := range pats {
-					ix.embeds[path.Dir(f)] = append(ix.embeds[path.Dir(f)], embedPat{safeFile(f), n + 1, strings.TrimPrefix(p, "all:"), test})
+					ix.embeds[path.Dir(f)] = append(ix.embeds[path.Dir(f)], embedPat{safeFile(f), lineNo, strings.TrimPrefix(p, "all:"), test})
 				}
-				continue
+			} else {
+				ix.tokens(line, wanted, f, lineNo, test, binary, tl)
 			}
-			toks := tokenRE.FindAllString(line, maxLineTokens+1)
-			if len(toks) > maxLineTokens {
-				skip(fmt.Sprintf("lines with more than %d tokens (only the first searched)", maxLineTokens), fmt.Sprintf("%s:%d", f, n+1))
-				toks = toks[:maxLineTokens]
+			if end == len(src) {
+				break
 			}
-			seen := map[string]bool{}
-			for _, tok := range toks {
-				k := path.Base(tok)
-				if !wanted[k] || seen[k] {
-					continue
-				}
-				seen[k] = true
-				m := ix.mentions[k]
-				if m == nil {
-					m = &mentionList{}
-					ix.mentions[k] = m
-				}
-				entry := fmt.Sprintf("%s:%d%s: %s", safeFile(f), n+1, mark, clipText(tl))
-				if test && len(m.test) < maxRefs {
-					m.test = append(m.test, entry)
-				} else if !test && len(m.nonTest) < maxRefs {
-					m.nonTest = append(m.nonTest, entry)
-				}
-			}
+			at, lineStart = end+1, end+1
+			lineNo++
 		}
+		_ = lineStart
 	}
 	for _, why := range slices.Sorted(maps.Keys(skipped)) {
 		fs := skipped[why]
@@ -1397,18 +1431,71 @@ func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
 	return ix
 }
 
+// tokens records the wanted names among the tokens of one line (or of a
+// whole binary file), in one linear pass.
+func (ix *refIndex) tokens(line []byte, wanted map[string]bool, f string, lineNo int, test, binary bool, text string) {
+	seen := map[string]bool{}
+	for i := 0; i < len(line); {
+		if !isTokenByte(line[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(line) && isTokenByte(line[j]) {
+			j++
+		}
+		tok := line[i:j]
+		i = j
+		k := string(tok[bytes.LastIndexByte(tok, '/')+1:])
+		if !wanted[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		m := ix.mentions[k]
+		if m == nil {
+			m = &mentionList{}
+			ix.mentions[k] = m
+		}
+		mark, shown := "", clipText(text)
+		if test {
+			mark = " (test file)"
+		}
+		if binary {
+			mark, shown = " (inside this binary file)", "its bytes contain the name"
+		}
+		entry := fmt.Sprintf("%s:%d%s: %s", safeFile(f), lineNo, mark, shown)
+		switch {
+		case test:
+			if len(m.test) < maxRefs {
+				m.test = append(m.test, entry)
+			}
+		default:
+			if len(m.nonTest) < maxRefs {
+				m.nonTest = append(m.nonTest, entry)
+			}
+			if len(m.nonTestFiles) < maxNonTestFiles && !slices.Contains(m.nonTestFiles, f) {
+				m.nonTestFiles = append(m.nonTestFiles, f)
+			}
+		}
+	}
+}
+
 // refs is where the module refers to the file at rel: whether the linker
 // takes it (.syso), which //go:embed patterns match it (in a package at
 // or above its directory: embed patterns cannot use ".."), and which
-// text files mention its name. linked reports that it reaches the
-// program: a .syso, a match in non-test code, or a search that was not
-// complete.
-func (ix *refIndex) refs(rel string) (string, bool) {
+// files mention its name. inert is the gate's proof that the binary never
+// reaches the build: the search covered every file, the name is
+// searchable, it is not a .syso, no non-test //go:embed pattern matches
+// it, and no non-test file other than itself mentions it. why lists what
+// is missing from that proof.
+func (ix *refIndex) refs(rel string) (text string, inert bool, why []string) {
 	var b strings.Builder
 	dir := path.Dir(rel)
-	linked := !ix.embedsComplete
+	if !ix.complete {
+		why = append(why, "the reference search did not cover every file")
+	}
 	if path.Ext(rel) == ".syso" {
-		linked = true
+		why = append(why, "a .syso file is linked")
 		fmt.Fprintf(&b, "a .syso file is passed to the linker whenever its package directory (%s, %d non-test Go files) is built for a GOOS/GOARCH its name does not exclude: it is linked into the program\n", safeFile(dir), ix.goFiles[dir])
 	}
 	embeds := 0
@@ -1423,8 +1510,8 @@ func (ix *refIndex) refs(rel string) (string, bool) {
 				test := ""
 				if e.test {
 					test = " (test file)"
-				} else {
-					linked = true
+				} else if !slices.Contains(why, "a non-test //go:embed pattern matches it") {
+					why = append(why, "a non-test //go:embed pattern matches it")
 				}
 				fmt.Fprintf(&b, "embedded: %s:%d%s has //go:embed %s, which matches it\n", e.file, e.line, test, clipText(e.pat))
 			}
@@ -1434,9 +1521,19 @@ func (ix *refIndex) refs(rel string) (string, bool) {
 		}
 	}
 	base := path.Base(rel)
+	if !searchable(base) {
+		why = append(why, "its name has characters the search does not match")
+		b.WriteString("its name has characters the gate's search does not match, so mentions of it were not searched for\n")
+	}
 	m := ix.mentions[base]
 	if m == nil {
 		m = &mentionList{}
+	}
+	for _, f := range m.nonTestFiles {
+		if f != rel {
+			why = append(why, "a non-test file mentions its name")
+			break
+		}
 	}
 	for _, e := range m.nonTest {
 		b.WriteString("mentioned at " + e + "\n")
@@ -1449,19 +1546,18 @@ func (ix *refIndex) refs(rel string) (string, bool) {
 			fmt.Fprintf(&b, "(first %d mentions of this kind shown)\n", maxRefs)
 		}
 	}
-	if !searchable(base) {
-		b.WriteString("its name has characters the gate's search does not match, so mentions of it were not searched for\n")
-	}
 	if embeds == 0 && len(m.nonTest)+len(m.test) == 0 {
 		b.WriteString("no directive or mention found in the files searched\n")
 	}
 	for _, n := range ix.notes {
 		b.WriteString(n + "\n")
 	}
-	if !ix.embedsComplete {
-		b.WriteString("(Go files or //go:embed patterns were not all searched, so the gate treats this file as possibly embedded in the program)\n")
+	if len(why) == 0 {
+		b.WriteString("INERT, PROVEN by the gate: the search covered every file of the module, it is not a .syso, no //go:embed pattern in non-test code matches it, and no non-test file mentions its name. It never reaches the build.\n")
+		return b.String(), true, nil
 	}
-	return b.String(), linked
+	b.WriteString("possibly reaching the build: " + strings.Join(why, "; ") + "\n")
+	return b.String(), false, why
 }
 
 func clipText(s string) string {

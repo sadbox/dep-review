@@ -147,7 +147,7 @@ func TestEmbedPatternsBounded(t *testing.T) {
 		t.Errorf("CheckTrees took %v", d)
 	}
 	out := string(h.render("m"))
-	if !strings.Contains(out, "//go:embed patterns past the limit") || !strings.Contains(out, "treats this file as possibly embedded") {
+	if !strings.Contains(out, "//go:embed patterns past the limit") || !strings.Contains(out, "possibly reaching the build: the reference search did not cover every file") {
 		t.Errorf("capped patterns not reported:\n%.2000s", out)
 	}
 }
@@ -165,8 +165,11 @@ func TestLinkedUnrendered(t *testing.T) {
 		{"syso", map[string]string{"x.syso": broken, "p.go": "package p\n"}, true},
 		{"embedded by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
 		// Round 4: routing rests on the rendering alone, linked or not.
-		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
-		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, true},
+		// Round 5: a binary proven never to reach the build stays on review
+		// whatever its rendering.
+		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, false},
+		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, false},
+		{"mentioned by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nconst f = \"x.bin\"\n"}, true},
 		{"complete COFF .syso", map[string]string{"x.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, false},
 		// Informational (a): a .syso nothing can parse is linked and unread.
 		{"syso with no parser for its type", map[string]string{"x.syso": "\x00\x01 opaque", "p.go": "package p\n"}, true},
@@ -201,7 +204,7 @@ func TestLinkedUnrendered(t *testing.T) {
 func TestRefSearchNotes(t *testing.T) {
 	cur := map[string]string{
 		"logo.bin":   "\x00\x01logo",
-		"big.txt":    strings.Repeat("x", maxRefFileLen+1),
+		"big.txt":    strings.Repeat("x ", 1<<20) + "logo.bin\n",
 		"other.bin":  "\x00\x02other",
 		"p.go":       "package p\n\nconst name = \"logo.bin\"\n",
 		"we,ird.bin": "\x00\x03weird",
@@ -214,8 +217,9 @@ func TestRefSearchNotes(t *testing.T) {
 	for _, want := range []string{
 		"mentioned at p.go:3: const name = \"logo.bin\"",
 		fmt.Sprintf("(first %d mentions of this kind shown)", maxRefs),
-		"not searched: 1 files or lines larger than",
-		"big.txt",
+		// Large files are searched too (no per-file skip).
+		"mentioned at big.txt:1: ",
+		"possibly reaching the build: a non-test file mentions its name",
 	} {
 		if !strings.Contains(logo, want) {
 			t.Errorf("logo.bin: missing %q in:\n%s", want, logo)
