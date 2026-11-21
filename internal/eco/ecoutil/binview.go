@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,25 +45,66 @@ const (
 )
 
 // Budget bounds the work DescribeBinary does across every call that
-// shares it (one module's binaries): bytes handed to the structured
-// parsers plus bytes decompressed (Left), and wall time (Deadline, zero
-// for none). nil means no shared bound, only the per-file caps.
+// shares it: bytes handed to the structured parsers plus bytes
+// decompressed (Left, one module's binaries), and wall time (Clock,
+// shared by every module of a fetch; nil for none). A nil Budget means
+// no shared bound, only the per-file caps.
 type Budget struct {
-	Left     int64
-	Deadline time.Time
+	Left  int64
+	Clock *Clock
 }
 
 // Take reserves n bytes; it reports false, reserving nothing, when fewer
-// are left or the deadline has passed.
+// are left or the clock has run out.
 func (b *Budget) Take(n int64) bool {
 	if b == nil {
 		return true
 	}
-	if b.Left < n || (!b.Deadline.IsZero() && time.Now().After(b.Deadline)) {
+	if b.Left < n || !b.Clock.ok() {
 		return false
 	}
 	b.Left -= n
 	return true
+}
+
+// Clock is a wall-time allowance that starts with the first work charged
+// to it (not when it is made), so time spent before rendering begins
+// does not count. It is safe for concurrent use.
+type Clock struct {
+	mu      sync.Mutex
+	d       time.Duration
+	start   time.Time
+	expired bool
+}
+
+// NewClock is a Clock allowing d once started.
+func NewClock(d time.Duration) *Clock { return &Clock{d: d} }
+
+func (c *Clock) ok() bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if c.start.IsZero() {
+		c.start = now
+	}
+	return !c.expired && now.Sub(c.start) < c.d
+}
+
+// Started is when the clock started, zero before any work.
+func (c *Clock) Started() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.start
+}
+
+// Expire runs the clock out (tests).
+func (c *Clock) Expire() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.expired = true
 }
 
 // left is n, or less if the budget has less left.
@@ -89,6 +131,11 @@ const (
 	// rendered (budget spent, too large, the parser failed, or the
 	// isolated parser crashed or timed out).
 	NotStructured
+	// Partial: the structure was rendered only in part: a step stopped
+	// early on purpose (names too costly to build, compressed sections
+	// not inflated, build info not read). For a binary that reaches the
+	// program this counts as not rendered.
+	Partial
 )
 
 // Description is DescribeBinary's result.
@@ -237,11 +284,13 @@ type childResult struct {
 	Used   int64  `json:"used"` // bytes decompressed
 }
 
-// renderer is one structure rendering: it records a failure in any parser.
+// renderer is one structure rendering: it records a failure in any
+// parser, and any step it stopped early (partial).
 type renderer struct {
-	limit  int64 // bytes that may be decompressed
-	used   int64
-	failed bool
+	limit   int64 // bytes that may be decompressed
+	used    int64
+	failed  bool
+	partial bool
 }
 
 // guard runs one parser and turns a panic into a line of text.
@@ -282,14 +331,20 @@ func structureLocal(b []byte, limit int64) childResult {
 	case t == "gzip":
 		out.WriteString(rd.guard("gzip", func() string { return rd.describeGzip(r) }))
 	}
-	if !compressed {
+	if compressed {
 		// buildinfo reads section data, which for a compressed ELF
 		// section would inflate it.
+		rd.partial = true
+		out.WriteString("  Go build info: not read (a section is compressed)\n")
+	} else {
 		out.WriteString(rd.guard("Go build info", func() string { return describeBuildInfo(r) }))
 	}
 	st := Structured
-	if rd.failed {
+	switch {
+	case rd.failed:
 		st = NotStructured
+	case rd.partial:
+		st = Partial
 	}
 	return childResult{Text: out.String(), Status: st, Used: rd.used}
 }
@@ -373,8 +428,10 @@ func (rd *renderer) describeELF(r io.ReaderAt) (string, bool) {
 	fmt.Fprintf(&b, "  symbol tables: %d symbols, %d dynamic symbols\n", symbols[elf.SHT_SYMTAB], symbols[elf.SHT_DYNSYM])
 	switch {
 	case compressed:
+		rd.partial = true
 		b.WriteString("  imported libraries and symbols: not read (a section is compressed)\n")
 	case nameCost > maxNameBytes:
+		rd.partial = true
 		b.WriteString("  imported libraries and symbols: not read (their names could cost too much to build); counts above\n")
 	default:
 		if libs, err := f.ImportedLibraries(); err == nil {
@@ -391,51 +448,80 @@ func (rd *renderer) describeELF(r io.ReaderAt) (string, bool) {
 	return b.String(), compressed
 }
 
-// peNameCost reads, from the raw headers, the symbol count and string
-// table size of a PE image or COFF object: pe.NewFile builds every
-// symbol name up front.
-func peNameCost(b []byte) (syms uint32, cost uint64, ok bool) {
+// coffHeader is what the gate reads itself from a PE image's or COFF
+// object's headers, without pe.NewFile (which builds every symbol name
+// up front): machine, characteristics, the section table, the symbol
+// count and the string table size.
+type coffHeader struct {
+	machine, characteristics uint16
+	sections                 []string
+	nsec                     int
+	syms                     uint32
+	strSize                  uint64
+}
+
+func readCOFF(b []byte) (coffHeader, bool) {
+	var h coffHeader
 	off := 0
 	if len(b) >= 0x40 && b[0] == 'M' && b[1] == 'Z' {
 		off = int(binary.LittleEndian.Uint32(b[0x3c:]))
-		if off < 0 || off+4 > len(b) || string(b[off:off+4]) != "PE\x00\x00" {
-			return 0, 0, false
+		if off < 0 || off > len(b)-4 || string(b[off:off+4]) != "PE\x00\x00" {
+			return h, false
 		}
 		off += 4
 	}
-	if off+20 > len(b) {
-		return 0, 0, false
+	if off > len(b)-20 {
+		return h, false
 	}
+	h.machine = binary.LittleEndian.Uint16(b[off:])
+	h.nsec = int(binary.LittleEndian.Uint16(b[off+2:]))
 	ptr := uint64(binary.LittleEndian.Uint32(b[off+8:]))
-	syms = binary.LittleEndian.Uint32(b[off+12:])
-	strOff := ptr + 18*uint64(syms)
-	var strSize uint64
-	if ptr != 0 && strOff+4 <= uint64(len(b)) {
-		strSize = uint64(binary.LittleEndian.Uint32(b[strOff:]))
+	h.syms = binary.LittleEndian.Uint32(b[off+12:])
+	opt := int(binary.LittleEndian.Uint16(b[off+16:]))
+	h.characteristics = binary.LittleEndian.Uint16(b[off+18:])
+	sec := off + 20 + opt
+	for i := 0; i < h.nsec && i < maxListed; i++ {
+		at := sec + 40*i
+		if at < 0 || at > len(b)-40 {
+			break
+		}
+		name := strings.TrimRight(string(b[at:at+8]), "\x00")
+		h.sections = append(h.sections, fmt.Sprintf("%s size %d characteristics 0x%x", name, binary.LittleEndian.Uint32(b[at+16:]), binary.LittleEndian.Uint32(b[at+36:])))
 	}
-	return syms, uint64(syms) * max(strSize, 1), true
+	if strOff := ptr + 18*uint64(h.syms); ptr != 0 && strOff+4 <= uint64(len(b)) {
+		h.strSize = uint64(binary.LittleEndian.Uint32(b[strOff:]))
+	}
+	return h, true
 }
 
+// describePE always renders the headers the gate reads itself, then
+// imported libraries and symbols through pe.NewFile only when building
+// the symbol names is cheap; otherwise the rendering is partial.
 func (rd *renderer) describePE(raw []byte, r io.ReaderAt) string {
-	syms, cost, ok := peNameCost(raw)
+	h, ok := readCOFF(raw)
 	if !ok {
 		return rd.fail("PE/COFF", errors.New("unreadable headers"))
 	}
-	if cost > maxNameBytes {
-		return fmt.Sprintf("  PE/COFF: %d symbols; not parsed further (building their names could cost too much)\n", syms)
+	var b strings.Builder
+	fmt.Fprintf(&b, "  PE/COFF machine 0x%x, characteristics 0x%x, %d symbols, string table %d bytes\n", h.machine, h.characteristics, h.syms, h.strSize)
+	fmt.Fprintf(&b, "  sections (%d):\n", h.nsec)
+	for _, s := range h.sections {
+		b.WriteString("    | " + clip(s) + "\n")
+	}
+	if h.nsec > len(h.sections) {
+		fmt.Fprintf(&b, "    ... %d more (or beyond the end of the file)\n", h.nsec-len(h.sections))
+	}
+	if uint64(h.syms)*max(h.strSize, 1) > maxNameBytes {
+		rd.partial = true
+		b.WriteString("  imported libraries and symbols: not read (building the symbol names could cost too much)\n")
+		return b.String()
 	}
 	f, err := pe.NewFile(r)
 	if err != nil {
-		return rd.fail("PE/COFF", err)
+		b.WriteString(rd.fail("PE/COFF imports", err))
+		return b.String()
 	}
 	defer f.Close()
-	var b strings.Builder
-	fmt.Fprintf(&b, "  PE/COFF machine 0x%x, characteristics 0x%x, %d symbols\n", f.Machine, f.Characteristics, len(f.Symbols))
-	var secs []string
-	for _, s := range f.Sections {
-		secs = append(secs, fmt.Sprintf("%s size %d characteristics 0x%x", s.Name, s.Size, s.Characteristics))
-	}
-	list(&b, "sections", secs)
 	if libs, err := f.ImportedLibraries(); err == nil {
 		list(&b, "imported libraries", libs)
 	}

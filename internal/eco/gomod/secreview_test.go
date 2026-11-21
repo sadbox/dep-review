@@ -89,7 +89,7 @@ func TestSkippedGoesToAPerson(t *testing.T) {
 
 func TestBlobDecodeCharged(t *testing.T) {
 	lit := `"` + strings.Repeat("QUJD", 300) + `"`
-	out := blobContext("b.go:1", lit, &ecoutil.Budget{Left: 10})
+	out, _ := blobContext("b.go:1", lit, &ecoutil.Budget{Left: 10})
 	if !strings.Contains(out, "budget for this module is spent") || strings.Contains(out, "it decodes as") {
 		t.Errorf("blob decoded past the budget:\n%s", out)
 	}
@@ -166,7 +166,8 @@ func TestLinkedUnrendered(t *testing.T) {
 		{"embedded by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
 		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, false},
 		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, false},
-		{"syso with no parser for its type", map[string]string{"x.syso": "\x00\x01 opaque", "p.go": "package p\n"}, false},
+		// Informational (a): a .syso nothing can parse is linked and unread.
+		{"syso with no parser for its type", map[string]string{"x.syso": "\x00\x01 opaque", "p.go": "package p\n"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

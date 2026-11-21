@@ -67,8 +67,10 @@ a person: `evidence.json` lists every flagged item (`flagged`, capped at
 200, past which a person decides), and a `.flagged.md` evidence file per
 module shows exactly what changed for each one. For binaries and decoded
 blobs the gate renders, with Go's own parsers only (run in a child
-process of the gate with an address-space limit and a timeout, under a
-per-module budget of bytes parsed and decompressed), the type, structure
+process of the gate under a 2 GiB address-space limit on Linux, which
+leaves its Go heap roughly 360 to 515 MB, and a timeout; with a
+per-module budget of bytes parsed and decompressed and a 10-minute
+rendering clock per fetch that starts with the first rendering), the type, structure
 (ELF/Mach-O/PE sections, imported libraries and symbols, Go build info;
 zip/tar/gzip entries), a hexdump, printable strings, a comparison with the
 previous version, and where the module refers to the file (linked `.syso`,
@@ -77,8 +79,10 @@ item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
 list with the evidence's, and merges only when every flagged item, and
 nothing else, is `benign`. A Go file the gate cannot parse still goes to a
 person, as do truncated evidence, a module with more flagged items than a
-review can take, and a binary linked or embedded into the program whose
-structure the gate could not render. Module diffs do not detect renames,
+review can take, a binary linked or embedded into the program whose
+structure the gate could not render in full (or a `.syso` it has no parser
+for), and an encoded literal in non-test code it could not decode for its
+own limits. Module diffs do not detect renames,
 and the full new text of every C, assembly, cgo and risky-import file is
 in the focused evidence too.
 

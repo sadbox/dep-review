@@ -22,8 +22,13 @@ import (
 // in any way yields "not structured", which the caller treats as such.
 
 const (
-	// childMemory is the child's address-space limit (Linux) and soft
-	// Go memory limit (everywhere).
+	// childMemory is the child's address-space limit (Linux). The Go
+	// runtime reserves address space beyond its heap, so the heap the
+	// child can actually use under it is far smaller: about 360 to 515
+	// MB measured on linux/amd64 and arm64. That is still several times
+	// what a legitimate rendering needs (inputs are at most maxParse),
+	// and an amplifying parser hits it quickly. ChildMain also sets a
+	// soft Go memory limit of half of it, everywhere.
 	childMemory = 2 << 30
 	// childTimeout bounds one rendering.
 	childTimeout = 15 * time.Second
@@ -76,7 +81,7 @@ func (i *Isolation) run(b []byte, limit int64) childResult {
 		return fail("printed too much")
 	}
 	var res childResult
-	if err := json.Unmarshal(out.b, &res); err != nil || (res.Status != Structured && res.Status != NotStructured) || res.Used < 0 {
+	if err := json.Unmarshal(out.b, &res); err != nil || (res.Status != Structured && res.Status != NotStructured && res.Status != Partial) || res.Used < 0 {
 		return fail("returned no valid result")
 	}
 	return res

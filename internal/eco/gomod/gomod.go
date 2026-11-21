@@ -332,7 +332,8 @@ func majorPrefix(mod string) (string, bool) {
 func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, error) {
 	var findings []model.Finding
 	var flagged []model.FlaggedItem
-	checked := map[string]bool{} // flaggedUpdate keys already checked
+	checked := map[string]bool{}          // flaggedUpdate keys already checked
+	clock := ecoutil.NewClock(renderTime) // one for every module of this fetch
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
 	var args []string
 	for _, c := range work {
@@ -410,7 +411,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			fmt.Fprintf(summary, "- %s: same change as in another directory; its flagged items are listed once\n", key)
 		} else {
 			checked[key] = true
-			h := CheckTrees(trees[0], trees[1])
+			h := checkTrees(trees[0], trees[1], clock)
 			findings = append(findings, h.findings(su.Name)...)
 			flagged = append(flagged, h.flagged(key)...)
 			if len(h.hits) > 0 {

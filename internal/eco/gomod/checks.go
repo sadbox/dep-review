@@ -96,11 +96,14 @@ const (
 	// codeOpaque: a binary linked or embedded into the program whose
 	// structure the gate could not render.
 	codeOpaque = "gomod.linked-binary-unrendered"
+	// codeUndecoded: an encoded literal in non-test code the gate did not
+	// decode or render for its own limits (budget, time, size).
+	codeUndecoded = "gomod.blob-not-decoded"
 )
 
 // checkRoute is the route each code forces; anything not listed is
 // RouteReview.
-var checkRoute = map[string]model.Route{codeParse: model.RouteHuman, codeSkipped: model.RouteHuman, codeOpaque: model.RouteHuman}
+var checkRoute = map[string]model.Route{codeParse: model.RouteHuman, codeSkipped: model.RouteHuman, codeOpaque: model.RouteHuman, codeUndecoded: model.RouteHuman}
 
 func routeOf(code string) model.Route {
 	if r, ok := checkRoute[code]; ok {
@@ -126,20 +129,43 @@ type report struct {
 	// budget bounds the bytes the binary renderings parse and decompress
 	// for this module.
 	budget *ecoutil.Budget
+	// files holds, by sanitized path, the full new text of each file that
+	// items refer to: quoted once per focused evidence file, after the
+	// items (fileRef).
+	files map[string]string
 }
 
 // moduleParseBudget is report.budget's size.
 const moduleParseBudget = 128 << 20
 
-func newReport() *report {
+// newReport is a report with a rendering clock of its own (tests, and
+// CheckTrees outside a fetch).
+func newReport() *report { return newReportWith(ecoutil.NewClock(renderTime)) }
+
+// newReportWith is a report whose renderings share clock with every
+// other module of the fetch.
+func newReportWith(clock *ecoutil.Clock) *report {
 	return &report{
 		hits: hits{}, ctx: map[string]map[string][]string{}, keys: map[[2]string]bool{},
-		budget: &ecoutil.Budget{Left: moduleParseBudget, Deadline: time.Now().Add(moduleParseTime)},
+		budget: &ecoutil.Budget{Left: moduleParseBudget, Clock: clock},
+		files:  map[string]string{},
 	}
 }
 
-// moduleParseTime bounds the wall time of one module's binary renderings.
-const moduleParseTime = 2 * time.Minute
+// renderTime bounds the wall time of all binary renderings and blob
+// decoding of one fetch, from the first one: well inside fetch's own
+// timeout. What it leaves unrendered in code that reaches the program
+// goes to a person.
+const renderTime = 10 * time.Minute
+
+// fileRef records f's full new text for the focused evidence and returns
+// the line an item uses to point at it. The anchor ("### file <path>" at
+// the start of a line) can only be gate-written: module text is always
+// quoted under "    | ".
+func (r *report) fileRef(f string, text []byte) string {
+	r.files[f] = string(text)
+	return "full text: see \"### file " + f + "\" below\n"
+}
 
 // full reports whether adding (code, item) would take the module past
 // the number of flagged items a review can take; its context would then
@@ -244,6 +270,13 @@ func (r *report) render(update string) []byte {
 			}
 		}
 	}
+	if len(r.files) > 0 {
+		b.WriteString("\n# Full texts of flagged files\n\nEach file is quoted once; the items above refer to it by its \"### file\" heading.\n")
+		for _, f := range slices.Sorted(maps.Keys(r.files)) {
+			fmt.Fprintf(&b, "\n### file %s\n", f)
+			b.WriteString(quote("full text of the new version of "+f, r.files[f]))
+		}
+	}
 	return []byte(b.String())
 }
 
@@ -315,7 +348,8 @@ var checkText = map[string]string{
 	codeAsm:        "assembly (.s) file added or changed",
 	codeParse:      "Go file the gate could not parse (checked as text only)",
 	codeSkipped:    "item flagged past the limit of a review; its context was not built",
-	codeOpaque:     "binary linked or embedded into the program whose structure the gate could not render (budget spent, too large, or its parser failed)",
+	codeOpaque:     "binary linked or embedded into the program whose structure the gate could not render in full (budget or time spent, too large, its parser failed or stopped early, or no parser for a .syso)",
+	codeUndecoded:  "encoded literal in non-test code that the gate did not decode or render in full (budget or time spent, or too large)",
 }
 
 // cgoSourceExts are the extensions the go command hands to the C, C++,
@@ -337,8 +371,15 @@ var cgoSourceExts = map[string]bool{
 // Dispatch is on the extension first: a file the toolchain would compile
 // or link gets its check whatever its content looks like (a .go file that
 // looks binary is still parsed, and fails as unparseable).
-func CheckTrees(old, cur *ecoutil.Tree) *report {
+func CheckTrees(old, cur *ecoutil.Tree) *report { return checkTrees(old, cur, nil) }
+
+// checkTrees is CheckTrees with the fetch's rendering clock (nil: one of
+// its own).
+func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 	h := newReport()
+	if clock != nil {
+		h = newReportWith(clock)
+	}
 	shadow := map[string]*pkgScope{} // package directory -> scope
 	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
 	var bins []string                // flagged binaries; their context is built last
@@ -435,7 +476,9 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins []string) {
 		r.add(codeBinary, item,
 			quote("the gate's rendering of "+item+" (the module diff cannot show binary content)", d.Text),
 			quote("where the module refers to "+item+" (found by the gate)", refs))
-		if linked && d.Structure == ecoutil.NotStructured {
+		unrendered := d.Structure == ecoutil.NotStructured || d.Structure == ecoutil.Partial ||
+			(path.Ext(rel) == ".syso" && d.Structure == ecoutil.NoParser)
+		if linked && unrendered {
 			r.add(codeOpaque, item)
 		}
 	}
@@ -460,7 +503,7 @@ func (r *report) sourceFacts(code, rel string, prev, cur []byte, hadOld bool) {
 	if evidence.IsBinary(cur) {
 		b.WriteString(quote("it is not text; the gate's rendering of "+item, ecoutil.DescribeBinary(cur, prev, hadOld, r.budget).Text))
 	} else {
-		b.WriteString(quote("full text of the new version of "+item, string(cur)))
+		b.WriteString(r.fileRef(item, cur))
 	}
 	r.add(code, item, b.String())
 }
@@ -1007,7 +1050,7 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 	if !n.parsed {
 		h.add(codeParse, f, quote("the parser's error (the gate checked this file as text only)", n.parseErr))
 	}
-	fullText := func() string { return quote("full text of the new version of "+f, string(cur)) }
+	fullText := func() string { return h.fileRef(f, cur) }
 	for _, imp := range slices.Sorted(maps.Keys(n.imports)) {
 		line := n.imports[imp]
 		if _, had := o.imports[imp]; riskyImport(imp) != "" && !had {
@@ -1091,10 +1134,19 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 		h.skip(codeBlob, f)
 	default:
 		var ctx []string
+		undecoded := false
 		for _, lit := range lits {
-			ctx = append(ctx, blobContext(at(n.blobs[lit]), lit, h.budget))
+			text, done := blobContext(at(n.blobs[lit]), lit, h.budget)
+			ctx = append(ctx, text)
+			undecoded = undecoded || !done
 		}
 		h.add(codeBlob, f, ctx...)
+		// checkGoFile sees non-test files only: this literal is compiled
+		// into the package, and what the gate's own limits left unread
+		// is for a person.
+		if undecoded {
+			h.add(codeUndecoded, f)
+		}
 	}
 }
 
@@ -1102,26 +1154,33 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 const maxBlobDecode = 1 << 20
 
 // blobContext shows one encoded literal: its start, and what it decodes
-// to if it is plain base64 or hex (rendered like a binary file).
-func blobContext(where, lit string, budget *ecoutil.Budget) string {
+// to if it is plain base64 or hex (rendered like a binary file). done is
+// false when the gate's own limits (budget, time, size) kept it from
+// decoding or fully rendering the literal; a literal that is simply not
+// plain hex or base64 is done.
+func blobContext(where, lit string, budget *ecoutil.Budget) (text string, done bool) {
 	var b strings.Builder
 	head := lit[:min(len(lit), 120)]
 	b.WriteString(quote(fmt.Sprintf("string literal at %s, %d bytes; its start", where, len(lit)), head+"..."))
 	s, err := strconv.Unquote(lit)
 	if err != nil {
 		b.WriteString("the gate could not unquote the literal\n")
-		return b.String()
+		return b.String(), true
 	}
 	s = strings.TrimSpace(s)
 	// Decoding is charged to the module's budget like parsing, and is
 	// not tried for a literal whose decoded size could exceed the cap.
 	if len(s) > 2*maxBlobDecode {
 		fmt.Fprintf(&b, "it is %d bytes long, more than the gate decodes (%d)\n", len(s), 2*maxBlobDecode)
-		return b.String()
+		return b.String(), false
+	}
+	if strings.Trim(s, "0123456789abcdefABCDEFghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ+/-_=") != "" {
+		b.WriteString("it is not plain hex or base64 (escapes or another encoding); the gate did not decode it\n")
+		return b.String(), true
 	}
 	if !budget.Take(int64(len(s))) {
 		b.WriteString("it was not decoded: the gate's parse budget for this module is spent\n")
-		return b.String()
+		return b.String(), false
 	}
 	var dec []byte
 	var how string
@@ -1140,10 +1199,15 @@ func blobContext(where, lit string, budget *ecoutil.Budget) string {
 		b.WriteString("it is not plain hex or base64 (escapes or another encoding); the gate did not decode it\n")
 	case len(dec) > maxBlobDecode:
 		fmt.Fprintf(&b, "it decodes as %s to %d bytes, more than the gate renders (%d)\n", how, len(dec), maxBlobDecode)
+		return b.String(), false
 	default:
-		b.WriteString(quote(fmt.Sprintf("it decodes as %s; the gate's rendering of the decoded bytes", how), ecoutil.DescribeBinary(dec, nil, false, budget).Text))
+		d := ecoutil.DescribeBinary(dec, nil, false, budget)
+		b.WriteString(quote(fmt.Sprintf("it decodes as %s; the gate's rendering of the decoded bytes", how), d.Text))
+		if d.Structure == ecoutil.NotStructured || d.Structure == ecoutil.Partial {
+			return b.String(), false
+		}
 	}
-	return b.String()
+	return b.String(), true
 }
 
 // Bounds for indexRefs: files and bytes read, the largest file, the
