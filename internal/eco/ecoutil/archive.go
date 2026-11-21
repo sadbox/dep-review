@@ -76,7 +76,40 @@ func ExtractTar(r io.Reader, dir string, stripFirst bool) (*Tree, error) {
 			x.reject(h.Name, fmt.Sprintf("tar entry type %q (link, device or other special file)", h.Typeflag))
 		}
 	}
+	if why := trailingData(r); why != "" {
+		x.reject("(end of archive)", why)
+	}
 	return x.tree(), nil
+}
+
+// maxTrailing bounds how much is read past the end-of-archive marker.
+const maxTrailing = 16 << 20
+
+// trailingData reports anything but zero padding after the tar
+// end-of-archive marker. archive/tar stops at the marker, but other
+// extractors (GNU tar --ignore-zeros, Python's tarfile with ignore_zeros)
+// keep reading, so a second archive appended there would install files
+// the gate never saw.
+func trailingData(r io.Reader) string {
+	buf := make([]byte, 32<<10)
+	var n int64
+	for {
+		k, err := r.Read(buf)
+		for _, b := range buf[:k] {
+			if b != 0 {
+				return "data after the end-of-archive marker (a second archive or appended bytes)"
+			}
+		}
+		n += int64(k)
+		switch {
+		case errors.Is(err, io.EOF):
+			return ""
+		case err != nil:
+			return "unreadable data after the end-of-archive marker: " + err.Error()
+		case n > maxTrailing:
+			return fmt.Sprintf("more than %d bytes after the end-of-archive marker", maxTrailing)
+		}
+	}
 }
 
 // ExtractZip extracts a zip (wheel, sdist .zip) with the same rules as
