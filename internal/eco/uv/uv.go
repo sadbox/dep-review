@@ -186,6 +186,13 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 		return nil, findings, nil
 	}
 	headProject := map[int]bool{}
+	baseLocal := map[string]bool{}
+	for _, p := range bl.Packages {
+		if _, ok := p.projectPath(); ok {
+			baseLocal[localKey(p)] = true
+		}
+	}
+	var unchangedLocal []Package
 	direct := map[string]bool{}
 	for i, p := range hl.Packages {
 		if len(p.Source) != 1 {
@@ -201,8 +208,14 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			return nil, nil, err
 		}
 		if why != "" {
-			refuse("uv.project-source-invalid", Normalize(p.Name), fmt.Sprintf("source %v: %s", p.Source, why))
-			continue
+			// A local path package (an editable dependency outside the
+			// workspace, say) that the base already has, unchanged, is the
+			// owner's choice; one the PR adds or changes refuses.
+			if !baseLocal[localKey(p)] {
+				refuse("uv.project-source-invalid", Normalize(p.Name), fmt.Sprintf("source %v: %s", p.Source, why))
+				continue
+			}
+			unchangedLocal = append(unchangedLocal, p)
 		}
 		headProject[i] = true
 		for _, d := range p.Deps {
@@ -295,8 +308,28 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			changes = append(changes, c)
 		}
 	}
+	// A changed package installed because an unchanged local package
+	// depends on it resolves through code the gate never sees.
+	for _, p := range unchangedLocal {
+		var through []string
+		for _, c := range changes {
+			if slices.Contains(p.Deps, c.update.Name) {
+				through = append(through, c.update.Name)
+			}
+		}
+		if len(through) > 0 {
+			findings = append(findings, human("uv.local-path-dependency", Normalize(p.Name), fmt.Sprintf("%s: %s (source %v, unchanged since the base, not a declared workspace member) depends on changed %s",
+				depDir, p.Name, p.Source, strings.Join(through, ", "))))
+		}
+	}
 	summary.WriteString("\n")
 	return changes, findings, nil
+}
+
+// localKey identifies a local (virtual/editable) package entry exactly,
+// so "unchanged since the base" means byte-for-byte the same lock entry.
+func localKey(p Package) string {
+	return fmt.Sprint(Normalize(p.Name), "\x00", p.Version, "\x00", p.Source, "\x00", p.Deps, "\x00", p.Sdist, "\x00", p.Wheels)
 }
 
 var (

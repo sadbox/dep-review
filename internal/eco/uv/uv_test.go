@@ -905,3 +905,56 @@ func TestBuildRequiresBump(t *testing.T) {
 		wantRoute(t, fs, want[0], model.Route(want[1]))
 	}
 }
+
+// TestUnchangedLocalPathDependency: an editable dependency outside the
+// workspace that the base already has is the owner's choice; adding or
+// changing one refuses, and a changed package that resolves through an
+// unchanged one needs a person.
+func TestUnchangedLocalPathDependency(t *testing.T) {
+	pyproject := []byte("[project]\nname = \"root\"\nversion = \"0\"\ndependencies = [\"lib\"]\n\n[tool.uv.sources]\nlib = { path = \"../lib\", editable = true }\n")
+	six := func(v string) string {
+		h := strings.Repeat(v[len(v)-1:], 64)
+		return "[[package]]\nname = \"six\"\nversion = \"" + v + "\"\nsource = { registry = \"https://pypi.org/simple\" }\n" +
+			"wheels = [\n    { url = \"https://files.pythonhosted.org/packages/aa/six-" + v + "-py2.py3-none-any.whl\", hash = \"sha256:" + h + "\", size = 1 },\n]\n"
+	}
+	lib := func(v string) string {
+		return "[[package]]\nname = \"lib\"\nversion = \"" + v + "\"\nsource = { editable = \"../lib\" }\ndependencies = [\n    { name = \"six\" },\n]\n"
+	}
+	lock := func(pkgs ...string) []byte {
+		return []byte("version = 1\nrevision = 3\n\n[[package]]\nname = \"root\"\nversion = \"0\"\nsource = { virtual = \".\" }\ndependencies = [\n    { name = \"lib\" },\n]\n\n" + strings.Join(pkgs, "\n"))
+	}
+	run := func(t *testing.T, base, head []byte) ([]change, []model.Finding) {
+		dir, b, h := gittest.Repo(t, map[string][]byte{"pyproject.toml": pyproject, "uv.lock": base}, map[string][]byte{"pyproject.toml": pyproject, "uv.lock": head})
+		var sum bytes.Buffer
+		cs, fs, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cs, fs
+	}
+	t.Run("unchanged, a dependency of it changes", func(t *testing.T) {
+		cs, fs := run(t, lock(lib("1.0"), six("1.16.0")), lock(lib("1.0"), six("1.17.0")))
+		if len(cs) != 1 || cs[0].update.Name != "six" {
+			t.Errorf("changes %+v", cs)
+		}
+		if got := codesOf(fs); !slices.Equal(got, []string{"uv.local-path-dependency"}) {
+			t.Errorf("codes %q, want only uv.local-path-dependency", got)
+		}
+		wantRoute(t, fs, "uv.local-path-dependency", model.RouteHuman)
+	})
+	t.Run("unchanged, nothing through it changes", func(t *testing.T) {
+		extra := "[[package]]\nname = \"other\"\nversion = \"1.0\"\nsource = { registry = \"https://pypi.org/simple\" }\nwheels = [\n    { url = \"https://files.pythonhosted.org/packages/aa/other-1.0-py3-none-any.whl\", hash = \"sha256:" + strings.Repeat("a", 64) + "\", size = 1 },\n]\n"
+		_, fs := run(t, lock(lib("1.0"), six("1.16.0")), lock(lib("1.0"), six("1.16.0"), extra))
+		if len(fs) != 0 {
+			t.Errorf("findings %+v", fs)
+		}
+	})
+	t.Run("changed by the PR", func(t *testing.T) {
+		_, fs := run(t, lock(lib("1.0"), six("1.16.0")), lock(lib("1.1"), six("1.16.0")))
+		wantRefuse(t, fs, "uv.project-source-invalid")
+	})
+	t.Run("added by the PR", func(t *testing.T) {
+		_, fs := run(t, lock(six("1.16.0")), lock(lib("1.0"), six("1.16.0")))
+		wantRefuse(t, fs, "uv.project-source-invalid")
+	})
+}
