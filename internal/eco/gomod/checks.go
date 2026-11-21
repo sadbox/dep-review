@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/evidence"
@@ -90,20 +91,15 @@ const (
 	codeBinary     = "gomod.binary-file"
 	codeAsm        = "gomod.assembly-changed"
 	codeParse      = "gomod.unparseable"
-	// codeSkipped: an item whose context was not built because the module
-	// already has as many flagged items as a review can take.
-	codeSkipped = "gomod.context-not-built"
-	// codeOpaque: a binary linked or embedded into the program whose
-	// structure the gate could not render.
-	codeOpaque = "gomod.linked-binary-unrendered"
-	// codeUndecoded: an encoded literal in non-test code the gate did not
-	// decode or render for its own limits (budget, time, size).
-	codeUndecoded = "gomod.blob-not-decoded"
+	// codeIncomplete lists every review-routed item the gate did not
+	// positively show in full ("<code> <item>"). report computes it from
+	// what add was told; nothing adds to it directly.
+	codeIncomplete = "gomod.not-shown-in-full"
 )
 
 // checkRoute is the route each code forces; anything not listed is
 // RouteReview.
-var checkRoute = map[string]model.Route{codeParse: model.RouteHuman, codeSkipped: model.RouteHuman, codeOpaque: model.RouteHuman, codeUndecoded: model.RouteHuman}
+var checkRoute = map[string]model.Route{codeParse: model.RouteHuman, codeIncomplete: model.RouteHuman}
 
 func routeOf(code string) model.Route {
 	if r, ok := checkRoute[code]; ok {
@@ -129,10 +125,20 @@ type report struct {
 	// budget bounds the bytes the binary renderings parse and decompress
 	// for this module.
 	budget *ecoutil.Budget
-	// files holds, by sanitized path, the full new text of each file that
-	// items refer to: quoted once per focused evidence file, after the
-	// items (fileRef).
-	files map[string]string
+	// shown records, for each review-routed key, whether every add of it
+	// asserted that its context shows it in full. A key without an entry
+	// (reserved, never decided) or with false is listed under
+	// codeIncomplete: the default is a person, not the review.
+	shown map[[2]string]bool
+	// files holds, by raw path, the full new text of each file that items
+	// refer to, and its gate-assigned number: quoted once per focused
+	// evidence file, after the items (fileRef).
+	files map[string]*quotedFile
+}
+
+type quotedFile struct {
+	n    int
+	text string
 }
 
 // moduleParseBudget is report.budget's size.
@@ -148,7 +154,7 @@ func newReportWith(clock *ecoutil.Clock) *report {
 	return &report{
 		hits: hits{}, ctx: map[string]map[string][]string{}, keys: map[[2]string]bool{},
 		budget: &ecoutil.Budget{Left: moduleParseBudget, Clock: clock},
-		files:  map[string]string{},
+		shown:  map[[2]string]bool{}, files: map[string]*quotedFile{},
 	}
 }
 
@@ -158,13 +164,19 @@ func newReportWith(clock *ecoutil.Clock) *report {
 // goes to a person.
 const renderTime = 10 * time.Minute
 
-// fileRef records f's full new text for the focused evidence and returns
-// the line an item uses to point at it. The anchor ("### file <path>" at
-// the start of a line) can only be gate-written: module text is always
-// quoted under "    | ".
-func (r *report) fileRef(f string, text []byte) string {
-	r.files[f] = string(text)
-	return "full text: see \"### file " + f + "\" below\n"
+// fileRef records the full new text of the file at raw path rel for the
+// focused evidence and returns the line an item uses to point at it: the
+// gate-assigned number of the "### file <n>: <path>" heading. Files are
+// keyed by their raw path, so two paths that sanitize alike keep their
+// own texts and numbers; module text, always quoted under "    | ",
+// cannot write such a heading.
+func (r *report) fileRef(rel string, text []byte) string {
+	q := r.files[rel]
+	if q == nil {
+		q = &quotedFile{n: len(r.files) + 1, text: string(text)}
+		r.files[rel] = q
+	}
+	return fmt.Sprintf("full text: see \"### file %d\" below (%s)\n", q.n, safeFile(rel))
 }
 
 // full reports whether adding (code, item) would take the module past
@@ -177,16 +189,30 @@ func (r *report) full(code, item string) bool {
 // skipped is the context of an item flagged past the cap.
 const skipped = "(context not built: this module has more flagged items than a review can take, so a person decides)\n"
 
-// skip adds (code, item) without its context, and the person-routed
-// finding that makes skipped's words true.
-func (r *report) skip(code, item string) {
-	r.add(code, item, skipped)
-	r.add(codeSkipped, code+" "+item)
-}
+// skip adds (code, item) without its context; it is not shown in full,
+// so a person decides.
+func (r *report) skip(code, item string) { r.add(code, item, false, skipped) }
 
-func (r *report) add(code, item string, ctx ...string) {
+// reserve counts (code, item) as flagged before its context is built (a
+// binary, rendered last). Until an add decides it, it is not shown.
+func (r *report) reserve(code, item string) {
 	if routeOf(code) == model.RouteReview {
 		r.keys[[2]string{code, item}] = true
+	}
+	r.hits[code] = append(r.hits[code], item)
+}
+
+// add records an item and its context. complete is the caller's positive
+// assertion that ctx shows the item in full; every add of a key must
+// assert it, or the key is listed under codeIncomplete.
+func (r *report) add(code, item string, complete bool, ctx ...string) {
+	k := [2]string{code, item}
+	if routeOf(code) == model.RouteReview {
+		r.keys[k] = true
+		if prev, ok := r.shown[k]; ok {
+			complete = complete && prev
+		}
+		r.shown[k] = complete
 	}
 	r.hits[code] = append(r.hits[code], item)
 	if len(ctx) == 0 {
@@ -198,10 +224,32 @@ func (r *report) add(code, item string, ctx ...string) {
 	r.ctx[code][item] = append(r.ctx[code][item], ctx...)
 }
 
-func (r *report) codes() []string { return slices.Sorted(maps.Keys(r.hits)) }
+func (r *report) codes() []string {
+	cs := slices.Sorted(maps.Keys(r.hits))
+	if len(r.incomplete()) > 0 {
+		cs = append(cs, codeIncomplete)
+		slices.Sort(cs)
+	}
+	return cs
+}
 
 func (r *report) items(code string) []string {
+	if code == codeIncomplete {
+		return r.incomplete()
+	}
 	return slices.Compact(slices.Sorted(slices.Values(r.hits[code])))
+}
+
+// incomplete is every review-routed key not positively shown in full.
+func (r *report) incomplete() []string {
+	var out []string
+	for k := range r.keys {
+		if !r.shown[k] {
+			out = append(out, k[0]+" "+k[1])
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // findings turns the report into one finding per code, listing up to 10
@@ -271,10 +319,14 @@ func (r *report) render(update string) []byte {
 		}
 	}
 	if len(r.files) > 0 {
-		b.WriteString("\n# Full texts of flagged files\n\nEach file is quoted once; the items above refer to it by its \"### file\" heading.\n")
-		for _, f := range slices.Sorted(maps.Keys(r.files)) {
-			fmt.Fprintf(&b, "\n### file %s\n", f)
-			b.WriteString(quote("full text of the new version of "+f, r.files[f]))
+		b.WriteString("\n# Full texts of flagged files\n\nEach file is quoted once; the items above refer to it by its \"### file <n>\" heading.\n")
+		byN := make([]string, len(r.files))
+		for rel, q := range r.files {
+			byN[q.n-1] = rel
+		}
+		for i, rel := range byN {
+			fmt.Fprintf(&b, "\n### file %d: %s\n", i+1, safeFile(rel))
+			b.WriteString(quote("full text of the new version of "+safeFile(rel), r.files[rel].text))
 		}
 	}
 	return []byte(b.String())
@@ -302,10 +354,18 @@ func quote(label, text string) string {
 // visible escapes what could end or rewrite a line: C0 controls but tab,
 // DEL, C1 controls (U+0085 among them) as <0xNN>; U+2028, U+2029 and
 // format characters (bidi controls, zero-width characters, BOM) as
-// <U+XXXX>. Invalid UTF-8 becomes U+FFFD.
+// <U+XXXX>. A byte that is not valid UTF-8 is written <0xNN> too, so the
+// text is shown without loss.
 func visible(s string) string {
 	var b strings.Builder
-	for _, r := range s {
+	for len(s) > 0 {
+		r, n := utf8.DecodeRuneInString(s)
+		if r == utf8.RuneError && n == 1 {
+			fmt.Fprintf(&b, "<0x%02X>", s[0])
+			s = s[1:]
+			continue
+		}
+		s = s[n:]
 		switch {
 		case r == '\t':
 			b.WriteRune(r)
@@ -347,9 +407,7 @@ var checkText = map[string]string{
 	codeBinary:     "binary file added or changed (testdata/ fixtures other than .syso excepted)",
 	codeAsm:        "assembly (.s) file added or changed",
 	codeParse:      "Go file the gate could not parse (checked as text only)",
-	codeSkipped:    "item flagged past the limit of a review; its context was not built",
-	codeOpaque:     "binary linked or embedded into the program whose structure the gate could not render in full (budget or time spent, too large, its parser failed or stopped early, or no parser for a .syso)",
-	codeUndecoded:  "encoded literal in non-test code that the gate did not decode or render in full (budget or time spent, or too large)",
+	codeIncomplete: "flagged item the gate did not show in full (past the item cap, a size, budget or time limit, a parser that failed or stopped early, no parser for its type, or a literal it could not decode)",
 }
 
 // cgoSourceExts are the extensions the go command hands to the C, C++,
@@ -396,7 +454,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 		testdata := slices.Contains(strings.Split(path.Dir(rel), "/"), "testdata")
 		ext := path.Ext(rel)
 		binary := func() {
-			h.add(codeBinary, safeFile(rel))
+			h.reserve(codeBinary, safeFile(rel))
 			bins = append(bins, rel)
 		}
 		switch {
@@ -438,7 +496,8 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 			shadow[dir] = packageScope(cur, dir)
 		}
 		for _, c := range initCalleesChanged(old, cur, dir, shadow[dir]) {
-			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), c.context())
+			// The declarations' texts, old and new, are shown whole.
+			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), true, c.context())
 		}
 	}
 	h.binaries(old, cur, bins)
@@ -473,21 +532,18 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins []string) {
 		d := ecoutil.DescribeBinary(data, prev, hadOld, r.budget)
 		refs, linked := ix.refs(rel)
 		item := safeFile(rel)
-		r.add(codeBinary, item,
+		_ = linked // stated in refs; routing rests on the rendering alone
+		r.add(codeBinary, item, d.Complete,
 			quote("the gate's rendering of "+item+" (the module diff cannot show binary content)", d.Text),
 			quote("where the module refers to "+item+" (found by the gate)", refs))
-		unrendered := d.Structure == ecoutil.NotStructured || d.Structure == ecoutil.Partial ||
-			(path.Ext(rel) == ".syso" && d.Structure == ecoutil.NoParser)
-		if linked && unrendered {
-			r.add(codeOpaque, item)
-		}
 	}
 }
 
-// sourceFacts adds a C or assembly file with its full new text (or the
-// gate's rendering if it is not text). The text is here and not only in
-// the module diff: a diff can show a moved file as a rename, and the
-// reviewer must read what is compiled.
+// sourceFacts adds a C or assembly file with its full new text, always
+// as text (quote shows NUL and every other control byte as a visible
+// escape): a compiler reads it as source whatever it looks like, so it
+// never takes the binary path. The text is here and not only in the
+// module diff: a diff can show a moved file as a rename.
 func (r *report) sourceFacts(code, rel string, prev, cur []byte, hadOld bool) {
 	item := safeFile(rel)
 	if r.full(code, item) {
@@ -500,12 +556,8 @@ func (r *report) sourceFacts(code, rel string, prev, cur []byte, hadOld bool) {
 	} else {
 		fmt.Fprintf(&b, "new file, %d bytes\n", len(cur))
 	}
-	if evidence.IsBinary(cur) {
-		b.WriteString(quote("it is not text; the gate's rendering of "+item, ecoutil.DescribeBinary(cur, prev, hadOld, r.budget).Text))
-	} else {
-		b.WriteString(r.fileRef(item, cur))
-	}
-	r.add(code, item, b.String())
+	b.WriteString(r.fileRef(rel, cur))
+	r.add(code, item, true, b.String())
 }
 
 // declInfo is one package-level declaration: its source text, the
@@ -1048,9 +1100,11 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 	f := safeFile(rel)
 	at := func(line int) string { return fmt.Sprintf("%s:%d", f, line) }
 	if !n.parsed {
-		h.add(codeParse, f, quote("the parser's error (the gate checked this file as text only)", n.parseErr))
+		h.add(codeParse, f, false, quote("the parser's error (the gate checked this file as text only)", n.parseErr))
 	}
-	fullText := func() string { return h.fileRef(f, cur) }
+	// Every item of this file points at the file's full new text, so each
+	// is shown in full whatever its own excerpt shows.
+	fullText := func() string { return h.fileRef(rel, cur) }
 	for _, imp := range slices.Sorted(maps.Keys(n.imports)) {
 		line := n.imports[imp]
 		if _, had := o.imports[imp]; riskyImport(imp) != "" && !had {
@@ -1059,12 +1113,12 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 				h.skip(codeImport, item)
 				continue
 			}
-			h.add(codeImport, item, quote("import at "+at(line)+"; every use of the package in this file is the change to read", excerpt(cur, line, 0)), fullText())
+			h.add(codeImport, item, true, quote("import at "+at(line)+"; every use of the package in this file is the change to read", excerpt(cur, line, 0)), fullText())
 		}
 	}
 	for imp, line := range n.blank {
 		if _, had := o.blank[imp]; !had {
-			h.add(codeBlank, f+" ("+safeImport(imp)+")", quote("blank import at "+at(line)+"; it runs that package's init code (find what it registers)", excerpt(cur, line, 0)))
+			h.add(codeBlank, f+" ("+safeImport(imp)+")", true, quote("blank import at "+at(line)+"; it runs that package's init code (find what it registers)", excerpt(cur, line, 0)), fullText())
 		}
 	}
 	if n.cgo {
@@ -1080,7 +1134,7 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 		if h.full(codeCgo, f) {
 			h.skip(codeCgo, f)
 		} else {
-			h.add(codeCgo, f, append(ctx, fullText())...)
+			h.add(codeCgo, f, true, append(ctx, fullText())...)
 		}
 	}
 	initCtx := func(what string, old, cur []snippet) []string {
@@ -1098,10 +1152,10 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 		return ctx
 	}
 	if slices.ContainsFunc(n.inits, func(s snippet) bool { return !hasText(o.inits, s.text) }) {
-		h.add(codeInit, f, initCtx("func init", o.inits, n.inits)...)
+		h.add(codeInit, f, true, append(initCtx("func init", o.inits, n.inits), fullText())...)
 	}
 	if slices.ContainsFunc(n.varInits, func(s snippet) bool { return !hasText(o.varInits, s.text) }) {
-		h.add(codeVarInit, f, initCtx("package-level var initializer", o.varInits, n.varInits)...)
+		h.add(codeVarInit, f, true, append(initCtx("package-level var initializer", o.varInits, n.varInits), fullText())...)
 	}
 	for _, d := range slices.Sorted(maps.Keys(n.directives)) {
 		if _, had := o.directives[d]; had {
@@ -1113,13 +1167,13 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 		}
 		switch {
 		case strings.HasPrefix(d, "//go:linkname"):
-			h.add(codeLinkname, f, ctx...)
+			h.add(codeLinkname, f, true, append(ctx, fullText())...)
 		case strings.HasPrefix(d, "//go:generate"):
-			h.add(codeGenerate, f, ctx...)
+			h.add(codeGenerate, f, true, append(ctx, fullText())...)
 		case strings.HasPrefix(d, "//go:embed"):
-			h.add(codeEmbed, f, ctx...)
+			h.add(codeEmbed, f, true, append(ctx, fullText())...)
 		case strings.HasPrefix(d, "//go:cgo_"):
-			h.add(codeCgo, f, ctx...)
+			h.add(codeCgo, f, true, append(ctx, fullText())...)
 		}
 	}
 	var lits []string
@@ -1133,31 +1187,29 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 	case h.full(codeBlob, f):
 		h.skip(codeBlob, f)
 	default:
-		var ctx []string
-		undecoded := false
+		// Shown in full only if every literal was decoded and its bytes
+		// rendered completely; the literal's own text is in the file.
+		ctx := []string{fullText()}
+		complete := true
 		for _, lit := range lits {
 			text, done := blobContext(at(n.blobs[lit]), lit, h.budget)
 			ctx = append(ctx, text)
-			undecoded = undecoded || !done
+			complete = complete && done
 		}
-		h.add(codeBlob, f, ctx...)
-		// checkGoFile sees non-test files only: this literal is compiled
-		// into the package, and what the gate's own limits left unread
-		// is for a person.
-		if undecoded {
-			h.add(codeUndecoded, f)
-		}
+		h.add(codeBlob, f, complete, ctx...)
 	}
 }
 
 // maxBlobDecode bounds the bytes of one decoded blob the gate renders.
 const maxBlobDecode = 1 << 20
 
-// blobContext shows one encoded literal: its start, and what it decodes
-// to if it is plain base64 or hex (rendered like a binary file). done is
-// false when the gate's own limits (budget, time, size) kept it from
-// decoding or fully rendering the literal; a literal that is simply not
-// plain hex or base64 is done.
+// blobContext shows one flagged literal: its start, and the gate's
+// rendering of its bytes: the unquoted bytes themselves if they are
+// binary ("\x7fELF..."), otherwise what they decode to as hex or base64
+// once ASCII whitespace is removed (wrapped base64). done is true only
+// when those bytes were rendered completely; every other outcome (no
+// decoding works, too large, budget or time spent, an incomplete
+// rendering) is for a person.
 func blobContext(where, lit string, budget *ecoutil.Budget) (text string, done bool) {
 	var b strings.Builder
 	head := lit[:min(len(lit), 120)]
@@ -1165,49 +1217,49 @@ func blobContext(where, lit string, budget *ecoutil.Budget) (text string, done b
 	s, err := strconv.Unquote(lit)
 	if err != nil {
 		b.WriteString("the gate could not unquote the literal\n")
-		return b.String(), true
+		return b.String(), false
 	}
-	s = strings.TrimSpace(s)
-	// Decoding is charged to the module's budget like parsing, and is
-	// not tried for a literal whose decoded size could exceed the cap.
 	if len(s) > 2*maxBlobDecode {
 		fmt.Fprintf(&b, "it is %d bytes long, more than the gate decodes (%d)\n", len(s), 2*maxBlobDecode)
 		return b.String(), false
-	}
-	if strings.Trim(s, "0123456789abcdefABCDEFghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ+/-_=") != "" {
-		b.WriteString("it is not plain hex or base64 (escapes or another encoding); the gate did not decode it\n")
-		return b.String(), true
 	}
 	if !budget.Take(int64(len(s))) {
 		b.WriteString("it was not decoded: the gate's parse budget for this module is spent\n")
 		return b.String(), false
 	}
 	var dec []byte
-	var how string
-	if d, err := hex.DecodeString(s); err == nil {
-		dec, how = d, "hex"
+	how := ""
+	if evidence.IsBinary([]byte(s)) {
+		dec, how = []byte(s), "its bytes are binary as written"
 	} else {
-		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-			if d, err := enc.DecodeString(s); err == nil {
-				dec, how = d, "base64"
-				break
+		compact := strings.Map(func(r rune) rune {
+			if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v' {
+				return -1
+			}
+			return r
+		}, s)
+		if d, err := hex.DecodeString(compact); err == nil {
+			dec, how = d, "it decodes as hex"
+		} else {
+			for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+				if d, err := enc.DecodeString(compact); err == nil {
+					dec, how = d, "it decodes as base64"
+					break
+				}
 			}
 		}
 	}
 	switch {
 	case dec == nil:
-		b.WriteString("it is not plain hex or base64 (escapes or another encoding); the gate did not decode it\n")
-	case len(dec) > maxBlobDecode:
-		fmt.Fprintf(&b, "it decodes as %s to %d bytes, more than the gate renders (%d)\n", how, len(dec), maxBlobDecode)
+		b.WriteString("it decodes neither as hex nor as base64; the gate could not render its bytes\n")
 		return b.String(), false
-	default:
-		d := ecoutil.DescribeBinary(dec, nil, false, budget)
-		b.WriteString(quote(fmt.Sprintf("it decodes as %s; the gate's rendering of the decoded bytes", how), d.Text))
-		if d.Structure == ecoutil.NotStructured || d.Structure == ecoutil.Partial {
-			return b.String(), false
-		}
+	case len(dec) > maxBlobDecode:
+		fmt.Fprintf(&b, "%s, to %d bytes, more than the gate renders (%d)\n", how, len(dec), maxBlobDecode)
+		return b.String(), false
 	}
-	return b.String(), true
+	d := ecoutil.DescribeBinary(dec, nil, false, budget)
+	b.WriteString(quote(how+"; the gate's rendering of those bytes", d.Text))
+	return b.String(), d.Complete
 }
 
 // Bounds for indexRefs: files and bytes read, the largest file, the

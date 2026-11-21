@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 	case "crash":
 		os.Exit(3)
 	case "garbage":
-		fmt.Print(`{"text":"x","status":7}`)
+		fmt.Print("not json")
 	case "alloc":
 		// What an amplifying parser does: allocate past the limit.
 		if err := limitMemory(childMemory); err != nil {
@@ -44,7 +44,7 @@ func TestMain(m *testing.M) {
 			}
 			keep = append(keep, b)
 		}
-		fmt.Printf(`{"text":"allocated %d","status":1,"used":0}`, len(keep))
+		fmt.Printf(`{"text":"allocated %d","complete":true,"used":0}`, len(keep))
 	}
 	os.Exit(0)
 }
@@ -73,15 +73,15 @@ func TestIsolatedStructure(t *testing.T) {
 
 	withIsolation(t, childIsolation(t, "ok", time.Minute))
 	got := DescribeBinary(self, nil, false, nil)
-	if got.Structure != Structured || got.Text != local.Text {
-		t.Errorf("child rendering differs from the local one (status %d)", got.Structure)
+	if !got.Complete || got.Text != local.Text {
+		t.Errorf("child rendering differs from the local one (complete %v)", got.Complete)
 	}
 	for mode, want := range map[string]string{"hang": "timed out", "crash": "failed", "garbage": "returned no valid result"} {
 		withIsolation(t, childIsolation(t, mode, 2*time.Second))
 		start := time.Now()
 		d := DescribeBinary(self, nil, false, nil)
-		if d.Structure != NotStructured || !strings.Contains(d.Text, "the isolated parser "+want) {
-			t.Errorf("%s: status %d, text %.300s", mode, d.Structure, d.Text)
+		if d.Complete || !strings.Contains(d.Text, "the isolated parser "+want) {
+			t.Errorf("%s: complete %v, text %.300s", mode, d.Complete, d.Text)
 		}
 		if time.Since(start) > 30*time.Second {
 			t.Errorf("%s took %v", mode, time.Since(start))
@@ -98,7 +98,7 @@ func TestChildMemoryLimit(t *testing.T) {
 	}
 	withIsolation(t, childIsolation(t, "alloc", time.Minute))
 	res := isolation.run([]byte("\x7fELF"), 0)
-	if res.Status != NotStructured {
+	if res.Complete {
 		t.Errorf("a child allocating %d bytes was not stopped: %+v", 4*childMemory, res)
 	}
 }
@@ -160,7 +160,9 @@ func TestELFSymbolAmplification(t *testing.T) {
 	if n > 32<<20 {
 		t.Errorf("rendering a %d KiB ELF allocated %d MiB", len(data)>>10, n>>20)
 	}
-	if !strings.Contains(out.Text, "symbol tables: 4097 symbols") || !strings.Contains(out.Text, "names could cost too much") {
+	// .symtab names are never built, only counted (L1): the rendering is
+	// complete and says so.
+	if !strings.Contains(out.Text, "symbol tables: 4097 symbols (counted, names not read)") || !out.Complete {
 		t.Errorf("counts not reported:\n%.1500s", out.Text)
 	}
 }

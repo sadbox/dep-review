@@ -77,14 +77,19 @@ previous version, and where the module refers to the file (linked `.syso`,
 `//go:embed`, test-only mentions). The verdict must assess every flagged
 item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
 list with the evidence's, and merges only when every flagged item, and
-nothing else, is `benign`. A Go file the gate cannot parse still goes to a
-person, as do truncated evidence, a module with more flagged items than a
-review can take, a binary linked or embedded into the program whose
-structure the gate could not render in full (or a `.syso` it has no parser
-for), and an encoded literal in non-test code it could not decode for its
-own limits. Module diffs do not detect renames,
-and the full new text of every C, assembly, cgo and risky-import file is
-in the focused evidence too.
+nothing else, is `benign`.
+
+The default is a person. An item stays on the review route only if the
+gate positively asserts it showed the item in full: the whole new text of
+the file it is in (every file with a flagged Go item, and every C,
+assembly or cgo file, always as text, controls shown as escapes), the
+whole declaration for an init callee, or, for a binary or a decoded
+literal, a structure rendering that reached its end with no cap, stop,
+skip, budget or time limit, or parser failure (a type with no parser is
+not complete). Everything else is listed under `gomod.not-shown-in-full`
+and goes to a person, as do unparseable Go files, truncated evidence and a
+module with more flagged items than a review can take. Module diffs do not
+detect renames.
 
 ### GitHub workflow lockfiles
 

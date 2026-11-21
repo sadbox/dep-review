@@ -49,14 +49,14 @@ func TestDistinctItemCap(t *testing.T) {
 	}
 	h := CheckTrees(nil, writeTree(t, map[string]string{
 		"a/gen.go":    gen.String(),
-		"z/evil.syso": "\x00\x01 no parser for this, evil payload string here",
+		"z/evil.syso": string(coffObject(2, 64)),
 		"z/z.go":      "package z\n",
 	}))
 	if ctx := h.ctx[codeBinary]["z/evil.syso"]; len(ctx) == 0 || ctx[0] == skipped {
 		t.Errorf("2 flagged items, but the .syso context was skipped: %q", ctx)
 	}
-	if len(h.items(codeSkipped)) != 0 {
-		t.Errorf("skipped items %q", h.items(codeSkipped))
+	if len(h.items(codeIncomplete)) != 0 {
+		t.Errorf("not shown in full: %q", h.items(codeIncomplete))
 	}
 }
 
@@ -71,7 +71,7 @@ func TestSkippedGoesToAPerson(t *testing.T) {
 	h := CheckTrees(nil, writeTree(t, cur))
 	var human bool
 	for _, f := range h.findings("m") {
-		if f.Code == codeSkipped && f.Route == model.RouteHuman {
+		if f.Code == codeIncomplete && f.Route == model.RouteHuman {
 			human = true
 		}
 	}
@@ -80,7 +80,7 @@ func TestSkippedGoesToAPerson(t *testing.T) {
 	}
 	for code, items := range h.ctx {
 		for item, ctx := range items {
-			if slices.Contains(ctx, skipped) && !slices.Contains(h.items(codeSkipped), code+" "+item) {
+			if slices.Contains(ctx, skipped) && !slices.Contains(h.items(codeIncomplete), code+" "+item) {
 				t.Errorf("%s %s skipped without its finding", code, item)
 			}
 		}
@@ -164,20 +164,22 @@ func TestLinkedUnrendered(t *testing.T) {
 	}{
 		{"syso", map[string]string{"x.syso": broken, "p.go": "package p\n"}, true},
 		{"embedded by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
-		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, false},
-		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, false},
+		// Round 4: routing rests on the rendering alone, linked or not.
+		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
+		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, true},
+		{"complete COFF .syso", map[string]string{"x.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, false},
 		// Informational (a): a .syso nothing can parse is linked and unread.
 		{"syso with no parser for its type", map[string]string{"x.syso": "\x00\x01 opaque", "p.go": "package p\n"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := CheckTrees(nil, writeTree(t, tc.files))
-			got := len(h.items(codeOpaque)) > 0
+			got := len(h.items(codeIncomplete)) > 0
 			if got != tc.want {
-				t.Errorf("linked-unrendered = %v, want %v (%q)", got, tc.want, h.items(codeOpaque))
+				t.Errorf("linked-unrendered = %v, want %v (%q)", got, tc.want, h.items(codeIncomplete))
 			}
 			for _, f := range h.findings("m") {
-				if f.Code == codeOpaque && f.Route != model.RouteHuman {
+				if f.Code == codeIncomplete && f.Route != model.RouteHuman {
 					t.Errorf("route %s", f.Route)
 				}
 			}
@@ -188,7 +190,7 @@ func TestLinkedUnrendered(t *testing.T) {
 	h.budget.Left = 0
 	tr := writeTree(t, map[string]string{"x.syso": broken, "p.go": "package p\n"})
 	h.binaries(nil, tr, []string{"x.syso"})
-	if len(h.items(codeOpaque)) == 0 {
+	if len(h.items(codeIncomplete)) == 0 {
 		t.Errorf("a linked binary whose parse budget was spent did not go to a person")
 	}
 }

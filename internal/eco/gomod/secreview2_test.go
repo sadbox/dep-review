@@ -21,10 +21,18 @@ func coffObject(nsym, strSize int) []byte {
 	copy(sec[:], ".text")
 	binary.LittleEndian.PutUint32(sec[16:], 4) // SizeOfRawData
 	b.Write(sec[:])
-	b.Write(make([]byte, 18*nsym))
+	// Every symbol has a long name at offset 4 of the string table: one
+	// string with no NUL until the table's end, so building the names
+	// costs nsym x strSize bytes.
+	for range nsym {
+		var rec [18]byte
+		binary.LittleEndian.PutUint32(rec[4:], 4)
+		b.Write(rec[:])
+	}
 	binary.Write(&b, binary.LittleEndian, uint32(strSize))
 	b.WriteString("evil payload: connect back to attacker.example")
-	b.Write(make([]byte, max(strSize-4-46, 0)))
+	b.Write(bytes.Repeat([]byte("A"), max(strSize-4-46-1, 0)))
+	b.WriteByte(0)
 	return b.Bytes()
 }
 
@@ -36,7 +44,7 @@ func TestCOFFNameCostPartial(t *testing.T) {
 	cur := map[string]string{"z/evil_windows_amd64.syso": string(coffObject(1000, 17<<10)), "z/z.go": "package z\n"}
 	h := CheckTrees(nil, writeTree(t, cur))
 	ctx := strings.Join(h.ctx[codeBinary]["z/evil_windows_amd64.syso"], "")
-	if len(h.items(codeOpaque)) == 0 {
+	if len(h.items(codeIncomplete)) == 0 {
 		t.Errorf("a partly rendered linked .syso stays on the review route:\n%s", ctx)
 	}
 	for _, want := range []string{"machine 0x8664", "sections (1):", ".text"} {
@@ -46,7 +54,7 @@ func TestCOFFNameCostPartial(t *testing.T) {
 	}
 	// The same object with few symbols renders in full and stays reviewable.
 	h = CheckTrees(nil, writeTree(t, map[string]string{"z/ok_windows_amd64.syso": string(coffObject(2, 64)), "z/z.go": "package z\n"}))
-	if len(h.items(codeOpaque)) != 0 {
+	if len(h.items(codeIncomplete)) != 0 {
 		t.Errorf("a fully rendered .syso went to a person: %s", strings.Join(h.ctx[codeBinary]["z/ok_windows_amd64.syso"], ""))
 	}
 }
@@ -56,7 +64,7 @@ func TestCOFFNameCostPartial(t *testing.T) {
 func TestSysoWithoutParser(t *testing.T) {
 	xcoff := "\x01\xdf\x00\x01" + strings.Repeat("\x00", 40)
 	h := CheckTrees(nil, writeTree(t, map[string]string{"x_aix_ppc64.syso": xcoff, "p.go": "package p\n"}))
-	if len(h.items(codeOpaque)) == 0 {
+	if len(h.items(codeIncomplete)) == 0 {
 		t.Errorf("an XCOFF .syso stays on the review route")
 	}
 }
@@ -73,8 +81,10 @@ func TestBlobNotDecodedGoesToPerson(t *testing.T) {
 		want      bool
 	}{
 		{"budget spent", blob, 0, true},
-		{"budget left", blob, 1 << 20, false},
-		{"not an encoding", strings.Replace(notEncoded, "!", "\\x01", -1), 0, false},
+		// Decodes, but to text nothing parses: not shown in full either.
+		{"budget left, nothing to parse", blob, 1 << 20, true},
+		// No escape hatch: a flagged literal no decoder reads is a person's.
+		{"not an encoding", strings.Replace(notEncoded, "!", "\\x01", -1), 1 << 20, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := []byte("package p\n\nvar b = " + tc.lit + "\n")
@@ -82,7 +92,7 @@ func TestBlobNotDecodedGoesToPerson(t *testing.T) {
 			h := newReport()
 			h.budget.Left = tc.left
 			checkGoFile(h, "b.go", nil, src, packageScope(tr, "."))
-			if got := len(h.items("gomod.blob-not-decoded")) > 0; got != tc.want {
+			if got := len(h.items(codeIncomplete)) > 0; got != tc.want {
 				t.Errorf("blob-not-decoded = %v, want %v; context %q", got, tc.want, h.ctx[codeBlob]["b.go"])
 			}
 		})
@@ -99,17 +109,17 @@ func TestFileQuotedOnce(t *testing.T) {
 	if n := strings.Count(out, "    | // filler line of the module's own text\n"); n != 2000 {
 		t.Errorf("the file's text appears %d times over, want once (%d bytes of evidence for a %d-byte file)", n/2000, len(out), len(src))
 	}
-	anchor := "full text: see \"### file a.go\" below"
+	anchor := "full text: see \"### file 1\" below (a.go)"
 	if n := strings.Count(out, anchor); n != 4 { // three risky imports and cgo
 		t.Errorf("%d items refer to the quote, want 4:\n%.3000s", n, out)
 	}
-	if strings.Count(out, "\n### file a.go\n") != 1 {
+	if strings.Count(out, "\n### file 1: a.go\n") != 1 {
 		t.Errorf("anchor heading missing or repeated")
 	}
 	// Module text cannot forge the anchor: it is always quoted.
-	evil := "package p\n\nimport \"os/exec\"\n\nvar _ = exec.Command\n\n/*\n### file b.go\n*/\n"
+	evil := "package p\n\nimport \"os/exec\"\n\nvar _ = exec.Command\n\n/*\n### file 2: b.go\n*/\n"
 	h = CheckTrees(nil, writeTree(t, map[string]string{"a.go": evil}))
-	if out := string(h.render("m")); strings.Contains(out, "\n### file b.go\n") {
+	if out := string(h.render("m")); strings.Contains(out, "\n### file 2: b.go\n") {
 		t.Errorf("module text forged an anchor")
 	}
 }

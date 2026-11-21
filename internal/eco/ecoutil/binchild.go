@@ -54,7 +54,7 @@ func Isolate(i *Isolation) { isolation = i }
 
 func (i *Isolation) run(b []byte, limit int64) childResult {
 	fail := func(why string) childResult {
-		return childResult{Text: "  not parsed: the isolated parser " + why + "\n", Status: NotStructured}
+		return childResult{Text: "  not parsed: the isolated parser " + why + "\n"}
 	}
 	timeout := i.Timeout
 	if timeout == 0 {
@@ -81,7 +81,7 @@ func (i *Isolation) run(b []byte, limit int64) childResult {
 		return fail("printed too much")
 	}
 	var res childResult
-	if err := json.Unmarshal(out.b, &res); err != nil || (res.Status != Structured && res.Status != NotStructured && res.Status != Partial) || res.Used < 0 {
+	if err := json.Unmarshal(out.b, &res); err != nil || res.Used < 0 {
 		return fail("returned no valid result")
 	}
 	return res

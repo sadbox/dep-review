@@ -73,7 +73,7 @@ func TestDescribeBinaryArchives(t *testing.T) {
 	gw.Close()
 	start := time.Now()
 	out := DescribeBinary(g.Bytes(), nil, false, nil).Text
-	if !strings.Contains(out, "decompressed: more than") {
+	if !strings.Contains(out, "decompressed: stopped after") {
 		t.Errorf("gzip bomb not capped:\n%s", out)
 	}
 	if time.Since(start) > 20*time.Second {

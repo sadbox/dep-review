@@ -63,8 +63,9 @@ For each update with flagged items there is an evidence file ending in
 `update`, `code` and `item`, and shows exactly what changed: the old and
 new text of each init function, initializer or reached declaration and the
 path by which init code reaches it; the lines around each directive or
-import; the full new text of every C or assembly file, cgo file and file
-with a new risky import (read all of it: this is what is compiled); and
+import; the full new text of every file with a flagged item, quoted once
+under a numbered "### file <n>: <path>" heading that the items point to
+(read all of it: this is what is compiled); and
 for binaries and decoded blobs, the gate's rendering (type,
 structure, imported libraries and symbols, a hexdump, printable strings, a
 comparison with the previous version) and where the module refers to the

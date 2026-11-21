@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/sadbox/dep-review/internal/model"
 )
 
 // TestFlaggedItems: every item of a review-routed code is in the flagged
@@ -124,9 +122,9 @@ func TestRenderDirectivesAndImports(t *testing.T) {
 		// Raw, as cgo reads it: the space after "//" is kept.
 		"new cgo preamble (C code compiled into the package):\n    |  #include <stdlib.h>\n    |  static void boom(void) { system(\"id\"); }\n",
 		"import at e.go:3",
-		"item: x.c\nchanged: 26 -> 26 bytes\nfull text: see \"### file x.c\" below\n",
-		"### file x.c\nfull text of the new version of x.c:\n    | int f(void) { return 1; }\n",
-		"item: x.s\nnew file, 22 bytes\nfull text: see \"### file x.s\" below\n",
+		"item: x.c\nchanged: 26 -> 26 bytes\nfull text: see \"### file ",
+		": x.c\nfull text of the new version of x.c:\n    | int f(void) { return 1; }\n",
+		"item: x.s\nnew file, 22 bytes\nfull text: see \"### file ",
 		"directive at go.go:3:\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -198,13 +196,5 @@ func TestEmbedMatch(t *testing.T) {
 	}
 }
 
-// TestFlaggedRoutesReview: a PR whose only findings are review-routed Go
-// checks stays on the review route.
-func TestFlaggedRoutesReview(t *testing.T) {
-	h := CheckTrees(nil, writeTree(t, map[string]string{"a.go": "package p\nfunc init() {}\n", "x.bin": "\x00\x01 unreferenced, no parser for this type"}))
-	for _, f := range h.findings("m") {
-		if f.Route != model.RouteReview {
-			t.Errorf("%s routes %s", f.Code, f.Route)
-		}
-	}
-}
+// TestFlaggedRoutesReview moved to invariant_test.go (TestInvariantShownInFull),
+// with positive fixtures that must stay on the review route.
