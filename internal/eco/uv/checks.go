@@ -87,6 +87,9 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 		if s := cur.sdist.ReadFile("setup.py"); s != nil && !bytes.Equal(s, old.sdist.ReadFile("setup.py")) {
 			add("uv.setup-py-changed", "sdist setup.py added or changed (runs at build time)")
 		}
+		if files := buildCodeFiles(old.sdist, cur.sdist); len(files) > 0 {
+			add("uv.build-code-changed", "sdist build code or configuration added or changed (runs or is read at build time): %s", ecoutil.List(files, 10))
+		}
 		ob, err1 := buildSystem(old.sdist.ReadFile("pyproject.toml"))
 		cb, err2 := buildSystem(cur.sdist.ReadFile("pyproject.toml"))
 		switch {

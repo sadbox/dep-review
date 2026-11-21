@@ -1007,3 +1007,79 @@ func TestPOCB10(t *testing.T) {
 		}
 	}
 }
+
+func dirTree(t *testing.T, files map[string]string) *ecoutil.Tree {
+	t.Helper()
+	d := t.TempDir()
+	for k, v := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(d, k)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, k), []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr, err := ecoutil.DirTree(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr
+}
+
+// TestPOCSdistBuildHook is the review's sdist PoC: an in-tree backend
+// (backend-path) and a hatch build hook change, with setup.py and
+// [build-system] untouched. Both run at build time.
+func TestPOCSdistBuildHook(t *testing.T) {
+	const pp = "[build-system]\nrequires = []\nbuild-backend = \"backend\"\nbackend-path = [\".\"]\n\n[project]\nname = \"demo\"\nversion = \"1.0\"\n"
+	const hatch = "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[project]\nname = \"demo\"\nversion = \"1.0\"\n\n[tool.hatch.build.hooks.custom]\n"
+	const evil = "import os; os.system('id')\n"
+	tests := []struct {
+		name     string
+		old, cur map[string]string
+		want     []string // files named in uv.build-code-changed
+	}{
+		{"in-tree backend", map[string]string{"pyproject.toml": pp, "backend.py": "from setuptools.build_meta import *\n", "PKG-INFO": "Name: demo\n\n"},
+			map[string]string{"pyproject.toml": pp, "backend.py": evil + "from setuptools.build_meta import *\n", "PKG-INFO": "Name: demo\n\n"}, []string{"backend.py"}},
+		{"hatch_build.py", map[string]string{"pyproject.toml": hatch, "hatch_build.py": "x=1\n", "PKG-INFO": "Name: demo\n\n"},
+			map[string]string{"pyproject.toml": hatch, "hatch_build.py": evil, "PKG-INFO": "Name: demo\n\n"}, []string{"hatch_build.py"}},
+		{"hatch custom hook path", map[string]string{"pyproject.toml": hatch + "path = \"tools/hook.py\"\n", "tools/hook.py": "x=1\n"},
+			map[string]string{"pyproject.toml": hatch + "path = \"tools/hook.py\"\n", "tools/hook.py": evil}, []string{"tools/hook.py"}},
+		{"backend package", map[string]string{"pyproject.toml": strings.Replace(pp, `"backend"`, `"_build.api:Backend"`, 1), "_build/api.py": "x=1\n", "_build/util.py": "y=1\n"},
+			map[string]string{"pyproject.toml": strings.Replace(pp, `"backend"`, `"_build.api:Backend"`, 1), "_build/api.py": "x=1\n", "_build/util.py": evil}, []string{"_build/util.py"}},
+		{"setup.cfg, pdm_build.py, build.py", map[string]string{"setup.cfg": "[metadata]\n"},
+			map[string]string{"setup.cfg": "[options]\nsetup_requires = evil\n", "pdm_build.py": evil, "build.py": evil}, []string{"setup.cfg", "pdm_build.py", "build.py"}},
+		{"unchanged", map[string]string{"pyproject.toml": pp, "backend.py": "x\n", "hatch_build.py": "x\n"},
+			map[string]string{"pyproject.toml": pp, "backend.py": "x\n", "hatch_build.py": "x\n", "src/demo.py": evil}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := checkPackage(sideTrees{sdist: dirTree(t, tt.old)}, sideTrees{sdist: dirTree(t, tt.cur)})
+			var hit *model.Finding
+			for i := range fs {
+				if fs[i].Code == "uv.build-code-changed" {
+					hit = &fs[i]
+				}
+			}
+			if tt.want == nil {
+				if hit != nil {
+					t.Errorf("unexpected %+v", *hit)
+				}
+				return
+			}
+			if hit == nil || hit.Route != model.RouteHuman {
+				t.Fatalf("findings %+v lack a human uv.build-code-changed", fs)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(hit.Detail, w) {
+					t.Errorf("detail %q does not name %s", hit.Detail, w)
+				}
+			}
+		})
+	}
+	// Any change under [build-system] is a person's call.
+	old := dirTree(t, map[string]string{"pyproject.toml": hatch})
+	cur := dirTree(t, map[string]string{"pyproject.toml": strings.Replace(hatch, `["hatchling"]`, `["hatchling", "evil"]`, 1)})
+	if !slices.Contains(codesOf(checkPackage(sideTrees{sdist: old}, sideTrees{sdist: cur})), "uv.build-backend-changed") {
+		t.Error("[build-system] requires change not flagged")
+	}
+}
