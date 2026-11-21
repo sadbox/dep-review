@@ -55,3 +55,10 @@ func TestTriggerPathRequired(t *testing.T) {
 		}
 	}
 }
+
+func TestFetchRejectsBadDockerPlatforms(t *testing.T) {
+	err := runFetch([]string{"--classification", "x", "--repo-dir", "y", "--out", "z", "--docker-platforms", "linux/amd64;id"})
+	if err == nil || !strings.Contains(err.Error(), "docker platform") {
+		t.Errorf("err = %v", err)
+	}
+}

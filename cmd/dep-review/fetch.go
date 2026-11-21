@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sadbox/dep-review/internal/eco/docker"
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/fetch"
@@ -30,11 +31,16 @@ func runFetch(args []string) error {
 	classPath := fl.String("classification", "", "classification.json from classify")
 	repoDir := fl.String("repo-dir", "", "the PR's head checkout (full history)")
 	outDir := fl.String("out", "", "evidence directory to create")
+	dockerPlatforms := fl.String("docker-platforms", "", "optional: the platforms the repository builds, e.g. linux/amd64,linux/arm64 (default: every platform in the image index must be unchanged for a no-op)")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
 	if *classPath == "" || *repoDir == "" || *outDir == "" || fl.NArg() > 0 {
 		return errors.New("usage: dep-review fetch --classification <file> --repo-dir <dir> --out <dir>")
+	}
+	platforms, err := docker.ParsePlatforms(*dockerPlatforms)
+	if err != nil {
+		return err
 	}
 	b, err := os.ReadFile(*classPath)
 	if err != nil {
@@ -77,7 +83,7 @@ func runFetch(args []string) error {
 		HTTP:    ecoutil.NewClient(),
 		GitHub:  ghc,
 	}
-	out, err := fetch.Run(ctx, env, ecosystems, ev)
+	out, err := fetch.Run(ctx, env, ecosystems(platforms), ev)
 	if err != nil {
 		return err
 	}

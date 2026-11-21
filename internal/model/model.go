@@ -67,8 +67,9 @@ type Update struct {
 	// NoOp is set only by a fetcher that has proven, byte for byte, that the
 	// update changes nothing the repo builds or runs (e.g. a Docker digest
 	// refresh whose old and new indexes hold the same image manifest for
-	// every platform, built or not; attestations aside). It is the only way
-	// an update reaches RouteAuto.
+	// every platform, attestations aside, or for exactly the platforms the
+	// caller declared in docker_platforms). It is the only way an update
+	// reaches RouteAuto.
 	NoOp bool `json:"no_op,omitempty"`
 }
 

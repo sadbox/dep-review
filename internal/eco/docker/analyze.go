@@ -18,6 +18,12 @@ import (
 )
 
 type analyzer struct {
+	// platforms, when set, are the platforms the repository owner declares
+	// it builds (gate input docker_platforms). The no-op proof and tag
+	// equivalence then compare those platforms (plus any a stage names)
+	// instead of every manifest in the index.
+	platforms []string
+
 	reg  *registry
 	hist tagHistory
 	osv  *osvClient
@@ -197,8 +203,11 @@ func (a *analyzer) analyze(ctx context.Context, ch fromChange, platforms []strin
 		}
 		pairs = append(pairs, pair{p, od, nd})
 	}
-	noop, unbuilt := sameManifests(oldIdx, ch.Old.Digest, newIdx, ch.New.Digest, platforms)
-	if len(unbuilt) > 0 {
+	noop, unbuilt := a.sameImage(oldIdx, ch.Old.Digest, newIdx, ch.New.Digest, platforms)
+	switch {
+	case len(unbuilt) > 0 && len(a.platforms) > 0:
+		u.Notes = append(u.Notes, "manifests changed only for platforms outside the declared docker_platforms (not analysed): "+strings.Join(unbuilt, ", "))
+	case len(unbuilt) > 0:
 		u.find(model.RouteReview, codeOtherPlatforms, "%s: manifests changed for platforms the gate did not detect a build for, so this is not a proven no-op and they were not analysed: %s", ch.New.Name(), strings.Join(unbuilt, ", "))
 	}
 	if len(pairs) == 0 || missing {
@@ -299,6 +308,102 @@ func (u *updateResult) platformFindings(r *platformResult) {
 		u.find(model.RouteHuman, codeOSVUnavailable, "%s: the changed packages could not be checked against OSV.dev: %s", p, r.OSV.Err)
 	}
 }
+
+// sameImage is the identity both the no-op proof and tag equivalence use:
+// sameManifests (every manifest) by default, samePlatforms (exactly the
+// given platforms, each present once in both) when the owner declared
+// docker_platforms. platforms is then the declared set plus whatever a
+// stage names itself (see platformsFor).
+func (a *analyzer) sameImage(oldDoc *manifestDoc, oldDigest string, newDoc *manifestDoc, newDigest string, platforms []string) (bool, []string) {
+	if len(a.platforms) == 0 {
+		return sameManifests(oldDoc, oldDigest, newDoc, newDigest, platforms)
+	}
+	_, unbuilt := sameManifests(oldDoc, oldDigest, newDoc, newDigest, platforms)
+	return samePlatforms(oldDoc, oldDigest, newDoc, newDigest, platforms), unbuilt
+}
+
+// samePlatforms: two single manifests when their digests are equal; two
+// indexes when every platform in plats has exactly one image manifest in
+// each and the two are the same digest.
+func samePlatforms(oldDoc *manifestDoc, oldDigest string, newDoc *manifestDoc, newDigest string, plats []string) bool {
+	switch {
+	case !oldDoc.isIndex() && !newDoc.isIndex():
+		return oldDigest == newDigest
+	case oldDoc.isIndex() != newDoc.isIndex() || len(plats) == 0:
+		return false
+	}
+	only := func(doc *manifestDoc, plat string) (string, bool) {
+		wos, warch, wvar := splitPlatform(plat)
+		var found []string
+		for _, d := range doc.Manifests {
+			if isAttestation(d) || d.Platform == nil {
+				continue
+			}
+			pos, parch, pvar := splitPlatform(d.Platform.String())
+			if pos == wos && parch == warch && pvar == wvar {
+				found = append(found, d.Digest)
+			}
+		}
+		if len(found) != 1 {
+			return "", false
+		}
+		return found[0], true
+	}
+	for _, p := range plats {
+		o, ok1 := only(oldDoc, p)
+		n, ok2 := only(newDoc, p)
+		if !ok1 || !ok2 || o != n {
+			return false
+		}
+	}
+	return true
+}
+
+// platformsFor is the platform set one stage is compared on: detection's
+// (the default), or with docker_platforms the declared set plus anything
+// detection found for the stage. Detection can only add platforms.
+func (a *analyzer) platformsFor(detected []string) []string {
+	if len(a.platforms) == 0 {
+		return detected
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range append(slicesConcat(a.platforms, nil), detected...) {
+		if n := normPlatform(p); !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ParsePlatforms validates a docker_platforms value
+// ("linux/amd64,linux/arm64"): at most 16 os/arch[/variant] entries.
+func ParsePlatforms(s string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !declaredPlatformRe.MatchString(f) {
+			return nil, fmt.Errorf("docker platform %.40q is not os/arch[/variant]", f)
+		}
+		if n := normPlatform(f); !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	if len(out) > 16 {
+		return nil, fmt.Errorf("%d docker platforms; at most 16", len(out))
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+var declaredPlatformRe = regexp.MustCompile(`^[a-z0-9]{1,16}/[a-z0-9_]{1,16}(?:/[a-z0-9]{1,8})?$`)
 
 // isAttestation reports whether an index entry is a BuildKit attestation
 // manifest: both the attestation annotation and the unknown/unknown
@@ -402,16 +507,12 @@ func (a *analyzer) tagCheck(ctx context.Context, ref imageRef, pinned *manifestD
 		if err != nil {
 			return tagResult{}, err
 		}
-		same := true
-		for _, p := range platforms {
-			x, ok1 := platformDesc(curIdx, cur, p)
-			y, ok2 := platformDesc(pinned, ref.Digest, p)
-			if !ok1 || !ok2 || x.Digest != y.Digest {
-				same = false
+		if same, _ := a.sameImage(curIdx, cur, pinned, ref.Digest, platforms); same {
+			what := "every manifest"
+			if len(a.platforms) > 0 {
+				what = "the same manifests for " + strings.Join(platforms, ", ")
 			}
-		}
-		if same {
-			return tagResult{State: tagEquivalent, Current: cur, Detail: "the tag's current index (" + cur + ") has the same manifests for every built platform"}, nil
+			return tagResult{State: tagEquivalent, Current: cur, Detail: "the tag's current index (" + cur + ") has " + what + " of the pin"}, nil
 		}
 	case !errors.Is(err, gh.ErrNotFound):
 		return tagResult{}, err

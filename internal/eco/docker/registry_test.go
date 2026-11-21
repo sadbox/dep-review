@@ -117,32 +117,43 @@ func TestSelectPlatform(t *testing.T) {
 
 // The five recorded bumps, offline: index, platform manifests and configs
 // as the registries served them. The two digest refreshes are identical
-// for every platform the repository builds but changed riscv64 and the
-// Windows images, so they are not proven no-ops (review), decided from the
-// indexes alone; the others' config diffs are checked from the
-// recorded configs (their layers are only fetched by TestLive).
+// for linux/amd64 and arm64 but changed riscv64 and the Windows images:
+// by default (every manifest must match) they are not proven no-ops, and
+// caddy's pin is not equivalent to the tag's current index either (no
+// history offline: human). With docker_platforms=linux/amd64,linux/arm64
+// both are no-ops (auto). Decided from the indexes alone; the others'
+// config diffs are checked from the recorded configs (their layers are
+// only fetched by TestLive).
 func TestRecordedCases(t *testing.T) {
+	declared := []string{"linux/amd64", "linux/arm64"}
 	for _, tc := range []struct {
-		name  string
-		route model.Route
-		noop  bool
-		tag   tagState
+		name      string
+		case_     string
+		platforms []string
+		route     model.Route
+		noop      bool
+		tag       tagState
+		code      string
 	}{
-		{"golang-digest-noop", model.RouteReview, false, tagCurrent},
-		{"caddy-digest-noop", model.RouteReview, false, tagEquivalent},
+		{"golang", "golang-digest-noop", nil, model.RouteReview, false, tagCurrent, codeOtherPlatforms + "=review"},
+		{"caddy", "caddy-digest-noop", nil, model.RouteHuman, false, tagUnavailable, codeOtherPlatforms + "=review"},
+		{"golang, declared platforms", "golang-digest-noop", declared, model.RouteAuto, true, tagCurrent, ""},
+		{"caddy, declared platforms", "caddy-digest-noop", declared, model.RouteAuto, true, tagEquivalent, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeRegistry(t)
-			cl, src := loadCase(t, filepath.Join("testdata/cases", tc.name))
+			cl, src := loadCase(t, filepath.Join("testdata/cases", tc.case_))
 			w := newMemWriter()
-			res, err := run(context.Background(), fetch.Env{Class: cl, Evidence: w}, src, f.analyzer(nil))
+			a := f.analyzer(nil)
+			a.platforms = tc.platforms
+			res, err := run(context.Background(), fetch.Env{Class: cl, Evidence: w}, src, a)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(res.Updates) != 1 || res.Updates[0].NoOp != tc.noop || res.Updates[0].Type != model.Digest {
 				t.Fatalf("updates %+v", res.Updates)
 			}
-			if r := policy.Combine(res.Updates, res.Findings, false); r != tc.route || !strings.Contains(codes(res.Findings), codeOtherPlatforms+"=review") {
+			if r := policy.Combine(res.Updates, res.Findings, false); r != tc.route || (tc.code != "" && !strings.Contains(codes(res.Findings), tc.code)) || (tc.code == "" && len(res.Findings) > 0) {
 				t.Errorf("route %s, want %s (%s)", r, tc.route, codes(res.Findings))
 			}
 			var summary string

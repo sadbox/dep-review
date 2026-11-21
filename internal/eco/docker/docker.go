@@ -9,10 +9,13 @@
 //   - which platforms the repository builds (from its workflows) and which
 //     stage the image is used in;
 //   - tag attribution: the pinned index is the tag's current value, is
-//     equivalent to it on the built platforms, or is a former value in
+//     the same image (see below), or is a former value in
 //     docker-library/repo-info's history;
-//   - a no-op: identical platform manifests for every built platform, the
-//     only route to auto-merge;
+//   - a no-op, the only route to auto-merge: the old and new index are the
+//     same image. By default that means every non-attestation manifest is
+//     identical; with WithPlatforms (gate input docker_platforms) it means
+//     identical manifests for exactly the declared platforms, each present
+//     in both indexes. Detected platforms only add to that set;
 //   - otherwise, per built platform: the config diff, the file-level layer
 //     diff, and attribution of every changed file to a changed distro
 //     package, an upstream payload or known build noise.
@@ -67,6 +70,7 @@ const maxDownload = 8 << 30
 
 type options struct {
 	noHistory   bool
+	platforms   []string
 	noOSV       bool
 	maxParallel int
 }
@@ -80,6 +84,15 @@ func WithoutTagHistory() Option { return func(o *options) { o.noHistory = true }
 
 // WithoutOSV skips the OSV.dev vulnerability delta.
 func WithoutOSV() Option { return func(o *options) { o.noOSV = true } }
+
+// WithPlatforms declares the platforms the repository builds (gate input
+// docker_platforms, already checked by ParsePlatforms). The no-op proof
+// and tag equivalence then need identity on exactly those platforms (plus
+// any a stage names), each present in both indexes; manifests for other
+// platforms may differ. Without it every manifest must be identical.
+func WithPlatforms(platforms []string) Option {
+	return func(o *options) { o.platforms = append([]string(nil), platforms...) }
+}
 
 // New returns the docker ecosystem fetcher.
 func New(opts ...Option) fetch.Ecosystem {
@@ -137,7 +150,7 @@ func (g gitSource) changed(ctx context.Context, base, head string) ([]string, er
 
 func (e *ecosystem) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error) {
 	reg := newRegistry(env.HTTP, maxDownload)
-	a := &analyzer{reg: reg, maxParallel: e.opts.maxParallel}
+	a := &analyzer{reg: reg, maxParallel: e.opts.maxParallel, platforms: e.opts.platforms}
 	if !e.opts.noHistory && env.Scratch != "" {
 		a.hist = newRepoInfo(env.Scratch)
 	}
@@ -212,7 +225,7 @@ func run(ctx context.Context, env fetch.Env, src source, a *analyzer) (fetch.Res
 		}
 		pi := detectPlatforms(workflows, f)
 		for _, ch := range changes {
-			plats := pi.stagePlatforms(ch.Stage.Platform)
+			plats := a.platformsFor(pi.stagePlatforms(ch.Stage.Platform))
 			key := f + " " + ch.Old.String() + " " + ch.New.String() + " " + strings.Join(plats, ",")
 			if first, ok := seen[key]; ok {
 				first.Notes = append(first.Notes, fmt.Sprintf("the same change is also on line %d", ch.Line))
