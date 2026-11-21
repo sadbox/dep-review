@@ -123,19 +123,33 @@ var depLists = [][]string{
 	{"project", "optional-dependencies", "*"},
 	{"dependency-groups", "*"},
 	{"tool", "uv", "dev-dependencies"},
+	{"build-system", "requires"},
 }
 
+// buildRequires is the build backend's own requirement list: any change
+// to it needs a person, whatever Dependabot declares.
+const buildRequires = "build-system.requires"
+
 // manifestChanges compares dir/pyproject.toml at base and head. It is
-// where uv takes its build backend ([build-system] requires), its indexes
-// ([[tool.uv.index]]) and its sources ([tool.uv.sources]) from, so the
-// only change a Dependabot PR may make is rewriting the version of a
-// declared update in a dependency list. Everything else refuses.
+// where uv takes its build backend ([build-system]), its indexes
+// ([[tool.uv.index]]) and its sources ([tool.uv.sources]) from. The
+// expected change is rewriting the version of a declared update in a
+// dependency list, keeping name, extras, operator and marker. Other
+// dependency-list changes (another specifier form, added or removed
+// requirements or groups, any [build-system] requires change) need a
+// person (uv.manifest-requirement, RouteHuman). A rewrite to a version
+// Dependabot did not declare, and any change outside the dependency
+// lists, refuse (uv.manifest-changed).
 func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, declared []model.Update) ([]model.Finding, error) {
 	depDir := path.Clean("/" + dir)
 	p := path.Join(dir, "pyproject.toml")
 	var findings []model.Finding
 	refuse := func(name, format string, args ...any) {
 		findings = append(findings, model.Finding{Code: "uv.manifest-changed", Route: model.RouteRefuse, Update: name,
+			Detail: path.Join(depDir, "pyproject.toml") + ": " + fmt.Sprintf(format, args...)})
+	}
+	review := func(name, format string, args ...any) {
+		findings = append(findings, model.Finding{Code: "uv.manifest-requirement", Route: model.RouteHuman, Update: name,
 			Detail: path.Join(depDir, "pyproject.toml") + ": " + fmt.Sprintf(format, args...)})
 	}
 	var docs [2]map[string]any
@@ -172,11 +186,16 @@ func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir strin
 		bl, inBase := bLists[key]
 		hl, inHead := hLists[key]
 		switch {
+		case reflect.DeepEqual(bl, hl):
+			continue
+		case key == buildRequires:
+			review("", "[build-system] requires changed")
+			continue
 		case !inBase || !inHead:
-			refuse("", "%s added or removed", key)
+			review("", "%s added or removed", key)
 			continue
 		case len(bl) != len(hl):
-			refuse("", "%s: requirements added or removed", key)
+			review("", "%s: requirements added or removed", key)
 			continue
 		}
 		for i := range bl {
@@ -186,12 +205,14 @@ func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir strin
 			from, ok1 := bl[i].(string)
 			to, ok2 := hl[i].(string)
 			if !ok1 || !ok2 {
-				refuse("", "%s[%d] changed", key, i)
+				review("", "%s[%d] changed", key, i)
 				continue
 			}
-			name, why := requirementBump(from, to, depDir, declared)
-			if why != "" {
+			switch name, route, why := requirementBump(from, to, depDir, declared); route {
+			case model.RouteRefuse:
 				refuse(name, "%s: %q -> %q: %s", key, from, to, why)
+			case model.RouteHuman:
+				review(name, "%s: %q -> %q: %s", key, from, to, why)
 			}
 		}
 	}
@@ -269,25 +290,26 @@ func diffPaths(a, b any, at string, out *[]string) {
 // requirementRE is a PEP 508 requirement with one version specifier.
 var requirementRE = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9._, -]*\])?\s*(===|==|~=|>=|<=|!=|>|<)\s*([0-9][0-9A-Za-z.+!_-]*)(\s*;.*)?$`)
 
-// requirementBump returns the requirement's name and why from -> to is
-// not a declared update's version rewrite, or "" when it is. Name,
+// requirementBump returns the requirement's name and routes from -> to:
+// "" for a declared update's version rewrite, RouteHuman for any other
+// form, RouteRefuse for a version Dependabot did not declare. Name,
 // extras, operator and marker must be unchanged, and the new version must
 // be the declared one ("ansible-core==2.21.6" -> "ansible-core==2.21.7").
-func requirementBump(from, to, dir string, declared []model.Update) (string, string) {
+func requirementBump(from, to, dir string, declared []model.Update) (string, model.Route, string) {
 	fm, tm := requirementRE.FindStringSubmatch(from), requirementRE.FindStringSubmatch(to)
 	if fm == nil || tm == nil {
-		return "", "only a requirement with a single version specifier may be rewritten"
+		return "", model.RouteHuman, "not a single-specifier version rewrite"
 	}
 	name := Normalize(tm[1])
 	if fm[1] != tm[1] || fm[2] != tm[2] || fm[3] != tm[3] || fm[5] != tm[5] {
-		return name, "only the version may change"
+		return name, model.RouteHuman, "more than the version changed"
 	}
 	for _, d := range declared {
 		if fetch.SameName(model.UV, d.Name, name) && sameDir(dir, d.Directory) && d.To == tm[4] {
-			return name, ""
+			return name, "", ""
 		}
 	}
-	return name, fmt.Sprintf("Dependabot declares no update of %s to %s in %s", name, tm[4], dir)
+	return name, model.RouteRefuse, fmt.Sprintf("Dependabot declares no update of %s to %s in %s", name, tm[4], dir)
 }
 
 // sameDir is fetch's rule: a declaration without a directory matches any.

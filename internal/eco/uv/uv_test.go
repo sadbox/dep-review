@@ -487,6 +487,19 @@ func TestCrossCheckPyPI(t *testing.T) {
 	}
 }
 
+func wantRoute(t *testing.T, fs []model.Finding, code string, route model.Route) {
+	t.Helper()
+	for _, f := range fs {
+		if f.Code == code {
+			if f.Route != route {
+				t.Errorf("%s route %s, want %s", code, f.Route, route)
+			}
+			return
+		}
+	}
+	t.Errorf("findings %+v lack %s", fs, code)
+}
+
 func wantRefuse(t *testing.T, fs []model.Finding, code string) {
 	t.Helper()
 	for _, f := range fs {
@@ -601,9 +614,9 @@ func TestManifestChanges(t *testing.T) {
 		{"declared bump", bump, declared, ""},
 		{"undeclared bump", bump, []model.Update{{Name: "ansible", To: "2.21.7"}}, "uv.manifest-changed"},
 		{"other version", strings.Replace(bump, "2.21.7", "2.21.8", 1), declared, "uv.manifest-changed"},
-		{"operator changed", strings.Replace(string(base), `"ansible-core==2.21.6"`, `"ansible-core>=2.21.7"`, 1), declared, "uv.manifest-changed"},
-		{"marker added", strings.Replace(string(base), `"ansible-core==2.21.6"`, `"ansible-core==2.21.7; sys_platform == 'linux'"`, 1), declared, "uv.manifest-changed"},
-		{"requirement added", strings.Replace(bump, `"ansible==14.6.0",`, `"ansible==14.6.0", "evil",`, 1), declared, "uv.manifest-changed"},
+		{"operator changed", strings.Replace(string(base), `"ansible-core==2.21.6"`, `"ansible-core>=2.21.7"`, 1), declared, "uv.manifest-requirement"},
+		{"marker added", strings.Replace(string(base), `"ansible-core==2.21.6"`, `"ansible-core==2.21.7; sys_platform == 'linux'"`, 1), declared, "uv.manifest-requirement"},
+		{"requirement added", strings.Replace(bump, `"ansible==14.6.0",`, `"ansible==14.6.0", "evil",`, 1), declared, "uv.manifest-requirement"},
 		{"index added", bump + "\n[[tool.uv.index]]\nurl = \"https://evil.example/simple\"\ndefault = true\n", declared, "uv.manifest-changed"},
 		{"source added", bump + "\n[tool.uv.sources]\nansible = { git = \"https://github.com/evil/ansible\" }\n", declared, "uv.manifest-changed"},
 		{"package flipped", strings.Replace(bump, "package = false", "package = true", 1), declared, "uv.manifest-changed"},
@@ -618,6 +631,13 @@ func TestManifestChanges(t *testing.T) {
 			if tt.want == "" {
 				if len(fs) != 0 {
 					t.Errorf("findings %+v", fs)
+				}
+				return
+			}
+			if tt.want == "uv.manifest-requirement" {
+				wantRoute(t, fs, tt.want, model.RouteHuman)
+				if slices.Contains(codesOf(fs), "uv.manifest-changed") {
+					t.Errorf("findings %+v also refuse", fs)
 				}
 				return
 			}
@@ -643,7 +663,7 @@ func TestPoCBuildSystem(t *testing.T) {
 	for _, f := range fs {
 		details = append(details, f.Detail)
 	}
-	for _, want := range []string{"[build-system.requires]", "[tool.uv.index]"} {
+	for _, want := range []string{"[build-system.build-backend]", "[tool.uv.index]", "[build-system] requires changed"} {
 		if !strings.Contains(strings.Join(details, "\n"), want) {
 			t.Errorf("findings %q do not name %s", details, want)
 		}
@@ -862,5 +882,26 @@ func TestPoCRoute(t *testing.T) {
 			}
 			wantRefuse(t, res.Findings, tt.code)
 		})
+	}
+}
+
+// TestBuildRequiresBump: a [build-system] requires change needs a person;
+// a build-backend change refuses.
+func TestBuildRequiresBump(t *testing.T) {
+	const bs = "[project]\nname = \"p\"\nversion = \"0\"\n\n[build-system]\nrequires = [\"setuptools>=70\"]\nbuild-backend = \"setuptools.build_meta\"\n"
+	for head, want := range map[string][2]string{
+		strings.Replace(bs, ">=70", ">=80", 1):                          {"uv.manifest-requirement", string(model.RouteHuman)},
+		strings.Replace(bs, "setuptools.build_meta", "evil_backend", 1): {"uv.manifest-changed", string(model.RouteRefuse)},
+	} {
+		dir, b, h := gittest.Repo(t, map[string][]byte{"pyproject.toml": []byte(bs)}, map[string][]byte{"pyproject.toml": []byte(head)})
+		fs, err := manifestChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fs) != 1 {
+			t.Errorf("findings %+v, want one %s", fs, want[0])
+			continue
+		}
+		wantRoute(t, fs, want[0], model.Route(want[1]))
 	}
 }
