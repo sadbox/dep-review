@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/scanner"
 	"go/token"
+	"maps"
 	"path"
 	"slices"
 	"sort"
@@ -66,19 +67,20 @@ const blobMin = 512
 
 // checkCodes are the hard-stop finding codes, each forcing RouteHuman.
 const (
-	codeInit     = "gomod.init-changed"
-	codeVarInit  = "gomod.var-initializer-call"
-	codeBlank    = "gomod.blank-import"
-	codeCSource  = "gomod.cgo-source-changed"
-	codeCgo      = "gomod.cgo"
-	codeLinkname = "gomod.linkname"
-	codeImport   = "gomod.risky-import"
-	codeGenerate = "gomod.go-generate"
-	codeEmbed    = "gomod.go-embed"
-	codeBlob     = "gomod.encoded-blob"
-	codeBinary   = "gomod.binary-file"
-	codeAsm      = "gomod.assembly-changed"
-	codeParse    = "gomod.unparseable"
+	codeInit       = "gomod.init-changed"
+	codeVarInit    = "gomod.var-initializer-call"
+	codeInitCallee = "gomod.init-callee-changed"
+	codeBlank      = "gomod.blank-import"
+	codeCSource    = "gomod.cgo-source-changed"
+	codeCgo        = "gomod.cgo"
+	codeLinkname   = "gomod.linkname"
+	codeImport     = "gomod.risky-import"
+	codeGenerate   = "gomod.go-generate"
+	codeEmbed      = "gomod.go-embed"
+	codeBlob       = "gomod.encoded-blob"
+	codeBinary     = "gomod.binary-file"
+	codeAsm        = "gomod.assembly-changed"
+	codeParse      = "gomod.unparseable"
 )
 
 // hits collects file paths per finding code.
@@ -112,19 +114,20 @@ func (h hits) findings(update string) []model.Finding {
 }
 
 var checkText = map[string]string{
-	codeInit:     "new or changed func init() (runs on import)",
-	codeVarInit:  "new or changed package-level var initializer that calls a function (runs on import)",
-	codeBlank:    `new blank import (import _ "...", imported only for its init side effects)`,
-	codeCSource:  "C/C++/Objective-C/Fortran/SWIG source added or changed (compiled by cgo)",
-	codeCgo:      `cgo (import "C" or //go:cgo_ directives) in a new or changed file`,
-	codeLinkname: "new //go:linkname (reaches into another package's internals)",
-	codeImport:   "non-test file newly imports a package that can run processes, make system calls, use the network, write files, break memory safety or call through reflection",
-	codeGenerate: "new //go:generate directive",
-	codeEmbed:    "new //go:embed directive",
-	codeBlob:     fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
-	codeBinary:   "binary file added or changed (testdata/ fixtures other than .syso excepted)",
-	codeAsm:      "assembly (.s) file added or changed",
-	codeParse:    "Go file the gate could not parse (checked as text only)",
+	codeInit:       "new or changed func init() (runs on import)",
+	codeVarInit:    "new or changed package-level var initializer that calls a function (runs on import)",
+	codeInitCallee: "package-local declaration reached from a func init or a calling var initializer changed (runs on import)",
+	codeBlank:      `new blank import (import _ "...", imported only for its init side effects)`,
+	codeCSource:    "C/C++/Objective-C/Fortran/SWIG source added or changed (compiled by cgo)",
+	codeCgo:        `cgo (import "C" or //go:cgo_ directives) in a new or changed file`,
+	codeLinkname:   "new //go:linkname (reaches into another package's internals)",
+	codeImport:     "non-test file newly imports a package that can run processes, make system calls, use the network, write files, break memory safety or call through reflection",
+	codeGenerate:   "new //go:generate directive",
+	codeEmbed:      "new //go:embed directive",
+	codeBlob:       fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
+	codeBinary:     "binary file added or changed (testdata/ fixtures other than .syso excepted)",
+	codeAsm:        "assembly (.s) file added or changed",
+	codeParse:      "Go file the gate could not parse (checked as text only)",
 }
 
 // cgoSourceExts are the extensions the go command hands to the C, C++,
@@ -141,10 +144,15 @@ var cgoSourceExts = map[string]bool{
 // the zip keeps top-level vendor/*.go (only vendor/<dir>/ is dropped), and
 // a package under testdata/ or vendor/ compiles when something imports
 // its path explicitly. The only exemption is binary fixtures under
-// testdata/ that the linker would not pick up (anything but .syso).
+// testdata/ with an extension the toolchain never compiles or links.
+//
+// Dispatch is on the extension first: a file the toolchain would compile
+// or link gets its check whatever its content looks like (a .go file that
+// looks binary is still parsed, and fails as unparseable).
 func CheckTrees(old, cur *ecoutil.Tree) hits {
 	h := hits{}
 	shadow := map[string]map[string]bool{} // package directory -> package-level names
+	goDirs := map[string]bool{}            // package directories with a changed non-test .go file
 	for _, rel := range cur.Files {
 		data := cur.ReadFile(rel)
 		var prev []byte
@@ -157,30 +165,232 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 		testdata := slices.Contains(strings.Split(path.Dir(rel), "/"), "testdata")
 		ext := path.Ext(rel)
 		switch {
-		case ext == ".s" || ext == ".S" || ext == ".sx":
-			h.add(codeAsm, rel)
-		case cgoSourceExts[ext]:
-			h.add(codeCSource, rel)
-		case evidence.IsBinary(data):
-			if !testdata || ext == ".syso" {
-				h.add(codeBinary, rel)
+		case ext == ".go":
+			if strings.HasSuffix(rel, "_test.go") {
+				continue // compiled only into the dependency's own tests
 			}
-		case ext == ".go" && !strings.HasSuffix(rel, "_test.go"):
 			dir := path.Dir(rel)
 			if _, ok := shadow[dir]; !ok {
 				shadow[dir] = packageNames(cur, dir)
 			}
+			goDirs[dir] = true
 			checkGoFile(h, rel, prev, data, shadow[dir])
+		case ext == ".s" || ext == ".S" || ext == ".sx":
+			h.add(codeAsm, rel)
+		case cgoSourceExts[ext]:
+			h.add(codeCSource, rel)
+		case ext == ".syso":
+			h.add(codeBinary, rel)
+		case evidence.IsBinary(data) && !testdata:
+			h.add(codeBinary, rel)
+		}
+	}
+	// Deleted .go files change a package too.
+	if old != nil {
+		for _, rel := range old.Files {
+			if path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") && !cur.Has(rel) {
+				goDirs[path.Dir(rel)] = true
+			}
+		}
+	}
+	for _, dir := range slices.Sorted(maps.Keys(goDirs)) {
+		if shadow[dir] == nil {
+			shadow[dir] = packageNames(cur, dir)
+		}
+		for _, name := range initCalleesChanged(old, cur, dir, shadow[dir]) {
+			h.add(codeInitCallee, path.Join(dir, name))
 		}
 	}
 	return h
 }
 
+// declInfo is one package-level declaration: its source text and the
+// identifiers it mentions.
+type declInfo struct {
+	text  string
+	refs  []string
+	names []string // for a var root: the names it declares
+}
+
+// pkgIndex is the package-level declarations of one package directory,
+// by name. A function or variable is under its name; a type is under its
+// name; a method is under its own name (any x.M() may reach it) and under
+// its receiver type's name (fmt and friends call String/Error/Format on a
+// value implicitly). roots are what runs at init: each func init and
+// each var spec whose initializer may call.
+type pkgIndex struct {
+	decls map[string][]declInfo
+	roots []declInfo
+}
+
+func identsIn(n ast.Node) []string {
+	var out []string
+	ast.Inspect(n, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			out = append(out, id.Name)
+		}
+		return true
+	})
+	return out
+}
+
+func indexPackage(t *ecoutil.Tree, dir string, shadow map[string]bool) pkgIndex {
+	ix := pkgIndex{decls: map[string][]declInfo{}}
+	if t == nil {
+		return ix
+	}
+	for _, rel := range t.Files {
+		if path.Dir(rel) != dir || path.Ext(rel) != ".go" || strings.HasSuffix(rel, "_test.go") {
+			continue
+		}
+		src := t.ReadFile(rel)
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, rel, src, parser.SkipObjectResolution)
+		if err != nil {
+			continue // checkGoFile reports it as unparseable if it changed
+		}
+		pkgs := map[string]string{}
+		for _, imp := range file.Imports {
+			if p, err := strconv.Unquote(imp.Path.Value); err == nil {
+				name := path.Base(p)
+				if imp.Name != nil {
+					name = imp.Name.Name
+				}
+				pkgs[name] = p
+			}
+		}
+		text := func(n ast.Node) string {
+			return string(src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset])
+		}
+		add := func(key string, n ast.Node) declInfo {
+			d := declInfo{text: text(n), refs: identsIn(n)}
+			ix.decls[key] = append(ix.decls[key], d)
+			return d
+		}
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				switch {
+				case d.Recv != nil:
+					add(d.Name.Name, d)
+					if len(d.Recv.List) == 1 {
+						if typ := recvTypeName(d.Recv.List[0].Type); typ != "" {
+							ix.decls[typ] = append(ix.decls[typ], declInfo{text: text(d), refs: identsIn(d)})
+						}
+					}
+				case d.Name.Name == "init":
+					ix.roots = append(ix.roots, declInfo{text: text(d), refs: identsIn(d)})
+				default:
+					add(d.Name.Name, d)
+				}
+			case *ast.GenDecl:
+				for _, s := range d.Specs {
+					switch s := s.(type) {
+					case *ast.ValueSpec:
+						var di declInfo
+						for _, n := range s.Names {
+							di = add(n.Name, s)
+						}
+						if d.Tok == token.VAR {
+							for _, v := range s.Values {
+								if mayCall(v, pkgs, shadow) {
+									for _, n := range s.Names {
+										di.names = append(di.names, n.Name)
+									}
+									ix.roots = append(ix.roots, di)
+									break
+								}
+							}
+						}
+					case *ast.TypeSpec:
+						add(s.Name.Name, s)
+					}
+				}
+			}
+		}
+	}
+	return ix
+}
+
+func recvTypeName(e ast.Expr) string {
+	for {
+		switch t := e.(type) {
+		case *ast.StarExpr:
+			e = t.X
+		case *ast.IndexExpr:
+			e = t.X
+		case *ast.IndexListExpr:
+			e = t.X
+		case *ast.ParenExpr:
+			e = t.X
+		case *ast.Ident:
+			return t.Name
+		default:
+			return ""
+		}
+	}
+}
+
+// initCalleesChanged returns the package-level declarations of dir that
+// code run at init reaches, transitively and by name, whose source
+// differs between old and cur. Reaching by name over-approximates (any
+// identifier spelled like a declaration counts), which is the safe side.
+// Calls into other packages, even of the same module, are not followed:
+// a changed function there is only flagged if it is itself an init root.
+func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow map[string]bool) []string {
+	o, n := indexPackage(old, dir, shadow), indexPackage(cur, dir, shadow)
+	seen := map[string]bool{}
+	var queue []string
+	for _, r := range n.roots {
+		queue = append(queue, r.refs...)
+		for _, name := range r.names {
+			seen[name] = true // the root itself is compared by codeVarInit
+		}
+	}
+	var changed []string
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		ds, ok := n.decls[name]
+		if !ok {
+			continue
+		}
+		if !sameDecls(o.decls[name], ds) {
+			changed = append(changed, name)
+		}
+		for _, d := range ds {
+			queue = append(queue, d.refs...)
+		}
+	}
+	sort.Strings(changed)
+	return changed
+}
+
+func sameDecls(a, b []declInfo) bool {
+	ta, tb := make([]string, len(a)), make([]string, len(b))
+	for i := range a {
+		ta[i] = a[i].text
+	}
+	for i := range b {
+		tb[i] = b[i].text
+	}
+	slices.Sort(ta)
+	slices.Sort(tb)
+	return slices.Equal(ta, tb)
+}
+
 // packageNames returns the package-level names declared by the .go files
-// of directory dir, which can shadow a builtin for every file there.
-// A file that does not parse contributes every builtin name.
+// of directory dir, which can shadow a builtin for every file there. The
+// value is true when every declaration of the name is a type (so (*T)(x)
+// is a conversion). A file that does not parse contributes every builtin
+// name, as a non-type.
 func packageNames(t *ecoutil.Tree, dir string) map[string]bool {
 	names := map[string]bool{}
+	nonType := func(n string) { names[n] = false }
 	for _, rel := range t.Files {
 		if path.Dir(rel) != dir || path.Ext(rel) != ".go" {
 			continue
@@ -188,7 +398,7 @@ func packageNames(t *ecoutil.Tree, dir string) map[string]bool {
 		file, err := parser.ParseFile(token.NewFileSet(), rel, t.ReadFile(rel), parser.SkipObjectResolution)
 		if err != nil {
 			for b := range pureBuiltins {
-				names[b] = true
+				nonType(b)
 			}
 			continue
 		}
@@ -196,17 +406,19 @@ func packageNames(t *ecoutil.Tree, dir string) map[string]bool {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				if d.Recv == nil {
-					names[d.Name.Name] = true
+					nonType(d.Name.Name)
 				}
 			case *ast.GenDecl:
 				for _, s := range d.Specs {
 					switch s := s.(type) {
 					case *ast.ValueSpec:
 						for _, n := range s.Names {
-							names[n.Name] = true
+							nonType(n.Name)
 						}
 					case *ast.TypeSpec:
-						names[s.Name.Name] = true
+						if _, seen := names[s.Name.Name]; !seen {
+							names[s.Name.Name] = true
+						}
 					}
 				}
 			}
@@ -366,10 +578,11 @@ func checkGoFile(h hits, rel string, prev, cur []byte, shadow map[string]bool) {
 }
 
 // pureCalls are standard-library functions a package-level var may call
-// without counting as an init-time side effect: they only build a value.
+// without counting as an init-time side effect: they only build a value
+// from strings and call no method of an argument (which is why fmt's
+// functions are not here: they call String, Error and Format).
 var pureCalls = map[string]map[string]bool{
 	"errors":  {"New": true},
-	"fmt":     {"Errorf": true, "Sprintf": true, "Sprint": true},
 	"regexp":  {"MustCompile": true, "MustCompilePOSIX": true},
 	"strings": {"NewReplacer": true},
 }
@@ -409,12 +622,19 @@ func mayCall(e ast.Expr, pkgs map[string]string, shadow map[string]bool) bool {
 func pureCall(fun ast.Expr, pkgs map[string]string, shadow map[string]bool) bool {
 	switch fn := ast.Unparen(fun).(type) {
 	case *ast.Ident:
-		return pureBuiltins[fn.Name] && !shadow[fn.Name]
+		_, declared := shadow[fn.Name]
+		return pureBuiltins[fn.Name] && !declared
 	case *ast.SelectorExpr:
 		x, ok := fn.X.(*ast.Ident)
 		return ok && pkgs[x.Name] == x.Name && pureCalls[x.Name][fn.Sel.Name]
 	case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType, *ast.StructType:
-		return true // conversion to a type literal; (*T)(x) is not exempt, (*p)() calls through a pointer
+		return true // conversion to a type literal
+	case *ast.StarExpr:
+		// (*T)(nil), the "var _ I = (*T)(nil)" idiom, is a conversion when T
+		// is a type of this package; (*p)() with p a variable is a call.
+		// (*pkg.T)(x) is treated as a call: the gate cannot see pkg.
+		id, ok := fn.X.(*ast.Ident)
+		return ok && shadow[id.Name]
 	}
 	return false
 }
