@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -58,7 +59,11 @@ type lockPackage struct {
 // ParsePackageLock parses package-lock.json / npm-shrinkwrap.json with
 // lockfileVersion 2 or 3 (the "packages" map). Version 1 lockfiles carry no
 // per-location data the gate relies on and are rejected.
-func ParsePackageLock(data []byte) (*Lock, error) {
+func ParsePackageLock(data []byte) (*Lock, error) { return parsePackageLock(data, nil) }
+
+// parsePackageLock is ParsePackageLock with the workspaces globs of the
+// root package.json (see Workspaces).
+func parsePackageLock(data []byte, workspaces []string) (*Lock, error) {
 	var raw struct {
 		LockfileVersion int                    `json:"lockfileVersion"`
 		Packages        map[string]lockPackage `json:"packages"`
@@ -77,21 +82,50 @@ func ParsePackageLock(data []byte) (*Lock, error) {
 			}
 		}
 	}
+	// Entries outside node_modules/ are not installed from the registry,
+	// so the gate does not verify them. Only two kinds are legitimate: a
+	// workspace the root package.json declares, and the target of a link
+	// entry ("node_modules/x": {"link": true, "resolved": "packages/x"}).
+	// Anything else fails closed, whatever it carries.
+	linkTargets := map[string]bool{}
+	for loc, p := range raw.Packages {
+		if p.Link && strings.Contains(loc, "node_modules/") {
+			linkTargets[p.Resolved] = true
+		}
+	}
+	local := func(dir string) bool {
+		if linkTargets[dir] {
+			return true
+		}
+		for _, g := range workspaces {
+			if ok, err := path.Match(path.Clean(g), dir); err == nil && ok && path.Clean(dir) == dir {
+				return true
+			}
+		}
+		return false
+	}
 	for loc, p := range raw.Packages {
 		if loc == "" {
 			continue
 		}
-		i := strings.LastIndex(loc, "node_modules/")
-		if i < 0 {
-			// A workspace's own directory entry ("packages/x"); its
-			// node_modules/ link entry is what gets installed. A real
-			// workspace entry never carries a download, so one that does
-			// is something the gate would otherwise not look at.
+		first := strings.Index(loc, "node_modules/")
+		if first < 0 {
+			if !local(loc) {
+				return nil, ambiguous("package-lock.json: %q is neither under node_modules/, a declared workspace, nor a link target", loc)
+			}
+			// A workspace's own directory entry; its node_modules/ link
+			// entry is what gets installed. It never carries a download.
 			if p.Resolved != "" || p.Integrity != "" {
 				return nil, ambiguous("package-lock.json: %q is not under node_modules/ but has resolved/integrity", loc)
 			}
 			continue
 		}
+		if prefix := strings.TrimSuffix(loc[:first], "/"); prefix != "" && (!strings.HasSuffix(loc[:first], "/") || !local(prefix)) {
+			// "packages/x/node_modules/y" is the workspace's own dependency;
+			// "elsewhere/node_modules/y" is not something npm ci lays out.
+			return nil, ambiguous("package-lock.json: %q is under %q, which is neither a declared workspace nor a link target", loc, prefix)
+		}
+		i := strings.LastIndex(loc, "node_modules/")
 		name := loc[i+len("node_modules/"):]
 		if p.Name != "" && !p.Link {
 			name = p.Name // npm alias: "node_modules/alias" installs package "name"
@@ -345,4 +379,32 @@ func (m manifest) runtimeDeps() map[string]bool {
 		}
 	}
 	return out
+}
+
+// Workspaces returns the "workspaces" globs of a package.json: an array,
+// or {"packages": [...]} (yarn's form, which npm also reads).
+func Workspaces(pkgJSON []byte) ([]string, error) {
+	if pkgJSON == nil {
+		return nil, nil
+	}
+	var m struct {
+		Workspaces json.RawMessage `json:"workspaces"`
+	}
+	if err := strictjson.Unmarshal(pkgJSON, &m); err != nil {
+		return nil, err
+	}
+	if len(m.Workspaces) == 0 || string(m.Workspaces) == "null" {
+		return nil, nil
+	}
+	var list []string
+	if err := strictjson.Unmarshal(m.Workspaces, &list); err == nil {
+		return list, nil
+	}
+	var obj struct {
+		Packages []string `json:"packages"`
+	}
+	if err := strictjson.Unmarshal(m.Workspaces, &obj); err != nil {
+		return nil, fmt.Errorf("package.json workspaces: %w", err)
+	}
+	return obj.Packages, nil
 }

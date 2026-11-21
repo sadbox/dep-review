@@ -687,3 +687,67 @@ func TestBinaryAnywhere(t *testing.T) {
 		t.Errorf("unchanged binary flagged: %q", got)
 	}
 }
+
+// TestNonModuleEntries: an entry outside node_modules/ is accepted only as
+// a declared workspace or a link target, whatever it carries.
+func TestNonModuleEntries(t *testing.T) {
+	lock := func(entries string) []byte {
+		return []byte(`{"lockfileVersion":3,"packages":{"":{"name":"root"}` + entries + `}}`)
+	}
+	const wsLink = `,"node_modules/a":{"resolved":"packages/a","link":true}`
+	tests := []struct {
+		name       string
+		lock       []byte
+		workspaces []string
+		ok         bool
+	}{
+		{"declared workspace with link", lock(wsLink + `,"packages/a":{"name":"a","version":"1.0.0","dependencies":{"x":"^1"}}`), []string{"packages/*"}, true},
+		{"declared workspace, exact path", lock(`,"packages/a":{"name":"a","version":"1.0.0"}`), []string{"packages/a"}, true},
+		{"link target only (file: dependency)", lock(`,"node_modules/lib":{"resolved":"../lib","link":true},"../lib":{"name":"lib","version":"1.0.0"}`), nil, true},
+		{"workspace's own dependency", lock(wsLink + `,"packages/a":{"name":"a"},"packages/a/node_modules/x":{"version":"1.0.0","resolved":"https://registry.npmjs.org/x/-/x-1.0.0.tgz","integrity":"sha512-x"}`), []string{"packages/*"}, true},
+		{"undeclared directory with only name and version", lock(`,"tools/left-pad":{"name":"left-pad","version":"1.3.0"}`), nil, false},
+		{"undeclared directory with dependencies", lock(`,"tools/x":{"dependencies":{"evil":"1"}}`), []string{"packages/*"}, false},
+		{"empty undeclared entry", lock(`,"tools/x":{}`), nil, false},
+		{"link whose resolved is another path", lock(`,"node_modules/a":{"resolved":"packages/b","link":true},"packages/a":{"name":"a"}`), nil, false},
+		{"workspace with a download", lock(`,"packages/a":{"version":"1.0.0","resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz"}`), []string{"packages/*"}, false},
+		{"node_modules under an undeclared directory", lock(`,"tools/node_modules/x":{"version":"1.0.0"}`), nil, false},
+		{"not a path segment", lock(`,"toolsnode_modules/x":{"version":"1.0.0"}`), nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parsePackageLock(tt.lock, tt.workspaces)
+			if tt.ok && err != nil {
+				t.Errorf("err = %v", err)
+			}
+			if !tt.ok && !isAmbiguous(err) {
+				t.Errorf("err = %v, want ambiguous", err)
+			}
+		})
+	}
+	for src, want := range map[string][]string{
+		`{"workspaces":["packages/*"]}`:              {"packages/*"},
+		`{"workspaces":{"packages":["packages/*"]}}`: {"packages/*"},
+		`{"name":"x"}`: nil,
+	} {
+		got, err := Workspaces([]byte(src))
+		if err != nil || !slices.Equal(got, want) {
+			t.Errorf("Workspaces(%s) = %q, %v", src, got, err)
+		}
+	}
+	if _, err := Workspaces([]byte(`{"workspaces":"packages/*"}`)); !isAmbiguous(err) {
+		t.Errorf("string workspaces: err = %v", err)
+	}
+	// Through dirChanges, with the workspaces read from package.json.
+	pkg := []byte(`{"name":"root","workspaces":["packages/*"]}`)
+	base := lock("")
+	head := lock(wsLink + `,"packages/a":{"name":"a","version":"1.0.0"}`)
+	dir, b, h := gittest.Repo(t, map[string][]byte{"package.json": pkg, "package-lock.json": base}, map[string][]byte{"package.json": pkg, "package-lock.json": head})
+	var sum bytes.Buffer
+	_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := codesOf(findings); !slices.Equal(got, []string{"npm.link"}) {
+		t.Errorf("codes = %q, want only npm.link", got)
+	}
+}

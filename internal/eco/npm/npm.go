@@ -177,7 +177,15 @@ func loadLock(ctx context.Context, git ecoutil.Git, sha, dir string) (*Lock, err
 			}
 			return l, nil
 		}
-		return ParsePackageLock(b)
+		pj, err := readAt(ctx, git, sha, path.Join(dir, "package.json"))
+		if err != nil {
+			return nil, err
+		}
+		ws, err := Workspaces(pj)
+		if err != nil {
+			return nil, fmt.Errorf("package.json: %w", err)
+		}
+		return parsePackageLock(b, ws)
 	}
 	return nil, nil
 }
