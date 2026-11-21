@@ -103,3 +103,47 @@ func TestSecretsExplicit(t *testing.T) {
 		}
 	}
 }
+
+// Every artifact passed between jobs is checked against its producer's
+// job output: a compromised job holding the run's runtime token could
+// otherwise replace, say, the verdict, and publish would merge on it.
+func TestArtifactsVerified(t *testing.T) {
+	jobs := gateJobs(t)
+	for _, a := range []struct {
+		name, producer string
+		consumers      []string
+	}{
+		{"classification", "classify", []string{"fetch", "publish"}},
+		{"evidence", "fetch", []string{"review", "publish"}},
+		{"verdict", "review", []string{"publish"}},
+	} {
+		p := jobs[a.producer]
+		out := a.name + "_sums: ${{ steps.sums.outputs.sums }}"
+		sums := strings.Index(p, "- name: Checksum the artifact")
+		up := strings.Index(p, "name: "+a.name+"\n")
+		if !strings.Contains(p, out) || sums < 0 || up < 0 || sums > up {
+			t.Errorf("%s does not output the %s artifact's checksums before uploading it", a.producer, a.name)
+		}
+		for _, c := range a.consumers {
+			job := jobs[c]
+			dl := strings.Index(job, "name: "+a.name+"\n")
+			if c == "publish" {
+				dl = strings.Index(job, "pattern: ")
+				if !strings.Contains(job[dl:], a.name) {
+					t.Errorf("publish does not download %s", a.name)
+				}
+			}
+			v := strings.Index(job, "- name: Verify the "+a.name+" artifact")
+			ref := "SUMS: ${{ needs." + a.producer + ".outputs." + a.name + "_sums }}"
+			if dl < 0 || v < dl || !strings.Contains(job[v:], ref) || !strings.Contains(job[v:], "sha256sum --check --strict") {
+				t.Errorf("%s does not verify the %s artifact after downloading it", c, a.name)
+				continue
+			}
+			for _, use := range []string{`/dep-review" `, "create-github-app-token", "install-gvisor.sh"} {
+				if u := strings.Index(job, use); u >= 0 && u < v {
+					t.Errorf("%s: %q comes before verifying %s", c, use, a.name)
+				}
+			}
+		}
+	}
+}

@@ -130,6 +130,7 @@ jobs:
       pull-requests: read
     outputs:
       kind: ${{ steps.classify.outputs.kind }}
+      classification_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -137,13 +138,16 @@ jobs:
           path: ${{ runner.temp }}/bin
       # gate-bin is an artifact of this run, and anything holding the
       # run's runtime token can replace one. Use it only if every file
-      # matches the build job's checksums (a job output, not an artifact).
+      # matches the build job's checksums (a job output, not an artifact). The
+      # same holds for every artifact below: each is checked against its
+      # producer's job output.
       - name: Verify the gate's files
         env:
           GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
         run: |
           cd "$RUNNER_TEMP/bin"
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
       - name: Classify
         id: classify
@@ -155,6 +159,15 @@ jobs:
             --event "$GITHUB_EVENT_PATH" \
             --trigger-path "$TRIGGER_PATH" \
             --out "$RUNNER_TEMP/out/classification.json"
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/out"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: classification
@@ -171,6 +184,7 @@ jobs:
       pull-requests: read
     outputs:
       route: ${{ steps.fetch.outputs.route }}
+      evidence_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -185,11 +199,20 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/bin"
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: classification
           path: ${{ runner.temp }}/in
+      - name: Verify the classification artifact
+        env:
+          SUMS: ${{ needs.classify.outputs.classification_sums }}
+        run: |
+          cd "$RUNNER_TEMP/in"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       # The go_modules fetcher runs `go mod download` (downloads and sum
       # checks only, in an empty module of its own). The version comes
       # from the gate's go.mod, never the PR's; no cache, since a cache
@@ -215,6 +238,15 @@ jobs:
             --classification "$RUNNER_TEMP/in/classification.json" \
             --repo-dir pr \
             --out "$RUNNER_TEMP/evidence"
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/evidence"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence
@@ -226,6 +258,8 @@ jobs:
     if: needs.fetch.outputs.route == 'review'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    outputs:
+      verdict_sums: ${{ steps.sums.outputs.sums }}
     permissions:
       contents: read
       # The federated model credential. The OIDC request token (which is
@@ -247,11 +281,20 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/bin"
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: evidence
           path: evidence
+      - name: Verify the evidence artifact
+        env:
+          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+        run: |
+          cd "evidence"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       - name: Check out the default branch (for usage search and the review notes)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -304,6 +347,15 @@ jobs:
             --max-requests "$MAX_REQUESTS" \
             --max-turns 80 \
             --timeout 20m
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/verdict"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verdict
@@ -333,7 +385,38 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/in/gate-bin"
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
+      - name: Verify the classification artifact
+        env:
+          SUMS: ${{ needs.classify.outputs.classification_sums }}
+        run: |
+          cd "$RUNNER_TEMP/in/classification"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+      - name: Verify the evidence artifact
+        env:
+          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+        run: |
+          # None if the job that makes it did not succeed; then there must
+          # be no artifact either.
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/evidence"; exit; fi
+          cd "$RUNNER_TEMP/in/evidence"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+      - name: Verify the verdict artifact
+        env:
+          SUMS: ${{ needs.review.outputs.verdict_sums }}
+        run: |
+          # None if the job that makes it did not succeed; then there must
+          # be no artifact either.
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/verdict"; exit; fi
+          cd "$RUNNER_TEMP/in/verdict"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       - name: Gate app token (this repository only)
         id: app
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
@@ -383,6 +466,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/bin"
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
       - name: Gate app token (this repository only)
         id: app
