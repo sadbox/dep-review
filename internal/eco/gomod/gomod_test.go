@@ -3,6 +3,7 @@ package gomod
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -444,4 +445,44 @@ func runFetch(t *testing.T, repo string, class model.Classification) model.Evide
 		}
 	}
 	return ev
+}
+
+// TestPOCDupRequire is the re-review's N7 PoC: two require lines for one
+// path were last-wins in the gate's map. A repeated require, a replace
+// with the same left-hand side, or a repeated exclude line now refuses.
+func TestPOCDupRequire(t *testing.T) {
+	const head = "module example.com/dup\n\ngo 1.22\n\n"
+	for _, body := range []string{
+		"require golang.org/x/text v0.14.0\nrequire golang.org/x/text v0.3.8\n",
+		"require (\n\tgolang.org/x/text v0.14.0\n\t\"golang.org/x/text\" v0.3.8 // indirect\n)\n",
+		"replace golang.org/x/text => ../a\nreplace golang.org/x/text => ../b\n",
+		"replace golang.org/x/text v0.3.8 => ../a\nreplace (\n\tgolang.org/x/text v0.3.8 => ../b\n)\n",
+		"exclude golang.org/x/text v0.3.8\nexclude golang.org/x/text v0.3.8\n",
+	} {
+		if mf, err := ParseModFile([]byte(head + body)); !errors.Is(err, ErrDuplicate) {
+			t.Errorf("%q: err %v (require %v), want ErrDuplicate", body, err, mf)
+		}
+	}
+	for _, body := range []string{
+		"exclude golang.org/x/text v0.3.7\nexclude golang.org/x/text v0.3.8\n",
+		"replace golang.org/x/text => ../a\nreplace golang.org/x/text v0.3.8 => ../b\n",
+		"require golang.org/x/text v0.14.0\nreplace golang.org/x/text => ../a\nexclude golang.org/x/text v0.3.8\n",
+	} {
+		if _, err := ParseModFile([]byte(head + body)); err != nil {
+			t.Errorf("%q: %v", body, err)
+		}
+	}
+
+	base := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "base"))
+	h := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "head"))
+	gm := string(h["go.mod"]) + "\nrequire github.com/aws/aws-sdk-go-v2/credentials v1.21.0\n"
+	dir, b, hs := gittest.Repo(t, base, map[string][]byte{"go.mod": []byte(gm), "go.sum": h["go.sum"]})
+	var sum bytes.Buffer
+	_, findings, err := moduleChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, hs, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].Code != "gomod.duplicate-module" || findings[0].Route != model.RouteRefuse {
+		t.Errorf("findings = %+v", findings)
+	}
 }

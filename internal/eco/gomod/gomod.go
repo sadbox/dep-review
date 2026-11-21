@@ -165,11 +165,21 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 		return nil, findings, nil
 	}
 	bmf, err := ParseModFile(bm)
+	if errors.Is(err, ErrDuplicate) {
+		findings = append(findings, model.Finding{Code: "gomod.duplicate-module", Route: model.RouteRefuse,
+			Detail: safeDepDir + ": base go.mod names one module twice in require, replace or exclude (which one wins is up to the reader)"})
+		return nil, findings, nil
+	}
 	if err != nil {
 		human("gomod.parse", "base go.mod could not be parsed")
 		return nil, findings, nil
 	}
 	hmf, err := ParseModFile(hm)
+	if errors.Is(err, ErrDuplicate) {
+		findings = append(findings, model.Finding{Code: "gomod.duplicate-module", Route: model.RouteRefuse,
+			Detail: safeDepDir + ": head go.mod names one module twice in require, replace or exclude (which one wins is up to the reader)"})
+		return nil, findings, nil
+	}
 	if err != nil {
 		human("gomod.parse", "head go.mod could not be parsed")
 		return nil, findings, nil
