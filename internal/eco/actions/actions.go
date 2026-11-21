@@ -233,14 +233,18 @@ func groupPairs(all []usesChange, fs *findings) (map[string]*pair, []string) {
 		}
 		if c.lock != nil {
 			p.lock = true
-			if _, ok := parseTag(c.new.ref); ok && !contains(p.lockNewTags, c.new.ref) {
-				p.lockNewTags = append(p.lockNewTags, c.new.ref)
+			// The ref the entry records is the one the runner checks the
+			// commit against: the tag the line names, or for a SHA-pinned
+			// line the tag gh-actions-lock found. Either must be upstream's
+			// vX.Y.Z tag on that commit (analyzePair).
+			if e := c.lock.newEntry; e != nil {
+				if !contains(p.lockNewTags, e.ref) {
+					p.lockNewTags = append(p.lockNewTags, e.ref)
+				}
+				p.lockEntries = append(p.lockEntries, e)
 			}
-			if _, ok := parseTag(c.old.ref); ok && !contains(p.lockOldTags, c.old.ref) {
-				p.lockOldTags = append(p.lockOldTags, c.old.ref)
-			}
-			if c.lock.newEntry != nil {
-				p.lockEntries = append(p.lockEntries, c.lock.newEntry)
+			if e := c.lock.oldEntry; e != nil && !contains(p.lockOldTags, e.ref) {
+				p.lockOldTags = append(p.lockOldTags, e.ref)
 			}
 		}
 		p.changes = append(p.changes, c)
@@ -467,9 +471,9 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 			return u, err
 		}
 		if !ok {
-			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "upstream tag %s does not dereference to the commit actions.lock records for it (%s)", tn, short(p.newRef))
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "%s is not an upstream vX.Y.Z tag that dereferences to the commit actions.lock records for it (%s)", safeRef(tn), short(p.newRef))
 		} else if newTag != nil && newTag.name != tn {
-			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "the workflow names %s, but the version the gate read for the locked commit is %s", tn, newTag.name)
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "actions.lock records %s, but the version the gate read for the locked commit is %s", tn, newTag.name)
 		}
 	}
 	if oldTag == nil {

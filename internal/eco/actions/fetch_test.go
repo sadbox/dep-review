@@ -263,6 +263,20 @@ func lockedCaller(oldTag, oldSHA, newTag, newSHA string, ids string) (map[string
 		map[string]string{".github/workflows/ci.yml": wfText(newTag), ".github/workflows/actions.lock": lock(newTag, newSHA)}
 }
 
+// lockedSHACaller is lockedCaller with the step pinned by SHA and a
+// version comment; the lockfile keys the entry by SHA and records newRef.
+func lockedSHACaller(old, new, newRef string) (map[string]string, map[string]string) {
+	wfText := func(sha, c string) string {
+		return "name: ci\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-26.04\n    steps:\n      - uses: acme/act@" + sha + " # " + c + "\n      - run: echo hi\n"
+	}
+	lock := func(sha, ref string) string {
+		return "version: 'v0.0.3'\nworkflows:\n    '.github/workflows/ci.yml':\n        - 'acme/act@" + sha +
+			"'\ndependencies:\n    'acme/act@" + sha + "':\n        ref: '" + ref + "'\n        commit: 'sha1-" + sha + "'\n" + lockIDs
+	}
+	return map[string]string{".github/workflows/ci.yml": wfText(old, "v1.0.0"), ".github/workflows/actions.lock": lock(old, "v1.0.0")},
+		map[string]string{".github/workflows/ci.yml": wfText(new, "v1.0.1"), ".github/workflows/actions.lock": lock(new, newRef)}
+}
+
 const lockIDs = "        owner_id: 1\n        repo_id: 2\n"
 
 func TestFetchScenarios(t *testing.T) {
@@ -361,6 +375,18 @@ func TestFetchScenarios(t *testing.T) {
 				a[".github/workflows/ci.yml"] = b[".github/workflows/ci.yml"]
 				a[".github/workflows/actions.lock"] = b[".github/workflows/actions.lock"]
 				return b, a
+			}},
+		{name: "locked SHA-pinned step", want: model.RouteReview, notCodes: []string{"actions.lock-tag-mismatch", "actions.ref-not-sha"},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				return lockedSHACaller(old, new, "v1.0.1")
+			}},
+		{name: "locked SHA-pinned step records another tag", want: model.RouteRefuse, codes: []string{"actions.lock-tag-mismatch"},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				return lockedSHACaller(old, new, "v1.0.2")
+			}},
+		{name: "locked SHA-pinned step records a branch", want: model.RouteRefuse, codes: []string{"actions.lock-tag-mismatch"},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				return lockedSHACaller(old, new, "main")
 			}},
 		{name: "lockfile added", want: model.RouteRefuse, codes: []string{"actions.unexpected-file"},
 			caller: func(old, new string) (map[string]string, map[string]string) {

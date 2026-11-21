@@ -244,15 +244,17 @@ func TestParseActionsLockRefuses(t *testing.T) {
 		}
 		return strings.Replace(synthLock, old, new, 1)
 	}
+	actEntry := "    'acme/act@v1.0.0':\n        ref: 'v1.0.0'\n        commit: 'sha1-1111111111111111111111111111111111111111'\n        owner_id: 1\n        repo_id: 2\n        uses:\n            - 'acme/helper@v2.0.0'\n"
+	helperEntry := "    'acme/helper@v2.0.0':\n        ref: 'v2.0.0'\n        commit: 'sha1-2222222222222222222222222222222222222222'\n        owner_id: 1\n        repo_id: 3\n"
 	entry := "    'other/tool@v3.0.0':\n        ref: 'v3.0.0'\n        commit: 'sha1-3333333333333333333333333333333333333333'\n        owner_id: 4\n        repo_id: 5\n"
 	cases := map[string]string{
 		"duplicate dependency key":  synthLock + entry,
-		"duplicate key, other case": r("    'other/tool@v3.0.0':\n", "    'Other/tool@v3.0.0':\n        ref: 'v3.0.0'\n        commit: 'sha1-3333333333333333333333333333333333333333'\n        owner_id: 4\n        repo_id: 5\n    'other/tool@v3.0.0':\n"),
-		"upper-case owner":          strings.ReplaceAll(synthLock, "other/tool", "Other/tool"),
+		"duplicate key, other case": r("    'acme/act@v1.0.0':\n", "    'Acme/act@v1.0.0':\n        ref: 'v1.0.0'\n        commit: 'sha1-1111111111111111111111111111111111111111'\n        owner_id: 1\n        repo_id: 2\n    'acme/act@v1.0.0':\n"),
+		"upper-case repo":           strings.ReplaceAll(synthLock, "other/tool", "other/Tool"),
 		"duplicate workflow key":    r("    '.github/workflows/idle.yml': []\n", "    '.github/workflows/idle.yml': []\n    '.github/workflows/idle.yml': []\n"),
 		"case-folded workflow keys": r("    '.github/workflows/ci.yml':\n", "    '.github/workflows/CI.yml': []\n    '.github/workflows/ci.yml':\n"),
 		"duplicate field":           r("        repo_id: 5\n", "        repo_id: 5\n        repo_id: 6\n"),
-		"unsorted keys":             r("    'acme/helper@v2.0.0':", "    'acme/zzz@v2.0.0':"),
+		"unsorted keys":             r(actEntry+helperEntry, helperEntry+actEntry),
 		"unsorted list":             r("        - 'acme/act@v1.0.0'\n        - 'acme/helper@v2.0.0'\n", "        - 'acme/helper@v2.0.0'\n        - 'acme/act@v1.0.0'\n"),
 		"double-quoted key":         r("    'other/tool@v3.0.0':", `    "other/tool@v3.0.0":`),
 		"escaped key":               r("    'other/tool@v3.0.0':", `    "other/t\x6fol@v3.0.0":`),
@@ -288,11 +290,61 @@ func TestParseActionsLockRefuses(t *testing.T) {
 		"dangling workflow pin":     r("        - 'other/tool@v3.0.0'\n", "        - 'other/tool@v3.0.0'\n        - 'zz/missing@v1.0.0'\n"),
 		"dangling uses pin":         r("            - 'acme/helper@v2.0.0'\n", "            - 'acme/helper@v2.0.0'\n            - 'zz/missing@v1.0.0'\n"),
 		"key ref differs from ref":  r("ref: 'v3.0.0'", "ref: 'v3.0.1'"),
-		"sha key differs":           r("    'other/tool@v3.0.0':\n        ref: 'v3.0.0'\n", "    'other/tool@5555555555555555555555555555555555555555':\n        ref: 'v3.0.0'\n"),
+		"sha key differs":           strings.ReplaceAll(synthLock, "other/tool@v3.0.0", "other/tool@5555555555555555555555555555555555555555"),
 		"cycle":                     r("        repo_id: 3\n", "        repo_id: 3\n        uses:\n            - 'acme/act@v1.0.0'\n"),
 		"workflow outside dir":      r("'.github/workflows/idle.yml'", "'.github/workflows/sub/idle.yml'"),
 		"two-space indent":          strings.ReplaceAll(synthLock, "    ", "  "),
 		"empty":                     "",
+	}
+	// Why each case is refused: the check that must catch it.
+	why := map[string]string{
+		"duplicate dependency key":  "dependency keys not sorted, or a duplicate",
+		"duplicate key, other case": "not a canonical lower-case",
+		"upper-case repo":           "not a canonical lower-case",
+		"duplicate workflow key":    "workflow keys not sorted, or a duplicate",
+		"case-folded workflow keys": "differ only in case",
+		"duplicate field":           "unexpected line",
+		"unsorted keys":             "dependency keys not sorted",
+		"unsorted list":             "not sorted or not unique",
+		"double-quoted key":         "double quote",
+		"escaped key":               "double quote or backslash",
+		"doubled single quote":      ": ref",
+		"plain scalar":              ": ref",
+		"hostname":                  "expected ref",
+		"unknown field":             "unexpected line",
+		"fields out of order":       "expected owner_id",
+		"v0.0.2":                    "schema version is not v0.0.3",
+		"future version":            "schema version is not v0.0.3",
+		"sha256 commit":             "commit is not sha1-",
+		"upper-case hex":            "commit is not sha1-",
+		"leading-zero id":           "owner_id is not a positive integer",
+		"quoted id":                 "owner_id is not a positive integer",
+		"hex id":                    "owner_id is not a positive integer",
+		"flow list":                 "workflow key",
+		"block list for idle":       "empty list",
+		"comment mid-file":          "empty dependencies",
+		"trailing comment":          ": ref",
+		"blank line":                "unexpected line",
+		"lone CR":                   "CR without LF",
+		"CRLF":                      "CR, tab",
+		"NEL":                       "U+0085",
+		"LS":                        "U+2028",
+		"PS":                        "U+2029",
+		"tab":                       "CR, tab",
+		"BOM":                       "expected version",
+		"anchor":                    "dependency key",
+		"merge key":                 "unexpected line",
+		"tag":                       ": ref",
+		"second document":           "unexpected line",
+		"no final newline":          "no final newline",
+		"dangling workflow pin":     "names a pin with no dependencies entry",
+		"dangling uses pin":         "uses a pin with no dependencies entry",
+		"key ref differs from ref":  "ref differs from the ref in its key",
+		"sha key differs":           "commit differs from the SHA in its key",
+		"cycle":                     "uses cycle",
+		"workflow outside dir":      "workflow path",
+		"two-space indent":          "empty workflows",
+		"empty":                     "no final newline",
 	}
 	for name, text := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -303,8 +355,15 @@ func TestParseActionsLockRefuses(t *testing.T) {
 			if !errors.Is(err, errLockFormat) && !errors.Is(err, errLineBreak) {
 				t.Errorf("error %v is neither a format nor a line-break error", err)
 			}
-			t.Log(err)
+			if w, ok := why[name]; !ok || !strings.Contains(err.Error(), w) {
+				t.Errorf("refused for %q, want %q", err, w)
+			}
 		})
+	}
+	// The same key forms accepted: a SHA key whose commit agrees.
+	sha := strings.ReplaceAll(strings.Replace(synthLock, "sha1-3333333333333333333333333333333333333333", "sha1-5555555555555555555555555555555555555555", 1), "other/tool@v3.0.0", "other/tool@5555555555555555555555555555555555555555")
+	if _, err := parseActionsLock([]byte(sha)); err != nil {
+		t.Errorf("SHA key: %v", err)
 	}
 }
 
@@ -313,11 +372,14 @@ func TestActionsLockDelta(t *testing.T) {
 	const wfp = ".github/workflows/ci.yml"
 	base := map[string]string{lp: synthLock, wfp: synthWorkflow("v1.0.0")}
 	cases := []struct {
-		name  string
-		after map[string]string
-		codes map[string]model.Route
+		name          string
+		before, after map[string]string
+		codes         map[string]model.Route
 	}{
 		{name: "clean", after: map[string]string{lp: synthBumped(), wfp: synthWorkflow("v1.0.1")}},
+		{name: "mixed-case uses: maps to the lower-case key",
+			before: map[string]string{lp: synthLock, wfp: strings.Replace(synthWorkflow("v1.0.0"), "uses: acme/act@", "uses: Acme/Act@", 1)},
+			after:  map[string]string{lp: synthBumped(), wfp: strings.Replace(synthWorkflow("v1.0.1"), "uses: acme/act@", "uses: Acme/Act@", 1)}},
 		{name: "uses and lockfile disagree", after: map[string]string{lp: synthBumped(), wfp: synthWorkflow("v1.0.2")},
 			codes: map[string]model.Route{"actions.lock-uses-mismatch": model.RouteRefuse, "actions.lock-unexplained-change": model.RouteHuman}},
 		{name: "lockfile not updated", after: map[string]string{lp: synthLock, wfp: synthWorkflow("v1.0.1")},
@@ -347,7 +409,11 @@ func TestActionsLockDelta(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fs, all := lockRun(t, base, tc.after)
+			before := base
+			if tc.before != nil {
+				before = tc.before
+			}
+			fs, all := lockRun(t, before, tc.after)
 			got, lines := codesOf(fs)
 			want := tc.codes
 			if want == nil {
@@ -361,7 +427,7 @@ func TestActionsLockDelta(t *testing.T) {
 					t.Errorf("finding %s = %q, want %q\n%s", c, got[c], r, lines)
 				}
 			}
-			if tc.name == "clean" && (len(all) != 1 || all[0].lock == nil || all[0].lock.newCommit != "4444444444444444444444444444444444444444" || all[0].lock.oldCommit != "1111111111111111111111111111111111111111") {
+			if (tc.name == "clean" || strings.HasPrefix(tc.name, "mixed-case")) && (len(all) != 1 || all[0].lock == nil || all[0].lock.newCommit != "4444444444444444444444444444444444444444" || all[0].lock.oldCommit != "1111111111111111111111111111111111111111") {
 				t.Errorf("resolution %+v", all)
 			}
 		})

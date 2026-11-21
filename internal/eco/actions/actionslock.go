@@ -92,6 +92,14 @@ func safePin(k string) string {
 	return "(pin with unusual characters)"
 }
 
+// safeRef returns r if it is a vX.Y.Z tag, for trusted text.
+func safeRef(r string) string {
+	if _, ok := parseTag(r); ok {
+		return r
+	}
+	return "(a ref that is not a vX.Y.Z tag)"
+}
+
 // pinKey is the lockfile key a `uses: owner/repo[/path]@ref` resolves to:
 // the path is dropped and owner/repo lower-cased, as in
 // github/actions-lockfile's ParsePin/Pin.Canonical.
