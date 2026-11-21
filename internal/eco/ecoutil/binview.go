@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -120,18 +121,23 @@ func (b *Budget) left(n int64) int64 {
 // budgetNote is printed in place of what a spent budget skipped.
 const budgetNote = "the gate's parse budget for this module is spent"
 
-// Description is DescribeBinary's result. Complete is the gate's positive
-// assertion that the structure step reached the end of the file's
-// structure: every section, entry, library and imported symbol listed,
-// nothing skipped, stopped, capped, out of budget or time, and no parser
-// error. Every other outcome, a type the gate has no parser for
-// included, is incomplete. The hexdump and printable strings are samples
-// and do not count either way; neither do symbol tables shown as counts
-// (the evidence says so).
+// Description is DescribeBinary's result: descriptive evidence for the
+// person deciding. It carries no verdict: the gate does not clear a
+// binary by its content, however much of it the renderer read.
 type Description struct {
-	Text     string
-	Complete bool
+	Text string
 }
+
+// ForThePerson heads every rendering: it is descriptive only.
+const ForThePerson = "for the person deciding; the gate does not clear binaries by their content"
+
+// reachedEnd and stoppedEarly say how far parsing got. They describe the
+// parse, never the file's safety: data a parser does not model (archive
+// padding, PAX records, gzip extra fields...) is never ruled out.
+const (
+	reachedEnd   = "  (parsing reached the end of what the gate models for this type; data it does not model, such as archive padding, PAX records or gzip extra fields, is not ruled out)\n"
+	stoppedEarly = "  (parsing stopped before the end; see above)\n"
+)
 
 // DescribeBinary renders bytes a reviewer cannot read as text: size,
 // SHA-256, the type its magic number names, the structure the standard
@@ -165,13 +171,13 @@ func DescribeAs(cur, old []byte, hadOld bool, budget *Budget, s Sniff) Descripti
 	if len(all) > 1 {
 		fmt.Fprintf(&b, "its bytes match more than one type's magic: %s\n", strings.Join(all, "; "))
 	}
-	text, complete := structure(cur, budget, s)
-	b.WriteString("\nstructure (parsed by the gate):\n")
+	text, reached := structure(cur, budget, s)
+	b.WriteString("\nstructure (parsed by the gate, " + ForThePerson + "):\n")
 	b.WriteString(text)
-	if complete {
-		b.WriteString("  (the gate read this structure to its end)\n")
+	if reached {
+		b.WriteString(reachedEnd)
 	} else {
-		b.WriteString("  (the gate did NOT read this structure in full)\n")
+		b.WriteString(stoppedEarly)
 	}
 	if hadOld {
 		b.WriteString("\n")
@@ -188,13 +194,13 @@ func DescribeAs(cur, old []byte, hadOld bool, budget *Budget, s Sniff) Descripti
 	for _, s := range strs {
 		b.WriteString("    | " + s + "\n")
 	}
-	return Description{Text: b.String(), Complete: complete}
+	return Description{Text: b.String()}
 }
 
 // magics are the types the gate recognizes by magic number, in the
-// order magicType names them. Each is tested on its own: a file that
+// order magicType names them. Each is tested on its own, so a file that
 // matches more than one (a polyglot, read differently by different
-// consumers) is never rendered complete.
+// consumers) is reported as such.
 var magics = []struct {
 	name  string
 	match func(b []byte) bool
@@ -325,9 +331,9 @@ type childResult struct {
 }
 
 // renderer is one structure rendering. Its describe functions each return
-// (text, complete); complete is true only from a describer's final
-// return, after everything it covers was read. An early return, a cap or
-// a panic (guard) is incomplete by construction.
+// (text, reached): reached is true only from a describer's final return,
+// after everything it parses was read, and labels the evidence; it is
+// never a verdict on the file.
 type renderer struct {
 	limit int64 // bytes that may be decompressed
 	used  int64
@@ -1046,6 +1052,9 @@ func (rd *renderer) describeTar(r *bytes.Reader, depth int) (string, bool) {
 			return b.String(), false
 		}
 		fmt.Fprintf(&b, "  tar entry %s (type %q, %d bytes, mode %o)\n", clip(h.Name), h.Typeflag, h.Size, h.Mode)
+		for _, k := range slices.Sorted(maps.Keys(h.PAXRecords)) {
+			fmt.Fprintf(&b, "    PAX record %s: %d bytes (not rendered)\n", clip(k), len(h.PAXRecords[k]))
+		}
 		switch h.Typeflag {
 		case tar.TypeReg, tar.TypeCont, tar.TypeGNUSparse:
 			// Content: read and rendered below.
@@ -1083,6 +1092,9 @@ func (rd *renderer) describeGzip(r io.Reader, depth int) (string, bool) {
 	var b strings.Builder
 	if z.Name != "" {
 		fmt.Fprintf(&b, "  gzip header name: %s\n", clip(z.Name))
+	}
+	if len(z.Extra) > 0 {
+		fmt.Fprintf(&b, "  gzip header extra field: %d bytes (not rendered; tools like archive/zip can read data hidden there)\n", len(z.Extra))
 	}
 	data, ok, err := rd.take(z)
 	switch {

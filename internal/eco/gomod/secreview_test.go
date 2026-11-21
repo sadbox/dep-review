@@ -55,8 +55,9 @@ func TestDistinctItemCap(t *testing.T) {
 	if ctx := h.ctx[codeBinary]["z/evil.syso"]; len(ctx) == 0 || ctx[0] == skipped {
 		t.Errorf("2 flagged items, but the .syso context was skipped: %q", ctx)
 	}
-	if len(h.items(codeIncomplete)) != 0 {
-		t.Errorf("not shown in full: %q", h.items(codeIncomplete))
+	// The .syso goes to a person for being a .syso, not for being skipped.
+	if got := h.items(codeIncomplete); !slices.Equal(got, []string{"gomod.binary-file z/evil.syso"}) {
+		t.Errorf("not shown in full: %q", got)
 	}
 }
 
@@ -170,7 +171,8 @@ func TestLinkedUnrendered(t *testing.T) {
 		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, false},
 		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, false},
 		{"mentioned by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nconst f = \"x.bin\"\n"}, true},
-		{"complete COFF .syso", map[string]string{"x.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, false},
+		// Round 8: a .syso is never cleared by its rendering.
+		{"complete COFF .syso", map[string]string{"x.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, true},
 		// Informational (a): a .syso nothing can parse is linked and unread.
 		{"syso with no parser for its type", map[string]string{"x.syso": "\x00\x01 opaque", "p.go": "package p\n"}, true},
 	}

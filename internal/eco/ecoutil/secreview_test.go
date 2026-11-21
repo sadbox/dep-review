@@ -73,15 +73,15 @@ func TestIsolatedStructure(t *testing.T) {
 
 	withIsolation(t, childIsolation(t, "ok", time.Minute))
 	got := DescribeBinary(self, nil, false, nil)
-	if !got.Complete || got.Text != local.Text {
-		t.Errorf("child rendering differs from the local one (complete %v)", got.Complete)
+	if !reached(got) || got.Text != local.Text {
+		t.Errorf("child rendering differs from the local one (complete %v)", reached(got))
 	}
 	for mode, want := range map[string]string{"hang": "timed out", "crash": "failed", "garbage": "returned no valid result"} {
 		withIsolation(t, childIsolation(t, mode, 2*time.Second))
 		start := time.Now()
 		d := DescribeBinary(self, nil, false, nil)
-		if d.Complete || !strings.Contains(d.Text, "the isolated parser "+want) {
-			t.Errorf("%s: complete %v, text %.300s", mode, d.Complete, d.Text)
+		if reached(d) || !strings.Contains(d.Text, "the isolated parser "+want) {
+			t.Errorf("%s: complete %v, text %.300s", mode, reached(d), d.Text)
 		}
 		if time.Since(start) > 30*time.Second {
 			t.Errorf("%s took %v", mode, time.Since(start))
@@ -162,7 +162,7 @@ func TestELFSymbolAmplification(t *testing.T) {
 	}
 	// .symtab names are never built, only counted (L1): the rendering is
 	// complete and says so.
-	if !strings.Contains(out.Text, "symbol tables: 4097 symbols (counted, names not read)") || !out.Complete {
+	if !strings.Contains(out.Text, "symbol tables: 4097 symbols (counted, names not read)") || !reached(out) {
 		t.Errorf("counts not reported:\n%.1500s", out.Text)
 	}
 }

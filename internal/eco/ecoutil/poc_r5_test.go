@@ -10,7 +10,7 @@ import (
 // though the inner ELF's structure was never read.
 func TestR4GzipWrapsUnreadELF(t *testing.T) {
 	inner := []byte("\x7fELF\x02\x01\x01 truncated header, never parsed")
-	if d := DescribeBinary(inner, nil, false, &Budget{Left: 1 << 30}); d.Complete {
+	if d := DescribeBinary(inner, nil, false, &Budget{Left: 1 << 30}); reached(d) {
 		t.Fatalf("bare broken ELF complete")
 	}
 	var buf bytes.Buffer
@@ -18,7 +18,7 @@ func TestR4GzipWrapsUnreadELF(t *testing.T) {
 	w.Write(inner)
 	w.Close()
 	d := DescribeBinary(buf.Bytes(), nil, false, &Budget{Left: 1 << 30})
-	if d.Complete {
+	if reached(d) {
 		t.Errorf("gzip of an unparsed ELF counts as Complete:\n%s", d.Text)
 	}
 }
@@ -68,7 +68,7 @@ func TestR4SectionlessELFImports(t *testing.T) {
 	copy(b[strOff:], dynstr)
 	copy(b[dynOff:], dyn)
 	d := DescribeBinary(b, nil, false, &Budget{Left: 1 << 30})
-	if d.Complete {
+	if reached(d) {
 		t.Errorf("sectionless ELF with DT_NEEDED libevil.so via PT_DYNAMIC is Complete:\n%s", d.Text)
 	}
 }

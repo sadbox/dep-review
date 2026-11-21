@@ -403,10 +403,10 @@ var checkText = map[string]string{
 	codeGenerate:   "new //go:generate directive",
 	codeEmbed:      "new //go:embed directive",
 	codeBlob:       fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
-	codeBinary:     "binary file added or changed (testdata/ fixtures other than .syso excepted)",
+	codeBinary:     "binary file added or changed (testdata/ fixtures excepted unless the module can reach them); renderings are " + ecoutil.ForThePerson,
 	codeAsm:        "assembly (.s) file added or changed",
 	codeParse:      "Go file the gate could not parse (checked as text only)",
-	codeIncomplete: "flagged item the gate did not show in full (past the item cap, a size, budget or time limit, a parser that failed or stopped early, no parser for its type, or a literal it could not decode)",
+	codeIncomplete: "flagged item the gate did not show in full as text, nor prove unable to reach the build (every binary that may reach the build, decoded bytes that are not text, anything past a cap or limit)",
 }
 
 // cgoSourceExts are the extensions the go command hands to the C, C++,
@@ -461,8 +461,14 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 		case ext == ".go":
 			if strings.HasSuffix(rel, "_test.go") {
 				// Compiled only into the dependency's own tests; still no
-				// binary hiding behind a .go name outside testdata/.
-				if evidence.IsBinary(data) && !testdata {
+				// binary hiding behind a .go name: outside testdata/ it is
+				// flagged, inside it goes through the testdata logic (a
+				// non-test //go:embed can reach it).
+				switch {
+				case !evidence.IsBinary(data):
+				case testdata:
+					tdBins = append(tdBins, rel)
+				default:
 					binary()
 				}
 				continue
@@ -558,7 +564,9 @@ func moduleLinks(t *ecoutil.Tree) string {
 	return ""
 }
 
-// nonTestEmbed: a //go:embed pattern in non-test code matches rel.
+// nonTestEmbed: a //go:embed pattern in non-test code matches rel. A
+// path with a non-ASCII character counts as matched by any non-test
+// pattern of an ancestor directory: fold does not model Unicode folding.
 func (ix *refIndex) nonTestEmbed(rel string) bool {
 	dir := path.Dir(rel)
 	for d := dir; ; d = path.Dir(d) {
@@ -567,7 +575,7 @@ func (ix *refIndex) nonTestEmbed(rel string) bool {
 			r = strings.TrimPrefix(rel, d+"/")
 		}
 		for _, e := range ix.embeds[fold(d)] {
-			if !e.test && embedMatches(e.pat, r) {
+			if !e.test && (embedMatches(e.pat, r) || !ascii(rel)) {
 				return true
 			}
 		}
@@ -576,12 +584,6 @@ func (ix *refIndex) nonTestEmbed(rel string) bool {
 		}
 	}
 }
-
-// binaryShown is the completeness rule for a binary: its rendering read
-// to the end, or the gate's complete proof that it never reaches the
-// build (refIndex.refs). Anything short of that proof means "possibly
-// reaching the build", and then only a complete rendering will do.
-func binaryShown(d ecoutil.Description, inert bool) bool { return d.Complete || inert }
 
 // binaries builds each flagged binary's context: the gate's rendering and
 // where the module refers to it, from one index of the tree. When the
@@ -633,8 +635,11 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 		d := ecoutil.DescribeAs(data, prev, hadOld, r.budget, sn)
 		refs, inert, _ := ix.refs(rel, links)
 		item := safeFile(rel)
-		r.add(codeBinary, item, binaryShown(d, inert),
-			quote("the gate's rendering of "+item+" (the module diff cannot show binary content)", d.Text),
+		// The allowlist: a binary stays on review only when the gate finds
+		// no way for it to reach the build. Its rendering is evidence for a
+		// person, never a reason to clear it.
+		r.add(codeBinary, item, inert,
+			quote("the gate's rendering of "+item+" ("+ecoutil.ForThePerson+")", d.Text),
 			quote("where the module refers to "+item+" (found by the gate)", refs))
 	}
 }
@@ -1288,7 +1293,7 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 		h.skip(codeBlob, f)
 	default:
 		// Shown in full only if every literal was decoded and its bytes
-		// rendered completely; the literal's own text is in the file.
+		// shown in full as text; the literal's own text is in the file.
 		ctx := []string{fullText()}
 		complete := true
 		for _, lit := range lits {
@@ -1307,9 +1312,9 @@ const maxBlobDecode = 1 << 20
 // rendering of its bytes: the unquoted bytes themselves if they are
 // binary ("\x7fELF..."), otherwise what they decode to as hex or base64
 // once ASCII whitespace is removed (wrapped base64). done is true only
-// when those bytes were rendered completely; every other outcome (no
-// decoding works, too large, budget or time spent, an incomplete
-// rendering) is for a person.
+// when those bytes are text quoted in full; every other outcome (no
+// decoding works, too large, budget or time spent, bytes that are not
+// text, however well rendered) is for a person.
 func blobContext(where, lit string, budget *ecoutil.Budget) (text string, done bool) {
 	var b strings.Builder
 	head := lit[:min(len(lit), 120)]
@@ -1373,7 +1378,7 @@ func stripSpace(s string) string {
 // renderDecoded shows decoded bytes in full and reports whether it did:
 // plain text quoted whole (decoded again, up to maxBlobDepth, if it looks
 // encoded itself, as the blob rule would flag it), anything else through
-// DescribeBinary, complete only if that rendering is.
+// DescribeBinary as evidence for a person, never shown in full.
 func renderDecoded(dec []byte, how string, depth int, budget *ecoutil.Budget) (string, bool) {
 	var b strings.Builder
 	if len(dec) > maxBlobDecode {
@@ -1405,9 +1410,11 @@ func renderDecoded(dec []byte, how string, depth int, budget *ecoutil.Budget) (s
 		b.WriteString(quote(how+"; the decoded text, in full", string(dec)))
 		return b.String(), true
 	}
+	// Decoded bytes that are not text are a binary: rendered for the
+	// person deciding, never cleared by the gate.
 	d := ecoutil.DescribeBinary(dec, nil, false, budget)
-	b.WriteString(quote(how+"; the gate's rendering of those bytes", d.Text))
-	return b.String(), d.Complete
+	b.WriteString(quote(how+"; the gate's rendering of those bytes ("+ecoutil.ForThePerson+")", d.Text))
+	return b.String(), false
 }
 
 // Bounds for indexRefs: files and bytes read, the mentions shown per name
@@ -1519,6 +1526,11 @@ func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
 					pats = pats[:max(0, min(len(pats), maxDirectivePats, maxEmbedPatterns-patterns))]
 				}
 				patterns += len(pats)
+				if !test && !ascii(tl) {
+					// Unicode case folding (ſ, K, final sigma...) on macOS
+					// and Windows file systems is more than fold models.
+					skip("non-test //go:embed patterns with non-ASCII characters", fmt.Sprintf("%s:%d", f, lineNo))
+				}
 				for _, p := range pats {
 					ix.embeds[fold(path.Dir(f))] = append(ix.embeds[fold(path.Dir(f))], embedPat{safeFile(f), lineNo, strings.TrimPrefix(p, "all:"), test})
 				}
@@ -1563,37 +1575,55 @@ func (ix *refIndex) tokens(line []byte, wanted map[string]bool, f string, lineNo
 			j++
 		}
 		tok := line[i:j]
+		touches := (i > 0 && line[i-1] >= 0x80) || (j < len(line) && line[j] >= 0x80)
 		i = j
 		k := fold(string(tok[bytes.LastIndexByte(tok, '/')+1:]))
+		if !test && touches && !binary {
+			// A name spelled with non-ASCII characters that fold to ASCII
+			// ("ſecret.bin") splits into pieces: each piece touching a
+			// non-ASCII byte mentions every wanted name it is part of.
+			for w := range wanted {
+				if strings.Contains(w, k) && !seen[w] {
+					seen[w] = true
+					ix.mention(w, f, lineNo, test, binary, text)
+				}
+			}
+			continue
+		}
 		if !wanted[k] || seen[k] {
 			continue
 		}
 		seen[k] = true
-		m := ix.mentions[k]
-		if m == nil {
-			m = &mentionList{}
-			ix.mentions[k] = m
+		ix.mention(k, f, lineNo, test, binary, text)
+	}
+}
+
+// mention records that file f mentions the wanted name k at lineNo.
+func (ix *refIndex) mention(k, f string, lineNo int, test, binary bool, text string) {
+	m := ix.mentions[k]
+	if m == nil {
+		m = &mentionList{}
+		ix.mentions[k] = m
+	}
+	mark, shown := "", clipText(text)
+	if test {
+		mark = " (test file)"
+	}
+	if binary {
+		mark, shown = " (inside this binary file)", "its bytes contain the name"
+	}
+	entry := fmt.Sprintf("%s:%d%s: %s", safeFile(f), lineNo, mark, shown)
+	switch {
+	case test:
+		if len(m.test) < maxRefs {
+			m.test = append(m.test, entry)
 		}
-		mark, shown := "", clipText(text)
-		if test {
-			mark = " (test file)"
+	default:
+		if len(m.nonTest) < maxRefs {
+			m.nonTest = append(m.nonTest, entry)
 		}
-		if binary {
-			mark, shown = " (inside this binary file)", "its bytes contain the name"
-		}
-		entry := fmt.Sprintf("%s:%d%s: %s", safeFile(f), lineNo, mark, shown)
-		switch {
-		case test:
-			if len(m.test) < maxRefs {
-				m.test = append(m.test, entry)
-			}
-		default:
-			if len(m.nonTest) < maxRefs {
-				m.nonTest = append(m.nonTest, entry)
-			}
-			if len(m.nonTestFiles) < maxNonTestFiles && !slices.Contains(m.nonTestFiles, f) {
-				m.nonTestFiles = append(m.nonTestFiles, f)
-			}
+		if len(m.nonTestFiles) < maxNonTestFiles && !slices.Contains(m.nonTestFiles, f) {
+			m.nonTestFiles = append(m.nonTestFiles, f)
 		}
 	}
 }
@@ -1629,7 +1659,7 @@ func (ix *refIndex) refs(rel string, links string) (text string, inert bool, why
 			r = strings.TrimPrefix(rel, d+"/")
 		}
 		for _, e := range ix.embeds[fold(d)] {
-			if embedMatches(e.pat, r) {
+			if embedMatches(e.pat, r) || (!e.test && !ascii(rel)) {
 				embeds++
 				test := ""
 				if e.test {
@@ -1708,6 +1738,16 @@ func embedMatch(args, rel string) string {
 }
 
 // embedMatches: pattern p matches rel or one of its parent directories.
+// ascii reports a string of ASCII bytes only.
+func ascii(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 // fold is the case folding of a case-insensitive file system (macOS,
 // Windows), where //go:embed PAYLOAD.BIN embeds payload.bin: names,
 // patterns and mentions are compared folded. Over-matching is the safe

@@ -53,10 +53,11 @@ func TestCOFFNameCostPartial(t *testing.T) {
 			t.Errorf("missing %q in:\n%.1500s", want, ctx)
 		}
 	}
-	// The same object with few symbols renders in full and stays reviewable.
+	// Round 8: the same object with few symbols renders in full, and
+	// still goes to a person: a .syso is never cleared by its content.
 	h = CheckTrees(nil, writeTree(t, map[string]string{"z/ok_windows_amd64.syso": string(coffObject(2, 64)), "z/z.go": "package z\n"}))
-	if len(h.items(codeIncomplete)) != 0 {
-		t.Errorf("a fully rendered .syso went to a person: %s", strings.Join(h.ctx[codeBinary]["z/ok_windows_amd64.syso"], ""))
+	if ctx := strings.Join(h.ctx[codeBinary]["z/ok_windows_amd64.syso"], ""); len(h.items(codeIncomplete)) != 1 || !strings.Contains(ctx, "sections (1):") {
+		t.Errorf("a .syso: incomplete %q\n%s", h.items(codeIncomplete), ctx)
 	}
 }
 

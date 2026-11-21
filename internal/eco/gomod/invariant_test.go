@@ -137,16 +137,16 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"C source", nil, map[string]string{"x.c": "int f(void) { return 1; }\n", "p.go": "package p\n"}, codeCSource, "x.c", true},
 		{"C source with a NUL", nil, map[string]string{"x.c": "\x00int f(void) { system(\"id\"); }\n", "p.go": "package p\n"}, codeCSource, "x.c", true},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\n\tRET\n", "p.go": "package p\n"}, codeAsm, "x_amd64.s", true},
-		{"wrapped base64 of an ELF", nil, map[string]string{"b.go": "package p\n\nvar blob = `" + wrapped(minimalELF()) + "`\n"}, codeBlob, "b.go", true},
+		{"wrapped base64 of an ELF", nil, map[string]string{"b.go": "package p\n\nvar blob = `" + wrapped(minimalELF()) + "`\n"}, codeBlob, "b.go", false},
 		{"blob of text", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("plain words, nothing encoded here.\n", 40))) + "\"\n"}, codeBlob, "b.go", true},
 		// "ABC..." is itself valid base64: decoded again, to bytes nothing parses.
 		{"blob of text that looks encoded", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 300) + "\"\n"}, codeBlob, "b.go", false},
 		{"blob of DER bytes", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString(append([]byte{0x30, 0x82, 0x03, 0x00}, bytes.Repeat([]byte{0x02, 0x01, 0x00}, 300)...)) + "\"\n"}, codeBlob, "b.go", false},
 		{"blob of text over the file cap", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 140<<10) + "\"\n"}, codeBlob, "b.go", false},
 		{"blob no decoder reads", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD\\x01", 300) + "\"\n"}, codeBlob, "b.go", false},
-		{"COFF .syso", nil, map[string]string{"w_windows_amd64.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, codeBinary, "w_windows_amd64.syso", true},
-		{"linked Go ELF .syso", nil, map[string]string{"g_linux_amd64.syso": "", "p.go": "package p\n"}, codeBinary, "g_linux_amd64.syso", true},
-		{"embedded Go ELF", nil, map[string]string{"bin/tool": "", "e.go": "package p\n\nimport _ \"embed\"\n\n//go:embed bin/tool\nvar tool []byte\n"}, codeBinary, "bin/tool", true},
+		{"COFF .syso", nil, map[string]string{"w_windows_amd64.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, codeBinary, "w_windows_amd64.syso", false},
+		{"linked Go ELF .syso", nil, map[string]string{"g_linux_amd64.syso": "", "p.go": "package p\n"}, codeBinary, "g_linux_amd64.syso", false},
+		{"embedded Go ELF", nil, map[string]string{"bin/tool": "", "e.go": "package p\n\nimport _ \"embed\"\n\n//go:embed bin/tool\nvar tool []byte\n"}, codeBinary, "bin/tool", false},
 		{"truncated ELF .syso", nil, map[string]string{"x.syso": "\x7fELF\x02\x01\x01 truncated", "p.go": "package p\n"}, codeBinary, "x.syso", false},
 		// Round 5: inert binaries. An image nothing parses stays on review
 		// only while the gate proves it never reaches the build.
@@ -164,12 +164,12 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"unchanged embedding file", map[string]string{"x.bin": "\x7fELF\x02\x01\x01 v1", "a.txt": "a\n", "p.go": "package p\n\nimport \"embed\"\n\n//go:embed a.txt\tx.bin\nvar F embed.FS\n"},
 			map[string]string{"x.bin": "\x7fELF\x02\x01\x01 v2", "a.txt": "a\n", "p.go": "package p\n\nimport \"embed\"\n\n//go:embed a.txt\tx.bin\nvar F embed.FS\n"}, codeBinary, "x.bin", false},
 		{"gzip of an unread ELF, embedded", nil, map[string]string{"x.gz": gz("\x7fELF\x02\x01\x01 truncated"), "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.gz\nvar b []byte\n"}, codeBinary, "x.gz", false},
-		{"gzip of a complete ELF, embedded", nil, map[string]string{"x.gz": gz(string(minimalELF())), "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.gz\nvar b []byte\n"}, codeBinary, "x.gz", true},
+		{"gzip of a complete ELF, embedded", nil, map[string]string{"x.gz": gz(string(minimalELF())), "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.gz\nvar b []byte\n"}, codeBinary, "x.gz", false},
 		{"testdata PNG in a module without cgo", nil, map[string]string{"testdata/logo.png": png, "p.go": "package p\n", "a.go": "package p\n\nfunc init() {}\n"}, codeInit, "a.go", true},
 		// Round 7: archives read in full, polyglots and case folding.
-		{"embedded tar of regular members", nil, embedding("x.tar", archTar(tar.TypeReg, false)), codeBinary, "x.tar", true},
-		{"embedded tar.gz of regular members", nil, embedding("x.tar.gz", gz(archTar(tar.TypeReg, false))), codeBinary, "x.tar.gz", true},
-		{"embedded zip of regular members", nil, embedding("x.zip", archZip()), codeBinary, "x.zip", true},
+		{"embedded tar of regular members", nil, embedding("x.tar", archTar(tar.TypeReg, false)), codeBinary, "x.tar", false},
+		{"embedded tar.gz of regular members", nil, embedding("x.tar.gz", gz(archTar(tar.TypeReg, false))), codeBinary, "x.tar.gz", false},
+		{"embedded zip of regular members", nil, embedding("x.zip", archZip()), codeBinary, "x.zip", false},
 		{"embedded tar with a contiguous member", nil, embedding("x.tar", archTar(tar.TypeCont, true)), codeBinary, "x.tar", false},
 		{"embedded tar with junk after its end", nil, embedding("x.tar", archTar(tar.TypeReg, false)+"\x7fELF trailer"), codeBinary, "x.tar", false},
 		{"embedded tar/zip polyglot", nil, embedding("x.tar", archTar(tar.TypeReg, false)+archZip()), codeBinary, "x.tar", false},
@@ -178,6 +178,9 @@ func TestInvariantShownInFull(t *testing.T) {
 			map[string]string{"payload.bin": "\x00\x01 v2", "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed PAYLOAD.BIN\nvar b []byte\n"}, codeBinary, "payload.bin", false},
 		{"testdata binary embedded in another case", nil, map[string]string{"testdata/x.bin": "\x00\x02 evil", "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed TESTDATA/X.BIN\nvar b []byte\n"}, codeBinary, "testdata/x.bin", false},
 		{"nested text encoded in an unknown form", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat(`\x7f\x45\x4c\x46`, 200))) + "\"\n"}, codeBlob, "b.go", false},
+		// Round 8: the allowlist.
+		{"PNG beside a non-ASCII embed pattern", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed ſ.txt\nvar s string\n", "ſ.txt": "x\n"}, codeBinary, "fixtures/logo.png", false},
+		{"testdata binary named _test.go, embedded", nil, map[string]string{"testdata/blob_test.go": "\x7fELF\x02\x01\x01\x00payload", "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed testdata/blob_test.go\nvar b []byte\n"}, codeBinary, "testdata/blob_test.go", false},
 		{"PNG with the reference search capped", nil, capped(map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}), codeBinary, "fixtures/logo.png", false},
 		{"COFF listing fewer sections than it has", nil, map[string]string{"x.syso": string(coffSections(5, 2)), "p.go": "package p\n"}, codeBinary, "x.syso", false},
 	}
@@ -210,17 +213,18 @@ func TestInvariantShownInFull(t *testing.T) {
 					t.Errorf("declaration not shown whole:\n%s", ctx)
 				}
 			case codeBinary:
-				// Review-eligible: rendered in full, or proven inert.
-				if !strings.Contains(ctx, "(the gate read this structure to its end)") && !strings.Contains(ctx, "NO WAY TO THE BUILD FOUND") {
-					t.Errorf("binary on review neither rendered in full nor proven inert:\n%s", ctx)
+				// The allowlist: a binary is review-eligible only when the
+				// gate found no way for it to reach the build.
+				if !strings.Contains(ctx, "NO WAY TO THE BUILD FOUND") {
+					t.Errorf("binary on review without the no-way-to-the-build finding:\n%s", ctx)
 				}
 			default:
 				f := fileOf(tc.item)
 				if !strings.Contains(out, quote("full text of the new version of "+f, tc.cur[f])) {
 					t.Errorf("the full text of %s is not in the focused evidence:\n%.3000s", f, out)
 				}
-				if tc.code == codeBlob && !strings.Contains(ctx, "(the gate read this structure to its end)") && !strings.Contains(ctx, "the decoded text, in full") {
-					t.Errorf("blob on review without its bytes shown in full:\n%s", ctx)
+				if tc.code == codeBlob && !strings.Contains(ctx, "the decoded text, in full") {
+					t.Errorf("blob on review without its decoded text in full:\n%s", ctx)
 				}
 			}
 		})
@@ -355,8 +359,10 @@ func TestSamePlaceholderDistinctFiles(t *testing.T) {
 
 // TestWrappedAndEscapedBlobs (round 4, M2; the review's TestZZWrappedBase64).
 func TestWrappedAndEscapedBlobs(t *testing.T) {
+	// Round 8: both are rendered (for the person deciding) and go to a
+	// person; decoded bytes that are not text are never cleared.
 	h := CheckTrees(nil, writeTree(t, map[string]string{"p.go": "package p\n\nvar blob = `" + wrapped(minimalELF()) + "`\n"}))
-	if ctx := strings.Join(h.ctx[codeBlob]["p.go"], ""); !strings.Contains(ctx, "type: ELF") || len(h.items(codeIncomplete)) != 0 {
+	if ctx := strings.Join(h.ctx[codeBlob]["p.go"], ""); !strings.Contains(ctx, "type: ELF") || len(h.items(codeIncomplete)) != 1 {
 		t.Errorf("wrapped base64 of an ELF: incomplete %q\n%.2000s", h.items(codeIncomplete), ctx)
 	}
 	var e strings.Builder
@@ -365,7 +371,7 @@ func TestWrappedAndEscapedBlobs(t *testing.T) {
 	}
 	h = CheckTrees(nil, writeTree(t, map[string]string{"q.go": "package p\n\nvar b = \"" + e.String() + "\"\n"}))
 	ctx := strings.Join(h.ctx[codeBlob]["q.go"], "")
-	if !strings.Contains(ctx, "its bytes are binary as written") || !strings.Contains(ctx, "type: ELF") || len(h.items(codeIncomplete)) != 0 {
+	if !strings.Contains(ctx, "its bytes are binary as written") || !strings.Contains(ctx, "type: ELF") || len(h.items(codeIncomplete)) != 1 {
 		t.Errorf("escaped ELF literal: incomplete %q\n%.2000s", h.items(codeIncomplete), ctx)
 	}
 	_ = model.MaxFlagged

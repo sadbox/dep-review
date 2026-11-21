@@ -78,7 +78,7 @@ func TestELFNameCostFixedRecords(t *testing.T) {
 	if n := allocated(func() { d = DescribeBinary(data, nil, false, nil) }); n > 8<<20 {
 		t.Errorf("rendering allocated %d MiB building names (%d KiB file)", n>>20, len(data)>>10)
 	}
-	if d.Complete || !strings.Contains(d.Text, "names would cost") {
+	if reached(d) || !strings.Contains(d.Text, "names would cost") {
 		t.Errorf("name amplification through Entsize 0 not caught:\n%.1500s", d.Text)
 	}
 }
@@ -109,7 +109,7 @@ func TestELFNameCostVersions(t *testing.T) {
 	if n := allocated(func() { d = DescribeBinary(data, nil, false, nil) }); n > 8<<20 {
 		t.Errorf("rendering allocated %d MiB building version names (%d KiB file)", n>>20, len(data)>>10)
 	}
-	if d.Complete || !strings.Contains(d.Text, "names would cost") {
+	if reached(d) || !strings.Contains(d.Text, "names would cost") {
 		t.Errorf("version-name amplification not caught:\n%.1500s", d.Text)
 	}
 	// The same layout with few names stays cheap and complete.
@@ -117,7 +117,7 @@ func TestELFNameCostVersions(t *testing.T) {
 		{".dynsym", elf.SHT_DYNSYM, 2, 24, dynsyms(3, 1)},
 		{".dynstr", elf.SHT_STRTAB, 0, 0, []byte("\x00puts\x00")},
 	})
-	if d := DescribeBinary(small, nil, false, nil); !d.Complete {
+	if d := DescribeBinary(small, nil, false, nil); !reached(d) {
 		t.Errorf("a small dynamic ELF is incomplete:\n%s", d.Text)
 	}
 }

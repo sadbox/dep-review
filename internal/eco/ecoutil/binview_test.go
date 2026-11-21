@@ -22,7 +22,7 @@ func TestDescribeBinaryExecutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := DescribeBinary(b, nil, false, nil).Text
-	for _, want := range []string{"sha256: ", "structure (parsed by the gate)", "sections (", "Go build info: go", "hexdump of the first 512 bytes", "printable strings"} {
+	for _, want := range []string{"sha256: ", "structure (parsed by the gate, for the person deciding", "sections (", "Go build info: go", "hexdump of the first 512 bytes", "printable strings"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%.2000s", want, out)
 		}

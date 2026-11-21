@@ -17,24 +17,24 @@ func TestCompleteOnlyAtTheEnd(t *testing.T) {
 	zw.Write(bytes.Repeat([]byte("payload "), 4096))
 	zw.Close()
 	whole := g.Bytes()
-	if d := DescribeBinary(whole, nil, false, nil); !d.Complete {
+	if d := DescribeBinary(whole, nil, false, nil); !reached(d) {
 		t.Errorf("a whole gzip stream is incomplete:\n%s", d.Text)
 	}
-	if d := DescribeBinary(whole[:len(whole)/2], nil, false, nil); d.Complete {
+	if d := DescribeBinary(whole[:len(whole)/2], nil, false, nil); reached(d) {
 		t.Errorf("a gzip stream cut before its end is complete:\n%s", d.Text)
 	}
 
 	thin := machO(macho.Cpu386)
-	if d := DescribeBinary(thin, nil, false, nil); !d.Complete {
+	if d := DescribeBinary(thin, nil, false, nil); !reached(d) {
 		t.Errorf("a minimal Mach-O is incomplete:\n%s", d.Text)
 	}
-	if d := DescribeBinary(fatMachO(maxArches), nil, false, nil); !d.Complete {
+	if d := DescribeBinary(fatMachO(maxArches), nil, false, nil); !reached(d) {
 		t.Errorf("a universal binary of %d architectures is incomplete:\n%s", maxArches, d.Text)
 	}
-	if d := DescribeBinary(fatMachO(maxArches+1), nil, false, nil); d.Complete || !strings.Contains(d.Text, "1 more architectures") {
+	if d := DescribeBinary(fatMachO(maxArches+1), nil, false, nil); reached(d) || !strings.Contains(d.Text, "1 more architectures") {
 		t.Errorf("a universal binary past the cap is complete:\n%s", d.Text)
 	}
-	if d := DescribeBinary([]byte("\x89PNG\r\n\x1a\nimage"), nil, false, nil); d.Complete {
+	if d := DescribeBinary([]byte("\x89PNG\r\n\x1a\nimage"), nil, false, nil); reached(d) {
 		t.Errorf("a type with no parser is complete")
 	}
 }
@@ -90,3 +90,7 @@ func TestNameBytes(t *testing.T) {
 		}
 	}
 }
+
+// reached: the rendering says parsing reached the end of what the gate
+// models. Descriptive only (the gate never clears a binary by it).
+func reached(d Description) bool { return strings.Contains(d.Text, reachedEnd) }

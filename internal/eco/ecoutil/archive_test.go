@@ -40,7 +40,7 @@ func legitZip(t *testing.T) []byte {
 func TestArchivesAccountForEveryByte(t *testing.T) {
 	tb, zb := legitTar(t), legitZip(t)
 	for name, b := range map[string][]byte{"tar": tb, "tar.gz": gzr6(tb), "zip": zb} {
-		if d := DescribeBinary(b, nil, false, nil); !d.Complete {
+		if d := DescribeBinary(b, nil, false, nil); !reached(d) {
 			t.Errorf("legitimate %s is incomplete:\n%s", name, d.Text)
 		}
 	}
@@ -59,7 +59,7 @@ func TestArchivesAccountForEveryByte(t *testing.T) {
 		"fifo entry with a size":      withSize,
 	}
 	for name, b := range bad {
-		if d := DescribeBinary(b, nil, false, nil); d.Complete {
+		if d := DescribeBinary(b, nil, false, nil); reached(d) {
 			t.Errorf("%s is complete:\n%s", name, d.Text)
 		}
 	}
@@ -72,7 +72,7 @@ func TestArchivesAccountForEveryByte(t *testing.T) {
 	// Rename it "bin/" in both headers: a directory entry that holds data.
 	dirZip := bytes.ReplaceAll(db.Bytes(), []byte("binX"), []byte("bin/"))
 	// archive/zip will not read a directory entry: then incomplete.
-	if d := DescribeBinary(dirZip, nil, false, nil); d.Complete {
+	if d := DescribeBinary(dirZip, nil, false, nil); reached(d) {
 		t.Errorf("a zip directory entry with an unread ELF is complete:\n%s", d.Text)
 	}
 }
@@ -107,7 +107,7 @@ func TestLinkerSniffOrder(t *testing.T) {
 	if typ, _ := typeFor(b, Generic); typ != "tar archive" {
 		t.Errorf("generic sniff = %q", typ)
 	}
-	if d := DescribeAs(b, nil, false, nil, LinkerInput); d.Complete {
+	if d := DescribeAs(b, nil, false, nil, LinkerInput); reached(d) {
 		t.Errorf("a COFF/tar polyglot is complete:\n%s", d.Text)
 	}
 }

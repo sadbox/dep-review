@@ -79,38 +79,42 @@ item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
 list with the evidence's, and merges only when every flagged item, and
 nothing else, is `benign`.
 
-The default is a person. An item stays on the review route only if the
-gate positively asserts it showed the item in full: the whole new text of
-the file it is in (every file with a flagged Go item, and every C,
-assembly or cgo file, always as text, controls shown as escapes), the
-whole declaration for an init callee, or, for a binary or a decoded
-literal, a structure rendering that reached its end with no cap, stop,
-skip, budget or time limit, or parser failure (a type with no parser is
-not complete). Two more ways count as shown: a literal that decodes to
-plain UTF-8 text is quoted whole (if it fits an evidence file), and a
-binary for which the gate finds no way to the build does not need a
-complete rendering. "No way found" holds only under stated conditions:
-the reference search covered every file of the module with nothing
-skipped; the module has no cgo (`import "C"` or `#cgo` in any `.go` file),
-no C, C++, Objective-C, Fortran, SWIG or assembly source and no `.syso`
-(any of which can link or include a file without naming it); the file's
-extension is not one the toolchain compiles or links; no `//go:embed`
-pattern in non-test code matches it (patterns split as `go/build` does);
-and no non-test file mentions its name. The evidence says which held.
-Testdata binaries, and files with a library or object extension
-(`.a`, `.o`, `.so`, ...), are flagged whenever the module could reach
-them. Archives and compressed streams are complete only if every member
-or the stream's content is complete or plain text (three levels deep at
-most), every entry type is one the gate models, and every byte is
-accounted for (a tar's tail is zero padding; a zip has nothing before its
-first header or after its end record); a file matching more than one
-type's magic is never complete, and a `.syso` or library is sniffed as
-the linker sniffs it. Embed patterns and mentions are compared with case
-folded, as on macOS and Windows. Decoded literals that look encoded again
-are decoded again, and are for a person if that fails. Everything else is listed under `gomod.not-shown-in-full`
-and goes to a person, as do unparseable Go files, truncated evidence and a
-module with more flagged items than a review can take. Module diffs do not
-detect renames.
+The default is a person; review eligibility is an allowlist of two
+things.
+
+1. **Text, quoted in full**: valid UTF-8 with no control characters but
+   tab, newline and carriage return. That is the whole new text of every
+   file with a flagged Go item, and of every C, assembly or cgo file (always
+   as text, controls shown as escapes), the whole declaration for an init
+   callee, and a literal that decodes to such text (decoded again, up to
+   three times, if the text looks encoded itself; for a person if that
+   fails), when it fits an evidence file.
+2. **A binary the gate finds no way into the build**, whatever its
+   content. That holds only under stated conditions: the reference search
+   covered every file of the module with nothing skipped; the module has
+   no cgo (`import "C"` or `#cgo` in any `.go` file), no C, C++,
+   Objective-C, Fortran, SWIG or assembly source and no `.syso` (any of
+   which can link or include a file without naming it); the file's
+   extension is not one the toolchain compiles or links; no `//go:embed`
+   pattern in non-test code matches it (patterns split as `go/build` does,
+   compared case-folded, as on macOS and Windows); and no non-test file
+   mentions its name. Matching is ASCII only: a non-ASCII character in a
+   non-test `//go:embed` pattern makes the search incomplete, a binary
+   path with one counts as matched by any non-test pattern of an ancestor
+   directory, and a token touching a non-ASCII byte in a non-test file
+   counts as a mention of every name it is part of. The evidence says
+   which conditions held.
+
+Everything else goes to a person, listed under `gomod.not-shown-in-full`:
+every binary that may reach the build (a `.syso`, an embedded file, a
+library or object file, a testdata binary the module can reach), however
+completely the gate renders it, and every literal that decodes to bytes
+that are not text. The gate still renders binaries (ELF, PE/COFF, Mach-O,
+tar, zip, gzip; parsed in the isolated child process), labelled "for the
+person deciding; the gate does not clear binaries by their content", so
+the person can triage quickly. Unparseable Go files, truncated evidence
+and a module with more flagged items than a review can take also go to a
+person. Module diffs do not detect renames.
 
 ### GitHub workflow lockfiles
 

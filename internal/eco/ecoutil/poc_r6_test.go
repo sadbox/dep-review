@@ -60,7 +60,7 @@ func TestR6TarContiguousMemberNotRendered(t *testing.T) {
 		}
 		for name, b := range map[string][]byte{"tar": raw, "tar.gz": gzr6(raw)} {
 			d := DescribeBinary(b, nil, false, nil)
-			if d.Complete && !strings.Contains(d.Text, "content of bin/helper") {
+			if reached(d) && !strings.Contains(d.Text, "content of bin/helper") {
 				t.Errorf("type %q %s: Complete=true, member content never rendered:\n%s", flag, name, d.Text)
 			}
 		}
@@ -95,7 +95,7 @@ func TestR6TarZipPolyglot(t *testing.T) {
 	}
 	d := DescribeBinary(poly, nil, false, nil)
 	t.Logf("type line: %s", strings.SplitN(d.Text, "\n", 4)[2])
-	if d.Complete {
+	if reached(d) {
 		t.Errorf("tar/zip polyglot: Complete=true from the zip view, tar member never rendered:\n%s", d.Text)
 	}
 }
