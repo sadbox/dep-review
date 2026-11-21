@@ -2,6 +2,7 @@ package gomod
 
 import (
 	"bytes"
+	"compress/gzip"
 	"debug/elf"
 	"encoding/base64"
 	"encoding/binary"
@@ -135,7 +136,9 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"C source with a NUL", nil, map[string]string{"x.c": "\x00int f(void) { system(\"id\"); }\n", "p.go": "package p\n"}, codeCSource, "x.c", true},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\n\tRET\n", "p.go": "package p\n"}, codeAsm, "x_amd64.s", true},
 		{"wrapped base64 of an ELF", nil, map[string]string{"b.go": "package p\n\nvar blob = `" + wrapped(minimalELF()) + "`\n"}, codeBlob, "b.go", true},
-		{"blob of text", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 300) + "\"\n"}, codeBlob, "b.go", true},
+		{"blob of text", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("plain words, nothing encoded here.\n", 40))) + "\"\n"}, codeBlob, "b.go", true},
+		// "ABC..." is itself valid base64: decoded again, to bytes nothing parses.
+		{"blob of text that looks encoded", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 300) + "\"\n"}, codeBlob, "b.go", false},
 		{"blob of DER bytes", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString(append([]byte{0x30, 0x82, 0x03, 0x00}, bytes.Repeat([]byte{0x02, 0x01, 0x00}, 300)...)) + "\"\n"}, codeBlob, "b.go", false},
 		{"blob of text over the file cap", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD", 140<<10) + "\"\n"}, codeBlob, "b.go", false},
 		{"blob no decoder reads", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + strings.Repeat("QUJD\\x01", 300) + "\"\n"}, codeBlob, "b.go", false},
@@ -148,6 +151,19 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"inert PNG only a test mentions", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", true},
 		{"PNG a non-test file mentions", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", false},
 		{"PNG embedded by non-test code", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed fixtures/*.png\nvar logo []byte\n"}, codeBinary, "fixtures/logo.png", false},
+		// Round 6: what reaches the build without being named.
+		{"PNG in a cgo module", nil, map[string]string{"fixtures/logo.png": png, "p.go": cgoFile, "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", false},
+		{"PNG beside an assembly file", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "x_amd64.s": "TEXT ·f(SB),0,$0\n\tRET\n"}, codeBinary, "fixtures/logo.png", false},
+		{"archive linked by -L/-l", nil, map[string]string{"lib/libfoo.a": "!<arch>\nfoo", "p.go": cgoFile}, codeBinary, "lib/libfoo.a", false},
+		{"testdata archive linked by -L/-l", nil, map[string]string{"testdata/libfoo.a": "!<arch>\nfoo", "p.go": cgoFile}, codeBinary, "testdata/libfoo.a", false},
+		{"archive in a module without cgo", nil, map[string]string{"lib/libfoo.a": "!<arch>\nfoo", "p.go": "package p\n"}, codeBinary, "lib/libfoo.a", false},
+		{"tab-separated //go:embed", nil, map[string]string{"x.bin": "\x7fELF\x02\x01\x01 truncated", "a.txt": "a\n", "p.go": "package p\n\nimport \"embed\"\n\n//go:embed a.txt\tx.bin\nvar F embed.FS\n"}, codeBinary, "x.bin", false},
+		{"//go:embed in a binary-looking Go file", nil, map[string]string{"x.bin": "\x7fELF\x02\x01\x01 truncated", "p.go": "package p\n\nimport \"embed\"\n\n// " + strings.Repeat("\x01", 400) + "\n\n//go:embed *.bin\nvar F embed.FS\n"}, codeBinary, "x.bin", false},
+		{"unchanged embedding file", map[string]string{"x.bin": "\x7fELF\x02\x01\x01 v1", "a.txt": "a\n", "p.go": "package p\n\nimport \"embed\"\n\n//go:embed a.txt\tx.bin\nvar F embed.FS\n"},
+			map[string]string{"x.bin": "\x7fELF\x02\x01\x01 v2", "a.txt": "a\n", "p.go": "package p\n\nimport \"embed\"\n\n//go:embed a.txt\tx.bin\nvar F embed.FS\n"}, codeBinary, "x.bin", false},
+		{"gzip of an unread ELF, embedded", nil, map[string]string{"x.gz": gz("\x7fELF\x02\x01\x01 truncated"), "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.gz\nvar b []byte\n"}, codeBinary, "x.gz", false},
+		{"gzip of a complete ELF, embedded", nil, map[string]string{"x.gz": gz(string(minimalELF())), "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.gz\nvar b []byte\n"}, codeBinary, "x.gz", true},
+		{"testdata PNG in a module without cgo", nil, map[string]string{"testdata/logo.png": png, "p.go": "package p\n", "a.go": "package p\n\nfunc init() {}\n"}, codeInit, "a.go", true},
 		{"PNG with the reference search capped", nil, capped(map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}), codeBinary, "fixtures/logo.png", false},
 		{"COFF listing fewer sections than it has", nil, map[string]string{"x.syso": string(coffSections(5, 2)), "p.go": "package p\n"}, codeBinary, "x.syso", false},
 	}
@@ -181,7 +197,7 @@ func TestInvariantShownInFull(t *testing.T) {
 				}
 			case codeBinary:
 				// Review-eligible: rendered in full, or proven inert.
-				if !strings.Contains(ctx, "(the gate read this structure to its end)") && !strings.Contains(ctx, "INERT, PROVEN by the gate") {
+				if !strings.Contains(ctx, "(the gate read this structure to its end)") && !strings.Contains(ctx, "NO WAY TO THE BUILD FOUND") {
 					t.Errorf("binary on review neither rendered in full nor proven inert:\n%s", ctx)
 				}
 			default:
@@ -198,6 +214,16 @@ func TestInvariantShownInFull(t *testing.T) {
 }
 
 const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+const cgoFile = "package p\n\n/*\n#cgo LDFLAGS: -L${SRCDIR}/lib -L${SRCDIR}/testdata -lfoo\nint evil(void);\n*/\nimport \"C\"\n\nfunc F() int { return int(C.evil()) }\n"
+
+func gz(s string) string {
+	var b bytes.Buffer
+	w := gzip.NewWriter(&b)
+	w.Write([]byte(s))
+	w.Close()
+	return b.String()
+}
 
 // capped adds enough files that the reference search stops before the
 // end (maxRefFiles), sorting after everything else.

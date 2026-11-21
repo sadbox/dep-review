@@ -440,6 +440,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 	shadow := map[string]*pkgScope{} // package directory -> scope
 	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
 	var bins []string                // flagged binaries; their context is built last
+	var tdBins []string              // testdata binaries, flagged only if reachable
 	for _, rel := range cur.Files {
 		data := cur.ReadFile(rel)
 		var prev []byte
@@ -478,8 +479,20 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 			h.sourceFacts(codeCSource, rel, prev, data, hadOld)
 		case ext == ".syso":
 			binary()
+		case linkExts[ext]:
+			// Linked by name (cgo -l) whatever its bytes look like.
+			if testdata {
+				tdBins = append(tdBins, rel)
+			} else {
+				binary()
+			}
 		case evidence.IsBinary(data) && !testdata:
 			binary()
+		case evidence.IsBinary(data):
+			// A testdata binary is flagged too when something can reach it
+			// (binaries decides: cgo, C, assembly or a .syso in the module,
+			// or a non-test //go:embed pattern that matches it).
+			tdBins = append(tdBins, rel)
 		}
 	}
 	// Deleted .go files change a package too.
@@ -499,8 +512,69 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), true, c.context())
 		}
 	}
-	h.binaries(old, cur, bins)
+	h.binaries(old, cur, bins, tdBins)
 	return h
+}
+
+// linkExts are libraries and objects a cgo link line can take by name.
+var linkExts = map[string]bool{".a": true, ".o": true, ".so": true, ".dylib": true, ".lib": true, ".dll": true}
+
+// compiledExts are the extensions the Go toolchain compiles or links by
+// name alone: a binary with one is never inert.
+var compiledExts = map[string]bool{
+	".go": true, ".c": true, ".h": true, ".cc": true, ".cpp": true, ".cxx": true, ".hh": true, ".hpp": true, ".hxx": true,
+	".m": true, ".f": true, ".F": true, ".for": true, ".f90": true, ".s": true, ".S": true, ".sx": true,
+	".swig": true, ".swigcxx": true, ".syso": true, ".a": true, ".o": true, ".so": true, ".dylib": true, ".lib": true, ".dll": true,
+}
+
+// moduleLinks names what in the module can make the build read a file it
+// never names: cgo (import "C" or a #cgo directive in any .go file, test
+// files included), C/C++/ObjC/Fortran/SWIG or assembly sources (-L/-l,
+// #include, #embed, .incbin), a .syso. "" when there is none. A .go file
+// whose imports cannot be parsed counts as cgo.
+func moduleLinks(t *ecoutil.Tree) string {
+	for _, f := range t.Files {
+		switch ext := path.Ext(f); {
+		case ext == ".syso":
+			return "a .syso"
+		case cgoSourceExts[ext] || ext == ".s" || ext == ".S" || ext == ".sx":
+			return "C, C++, Objective-C, Fortran, SWIG or assembly sources"
+		case ext == ".go":
+			src := t.ReadFile(f)
+			if bytes.Contains(src, []byte("#cgo")) {
+				return "cgo"
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), f, src, parser.ImportsOnly)
+			if err != nil {
+				return "cgo (a Go file whose imports the gate cannot read)"
+			}
+			for _, imp := range file.Imports {
+				if imp.Path.Value == `"C"` {
+					return "cgo"
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// nonTestEmbed: a //go:embed pattern in non-test code matches rel.
+func (ix *refIndex) nonTestEmbed(rel string) bool {
+	dir := path.Dir(rel)
+	for d := dir; ; d = path.Dir(d) {
+		r := rel
+		if d != "." {
+			r = strings.TrimPrefix(rel, d+"/")
+		}
+		for _, e := range ix.embeds[d] {
+			if !e.test && embedMatches(e.pat, r) {
+				return true
+			}
+		}
+		if d == "." {
+			return false
+		}
+	}
 }
 
 // binaryShown is the completeness rule for a binary: its rendering read
@@ -514,9 +588,26 @@ func binaryShown(d ecoutil.Description, inert bool) bool { return d.Complete || 
 // module is over the cap, the context is skipped (a person decides). A
 // binary that reaches the program (a .syso, or embedded by non-test code)
 // whose structure could not be rendered also goes to a person.
-func (r *report) binaries(old, cur *ecoutil.Tree, bins []string) {
-	if len(bins) == 0 {
+func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
+	if len(bins)+len(tdBins) == 0 {
 		return
+	}
+	links := moduleLinks(cur)
+	if len(tdBins) > 0 {
+		names := map[string]bool{}
+		for _, rel := range tdBins {
+			names[path.Base(rel)] = true
+		}
+		ix := indexRefs(cur, names)
+		for _, rel := range tdBins {
+			if links != "" || ix.nonTestEmbed(rel) || !ix.complete {
+				r.reserve(codeBinary, safeFile(rel))
+				bins = append(bins, rel)
+			}
+		}
+		if len(bins) == 0 {
+			return
+		}
 	}
 	if len(r.keys) > model.MaxFlagged {
 		for _, rel := range bins {
@@ -535,7 +626,7 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins []string) {
 			prev = old.ReadFile(rel)
 		}
 		d := ecoutil.DescribeBinary(data, prev, hadOld, r.budget)
-		refs, inert, _ := ix.refs(rel)
+		refs, inert, _ := ix.refs(rel, links)
 		item := safeFile(rel)
 		r.add(codeBinary, item, binaryShown(d, inert),
 			quote("the gate's rendering of "+item+" (the module diff cannot show binary content)", d.Text),
@@ -1236,32 +1327,66 @@ func blobContext(where, lit string, budget *ecoutil.Budget) (text string, done b
 	if evidence.IsBinary([]byte(s)) {
 		dec, how = []byte(s), "its bytes are binary as written"
 	} else {
-		compact := strings.Map(func(r rune) rune {
-			if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v' {
-				return -1
-			}
-			return r
-		}, s)
-		if d, err := hex.DecodeString(compact); err == nil {
-			dec, how = d, "it decodes as hex"
-		} else {
-			for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-				if d, err := enc.DecodeString(compact); err == nil {
-					dec, how = d, "it decodes as base64"
-					break
-				}
-			}
-		}
+		dec, how = decodeEncoded(s)
 	}
-	switch {
-	case dec == nil:
+	if dec == nil {
 		b.WriteString("it decodes neither as hex nor as base64; the gate could not render its bytes\n")
 		return b.String(), false
-	case len(dec) > maxBlobDecode:
+	}
+	text, ok := renderDecoded(dec, how, 1, budget)
+	return b.String() + text, ok
+}
+
+// maxBlobDepth bounds how many times a literal is decoded (text that
+// decodes to text that looks encoded again...).
+const maxBlobDepth = 3
+
+// decodeEncoded decodes s as hex or base64 once ASCII whitespace is
+// removed (wrapped base64); nil if neither works.
+func decodeEncoded(s string) ([]byte, string) {
+	compact := stripSpace(s)
+	if d, err := hex.DecodeString(compact); err == nil {
+		return d, "it decodes as hex"
+	}
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if d, err := enc.DecodeString(compact); err == nil {
+			return d, "it decodes as base64"
+		}
+	}
+	return nil, ""
+}
+
+func stripSpace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// renderDecoded shows decoded bytes in full and reports whether it did:
+// plain text quoted whole (decoded again, up to maxBlobDepth, if it looks
+// encoded itself, as the blob rule would flag it), anything else through
+// DescribeBinary, complete only if that rendering is.
+func renderDecoded(dec []byte, how string, depth int, budget *ecoutil.Budget) (string, bool) {
+	var b strings.Builder
+	if len(dec) > maxBlobDecode {
 		fmt.Fprintf(&b, "%s, to %d bytes, more than the gate renders (%d)\n", how, len(dec), maxBlobDecode)
 		return b.String(), false
 	}
-	if plainText(dec) {
+	if ecoutil.PlainText(dec) {
+		if c := stripSpace(string(dec)); len(c) > blobMin && looksEncoded(c) {
+			if inner, innerHow := decodeEncoded(c); inner != nil {
+				if depth >= maxBlobDepth {
+					fmt.Fprintf(&b, "%s, to text that looks encoded again; decoded %d times, the gate stops here\n", how, depth)
+					return b.String(), false
+				}
+				fmt.Fprintf(&b, "%s, to text that looks encoded again (%d bytes); decoding it once more:\n", how, len(dec))
+				text, ok := renderDecoded(inner, innerHow, depth+1, budget)
+				return b.String() + text, ok
+			}
+		}
 		if len(dec) > evidence.DefaultFileCap {
 			fmt.Fprintf(&b, "%s, to %d bytes of text, more than an evidence file holds (%d)\n", how, len(dec), evidence.DefaultFileCap)
 			return b.String(), false
@@ -1273,20 +1398,6 @@ func blobContext(where, lit string, budget *ecoutil.Budget) (text string, done b
 	d := ecoutil.DescribeBinary(dec, nil, false, budget)
 	b.WriteString(quote(how+"; the gate's rendering of those bytes", d.Text))
 	return b.String(), d.Complete
-}
-
-// plainText: valid UTF-8 with no control character but tab, newline and
-// carriage return (C0, DEL and C1 all count as control).
-func plainText(b []byte) bool {
-	if !utf8.Valid(b) {
-		return false
-	}
-	for _, r := range string(b) {
-		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return false
-		}
-	}
-	return true
 }
 
 // Bounds for indexRefs: files and bytes read, the mentions shown per name
@@ -1311,11 +1422,10 @@ type refIndex struct {
 	embeds   map[string][]embedPat // package directory -> its patterns
 	goFiles  map[string]int        // directory -> non-test .go files
 	mentions map[string]*mentionList
-	// complete: every file was searched and every //go:embed pattern
-	// kept. Only then can a binary be proven inert. embedsComplete is the
-	// part about Go files and patterns.
-	complete, embedsComplete bool
-	notes                    []string
+	// complete: every file was searched and every //go:embed directive
+	// read and kept. Only then can a binary be proven inert.
+	complete bool
+	notes    []string
 }
 
 type embedPat struct {
@@ -1353,13 +1463,10 @@ func searchable(name string) bool {
 }
 
 func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
-	ix := &refIndex{embeds: map[string][]embedPat{}, goFiles: map[string]int{}, mentions: map[string]*mentionList{}, complete: true, embedsComplete: true}
+	ix := &refIndex{embeds: map[string][]embedPat{}, goFiles: map[string]int{}, mentions: map[string]*mentionList{}, complete: true}
 	skipped := map[string][]string{} // reason -> files
-	skip := func(why, f string, embeds bool) {
+	skip := func(why, f string) {
 		ix.complete = false
-		if embeds {
-			ix.embedsComplete = false
-		}
 		skipped[why] = append(skipped[why], f)
 	}
 	scanned, patterns := 0, 0
@@ -1369,17 +1476,15 @@ func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
 			ix.goFiles[path.Dir(f)]++
 		}
 		if i >= maxRefFiles || scanned >= maxRefScan {
-			skip(fmt.Sprintf("past the search limit (%d files, %d bytes)", maxRefFiles, maxRefScan), f, isGo)
+			skip(fmt.Sprintf("past the search limit (%d files, %d bytes)", maxRefFiles, maxRefScan), f)
 			continue
 		}
 		src := t.ReadFile(f)
 		scanned += len(src)
 		test := strings.HasSuffix(f, "_test.go")
-		binary := evidence.IsBinary(src)
-		if binary && isGo {
-			// Its directives are not read: possibly an embed.
-			ix.embedsComplete = false
-		}
+		// A .go file is read line by line whatever it looks like: the go
+		// command compiles it, and its //go:embed lines count.
+		binary := !isGo && evidence.IsBinary(src)
 		lineNo, lineStart := 1, 0
 		for at := 0; at <= len(src); {
 			// One line at a time for text; a binary file is one "line".
@@ -1394,19 +1499,22 @@ func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
 			if !binary {
 				tl = strings.TrimSpace(string(line))
 			}
-			if isGo && !binary && strings.HasPrefix(tl, "//go:embed") {
-				pats := embedPatterns(strings.TrimPrefix(tl, "//go:embed"))
-				if len(pats) > maxDirectivePats || patterns+len(pats) > maxEmbedPatterns {
-					skip("//go:embed patterns past the limit", fmt.Sprintf("%s:%d", f, lineNo), true)
+			if isGo && strings.HasPrefix(tl, "//go:embed") {
+				pats, err := parseGoEmbed(strings.TrimPrefix(tl, "//go:embed"))
+				switch {
+				case err != nil:
+					skip("//go:embed lines the gate could not split as the go command does", fmt.Sprintf("%s:%d", f, lineNo))
+				case len(pats) > maxDirectivePats || patterns+len(pats) > maxEmbedPatterns:
+					skip("//go:embed patterns past the limit", fmt.Sprintf("%s:%d", f, lineNo))
 					pats = pats[:max(0, min(len(pats), maxDirectivePats, maxEmbedPatterns-patterns))]
 				}
 				patterns += len(pats)
 				for _, p := range pats {
 					ix.embeds[path.Dir(f)] = append(ix.embeds[path.Dir(f)], embedPat{safeFile(f), lineNo, strings.TrimPrefix(p, "all:"), test})
 				}
-			} else {
-				ix.tokens(line, wanted, f, lineNo, test, binary, tl)
 			}
+			// Every line is searched for mentions, //go:embed lines too.
+			ix.tokens(line, wanted, f, lineNo, test, binary, tl)
 			if end == len(src) {
 				break
 			}
@@ -1488,11 +1596,17 @@ func (ix *refIndex) tokens(line []byte, wanted map[string]bool, f string, lineNo
 // searchable, it is not a .syso, no non-test //go:embed pattern matches
 // it, and no non-test file other than itself mentions it. why lists what
 // is missing from that proof.
-func (ix *refIndex) refs(rel string) (text string, inert bool, why []string) {
+func (ix *refIndex) refs(rel string, links string) (text string, inert bool, why []string) {
 	var b strings.Builder
 	dir := path.Dir(rel)
 	if !ix.complete {
 		why = append(why, "the reference search did not cover every file")
+	}
+	if links != "" {
+		why = append(why, "the module has "+links+", which can link or include a file without naming it")
+	}
+	if compiledExts[path.Ext(rel)] {
+		why = append(why, "its extension is one the Go toolchain compiles or links")
 	}
 	if path.Ext(rel) == ".syso" {
 		why = append(why, "a .syso file is linked")
@@ -1553,7 +1667,7 @@ func (ix *refIndex) refs(rel string) (text string, inert bool, why []string) {
 		b.WriteString(n + "\n")
 	}
 	if len(why) == 0 {
-		b.WriteString("INERT, PROVEN by the gate: the search covered every file of the module, it is not a .syso, no //go:embed pattern in non-test code matches it, and no non-test file mentions its name. It never reaches the build.\n")
+		b.WriteString("NO WAY TO THE BUILD FOUND: the gate found no way for it to reach the build, under these conditions: the search covered every file of the module; the module has no cgo, no C, C++, Objective-C, Fortran, SWIG or assembly source and no .syso; its extension is not one the toolchain compiles or links; no //go:embed pattern in non-test code matches it; and no non-test file mentions its name.\n")
 		return b.String(), true, nil
 	}
 	b.WriteString("possibly reaching the build: " + strings.Join(why, "; ") + "\n")
@@ -1573,7 +1687,8 @@ func clipText(s string) string {
 // Quoted patterns are unquoted; "all:" is dropped. Over-matching only
 // adds a line for the reviewer.
 func embedMatch(args, rel string) string {
-	for _, p := range embedPatterns(args) {
+	pats, _ := parseGoEmbed(args)
+	for _, p := range pats {
 		p = strings.TrimPrefix(p, "all:")
 		if embedMatches(p, rel) {
 			return p
@@ -1592,30 +1707,59 @@ func embedMatches(p, rel string) bool {
 	return false
 }
 
-func embedPatterns(args string) []string {
-	var out []string
-	args = strings.TrimSpace(args)
-	for args != "" {
+// parseGoEmbed splits a //go:embed argument list exactly as go/build
+// does: patterns separated by unicode.IsSpace, each bare, "quoted" (Go
+// string syntax) or `backquoted`. An error is a list the go command
+// rejects, which the caller treats as "could embed anything".
+func parseGoEmbed(args string) ([]string, error) {
+	var list []string
+	for args = strings.TrimSpace(args); args != ""; args = strings.TrimSpace(args) {
 		var p string
+	Switch:
 		switch args[0] {
-		case '"', '`':
-			q, rest, ok := strings.Cut(args[1:], args[:1])
-			if !ok {
-				return append(out, args)
-			}
-			if u, err := strconv.Unquote(args[:1] + q + args[:1]); err == nil {
-				p = u
-			} else {
-				p = q
-			}
-			args = rest
 		default:
-			p, args, _ = strings.Cut(args, " ")
+			i := len(args)
+			for j, c := range args {
+				if unicode.IsSpace(c) {
+					i = j
+					break
+				}
+			}
+			p, args = args[:i], args[i:]
+		case '`':
+			i := strings.Index(args[1:], "`")
+			if i < 0 {
+				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
+			}
+			p, args = args[1:1+i], args[1+i+1:]
+		case '"':
+			i := 1
+			for ; i < len(args); i++ {
+				if args[i] == '\\' {
+					i++
+					continue
+				}
+				if args[i] == '"' {
+					q, err := strconv.Unquote(args[:i+1])
+					if err != nil {
+						return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args[:i+1])
+					}
+					p, args = q, args[i+1:]
+					break Switch
+				}
+			}
+			if i >= len(args) {
+				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
+			}
 		}
-		out = append(out, p)
-		args = strings.TrimSpace(args)
+		if args != "" {
+			if r, _ := utf8.DecodeRuneInString(args); !unicode.IsSpace(r) {
+				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
+			}
+		}
+		list = append(list, p)
 	}
-	return out
+	return list, nil
 }
 
 // pureCalls are standard-library functions a package-level var may call

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Limits for DescribeBinary. The input is hostile: every list is capped,
@@ -298,40 +299,6 @@ func failed(what string, err error) (string, bool) {
 	return "  " + what + ": not parsed: " + clip(err.Error()) + "\n", false
 }
 
-func structureLocal(b []byte, limit int64) childResult {
-	rd := &renderer{limit: limit}
-	r := bytes.NewReader(b)
-	var text string
-	var complete, exe bool
-	switch t := magicType(b); {
-	case t == "ELF":
-		text, complete = step("ELF", func() (string, bool) { return describeELF(b, r) })
-		exe = true
-	case strings.HasPrefix(t, "PE"), strings.HasPrefix(t, "COFF"):
-		text, complete = step("PE/COFF", func() (string, bool) { return describePE(b, r) })
-		exe = true
-	case strings.HasPrefix(t, "Mach-O"):
-		text, complete = step("Mach-O", func() (string, bool) { return describeMachO(r) })
-		exe = true
-	case t == "zip archive":
-		text, complete = step("zip", func() (string, bool) { return describeZip(r) })
-	case t == "tar archive":
-		text, complete = step("tar", func() (string, bool) { return describeTar(r) })
-	case t == "gzip":
-		text, complete = step("gzip", func() (string, bool) { return rd.describeGzip(r) })
-	default:
-		return childResult{Text: "  not parsed: the gate has no parser for this type\n"}
-	}
-	if exe && complete {
-		// Only after a complete executable rendering: for ELF that means
-		// no compressed section, which reading build info would inflate.
-		bi, ok := step("Go build info", func() (string, bool) { return describeBuildInfo(r) })
-		text += bi
-		complete = ok
-	}
-	return childResult{Text: text, Complete: complete, Used: rd.used}
-}
-
 // list writes items, one per line. complete is false when there are more
 // than n (the rest are not shown).
 func list(b *strings.Builder, title string, items []string, n int) bool {
@@ -554,6 +521,26 @@ func describeELF(raw []byte, r io.ReaderAt) (string, bool) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  ELF %s %s %s, OS ABI %s, entry 0x%x\n", f.Class, f.Data, f.Type, f.OSABI, f.Entry)
 	fmt.Fprintf(&b, "  machine: %s\n", f.Machine)
+	var progs []string
+	dynamicProg := false
+	for _, p := range f.Progs {
+		progs = append(progs, fmt.Sprintf("%s flags %s offset 0x%x size %d", p.Type, p.Flags, p.Off, p.Filesz))
+		dynamicProg = dynamicProg || p.Type == elf.PT_DYNAMIC || p.Type == elf.PT_INTERP
+	}
+	if !list(&b, "program headers", progs, maxListed) {
+		return b.String(), false
+	}
+	// debug/elf reads imported libraries and symbols from sections only:
+	// with no section headers, or a dynamic segment but no SHT_DYNAMIC
+	// section, what the loader would load is not what the gate read.
+	if len(f.Sections) <= 1 {
+		b.WriteString("  no section headers: imports not read (the loader would still use the program headers)\n")
+		return b.String(), false
+	}
+	if dynamicProg && f.SectionByType(elf.SHT_DYNAMIC) == nil {
+		b.WriteString("  a dynamic or interpreter segment without a dynamic section: imports not read\n")
+		return b.String(), false
+	}
 	var secs []string
 	compressed := false
 	symbols := map[elf.SectionType]uint64{}
@@ -775,7 +762,114 @@ func describeMachO(r io.ReaderAt) (string, bool) {
 	return b.String(), true
 }
 
-func describeZip(r *bytes.Reader) (string, bool) {
+// maxDepth bounds nesting (a gzip of a tar of a zip...); maxInnerText is
+// the largest plain-text member quoted whole inside a rendering.
+const (
+	maxDepth     = 3
+	maxInnerText = 64 << 10
+)
+
+// PlainText reports valid UTF-8 with no control character but tab,
+// newline and carriage return (C0, DEL and C1 all count as control).
+func PlainText(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+func structureLocal(b []byte, limit int64) childResult {
+	rd := &renderer{limit: limit}
+	text, complete := rd.render(b, 0)
+	return childResult{Text: text, Complete: complete, Used: rd.used}
+}
+
+// render describes b's structure, at nesting depth. It is complete only
+// if the describer for b's type reached its end, and, for an archive or
+// a compressed stream, every member (or the stream's content) is itself
+// complete or plain text quoted whole.
+func (rd *renderer) render(b []byte, depth int) (string, bool) {
+	r := bytes.NewReader(b)
+	var text string
+	var complete, exe bool
+	switch t := magicType(b); {
+	case t == "ELF":
+		text, complete = step("ELF", func() (string, bool) { return describeELF(b, r) })
+		exe = true
+	case strings.HasPrefix(t, "PE"), strings.HasPrefix(t, "COFF"):
+		text, complete = step("PE/COFF", func() (string, bool) { return describePE(b, r) })
+		exe = true
+	case strings.HasPrefix(t, "Mach-O"):
+		text, complete = step("Mach-O", func() (string, bool) { return describeMachO(r) })
+		exe = true
+	case t == "zip archive":
+		text, complete = step("zip", func() (string, bool) { return rd.describeZip(r, depth) })
+	case t == "tar archive":
+		text, complete = step("tar", func() (string, bool) { return rd.describeTar(r, depth) })
+	case t == "gzip":
+		text, complete = step("gzip", func() (string, bool) { return rd.describeGzip(r, depth) })
+	default:
+		return "  not parsed: the gate has no parser for this type (" + t + ")\n", false
+	}
+	if exe && complete {
+		// Only after a complete executable rendering: for ELF that means
+		// no compressed section, which reading build info would inflate.
+		bi, ok := step("Go build info", func() (string, bool) { return describeBuildInfo(r) })
+		text += bi
+		complete = ok
+	}
+	return text, complete
+}
+
+// inner renders the content of an archive member or a compressed stream:
+// plain text is quoted whole (up to maxInnerText), anything else is
+// rendered one level deeper, indented.
+func (rd *renderer) inner(name string, data []byte, depth int) (string, bool) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  content of %s: %d bytes, type %s\n", clip(name), len(data), magicType(data))
+	switch {
+	case PlainText(data):
+		if len(data) > maxInnerText {
+			fmt.Fprintf(&b, "  plain text larger than %d bytes: not shown\n", maxInnerText)
+			return b.String(), false
+		}
+		b.WriteString("  plain text, in full:\n")
+		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+			b.WriteString("      > " + line + "\n")
+		}
+		return b.String(), true
+	case depth+1 >= maxDepth:
+		b.WriteString("  not read: nested too deep\n")
+		return b.String(), false
+	}
+	text, ok := rd.render(data, depth+1)
+	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		b.WriteString("    " + line + "\n")
+	}
+	return b.String(), ok
+}
+
+// take reads up to the decompression limit left from r; ok is false when
+// the content is longer.
+func (rd *renderer) take(r io.Reader) ([]byte, bool, error) {
+	left := rd.limit - rd.used
+	if left <= 0 {
+		return nil, false, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, left+1))
+	rd.used += min(int64(len(data)), left)
+	if int64(len(data)) > left {
+		return nil, false, err
+	}
+	return data, true, err
+}
+
+func (rd *renderer) describeZip(r *bytes.Reader, depth int) (string, bool) {
 	z, err := zip.NewReader(r, r.Size())
 	if err != nil {
 		return failed("zip", err)
@@ -788,38 +882,68 @@ func describeZip(r *bytes.Reader) (string, bool) {
 	if !list(&b, "zip entries", names, maxListed) {
 		return b.String(), false
 	}
+	for _, f := range z.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			b.WriteString("  " + clip(f.Name) + ": not read: " + clip(err.Error()) + "\n")
+			return b.String(), false
+		}
+		data, ok, err := rd.take(rc)
+		rc.Close()
+		if !ok || err != nil {
+			fmt.Fprintf(&b, "  %s: not read in full (%s)\n", clip(f.Name), budgetNote)
+			return b.String(), false
+		}
+		text, ok := rd.inner(f.Name, data, depth)
+		b.WriteString(text)
+		if !ok {
+			return b.String(), false
+		}
+	}
 	return b.String(), true
 }
 
-// tarEntries lists entries up to the end of the archive; complete is
-// false when it stopped first (a cap or an error).
-func tarEntries(r io.Reader) ([]string, bool) {
+// describeTar lists every entry to the end of the archive and renders
+// each regular file's content.
+func (rd *renderer) describeTar(r io.Reader, depth int) (string, bool) {
+	var b strings.Builder
 	tr := tar.NewReader(r)
-	var names []string
-	for len(names) <= maxListed {
+	for n := 0; ; n++ {
 		h, err := tr.Next()
 		if err == io.EOF {
-			return names, true
+			return b.String(), true
 		}
 		if err != nil {
-			return append(names, "(stopped: "+err.Error()+")"), false
+			b.WriteString("  tar: stopped: " + clip(err.Error()) + "\n")
+			return b.String(), false
 		}
-		names = append(names, fmt.Sprintf("%s (type %q, %d bytes, mode %o)", h.Name, h.Typeflag, h.Size, h.Mode))
+		if n == maxListed {
+			b.WriteString("  tar: more entries than the gate lists\n")
+			return b.String(), false
+		}
+		fmt.Fprintf(&b, "  tar entry %s (type %q, %d bytes, mode %o)\n", clip(h.Name), h.Typeflag, h.Size, h.Mode)
+		if h.Typeflag != tar.TypeReg {
+			continue
+		}
+		data, ok, err := rd.take(tr)
+		if !ok || err != nil {
+			fmt.Fprintf(&b, "  %s: not read in full\n", clip(h.Name))
+			return b.String(), false
+		}
+		text, ok := rd.inner(h.Name, data, depth)
+		b.WriteString(text)
+		if !ok {
+			return b.String(), false
+		}
 	}
-	return names, false
-}
-
-func describeTar(r io.Reader) (string, bool) {
-	var b strings.Builder
-	names, done := tarEntries(r)
-	ok := list(&b, "tar entries", names, maxListed)
-	return b.String(), done && ok
 }
 
 // describeGzip is complete only when the stream decompressed to its end
-// within the limit and, if it holds a tar archive, the archive was
-// listed in full.
-func (rd *renderer) describeGzip(r io.Reader) (string, bool) {
+// within the limit and its content is itself complete or plain text.
+func (rd *renderer) describeGzip(r io.Reader, depth int) (string, bool) {
 	z, err := gzip.NewReader(r)
 	if err != nil {
 		return failed("gzip", err)
@@ -829,31 +953,19 @@ func (rd *renderer) describeGzip(r io.Reader) (string, bool) {
 	if z.Name != "" {
 		fmt.Fprintf(&b, "  gzip header name: %s\n", clip(z.Name))
 	}
-	limit := min(rd.limit, maxGunzip)
-	if limit <= 0 {
-		b.WriteString("  not decompressed: " + budgetNote + "\n")
-		return b.String(), false
-	}
-	data, err := io.ReadAll(io.LimitReader(z, limit+1))
-	rd.used += min(int64(len(data)), limit)
+	data, ok, err := rd.take(z)
 	switch {
-	case int64(len(data)) > limit:
-		fmt.Fprintf(&b, "  decompressed: stopped after %d bytes (limit or %s)\n", limit, budgetNote)
+	case !ok:
+		fmt.Fprintf(&b, "  decompressed: stopped at the limit (%s)\n", budgetNote)
 		return b.String(), false
 	case err != nil:
 		fmt.Fprintf(&b, "  decompressed: %d bytes, then an error: %s\n", len(data), clip(err.Error()))
 		return b.String(), false
 	}
 	fmt.Fprintf(&b, "  decompressed: %d bytes, to the end of the stream\n", len(data))
-	t := magicType(data)
-	fmt.Fprintf(&b, "  decompressed type: %s\n", t)
-	if t == "tar archive" {
-		names, done := tarEntries(bytes.NewReader(data))
-		if !list(&b, "tar entries", names, maxListed) || !done {
-			return b.String(), false
-		}
-	}
-	return b.String(), true
+	text, ok := rd.inner("the stream", data, depth)
+	b.WriteString(text)
+	return b.String(), ok
 }
 
 // describeBuildInfo is complete when the file has no Go build info (it is

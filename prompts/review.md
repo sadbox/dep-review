@@ -88,9 +88,13 @@ Hold these items to a stricter bar than ordinary changes:
   plainly explains it.
 - C, assembly and `//go:linkname` must match what the release says it
   changes; anything you cannot follow is unclear.
-- A binary marked "INERT, PROVEN by the gate" never reaches the build:
-  the gate searched every file and found no link, non-test embed or
-  non-test mention. Still say what it is (usually a test fixture).
+- A binary marked "NO WAY TO THE BUILD FOUND" is one for which the gate
+  found no way to reach the build under the conditions it lists (every
+  file searched; no cgo, C, assembly or .syso in the module; not a
+  compiled or linked file type; no non-test embed or mention). That is
+  what the gate checked, not a proof beyond it: still say what the file
+  is (usually a test fixture) and say unclear if anything suggests the
+  build or the program reads it.
 - A binary or blob is benign only if you can say what it is and why it
   changed: a test fixture used only by `_test.go` files, a regenerated
   table whose rendering matches its purpose, an updated version of the

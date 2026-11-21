@@ -88,11 +88,20 @@ literal, a structure rendering that reached its end with no cap, stop,
 skip, budget or time limit, or parser failure (a type with no parser is
 not complete). Two more ways count as shown: a literal that decodes to
 plain UTF-8 text is quoted whole (if it fits an evidence file), and a
-binary the gate proves inert never needs a complete rendering. Inert,
-proven means the reference search covered every file of the module with
-nothing skipped, the binary is not a `.syso`, no `//go:embed` pattern in
-non-test code matches it, and no non-test file mentions its name; the
-evidence says which held. Everything else is listed under `gomod.not-shown-in-full`
+binary for which the gate finds no way to the build does not need a
+complete rendering. "No way found" holds only under stated conditions:
+the reference search covered every file of the module with nothing
+skipped; the module has no cgo (`import "C"` or `#cgo` in any `.go` file),
+no C, C++, Objective-C, Fortran, SWIG or assembly source and no `.syso`
+(any of which can link or include a file without naming it); the file's
+extension is not one the toolchain compiles or links; no `//go:embed`
+pattern in non-test code matches it (patterns split as `go/build` does);
+and no non-test file mentions its name. The evidence says which held.
+Testdata binaries, and files with a library or object extension
+(`.a`, `.o`, `.so`, ...), are flagged whenever the module could reach
+them. Archives and compressed streams are complete only if every member
+or the stream's content is complete or plain text (three levels deep at
+most), and decoded literals that look encoded again are decoded again. Everything else is listed under `gomod.not-shown-in-full`
 and goes to a person, as do unparseable Go files, truncated evidence and a
 module with more flagged items than a review can take. Module diffs do not
 detect renames.

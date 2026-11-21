@@ -2,6 +2,7 @@ package gomod
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"strings"
 	"testing"
@@ -82,7 +83,7 @@ func TestBlobNotDecodedGoesToPerson(t *testing.T) {
 	}{
 		{"budget spent", blob, 0, true},
 		// Decodes to plain text, quoted in full (round 5).
-		{"budget left, decodes to text", blob, 1 << 20, false},
+		{"budget left, decodes to text", `"` + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("plain words, nothing encoded here.\n", 40))) + `"`, 1 << 20, false},
 		// No escape hatch: a flagged literal no decoder reads is a person's.
 		{"not an encoding", strings.Replace(notEncoded, "!", "\\x01", -1), 1 << 20, true},
 	} {

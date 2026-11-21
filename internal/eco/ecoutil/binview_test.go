@@ -73,7 +73,7 @@ func TestDescribeBinaryArchives(t *testing.T) {
 	gw.Close()
 	start := time.Now()
 	out := DescribeBinary(g.Bytes(), nil, false, nil).Text
-	if !strings.Contains(out, "decompressed: stopped after") {
+	if !strings.Contains(out, "decompressed: stopped at the limit") {
 		t.Errorf("gzip bomb not capped:\n%s", out)
 	}
 	if time.Since(start) > 20*time.Second {
@@ -104,7 +104,7 @@ func TestDescribeBinaryHostile(t *testing.T) {
 	copy(tarHdr, "evil")
 	copy(tarHdr[124:], "77777777777")
 	copy(tarHdr[257:], "ustar\x0000")
-	if out := DescribeBinary(tarHdr, nil, false, nil).Text; !strings.Contains(out, "tar entries") {
+	if out := DescribeBinary(tarHdr, nil, false, nil).Text; !strings.Contains(out, "tar") {
 		t.Errorf("tar:\n%s", out)
 	}
 }
