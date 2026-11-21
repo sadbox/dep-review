@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/publish"
 )
 
 // MaxStdout caps what the reviewer may print. A `claude -p --output-format
-// json` result with a 3000-character summary is a few kilobytes.
-const MaxStdout = 64 << 10
+// json` result with a 3000-character summary is a few kilobytes; one that
+// assesses model.MaxFlagged items is a few hundred (and the CLI may echo
+// the structured output in "result" too).
+const MaxStdout = 1 << 20
 
 // ReadVerdict is the sandbox's only output channel: it reads the
 // container's stdout (all of it, so the writer never blocks, keeping at
@@ -25,7 +28,7 @@ const MaxStdout = 64 << 10
 // and returns its structured_output once it passes publish.ParseVerdict,
 // the Go form of schema/verdict.json (TestSchemaInSync keeps the two
 // equal). The result is re-encoded, so verdict.json never holds bytes the
-// model chose beyond the three validated fields. Over the cap, trailing
+// model chose beyond the four validated fields. Over the cap, trailing
 // bytes, invalid JSON, an error result, a missing structured_output or a
 // schema failure are all errors: no verdict.
 //
@@ -66,6 +69,9 @@ func ReadVerdict(stdout io.Reader) ([]byte, error) {
 	}
 	if v.Flags == nil {
 		v.Flags = []string{}
+	}
+	if v.Items == nil {
+		v.Items = []model.ItemAssessment{}
 	}
 	return json.Marshal(v)
 }

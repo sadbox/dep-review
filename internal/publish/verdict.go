@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 // Flags is schema/verdict.json's flags enum; a test keeps them in sync.
@@ -30,14 +32,22 @@ var Flags = []string{
 }
 
 const (
-	maxFlags       = 12
-	maxVerdictSize = 64 << 10
+	maxFlags = 12
+	// itemFieldMax bounds an item's update, code and item strings (the
+	// gate's own, so a longer one cannot match anything); itemNoteMax its
+	// note. maxVerdictSize leaves room for model.MaxFlagged full items.
+	itemFieldMax   = 300
+	itemNoteMax    = 400
+	maxVerdictSize = 384 << 10
 )
 
 // ParseVerdict decodes and validates the review job's structured output
-// against the rules of schema/verdict.json: exactly the three fields, the
-// verdict and flag enums, unique flags, the length limits. Anything else
-// is an error and the PR goes to a human.
+// against the rules of schema/verdict.json: exactly the four fields (and
+// exactly the five in each item), the verdict, flag and assessment enums,
+// unique flags and items, the length and count limits. Anything else is
+// an error and the PR goes to a human. Keys that are duplicated or differ
+// from a field only in case are refused (strictjson), so what publish
+// reads is what the schema validated.
 func ParseVerdict(raw []byte) (model.Verdict, error) {
 	var v model.Verdict
 	if len(raw) > maxVerdictSize {
@@ -46,16 +56,19 @@ func ParseVerdict(raw []byte) (model.Verdict, error) {
 	if !utf8.Valid(raw) {
 		return v, errors.New("verdict is not UTF-8")
 	}
+	if err := strictjson.Check(raw, reflect.TypeFor[model.Verdict]()); err != nil {
+		return v, fmt.Errorf("verdict: %w", err)
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return v, fmt.Errorf("verdict is not a JSON object: %w", err)
 	}
-	for _, k := range []string{"verdict", "flags", "summary"} {
+	for _, k := range []string{"verdict", "flags", "summary", "items"} {
 		if _, ok := fields[k]; !ok {
 			return v, fmt.Errorf("verdict lacks %q", k)
 		}
 	}
-	if len(fields) != 3 {
+	if len(fields) != 4 {
 		return v, errors.New("verdict has unexpected fields")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -66,8 +79,11 @@ func ParseVerdict(raw []byte) (model.Verdict, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return v, errors.New("trailing data after verdict")
 	}
-	if fields["flags"][0] != '[' || fields["verdict"][0] != '"' || fields["summary"][0] != '"' {
+	if fields["flags"][0] != '[' || fields["verdict"][0] != '"' || fields["summary"][0] != '"' || fields["items"][0] != '[' {
 		return v, errors.New("verdict fields have the wrong types")
+	}
+	if err := checkItems(fields["items"], v.Items); err != nil {
+		return v, err
 	}
 	switch v.Verdict {
 	case model.Pass, model.Fail, model.Unsure:
@@ -91,6 +107,52 @@ func ParseVerdict(raw []byte) (model.Verdict, error) {
 		return v, errors.New("summary is too long")
 	}
 	return v, nil
+}
+
+// itemKeys are the fields of one item, every one required and a string.
+var itemKeys = []string{"update", "code", "item", "assessment", "note"}
+
+// checkItems validates the items array: raw is its JSON, items what it
+// decoded to.
+func checkItems(raw json.RawMessage, items []model.ItemAssessment) error {
+	if len(items) > model.MaxFlagged {
+		return errors.New("too many items")
+	}
+	var objs []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &objs); err != nil || len(objs) != len(items) {
+		return errors.New("items is not an array of objects")
+	}
+	seen := map[model.FlaggedItem]bool{}
+	for i, o := range objs {
+		if len(o) != len(itemKeys) {
+			return errors.New("an item has missing or unexpected fields")
+		}
+		for _, k := range itemKeys {
+			if f, ok := o[k]; !ok || len(f) == 0 || f[0] != '"' {
+				return fmt.Errorf("an item lacks %q or it is not a string", k)
+			}
+		}
+		it := items[i]
+		switch it.Assessment {
+		case model.Benign, model.Suspicious, model.Unclear:
+		default:
+			return errors.New("an item's assessment is not benign, suspicious or unclear")
+		}
+		for _, s := range []string{it.Update, it.Code, it.Item} {
+			if utf8.RuneCountInString(s) > itemFieldMax {
+				return errors.New("an item's update, code or item is too long")
+			}
+		}
+		if utf8.RuneCountInString(it.Note) > itemNoteMax {
+			return errors.New("an item's note is too long")
+		}
+		k := model.FlaggedItem{Update: it.Update, Code: it.Code, Item: it.Item}
+		if seen[k] {
+			return errors.New("duplicate item")
+		}
+		seen[k] = true
+	}
+	return nil
 }
 
 func knownFlag(f string) bool {

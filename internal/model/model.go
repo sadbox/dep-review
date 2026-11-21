@@ -163,6 +163,45 @@ type Evidence struct {
 	// Truncated is set when a size cap cut the evidence short; it forces
 	// RouteHuman.
 	Truncated bool `json:"truncated"`
+	// Flagged is every item a review-routed check flagged (one changed
+	// init function, one new //go:linkname file, one binary...). The
+	// reviewer must assess each one in its verdict, and publish merges
+	// only when every item here, and nothing else, was assessed benign.
+	// This list, not the model's, is the reference.
+	Flagged []FlaggedItem `json:"flagged"`
+}
+
+// MaxFlagged bounds Flagged: past it a reviewer cannot be expected to
+// assess every item, so fetch sends the PR to a human (and publish
+// refuses to merge even if it somehow did not).
+const MaxFlagged = 200
+
+// FlaggedItem is one item of Evidence.Flagged: a check (Code) that
+// flagged a construct (Item, e.g. "http2/transportConfig" or
+// "x/x.syso") in one update (Update, the Update.Name). All three are the
+// gate's own sanitized strings.
+type FlaggedItem struct {
+	Update string `json:"update"`
+	Code   string `json:"code"`
+	Item   string `json:"item"`
+}
+
+// Assessment is the reviewer's judgement of one flagged item.
+type Assessment string
+
+const (
+	Benign     Assessment = "benign"
+	Suspicious Assessment = "suspicious"
+	Unclear    Assessment = "unclear"
+)
+
+// ItemAssessment is the verdict's entry for one FlaggedItem.
+type ItemAssessment struct {
+	Update     string     `json:"update"`
+	Code       string     `json:"code"`
+	Item       string     `json:"item"`
+	Assessment Assessment `json:"assessment"`
+	Note       string     `json:"note"` // model text; sanitized before it is shown
 }
 
 type EvidenceFile struct {
@@ -186,6 +225,9 @@ type Verdict struct {
 	Verdict VerdictValue `json:"verdict"`
 	Flags   []string     `json:"flags"`   // values from schema/verdict.json's enum only
 	Summary string       `json:"summary"` // shown in the PR comment after sanitizing
+	// Items assesses every Evidence.Flagged item (empty when there are
+	// none). publish checks it against the evidence, never the reverse.
+	Items []ItemAssessment `json:"items"`
 }
 
 // Decision is publish's final, deterministic result.

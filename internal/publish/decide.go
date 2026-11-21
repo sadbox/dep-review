@@ -149,11 +149,14 @@ func Decide(in Inputs) Outcome {
 		}
 		o := human(route, "", nil)
 		o.Verdict = &v
+		accounted, why := accounting(ev.Flagged, v.Items)
 		switch {
 		case v.Verdict != model.Pass:
 			o.Reason = "the reviewer answered " + string(v.Verdict)
 		case len(v.Flags) > 0:
 			o.Reason = "the reviewer answered pass but raised flags"
+		case !accounted:
+			o.Reason = why
 		default:
 			o.Decision, o.State = model.DecisionMerge, StateSuccess
 			o.Reason = "checks passed and the reviewer approved; merging when CI is green"

@@ -231,7 +231,7 @@ func setup(t *testing.T, f *fakeGH) (Config, *recNotifier, *clock) {
 	return Config{GitHub: c, BotLogin: bot, TriggerPath: trigger, Notifier: n, ServerURL: "https://github.com", Now: ck.Now, Sleep: ck.Sleep, Logf: t.Logf}, n, ck
 }
 
-var passVerdict = []byte(`{"verdict":"pass","flags":[],"summary":"ok"}`)
+var passVerdict = []byte(`{"verdict":"pass","flags":[],"summary":"ok","items":[]}`)
 
 func reviewInputs() Inputs {
 	return Inputs{Class: class(), Evidence: evidence(model.RouteReview, patch), FetchResult: "success", ReviewResult: "success", Verdict: passVerdict}
