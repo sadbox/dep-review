@@ -125,6 +125,38 @@ func TestDecideAccounting(t *testing.T) {
 	}
 }
 
+// TestRenderItems: the comment shows each flagged item with the gate's
+// strings, the stoppers first; model notes are sanitized and an item the
+// gate did not flag is only counted.
+func TestRenderItems(t *testing.T) {
+	ev := evidence(model.RouteReview, patch)
+	ev.Flagged = []model.FlaggedItem{
+		{Update: "github.com/x/y", Code: "gomod.init-changed", Item: "a.go"},
+		{Update: "github.com/x/y", Code: "gomod.binary-file", Item: "x.syso"},
+		{Update: "github.com/x/y", Code: "gomod.linkname", Item: "l.go"},
+	}
+	v := model.Verdict{Verdict: model.Pass, Summary: "s", Items: []model.ItemAssessment{
+		{Update: "github.com/x/y", Code: "gomod.init-changed", Item: "a.go", Assessment: model.Benign, Note: "registers a codec"},
+		{Update: "github.com/x/y", Code: "gomod.binary-file", Item: "x.syso", Assessment: model.Suspicious, Note: "ask @someone see https://evil.example/x `code`"},
+		{Update: "github.com/x/y", Code: "gomod.init-changed", Item: "INJECTED <b>row</b>", Assessment: model.Benign, Note: "n"},
+	}}
+	out := renderComment(commentData{Class: class(), Evidence: ev, Outcome: Outcome{Decision: model.DecisionHuman, Verdict: &v}})
+	if !strings.Contains(out, "#### Flagged items (3): 1 benign, 1 suspicious, 0 unclear, 1 not assessed; 1 listed by the reviewer that the gate did not flag") {
+		t.Errorf("counts line missing:\n%s", out)
+	}
+	// Inline neutralizes mentions and backticks; the note stays inside a
+	// code span, where GitHub links nothing.
+	if strings.Contains(out, "INJECTED") || strings.Contains(out, "@someone") || strings.Contains(out, "`code`") {
+		t.Errorf("unsanitized model text in the comment:\n%s", out)
+	}
+	notAssessed := strings.Index(out, "`l.go`")
+	suspicious := strings.Index(out, "`x.syso`")
+	benign := strings.Index(out, "`a.go`")
+	if !(notAssessed >= 0 && notAssessed < suspicious && suspicious < benign) {
+		t.Errorf("rows out of order (%d %d %d):\n%s", notAssessed, suspicious, benign, out)
+	}
+}
+
 // The items limits here must match schema/verdict.json.
 func TestItemsSchemaInSync(t *testing.T) {
 	b, err := os.ReadFile("../../schema/verdict.json")

@@ -286,8 +286,12 @@ func TestCheckTrees(t *testing.T) {
 			var got []string
 			for _, f := range h.findings("m") {
 				got = append(got, f.Code)
-				if f.Route != model.RouteHuman || f.Update != "m" {
-					t.Errorf("finding %+v", f)
+				want := model.RouteReview
+				if f.Code == codeParse {
+					want = model.RouteHuman
+				}
+				if f.Route != want || f.Update != "m" {
+					t.Errorf("finding %+v, want route %s", f, want)
 				}
 			}
 			if !slices.Equal(got, tt.want) {
@@ -312,18 +316,18 @@ func TestReproVendorSkip(t *testing.T) {
 		"testdata/td/z.go":     "package td\nimport \"os/exec\"\nfunc init(){ exec.Command(\"id\").Run() }\n"})
 	h := CheckTrees(old, cur)
 	for _, want := range []string{"vendor/x.go", "internal/vendor/y.go", "testdata/td/z.go"} {
-		if !slices.Contains(h[codeInit], want) || !slices.Contains(h[codeImport], want+" (os/exec)") {
+		if !slices.Contains(h.hits[codeInit], want) || !slices.Contains(h.hits[codeImport], want+" (os/exec)") {
 			t.Errorf("%s: init/import not flagged: %v", want, h)
 		}
 	}
-	if len(h[codeBlank]) != 3 {
-		t.Errorf("blank imports = %q", h[codeBlank])
+	if len(h.hits[codeBlank]) != 3 {
+		t.Errorf("blank imports = %q", h.hits[codeBlank])
 	}
 
 	cur = writeTree(t, map[string]string{"go.mod": gomod,
 		"a.go": "package dep\nimport \"os\"\nvar _, _ = os.StartProcess(\"/bin/sh\", []string{\"sh\",\"-c\",\"id\"}, &os.ProcAttr{})\nfunc F(){}\n"})
 	h = CheckTrees(old, cur)
-	if !slices.Equal(h[codeVarInit], []string{"a.go"}) || !slices.Equal(h[codeImport], []string{"a.go (os)"}) {
+	if !slices.Equal(h.hits[codeVarInit], []string{"a.go"}) || !slices.Equal(h.hits[codeImport], []string{"a.go (os)"}) {
 		t.Errorf("StartProcess initializer: %v", h)
 	}
 }
@@ -394,8 +398,8 @@ func TestFetchNetwork(t *testing.T) {
 		wantRoute model.Route
 	}{
 		{"sprobot285", []model.Update{{Name: "github.com/aws/aws-sdk-go-v2/credentials", From: "1.21.0", To: "1.21.1"}}, model.RouteReview},
-		// x/sys always carries assembly and unsafe: a person decides.
-		{"towngear49", []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}, model.RouteHuman},
+		// x/sys always carries assembly and unsafe: reviewed item by item.
+		{"towngear49", []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}, model.RouteReview},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {

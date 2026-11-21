@@ -3,7 +3,8 @@
 // go command never runs inside the repository), downloads both versions of
 // every changed module through proxy.golang.org with sum.golang.org
 // checking on, verifies the hashes against the PR's go.sum, diffs the
-// module trees and runs the Go hard stops (see checks.go).
+// module trees and runs the Go checks (see checks.go), writing every item
+// they flag into the focused evidence the reviewer must assess.
 package gomod
 
 import (
@@ -106,11 +107,12 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		work = work[:MaxModules]
 	}
 	if len(work) > 0 {
-		fs, err := f.verifyAndDiff(ctx, env, home, work, &summary)
+		fs, flagged, err := f.verifyAndDiff(ctx, env, home, work, &summary)
 		if err != nil {
 			return fetch.Result{}, err
 		}
 		res.Findings = append(res.Findings, fs...)
+		res.Flagged = flagged
 	}
 	if err := env.Evidence.Add("gomod-summary.md", "Go module change set, hash verification and checks run by the gate", summary.Bytes()); err != nil {
 		return fetch.Result{}, err
@@ -324,10 +326,12 @@ func majorPrefix(mod string) (string, bool) {
 	return m[1], true
 }
 
-// verifyAndDiff downloads both sides of each change, checks hashes and
-// writes diffs.
-func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, error) {
+// verifyAndDiff downloads both sides of each change, checks hashes,
+// writes diffs, runs the checks and writes, per module with flagged
+// items, the focused evidence that lists them.
+func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, error) {
 	var findings []model.Finding
+	var flagged []model.FlaggedItem
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
 	var args []string
 	for _, c := range work {
@@ -338,7 +342,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 	}
 	got, err := dl.Download(ctx, slices.Compact(slices.Sorted(slices.Values(args))))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	summary.WriteString("## Downloads (proxy.golang.org, checked against sum.golang.org)\n\n")
 	for _, c := range work {
@@ -356,7 +360,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			m, ok := got[u.Name+"@"+side.ver]
 			if !ok {
-				return nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
+				return nil, nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
 			}
 			if m.Error != "" {
 				switch errorClass(m.Error) {
@@ -367,7 +371,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 					findings = append(findings, model.Finding{Code: "gomod.download-failed", Route: model.RouteHuman, Update: safeImport(u.Name),
 						Detail: fmt.Sprintf("%s@%s could not be fetched from proxy.golang.org (not found or gone)", safeImport(u.Name), safeVersion(side.ver))})
 				default:
-					return nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
+					return nil, nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
 				}
 				bad = true
 				continue
@@ -387,7 +391,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			t, err := ecoutil.DirTree(m.Dir)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			trees[i], dirs[i] = t, m.Dir
 		}
@@ -395,18 +399,27 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			continue
 		}
 		h := CheckTrees(trees[0], trees[1])
-		findings = append(findings, h.findings(safeImport(u.Name))...)
+		name := safeImport(u.Name)
+		findings = append(findings, h.findings(name)...)
+		flagged = append(flagged, h.flagged(name)...)
 		if err := writeDiff(ctx, env, home, u, dirs); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if len(h.hits) > 0 {
+			su := safeUpdate(u)
+			desc := fmt.Sprintf("every item the gate's checks flagged in %s %s -> %s, with exactly what changed (third-party code quoted under the gate's headings); assess each one", su.Name, ecoutil.OrNew(su.From), su.To)
+			if err := env.Evidence.AddUntrusted(evName(u, "flagged.md"), desc, h.render(su.Name, su.From, su.To)); err != nil {
+				return nil, nil, err
+			}
 		}
 		if ex := changelogExcerpt(trees[0], trees[1]); ex != nil {
 			if err := env.Evidence.AddUntrusted(evName(u, "changelog.md"), "changelog excerpt for "+safeImport(u.Name)+" "+safeVersion(u.To)+" (from the module, third-party text)", ex); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
 	summary.WriteString("\n")
-	return findings, nil
+	return findings, flagged, nil
 }
 
 func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, dirs [2]string) error {

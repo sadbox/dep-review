@@ -40,7 +40,7 @@
     "items": {
       "type": "array",
       "maxItems": 200,
-      "description": "One entry for every item in evidence.json's flagged list, with update, code and item copied exactly; [] when the list is empty. A pass merges only if every flagged item is here, nothing else is, and each is benign.",
+      "description": "One entry for every item in the flagged list of evidence.json, with update, code and item copied exactly; [] when the list is empty. A pass merges only if every flagged item is here, nothing else is, and each is benign.",
       "items": {
         "type": "object",
         "additionalProperties": false,

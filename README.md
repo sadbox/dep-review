@@ -51,9 +51,30 @@ a newer head can never be merged on an old verdict.
 | Route | When | Result |
 |---|---|---|
 | auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, or, when the caller sets `docker_platforms`, for exactly those platforms) | merge on green CI |
-| review | patch/minor/digest updates whose deterministic checks all passed | model review; merge only on `pass` |
-| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
+| review | patch/minor/digest updates whose deterministic checks all passed, or flagged only items the reviewer assesses one by one (see below) | model review; merge only on `pass` with every flagged item assessed `benign` |
+| human | majors, 0.x minors (except `golang.org/x/*`), anything a check routes to a person (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, more than 200 flagged items, model `fail`/`unsure` or a `pass` that does not assess every flagged item `benign`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
 | refuse | the PR is malformed (no updates, tag instead of SHA pin outside a workflow onboarded to `actions.lock`, a lockfile the gate cannot read strictly or that disagrees with the `uses:` lines, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |
+
+### Flagged items (Go modules)
+
+The Go checks flag code that runs on import (a new or changed `func init`,
+a package-level initializer that calls code, any changed declaration that
+init code reaches by name within its package), code the compiler does not
+check (cgo and its preamble, C/C++/assembly sources, `//go:linkname`), new
+risky or blank imports, new `//go:generate`/`//go:embed` directives,
+binaries and long encoded literals. These route to the model review, not to
+a person: `evidence.json` lists every flagged item (`flagged`, capped at
+200, past which a person decides), and a `.flagged.md` evidence file per
+module shows exactly what changed for each one. For binaries and decoded
+blobs the gate renders, with Go's own parsers only, the type, structure
+(ELF/Mach-O/PE sections, imported libraries and symbols, Go build info;
+zip/tar/gzip entries), a hexdump, printable strings, a comparison with the
+previous version, and where the module refers to the file (linked `.syso`,
+`//go:embed`, test-only mentions). The verdict must assess every flagged
+item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
+list with the evidence's, and merges only when every flagged item, and
+nothing else, is `benign`. A Go file the gate cannot parse still goes to a
+person, as does truncated evidence.
 
 ### GitHub workflow lockfiles
 
@@ -237,7 +258,7 @@ manager), in a container run under gVisor (`runsc`, pinned and sha512-checked by
 - **Only data we already publish**: the evidence and the default branch.
 
 Its answer comes back only on stdout: one `claude -p --output-format json`
-result, at most 64 KB, whose `structured_output` must pass the verdict
+result, at most 1 MB, whose `structured_output` must pass the verdict
 schema before `verdict.json` is written. Anything else is no verdict, which
 sends the PR to a human. The Read/Grep/Glob-only tool set and the
 permission settings from `review-prep` still apply inside, as a second
