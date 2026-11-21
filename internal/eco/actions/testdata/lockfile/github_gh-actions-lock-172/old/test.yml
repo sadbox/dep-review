@@ -1,0 +1,66 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5.0.1
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: make test
+
+  integration-stub:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5.0.1
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Install Ruby
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ruby
+          ruby --version
+      - run: make build
+      - run: make test-stub
+
+  integration-live:
+    runs-on: ubuntu-latest
+    # Separate job so flakes don't block merge
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5.0.1
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Install Ruby
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ruby
+          ruby --version
+      - run: make build
+      - run: make test-integration
