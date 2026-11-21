@@ -27,6 +27,11 @@ func readLockFixture(t *testing.T, parts ...string) string {
 // lockRun commits before/after into a caller repository and runs the
 // lockfile check on the uses: changes, as Fetch does.
 func lockRun(t *testing.T, before, after map[string]string) (*findings, []usesChange) {
+	fs, all, _ := lockRunMax(t, before, after, 8)
+	return fs, all
+}
+
+func lockRunMax(t *testing.T, before, after map[string]string, maxTrans int) (*findings, []usesChange, []*transPair) {
 	t.Helper()
 	caller := t.TempDir()
 	gitIn(t, caller, "init", "-q")
@@ -58,11 +63,11 @@ func lockRun(t *testing.T, before, after map[string]string) (*findings, []usesCh
 		return all[i].line < all[j].line
 	})
 	var sum strings.Builder
-	err := checkActionsLock(context.Background(), git{bin: "git", dir: caller}, fetch.Env{Evidence: &memEvidence{}}, base, head, lockChanged, all, &fs, &sum)
+	trans, err := checkActionsLock(context.Background(), git{bin: "git", dir: caller}, fetch.Env{Evidence: &memEvidence{}}, base, head, lockChanged, all, maxTrans, &fs, &sum)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &fs, all
+	return &fs, all, trans
 }
 
 func fixtureTrees(t *testing.T, dir string) (before, after map[string]string) {
@@ -88,43 +93,29 @@ func codesOf(fs *findings) (map[string]model.Route, string) {
 	return m, strings.Join(lines, "\n")
 }
 
-// TestActionsLockRealPRs runs the lockfile check on real Dependabot PRs
-// (testdata/lockfile/prs.json): the clean ones raise nothing and resolve
-// every locked line to the lockfile's commits; gh-actions-lock#170 and
-// #172 migrate a v0.0.2 lockfile and are refused.
+// TestActionsLockRealPRs runs the lockfile check on lockfiles and
+// workflows trimmed from public Dependabot github-actions PRs: each one
+// raises nothing and resolves every locked line to the lockfile's commits.
+// subpath: two codeql-action subpaths are one pin; two-old-versions: two
+// workflows move from two checkout versions to one.
 func TestActionsLockRealPRs(t *testing.T) {
 	cases := []struct {
 		dir   string
-		codes map[string]model.Route
 		locks int // locked uses: lines expected
 	}{
-		{dir: "kokkos_kokkos-9755", locks: 3}, // codeql-action/init, /analyze, /upload-sarif: one pin
-		{dir: "go-sql-driver_mysql-1839", locks: 1},
-		{dir: "raviqqe_muffet-1120", locks: 2},
-		{dir: "github_gh-actions-lock-173", locks: 5}, // checkout 5.0.1 and 6.0.2 both -> 7.0.1
-		{dir: "esphome_esp-web-tools-738", locks: 3},
-		{dir: "github_gh-actions-lock-170", codes: map[string]model.Route{"actions.lock-unparsed": model.RouteRefuse}},
-		{dir: "github_gh-actions-lock-172", codes: map[string]model.Route{"actions.lock-unparsed": model.RouteRefuse}},
+		{dir: "simple", locks: 1},
+		{dir: "subpath", locks: 2},
+		{dir: "two-old-versions", locks: 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.dir, func(t *testing.T) {
 			before, after := fixtureTrees(t, tc.dir)
-			fs, all := lockRun(t, before, after)
-			got, lines := codesOf(fs)
-			want := tc.codes
-			if want == nil {
-				want = map[string]model.Route{}
+			fs, all, trans := lockRunMax(t, before, after, 8)
+			if got, lines := codesOf(fs); len(got) != 0 {
+				t.Errorf("findings %v\n%s", got, lines)
 			}
-			if len(got) != len(want) {
-				t.Errorf("findings %v, want %v\n%s", got, want, lines)
-			}
-			for c, r := range want {
-				if got[c] != r {
-					t.Errorf("finding %s = %q, want %q\n%s", c, got[c], r, lines)
-				}
-			}
-			if tc.codes != nil {
-				return
+			if len(trans) != 0 {
+				t.Errorf("%d transitive pairs", len(trans))
 			}
 			n := 0
 			for _, c := range all {
@@ -144,21 +135,43 @@ func TestActionsLockRealPRs(t *testing.T) {
 	}
 }
 
-// TestActionsLockTransitiveReal is gh-actions-lock#170 with its base at
-// v0.0.3: cli/gh-extension-precompile 2.1.0 -> 2.2.0 changes the composite's
-// own pins, so every transitive entry it reaches changes and the PR goes
-// to a human, not to review.
+// TestActionsLockTransitiveReal is a real bump of a composite
+// (cli/gh-extension-precompile 2.1.0 -> 2.2.0) whose own pins changed.
+// As committed the base is a v0.0.2 lockfile, which is refused; with the
+// base at v0.0.3 every changed transitive entry pairs with its old
+// version and nothing goes to a human from the lockfile alone: the pairs
+// are analyzed like bumps.
 func TestActionsLockTransitiveReal(t *testing.T) {
-	before, after := fixtureTrees(t, "github_gh-actions-lock-170")
+	before, after := fixtureTrees(t, "transitive")
+	fs, _, _ := lockRunMax(t, before, after, 8)
+	if got, lines := codesOf(fs); len(got) != 1 || got["actions.lock-unparsed"] != model.RouteRefuse {
+		t.Errorf("v0.0.2 base: findings %v\n%s", got, lines)
+	}
 	lp := ".github/workflows/actions.lock"
 	before[lp] = strings.Replace(before[lp], "version: 'v0.0.2'", "version: 'v0.0.3'", 1)
-	fs, all := lockRun(t, before, after)
-	got, lines := codesOf(fs)
-	if got["actions.lock-transitive-changed"] != model.RouteHuman || len(got) != 1 {
+	fs, all, trans := lockRunMax(t, before, after, 8)
+	if got, lines := codesOf(fs); len(got) != 0 {
 		t.Errorf("findings %v\n%s", got, lines)
 	}
 	if len(all) != 1 || all[0].lock == nil || all[0].lock.newCommit != "76961aa3bd1123d0a6fd42d0a41aca0696937c39" {
 		t.Errorf("resolution %+v", all)
+	}
+	var got []string
+	for _, p := range trans {
+		got = append(got, p.oldKey+" -> "+p.newKey+" ("+p.via+")")
+	}
+	want := []string{
+		"actions/attest-build-provenance@v1 -> actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 (cli/gh-extension-precompile@v2.2.0 > actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32)",
+		"actions/setup-go@v5 -> actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c (cli/gh-extension-precompile@v2.2.0 > actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c)",
+		"actions/attest@67422f5511b7ff725f4dbd6fb9bd2cd925c65a8d -> actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 (cli/gh-extension-precompile@v2.2.0 > actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 > actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26)",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("pairs:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// Over the cap nothing is analyzed and the transitive changes go to a human.
+	fs, _, trans = lockRunMax(t, before, after, 2)
+	if got, lines := codesOf(fs); len(trans) != 0 || got["actions.lock-transitive-cap"] != model.RouteHuman || got["actions.lock-transitive-changed"] != model.RouteHuman {
+		t.Errorf("cap: %d pairs, findings %v\n%s", len(trans), got, lines)
 	}
 }
 
@@ -375,6 +388,7 @@ func TestActionsLockDelta(t *testing.T) {
 		name          string
 		before, after map[string]string
 		codes         map[string]model.Route
+		pairs         []string // transitive pairs, "old key -> new key"
 	}{
 		{name: "clean", after: map[string]string{lp: synthBumped(), wfp: synthWorkflow("v1.0.1")}},
 		{name: "mixed-case uses: maps to the lower-case key",
@@ -390,10 +404,18 @@ func TestActionsLockDelta(t *testing.T) {
 			codes: map[string]model.Route{"actions.lock-unexplained-change": model.RouteHuman}},
 		{name: "unrelated entry added", after: map[string]string{lp: strings.Replace(synthBumped(), "    'other/tool@v3.0.0':\n", "    'other/new@v1.0.0':\n        ref: 'v1.0.0'\n        commit: 'sha1-7777777777777777777777777777777777777777'\n        owner_id: 4\n        repo_id: 9\n    'other/tool@v3.0.0':\n", 1), wfp: synthWorkflow("v1.0.1")},
 			codes: map[string]model.Route{"actions.lock-unexplained-change": model.RouteHuman}},
-		{name: "transitive entry moves to an unverified commit", after: map[string]string{lp: strings.Replace(synthBumped(), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), wfp: synthWorkflow("v1.0.1")},
-			codes: map[string]model.Route{"actions.lock-entry-moved": model.RouteHuman}},
-		{name: "bumped action gains a transitive pin", after: map[string]string{lp: strings.Replace(synthBumped(), "            - 'acme/helper@v2.0.0'\n", "            - 'acme/helper@v2.0.0'\n            - 'other/tool@v3.0.0'\n", 1), wfp: synthWorkflow("v1.0.1")},
-			codes: map[string]model.Route{"actions.lock-transitive-changed": model.RouteHuman}},
+		// A transitive entry at a new commit is a pair Fetch analyzes.
+		{name: "transitive entry moves", after: map[string]string{lp: strings.Replace(synthBumped(), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), wfp: synthWorkflow("v1.0.1")},
+			pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.0"}},
+		{name: "transitive entry moves to another repository's IDs", after: map[string]string{lp: strings.Replace(strings.Replace(synthBumped(), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), "        repo_id: 3\n", "        repo_id: 30\n", 1), wfp: synthWorkflow("v1.0.1")},
+			codes: map[string]model.Route{"actions.lock-identity-changed": model.RouteHuman}, pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.0"}},
+		// An entry the base locked as is: no new code, so no pair (the
+		// composite's nested-uses finding still routes it at fetch time).
+		{name: "bumped action gains an already locked pin", after: map[string]string{lp: strings.Replace(synthBumped(), "            - 'acme/helper@v2.0.0'\n", "            - 'acme/helper@v2.0.0'\n            - 'other/tool@v3.0.0'\n", 1), wfp: synthWorkflow("v1.0.1")}},
+		{name: "bumped action gains a new repository", after: map[string]string{lp: strings.Replace(strings.Replace(synthBumped(), "            - 'acme/helper@v2.0.0'\n", "            - 'acme/helper@v2.0.0'\n            - 'other/new@v1.0.0'\n", 1), "    'other/tool@v3.0.0':\n", "    'other/new@v1.0.0':\n        ref: 'v1.0.0'\n        commit: 'sha1-7777777777777777777777777777777777777777'\n        owner_id: 4\n        repo_id: 9\n    'other/tool@v3.0.0':\n", 1), wfp: synthWorkflow("v1.0.1")},
+			codes: map[string]model.Route{"actions.lock-transitive-added": model.RouteHuman, "actions.lock-transitive-changed": model.RouteHuman}},
+		{name: "bumped action uses two pins of one repository", after: map[string]string{lp: strings.Replace(strings.Replace(synthBumped(), "            - 'acme/helper@v2.0.0'\n", "            - 'acme/helper@v2.0.0'\n            - 'acme/helper@v2.0.1'\n", 1), "    'other/tool@v3.0.0':\n", "    'acme/helper@v2.0.1':\n        ref: 'v2.0.1'\n        commit: 'sha1-7777777777777777777777777777777777777777'\n        owner_id: 1\n        repo_id: 3\n    'other/tool@v3.0.0':\n", 1), wfp: synthWorkflow("v1.0.1")},
+			codes: map[string]model.Route{"actions.lock-transitive-ambiguous": model.RouteHuman, "actions.lock-transitive-changed": model.RouteHuman}},
 		{name: "identity changes", after: map[string]string{lp: strings.Replace(synthBumped(), "        commit: 'sha1-4444444444444444444444444444444444444444'\n        owner_id: 1\n        repo_id: 2\n", "        commit: 'sha1-4444444444444444444444444444444444444444'\n        owner_id: 1\n        repo_id: 99\n", 1), wfp: synthWorkflow("v1.0.1")},
 			codes: map[string]model.Route{"actions.lock-identity-changed": model.RouteHuman}},
 		{name: "onboarding changes", after: map[string]string{lp: strings.Replace(synthBumped(), "    '.github/workflows/idle.yml': []\n", "", 1), wfp: synthWorkflow("v1.0.1")},
@@ -413,7 +435,14 @@ func TestActionsLockDelta(t *testing.T) {
 			if tc.before != nil {
 				before = tc.before
 			}
-			fs, all := lockRun(t, before, tc.after)
+			fs, all, trans := lockRunMax(t, before, tc.after, 8)
+			var pairs []string
+			for _, p := range trans {
+				pairs = append(pairs, p.oldKey+" -> "+p.newKey)
+			}
+			if strings.Join(pairs, ",") != strings.Join(tc.pairs, ",") {
+				t.Errorf("pairs %v, want %v", pairs, tc.pairs)
+			}
 			got, lines := codesOf(fs)
 			want := tc.codes
 			if want == nil {

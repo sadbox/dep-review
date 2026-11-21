@@ -1,8 +1,0 @@
-[
-  {"repo": "kokkos/kokkos", "pr": 9755, "base": "4a9280473e1192025d981192f5327dcc469aac10", "head": "12c7dff332de9f3358d08e4067ac9e9922f3f17d"},
-  {"repo": "go-sql-driver/mysql", "pr": 1839, "base": "d01565b499faca6788171e4c0fcf5dfc6b75df34", "head": "7b4a09211c48b54aaf7249994c3c15dacbde8af4"},
-  {"repo": "raviqqe/muffet", "pr": 1120, "base": "39b5d949695378e6ed1b334235821db25f320dd8", "head": "6b63b3231b90be9d986ac559e61784b90c7c66ff"},
-  {"repo": "github/gh-actions-lock", "pr": 173, "base": "9d7e72cbcc37b175cb422ba8cc04e95bf89a10a6", "head": "05eee32d6c21cc5558063b2683eb10840ac853ac"},
-  {"repo": "github/gh-actions-lock", "pr": 170, "base": "f43e069f9e87f8fedcc8f4fb69c617e3c17fe2af", "head": "de470d4b79166659014bca0ccfcb082ee475de28"},
-  {"repo": "github/gh-actions-lock", "pr": 172, "base": "f43e069f9e87f8fedcc8f4fb69c617e3c17fe2af", "head": "ff3f503adc68b1282075010e5795503c44b73e9f"},
-  {"repo": "esphome/esp-web-tools", "pr": 738, "base": "b027c3c939dd660e1f7abb7efd6404839453e759", "head": "5336139ce45b66848a417be8a8661e73a3a15a4c"}]

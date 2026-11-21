@@ -519,11 +519,14 @@ type lockFinding struct {
 // one, the new key's entry is added (or was already there, unchanged),
 // and an old key nothing references any more is dropped. A change to an
 // entry the bumped actions reach through uses (a transitive action) is
-// reported separately: the gate does not verify transitive commits, so
-// that goes to a human, as does every other change. Disagreement between
-// the workflows and the lockfile (a bumped workflow whose list lacks the
-// new key or never had the old one, a missing entry) is refused.
-func lockDelta(old, new *lockFile, bumps []lockBump) []lockFinding {
+// accepted only when explained says transitiveWalk accounts for that key
+// (its commit is then analyzed as a transitive pair, or it was dropped);
+// otherwise it goes to a human, as does every other change. walked says
+// the walk ran, so a bumped action's changed uses list is its business.
+// Disagreement between the workflows and the lockfile (a bumped workflow
+// whose list lacks the new key or never had the old one, a missing entry)
+// is refused.
+func lockDelta(old, new *lockFile, bumps []lockBump, explained map[string]bool, walked bool) []lockFinding {
 	var out []lockFinding
 	add := func(route model.Route, code, update, format string, args ...any) {
 		out = append(out, lockFinding{route, code, update, fmt.Sprintf(format, args...)})
@@ -551,6 +554,7 @@ func lockDelta(old, new *lockFile, bumps []lockBump) []lockFinding {
 	oldTrans := old.closure(sortedMapKeys(oldKeys))
 	newTrans := new.closure(sortedMapKeys(newKeys))
 	transitive := func(k string) bool { return oldTrans[k] || newTrans[k] }
+	accounted := func(k string) bool { return transitive(k) && explained[k] }
 
 	// Workflow lists.
 	for _, wf := range sortedMapKeys(new.workflows) {
@@ -561,7 +565,7 @@ func lockDelta(old, new *lockFile, bumps []lockBump) []lockFinding {
 		nl := new.workflows[wf]
 		for _, k := range setMinus(nl, ol) {
 			switch {
-			case bumpHas(byWF[wf], func(b lockBump) bool { return b.newKey == k }):
+			case bumpHas(byWF[wf], func(b lockBump) bool { return b.newKey == k }), accounted(k):
 			case transitive(k):
 				add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(k), "%s: transitive pin %s added to the workflow's list", safePath(wf), k)
 			default:
@@ -570,7 +574,7 @@ func lockDelta(old, new *lockFile, bumps []lockBump) []lockFinding {
 		}
 		for _, k := range setMinus(ol, nl) {
 			switch {
-			case bumpHas(byWF[wf], func(b lockBump) bool { return b.oldKey == k }):
+			case bumpHas(byWF[wf], func(b lockBump) bool { return b.oldKey == k }), accounted(k):
 			case transitive(k):
 				add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(k), "%s: transitive pin %s dropped from the workflow's list", safePath(wf), k)
 			default:
@@ -584,6 +588,7 @@ func lockDelta(old, new *lockFile, bumps []lockBump) []lockFinding {
 		ne, oe := new.deps[k], old.deps[k]
 		switch {
 		case oe != nil && oe.equal(ne):
+		case accounted(k) && !newKeys[k]:
 		case oe != nil:
 			if newKeys[k] || transitive(k) {
 				add(model.RouteHuman, "actions.lock-entry-moved", nameOf(k), "the entry for %s changed (commit %s -> %s): the same ref now resolves elsewhere", k, short(oe.commit), short(ne.commit))
@@ -592,13 +597,13 @@ func lockDelta(old, new *lockFile, bumps []lockBump) []lockFinding {
 			}
 		case newKeys[k]:
 		case transitive(k):
-			add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(k), "transitive pin %s added (%s); the gate does not verify transitive actions", k, short(ne.commit))
+			add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(k), "transitive pin %s added (%s), and the gate did not analyze it as a transitive pair", k, short(ne.commit))
 		default:
 			add(model.RouteHuman, "actions.lock-unexplained-change", nameOf(k), "pin %s added, but no bumped action uses it", k)
 		}
 	}
 	for _, k := range sortedMapKeys(old.deps) {
-		if new.deps[k] != nil || oldKeys[k] {
+		if new.deps[k] != nil || oldKeys[k] || accounted(k) {
 			continue
 		}
 		if transitive(k) {
@@ -614,7 +619,7 @@ func lockDelta(old, new *lockFile, bumps []lockBump) []lockFinding {
 		if oe == nil || ne == nil {
 			continue
 		}
-		if strings.Join(oe.uses, "\n") != strings.Join(ne.uses, "\n") {
+		if !walked && strings.Join(oe.uses, "\n") != strings.Join(ne.uses, "\n") {
 			add(model.RouteHuman, "actions.lock-transitive-changed", nameOf(b.newKey), "%s uses %d pins, %s used %d: its transitive actions changed", b.newKey, len(ne.uses), b.oldKey, len(oe.uses))
 		}
 		if oe.ownerID != ne.ownerID || oe.repoID != ne.repoID {
@@ -661,12 +666,119 @@ func bumpHas(bs []lockBump, f func(lockBump) bool) bool {
 	return false
 }
 
+// transPair is a transitive action whose locked commit a bump changed:
+// the same repository, under the same parent, at another commit (or at the
+// same commit under another key, which needs only its identity checked).
+type transPair struct {
+	nwo                string
+	oldKey, newKey     string
+	oldEntry, newEntry *lockEntry
+	parentNewKey       string // the entry whose uses list names newKey
+	via                string // bumped key > ... > newKey, for evidence
+	sameCommit         bool
+}
+
+// transitiveWalk pairs the transitive entries a bump changed. Starting at
+// each bumped (old key, new key), it matches the old and new entries' uses
+// lists by repository: one old and one new pin of a repository is a pair
+// (walked further, so a composite's own changed pins pair up too); a pin
+// of a repository the old list did not have is new code with no baseline
+// and goes to a human, unless the base already locked that exact entry;
+// two pins of one repository on a side are ambiguous and go to a human; a
+// pin dropped from the list needs no review. The lockfile is flat, so the
+// walk visits each entry pair once and reads no action.yml.
+//
+// explained holds every key the walk accounts for (pairs, dropped pins,
+// pins the base locked identically), for lockDelta.
+func transitiveWalk(old, new *lockFile, bumps []lockBump) ([]*transPair, map[string]bool, []lockFinding) {
+	var pairs []*transPair
+	var out []lockFinding
+	explained := map[string]bool{}
+	add := func(route model.Route, code, update, format string, args ...any) {
+		out = append(out, lockFinding{route, code, update, fmt.Sprintf(format, args...)})
+	}
+	type node struct{ oldKey, newKey, via string }
+	var queue []node
+	seen := map[[2]string]bool{}
+	for _, b := range bumps {
+		if old.deps[b.oldKey] != nil && new.deps[b.newKey] != nil && !seen[[2]string{b.oldKey, b.newKey}] {
+			seen[[2]string{b.oldKey, b.newKey}] = true
+			queue = append(queue, node{b.oldKey, b.newKey, b.newKey})
+		}
+	}
+	byRepo := func(keys []string) (map[string][]string, []string) {
+		m := map[string][]string{}
+		var order []string
+		for _, k := range keys {
+			n, _, _ := splitPin(k)
+			if m[n] == nil {
+				order = append(order, n)
+			}
+			m[n] = append(m[n], k)
+		}
+		return m, order
+	}
+	for len(queue) > 0 {
+		nd := queue[0]
+		queue = queue[1:]
+		oe, ne := old.deps[nd.oldKey], new.deps[nd.newKey]
+		om, _ := byRepo(oe.uses)
+		nm, norder := byRepo(ne.uses)
+		for n, ks := range om {
+			if nm[n] == nil {
+				for _, k := range ks {
+					explained[k] = true // dropped: nothing to review
+				}
+			}
+		}
+		for _, n := range norder {
+			olds, news := om[n], nm[n]
+			switch {
+			case len(olds) == 0:
+				for _, k := range news {
+					if oe2 := old.deps[k]; oe2 != nil && oe2.equal(new.deps[k]) {
+						explained[k] = true // already locked as is
+						continue
+					}
+					add(model.RouteHuman, "actions.lock-transitive-added", n, "%s now uses %s, a repository its old version did not use: no baseline to diff", nd.newKey, k)
+				}
+			case len(olds) > 1 || len(news) > 1:
+				add(model.RouteHuman, "actions.lock-transitive-ambiguous", n, "%s uses %d pins of %s, its old version %d: the gate cannot pair them", nd.newKey, len(news), n, len(olds))
+			default:
+				ok, nk := olds[0], news[0]
+				o2, n2 := old.deps[ok], new.deps[nk]
+				if ok == nk && o2.equal(n2) {
+					if !seen[[2]string{ok, nk}] {
+						seen[[2]string{ok, nk}] = true
+						queue = append(queue, node{ok, nk, nd.via + " > " + nk})
+					}
+					continue
+				}
+				explained[ok], explained[nk] = true, true
+				if seen[[2]string{ok, nk}] {
+					continue
+				}
+				seen[[2]string{ok, nk}] = true
+				if o2.ownerID != n2.ownerID || o2.repoID != n2.repoID {
+					add(model.RouteHuman, "actions.lock-identity-changed", n, "%s records owner/repo IDs %d/%d, %s recorded %d/%d: the repository behind the name changed", nk, n2.ownerID, n2.repoID, ok, o2.ownerID, o2.repoID)
+				}
+				pairs = append(pairs, &transPair{nwo: n, oldKey: ok, newKey: nk, oldEntry: o2, newEntry: n2,
+					parentNewKey: nd.newKey, via: nd.via + " > " + nk, sameCommit: o2.commit == n2.commit})
+				queue = append(queue, node{ok, nk, nd.via + " > " + nk})
+			}
+		}
+	}
+	return pairs, explained, out
+}
+
 // checkActionsLock reads actions.lock at both commits. Without one on
 // either side it does nothing, and the PR is checked as before. Otherwise
 // it resolves each rewritten step-level uses: line of an onboarded
 // workflow through the lockfiles (setting all[i].lock) and checks the
-// lockfile delta against those lines.
-func checkActionsLock(ctx context.Context, caller git, env fetch.Env, base, head string, lockChanged bool, all []usesChange, fs *findings, sum *strings.Builder) error {
+// lockfile delta against those lines. It returns the transitive pairs the
+// caller must analyze; above maxTrans of them it returns none and the
+// transitive changes go to a human.
+func checkActionsLock(ctx context.Context, caller git, env fetch.Env, base, head string, lockChanged bool, all []usesChange, maxTrans int, fs *findings, sum *strings.Builder) ([]*transPair, error) {
 	read := func(rev string) ([]byte, error) {
 		b, err := caller.show(ctx, rev, actionsLockPath)
 		if errors.Is(err, errMissing) {
@@ -676,17 +788,14 @@ func checkActionsLock(ctx context.Context, caller git, env fetch.Env, base, head
 	}
 	oldText, err := read(base)
 	if err != nil {
-		return fmt.Errorf("reading %s at base: %w", actionsLockPath, err)
+		return nil, fmt.Errorf("reading %s at base: %w", actionsLockPath, err)
 	}
 	newText, err := read(head)
 	if err != nil {
-		return fmt.Errorf("reading %s at head: %w", actionsLockPath, err)
-	}
-	if oldText == nil && newText == nil {
-		return nil
+		return nil, fmt.Errorf("reading %s at head: %w", actionsLockPath, err)
 	}
 	if oldText == nil || newText == nil {
-		return nil // added or deleted: refused as actions.unexpected-file
+		return nil, nil // none, or added or deleted: refused as actions.unexpected-file
 	}
 	parse := func(side string, b []byte) *lockFile {
 		lf, err := parseActionsLock(b)
@@ -703,10 +812,11 @@ func checkActionsLock(ctx context.Context, caller git, env fetch.Env, base, head
 	oldLock, newLock := parse("base", oldText), parse("head", newText)
 	if oldLock == nil || newLock == nil {
 		sum.WriteString("actions.lock: refused, not read\n\n")
-		return nil
+		return nil, nil
 	}
 
 	var bumps []lockBump
+	var trans []*transPair
 	for i := range all {
 		c := &all[i]
 		_, inOld := oldLock.workflows[c.file]
@@ -748,15 +858,25 @@ func checkActionsLock(ctx context.Context, caller git, env fetch.Env, base, head
 	case len(bumps) == 0 && lockChanged:
 		fs.add(model.RouteRefuse, "actions.lock-unexpected-change", "", "the PR changes %s but no uses: line of an onboarded workflow", actionsLockPath)
 	case lockChanged:
-		for _, x := range lockDelta(oldLock, newLock, bumps) {
+		var walked []lockFinding
+		var explained map[string]bool
+		trans, explained, walked = transitiveWalk(oldLock, newLock, bumps)
+		if len(trans) > maxTrans {
+			fs.add(model.RouteHuman, "actions.lock-transitive-cap", "", "the bump changes %d transitive actions in %s, more than the gate analyzes (MaxTransitive %d)", len(trans), actionsLockPath, maxTrans)
+			trans, explained, walked = nil, nil, nil
+		}
+		for _, x := range walked {
+			fs.add(x.route, x.code, x.update, "%s", x.detail)
+		}
+		for _, x := range lockDelta(oldLock, newLock, bumps, explained, explained != nil) {
 			fs.add(x.route, x.code, x.update, "%s", x.detail)
 		}
 	}
 	if lockChanged {
 		if err := env.Evidence.AddUntrusted("actions/actions-lock.diff", "diff of "+actionsLockPath+" (written by gh-actions-lock from upstream tag names)", []byte(unifiedDiff("a/"+actionsLockPath, "b/"+actionsLockPath, string(oldText), string(newText), 3))); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	fmt.Fprintf(sum, "actions.lock: %d onboarded workflows; %d rewritten locked uses: lines; lockfile changed: %t\n\n", len(newLock.workflows), len(bumps), lockChanged)
-	return nil
+	fmt.Fprintf(sum, "actions.lock: %d onboarded workflows; %d rewritten locked uses: lines; lockfile changed: %t; transitive pairs: %d\n\n", len(newLock.workflows), len(bumps), lockChanged, len(trans))
+	return trans, nil
 }

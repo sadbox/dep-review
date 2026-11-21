@@ -52,22 +52,30 @@ a newer head can never be merged on an old verdict.
 |---|---|---|
 | auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, or, when the caller sets `docker_platforms`, for exactly those platforms) | merge on green CI |
 | review | patch/minor/digest updates whose deterministic checks all passed | model review; merge only on `pass` |
-| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags (including an `actions.lock` change beyond the bumped entries, such as a transitive action), truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
+| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
 | refuse | the PR is malformed (no updates, tag instead of SHA pin outside a workflow onboarded to `actions.lock`, a lockfile the gate cannot read strictly or that disagrees with the `uses:` lines, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |
 
 ### GitHub workflow lockfiles
 
 In a workflow onboarded to `.github/workflows/actions.lock`, a step names
 an exact tag (`uses: owner/repo@v1.2.3`) and the runner runs the commit
-the lockfile records. The actions fetcher then takes both commits from the
-base and head lockfiles and runs the usual upstream checks on them; the
-named tag must dereference to the locked commit, and the locked
-owner/repo IDs must be upstream's. The lockfile is read only in the exact
-form `gh actions-lock` writes (schema v0.0.3, no `hostname`); anything
-else refuses. Its diff must be exactly the bumped entries: a change to a
-transitive action's entry, or to any other entry, goes to a human, since
-the gate does not verify transitive commits. Job-level reusable workflows
-and workflows not in the lockfile keep SHA pins.
+the lockfile records. The actions fetcher takes both commits from the base
+and head lockfiles and runs the usual upstream checks on them. The named
+tag must dereference to the locked commit, and the locked owner/repo IDs
+must be upstream's. The lockfile is read only in the exact form
+`gh actions-lock` writes (schema v0.0.3, no `hostname`); anything else
+refuses.
+
+A bumped composite can change its own pinned actions. Each transitive
+entry that moves to another commit of the same repository, under the same
+parent, is analyzed as a bump of its own (`Direct: false`, evidence under
+`actions/transitive/`), with the same identity checks. A nested `uses:`
+change that such a pair explains no longer forces a human; the PR's route
+is the worst of all pairs. These go to a human: a transitive action from a
+repository the old version did not use (no baseline), two pins of one
+repository under one parent, more than 8 transitive pairs, and any other
+lockfile change. Job-level reusable workflows and workflows not in the
+lockfile keep SHA pins.
 
 ## Layout
 

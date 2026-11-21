@@ -107,6 +107,7 @@ type metaFinding struct {
 	route  model.Route
 	code   string
 	detail string
+	uses   string // the nested uses: value, for actions.nested-uses-changed
 }
 
 // compareActionMeta applies the human-routing rules to an action.yml
@@ -114,7 +115,7 @@ type metaFinding struct {
 func compareActionMeta(sub string, old, new *actionMeta) ([]metaFinding, string) {
 	var fs []metaFinding
 	add := func(code, format string, args ...any) {
-		fs = append(fs, metaFinding{model.RouteHuman, code, fmt.Sprintf(format, args...)})
+		fs = append(fs, metaFinding{route: model.RouteHuman, code: code, detail: fmt.Sprintf(format, args...)})
 	}
 	where := safePath(path.Join(sub, "action.yml"))
 	if old.using != new.using {
@@ -149,6 +150,7 @@ func compareActionMeta(sub string, old, new *actionMeta) ([]metaFinding, string)
 				add("actions.docker-image-changed", "%s: a composite step uses a new or changed docker:// image", where)
 			} else {
 				add("actions.nested-uses-changed", "%s: a composite step uses a new or changed action reference", where)
+				fs[len(fs)-1].uses = u
 			}
 		}
 	}
