@@ -751,3 +751,43 @@ func TestNonModuleEntries(t *testing.T) {
 		t.Errorf("codes = %q, want only npm.link", got)
 	}
 }
+
+// TestPoCRoute runs the review's PoCs through fetch.Run end to end: the
+// route is refuse, for the gate's own reason, and not a job error.
+func TestPoCRoute(t *testing.T) {
+	tests := []struct {
+		dir     string
+		code    string
+		network bool
+	}{
+		{"dualcase", "npm.lockfile-ambiguous", false},
+		{"nonmodules", "npm.lockfile-ambiguous", false},
+		{"multihash", "npm.resolved-off-registry", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dir, func(t *testing.T) {
+			if tt.network && testing.Short() {
+				t.Skip("network")
+			}
+			head := readPoC(t, tt.dir)
+			base := map[string][]byte{"package.json": head["package.json"], "package-lock.json": []byte(pocBaseLock)}
+			dir, b, h := gittest.Repo(t, base, head)
+			class := model.Classification{Repo: "test/poc", PR: 1, BaseSHA: b, HeadSHA: h, Kind: model.KindDependabot, Ecosystem: model.NPM,
+				Declared: []model.Update{{Name: "is-number", To: "7.0.0"}}}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Class: class, RepoDir: dir, Scratch: t.TempDir(), HTTP: ecoutil.NewClient()}
+			res, err := fetch.Run(context.Background(), env, fetch.Registry{model.NPM: Fetcher{}}, ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Route != model.RouteRefuse {
+				t.Errorf("route = %s", res.Route)
+			}
+			wantRefuse(t, res.Findings, tt.code)
+		})
+	}
+}

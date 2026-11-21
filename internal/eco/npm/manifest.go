@@ -30,7 +30,7 @@ func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir strin
 	var findings []model.Finding
 	refuse := func(name, format string, args ...any) {
 		findings = append(findings, model.Finding{Code: "npm.manifest-changed", Route: model.RouteRefuse, Update: name,
-			Detail: depDir + "/package.json: " + fmt.Sprintf(format, args...)})
+			Detail: path.Join(depDir, "package.json") + ": " + fmt.Sprintf(format, args...)})
 	}
 	var docs [2]map[string]any
 	for i, sha := range []string{base, head} {
@@ -43,7 +43,7 @@ func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir strin
 		}
 		if err := strictjson.Unmarshal(b, &docs[i]); err != nil {
 			findings = append(findings, model.Finding{Code: "npm.manifest-ambiguous", Route: model.RouteRefuse,
-				Detail: fmt.Sprintf("%s/package.json at %s: %v", depDir, sha, err)})
+				Detail: fmt.Sprintf("%s at %s: %v", path.Join(depDir, "package.json"), sha, err)})
 			return findings, nil
 		}
 		if docs[i] == nil {

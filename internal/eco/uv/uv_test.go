@@ -825,3 +825,42 @@ func TestArtifactCapCountsDownloads(t *testing.T) {
 		})
 	}
 }
+
+// TestPoCRoute runs the review's PoCs through fetch.Run end to end: the
+// route is refuse, for the gate's own reason, and not a job error.
+func TestPoCRoute(t *testing.T) {
+	dual := gittest.ReadDir(t, "testdata/poc/dualsource")
+	tests := []struct {
+		name       string
+		base, head map[string][]byte
+		declared   []model.Update
+		code       string
+		network    bool
+	}{
+		{"buildsystem", gittest.ReadDir(t, "testdata/poc/buildsystem/base"), gittest.ReadDir(t, "testdata/poc/buildsystem/head"), nil, "uv.manifest-changed", false},
+		{"dualsource", map[string][]byte{"pyproject.toml": dual["pyproject.toml"]}, dual, []model.Update{{Name: "six", To: "1.16.0"}}, "uv.source-ambiguous", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.network && testing.Short() {
+				t.Skip("network")
+			}
+			dir, b, h := gittest.Repo(t, tt.base, tt.head)
+			class := model.Classification{Repo: "test/poc", PR: 1, BaseSHA: b, HeadSHA: h, Kind: model.KindDependabot, Ecosystem: model.UV, Declared: tt.declared}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Class: class, RepoDir: dir, Scratch: t.TempDir(), HTTP: ecoutil.NewClient()}
+			res, err := fetch.Run(context.Background(), env, fetch.Registry{model.UV: Fetcher{}}, ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Route != model.RouteRefuse {
+				t.Errorf("route = %s", res.Route)
+			}
+			wantRefuse(t, res.Findings, tt.code)
+		})
+	}
+}
