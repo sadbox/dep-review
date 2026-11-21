@@ -256,6 +256,18 @@ func TestCheckTrees(t *testing.T) {
 			map[string]string{"a.go": "package p\nfunc init() { helper() }\nfunc helper() {}\nfunc other() { println(1) }\n"},
 			nil},
 		{"interface assertion idiom", nil, map[string]string{"a.go": "package p\ntype I interface{ M() }\ntype T struct{}\nfunc (*T) M() {}\nvar _ I = (*T)(nil)\n"}, nil},
+		// "X is a type" evidence only from files compiled into the package everywhere.
+		{"type only in a test file", nil, map[string]string{"a.go": "package p\nvar f = g\nvar _ = (*T)(nil)\nfunc g() {}\n", "a_test.go": "package p\ntype T func()\n"}, []string{codeVarInit}},
+		{"type only in a build-tagged file", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "//go:build linux\n\npackage p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"type only in a GOOS file", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b_windows.go": "package p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"type in another package clause", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "package q\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"type and var under one name", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "package p\ntype T struct{}\n", "c.go": "//go:build ignore\n\npackage p\nvar T *func()\n"}, []string{codeInitCallee, codeVarInit}},
+		{"dot import", nil, map[string]string{"a.go": "package p\nimport . \"example.com/q\"\nvar _ = (*T)(nil)\n", "b.go": "package p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		// The walk compares every other declaration under a root's name.
+		{"method named like a var root",
+			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { var t T; return t.run() }\ntype T struct{}\n", "b.go": "package p\nfunc (T) run() int { return 1 }\n"},
+			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { var t T; return t.run() }\ntype T struct{}\n", "b.go": "package p\nfunc (T) run() int { return 2 }\n"},
+			[]string{codeInitCallee}},
 		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
 	}

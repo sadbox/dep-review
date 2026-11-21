@@ -151,8 +151,8 @@ var cgoSourceExts = map[string]bool{
 // looks binary is still parsed, and fails as unparseable).
 func CheckTrees(old, cur *ecoutil.Tree) hits {
 	h := hits{}
-	shadow := map[string]map[string]bool{} // package directory -> package-level names
-	goDirs := map[string]bool{}            // package directories with a changed non-test .go file
+	shadow := map[string]*pkgScope{} // package directory -> scope
+	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
 	for _, rel := range cur.Files {
 		data := cur.ReadFile(rel)
 		var prev []byte
@@ -171,7 +171,7 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 			}
 			dir := path.Dir(rel)
 			if _, ok := shadow[dir]; !ok {
-				shadow[dir] = packageNames(cur, dir)
+				shadow[dir] = packageScope(cur, dir)
 			}
 			goDirs[dir] = true
 			checkGoFile(h, rel, prev, data, shadow[dir])
@@ -195,7 +195,7 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 	}
 	for _, dir := range slices.Sorted(maps.Keys(goDirs)) {
 		if shadow[dir] == nil {
-			shadow[dir] = packageNames(cur, dir)
+			shadow[dir] = packageScope(cur, dir)
 		}
 		for _, name := range initCalleesChanged(old, cur, dir, shadow[dir]) {
 			h.add(codeInitCallee, path.Join(dir, name))
@@ -207,9 +207,9 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 // declInfo is one package-level declaration: its source text and the
 // identifiers it mentions.
 type declInfo struct {
-	text  string
-	refs  []string
-	names []string // for a var root: the names it declares
+	text string
+	refs []string
+	root bool // a var spec that is also an init root (compared by codeVarInit instead)
 }
 
 // pkgIndex is the package-level declarations of one package directory,
@@ -234,7 +234,7 @@ func identsIn(n ast.Node) []string {
 	return out
 }
 
-func indexPackage(t *ecoutil.Tree, dir string, shadow map[string]bool) pkgIndex {
+func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope) pkgIndex {
 	ix := pkgIndex{decls: map[string][]declInfo{}}
 	if t == nil {
 		return ix
@@ -287,19 +287,19 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow map[string]bool) pkgIndex 
 				for _, s := range d.Specs {
 					switch s := s.(type) {
 					case *ast.ValueSpec:
-						var di declInfo
-						for _, n := range s.Names {
-							di = add(n.Name, s)
-						}
+						di := declInfo{text: text(s), refs: identsIn(s)}
 						if d.Tok == token.VAR {
 							for _, v := range s.Values {
-								if mayCall(v, pkgs, shadow) {
-									for _, n := range s.Names {
-										di.names = append(di.names, n.Name)
-									}
+								if mayCall(v, fileScope{shadow, file.Name.Name, pkgs, pkgs["."] != ""}) {
+									di.root = true
 									ix.roots = append(ix.roots, di)
 									break
 								}
+							}
+						}
+						for _, n := range s.Names {
+							if n.Name != "_" { // a blank var cannot be referenced
+								ix.decls[n.Name] = append(ix.decls[n.Name], di)
 							}
 						}
 					case *ast.TypeSpec:
@@ -337,15 +337,12 @@ func recvTypeName(e ast.Expr) string {
 // identifier spelled like a declaration counts), which is the safe side.
 // Calls into other packages, even of the same module, are not followed:
 // a changed function there is only flagged if it is itself an init root.
-func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow map[string]bool) []string {
+func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope) []string {
 	o, n := indexPackage(old, dir, shadow), indexPackage(cur, dir, shadow)
 	seen := map[string]bool{}
 	var queue []string
 	for _, r := range n.roots {
 		queue = append(queue, r.refs...)
-		for _, name := range r.names {
-			seen[name] = true // the root itself is compared by codeVarInit
-		}
 	}
 	var changed []string
 	for len(queue) > 0 {
@@ -355,11 +352,14 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow map[string]bo
 			continue
 		}
 		seen[name] = true
-		ds, ok := n.decls[name]
-		if !ok {
+		// A var root's own spec is compared by codeVarInit; every other
+		// declaration under the name (a method, a declaration in another
+		// file or under other build tags) is compared and followed here.
+		ds := nonRoots(n.decls[name])
+		if len(ds) == 0 && len(nonRoots(o.decls[name])) == 0 {
 			continue
 		}
-		if !sameDecls(o.decls[name], ds) {
+		if !sameDecls(nonRoots(o.decls[name]), ds) {
 			changed = append(changed, name)
 		}
 		for _, d := range ds {
@@ -368,6 +368,16 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow map[string]bo
 	}
 	sort.Strings(changed)
 	return changed
+}
+
+func nonRoots(ds []declInfo) []declInfo {
+	var out []declInfo
+	for _, d := range ds {
+		if !d.root {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func sameDecls(a, b []declInfo) bool {
@@ -383,48 +393,111 @@ func sameDecls(a, b []declInfo) bool {
 	return slices.Equal(ta, tb)
 }
 
-// packageNames returns the package-level names declared by the .go files
-// of directory dir, which can shadow a builtin for every file there. The
-// value is true when every declaration of the name is a type (so (*T)(x)
-// is a conversion). A file that does not parse contributes every builtin
-// name, as a non-type.
-func packageNames(t *ecoutil.Tree, dir string) map[string]bool {
-	names := map[string]bool{}
-	nonType := func(n string) { names[n] = false }
+// pkgScope is what the initializer check needs to know about a package
+// directory beyond one file.
+type pkgScope struct {
+	// declared: every package-level name in any .go file of the directory
+	// (test files, other packages and build-constrained files included),
+	// any of which may shadow a builtin.
+	declared map[string]bool
+	// types, per package clause: names whose every declaration in the
+	// directory is a type, declared in a file compiled into that package
+	// on every platform (not _test.go, no //go:build or // +build line, no
+	// _GOOS/_GOARCH file name suffix). Only these make (*X)(v) a
+	// conversion; anything else is "unknown" and treated as a call.
+	types map[string]map[string]bool
+}
+
+// packageScope builds the pkgScope of directory dir. A file that does not
+// parse declares every builtin name and makes no name a type.
+func packageScope(t *ecoutil.Tree, dir string) *pkgScope {
+	sc := &pkgScope{declared: map[string]bool{}, types: map[string]map[string]bool{}}
+	nonType := map[string]bool{}
+	typeIn := map[string]map[string]bool{} // name -> package clauses with an unconstrained type decl
 	for _, rel := range t.Files {
 		if path.Dir(rel) != dir || path.Ext(rel) != ".go" {
 			continue
 		}
-		file, err := parser.ParseFile(token.NewFileSet(), rel, t.ReadFile(rel), parser.SkipObjectResolution)
+		file, err := parser.ParseFile(token.NewFileSet(), rel, t.ReadFile(rel), parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			for b := range pureBuiltins {
-				nonType(b)
+				sc.declared[b], nonType[b] = true, true
 			}
 			continue
 		}
+		compiled := !strings.HasSuffix(rel, "_test.go") && !buildConstrained(rel, file)
 		for _, d := range file.Decls {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				if d.Recv == nil {
-					nonType(d.Name.Name)
+					sc.declared[d.Name.Name], nonType[d.Name.Name] = true, true
 				}
 			case *ast.GenDecl:
 				for _, s := range d.Specs {
 					switch s := s.(type) {
 					case *ast.ValueSpec:
 						for _, n := range s.Names {
-							nonType(n.Name)
+							sc.declared[n.Name], nonType[n.Name] = true, true
 						}
 					case *ast.TypeSpec:
-						if _, seen := names[s.Name.Name]; !seen {
-							names[s.Name.Name] = true
+						sc.declared[s.Name.Name] = true
+						if !compiled {
+							nonType[s.Name.Name] = true
+							continue
 						}
+						if typeIn[s.Name.Name] == nil {
+							typeIn[s.Name.Name] = map[string]bool{}
+						}
+						typeIn[s.Name.Name][file.Name.Name] = true
 					}
 				}
 			}
 		}
 	}
-	return names
+	for name, pkgs := range typeIn {
+		if nonType[name] {
+			continue
+		}
+		for pkg := range pkgs {
+			if sc.types[pkg] == nil {
+				sc.types[pkg] = map[string]bool{}
+			}
+			sc.types[pkg][name] = true
+		}
+	}
+	return sc
+}
+
+// knownOS and knownArch are the GOOS and GOARCH values the go command
+// recognizes in file name suffixes (go/build's syslist).
+var knownOS = strings.Fields("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris wasip1 windows zos")
+var knownArch = strings.Fields("386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm")
+
+// buildConstrained reports a file that is not compiled on every platform:
+// a //go:build or // +build line before the package clause, or a
+// _GOOS, _GOARCH or _GOOS_GOARCH file name suffix.
+func buildConstrained(rel string, file *ast.File) bool {
+	for _, cg := range file.Comments {
+		if cg.Pos() >= file.Package {
+			break
+		}
+		for _, c := range cg.List {
+			if strings.HasPrefix(c.Text, "//go:build") || strings.HasPrefix(c.Text, "// +build") {
+				return true
+			}
+		}
+	}
+	parts := strings.Split(strings.TrimSuffix(strings.TrimSuffix(path.Base(rel), ".go"), "_test"), "_")
+	n := len(parts)
+	return n >= 2 && (slices.Contains(knownOS, parts[n-1]) || slices.Contains(knownArch, parts[n-1]))
+}
+
+// fileScope is one file's view for the initializer check.
+type fileScope struct {
+	pkg     *pkgScope
+	pkgName string            // the file's package clause
+	imports map[string]string // file-scope name -> import path
+	dotted  bool              // the file has a dot import
 }
 
 // goFacts is what the checks compare between the old and new file.
@@ -439,7 +512,7 @@ type goFacts struct {
 	parsed     bool
 }
 
-func facts(name string, src []byte, shadow map[string]bool) goFacts {
+func facts(name string, src []byte, shadow *pkgScope) goFacts {
 	f := goFacts{imports: map[string]bool{}, blank: map[string]bool{}, directives: map[string]bool{}, blobs: map[string]bool{}}
 	if src == nil {
 		f.parsed = true
@@ -490,7 +563,7 @@ func facts(name string, src []byte, shadow map[string]bool) goFacts {
 				for _, s := range d.Specs {
 					vs := s.(*ast.ValueSpec)
 					for _, v := range vs.Values {
-						if mayCall(v, pkgs, shadow) {
+						if mayCall(v, fileScope{shadow, file.Name.Name, pkgs, pkgs["."] != ""}) {
 							f.varInits = append(f.varInits, text(vs))
 							break
 						}
@@ -524,7 +597,7 @@ func facts(name string, src []byte, shadow map[string]bool) goFacts {
 	return f
 }
 
-func checkGoFile(h hits, rel string, prev, cur []byte, shadow map[string]bool) {
+func checkGoFile(h hits, rel string, prev, cur []byte, shadow *pkgScope) {
 	o, n := facts(rel, prev, shadow), facts(rel, cur, shadow)
 	if !n.parsed {
 		h.add(codeParse, rel)
@@ -600,10 +673,11 @@ var pureBuiltins = map[string]bool{
 
 // mayCall reports whether a package-level initializer can run code: any
 // call other than pureCalls (resolved through the file's imports, so an
-// aliased import does not pass) and pureBuiltins not redeclared in the
-// package (shadow), or a channel receive. A function literal that is only
-// stored is not a call; one that is called is.
-func mayCall(e ast.Expr, pkgs map[string]string, shadow map[string]bool) bool {
+// aliased import does not pass), pureBuiltins not declared anywhere in the
+// package, and conversions the gate can prove are conversions; or a
+// channel receive. A function literal that is only stored is not a call;
+// one that is called is.
+func mayCall(e ast.Expr, fs fileScope) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
 		switch n := n.(type) {
@@ -612,29 +686,29 @@ func mayCall(e ast.Expr, pkgs map[string]string, shadow map[string]bool) bool {
 		case *ast.UnaryExpr:
 			found = found || n.Op == token.ARROW
 		case *ast.CallExpr:
-			found = found || !pureCall(n.Fun, pkgs, shadow)
+			found = found || !pureCall(n.Fun, fs)
 		}
 		return !found
 	})
 	return found
 }
 
-func pureCall(fun ast.Expr, pkgs map[string]string, shadow map[string]bool) bool {
+func pureCall(fun ast.Expr, fs fileScope) bool {
 	switch fn := ast.Unparen(fun).(type) {
 	case *ast.Ident:
-		_, declared := shadow[fn.Name]
-		return pureBuiltins[fn.Name] && !declared
+		return pureBuiltins[fn.Name] && !fs.pkg.declared[fn.Name]
 	case *ast.SelectorExpr:
 		x, ok := fn.X.(*ast.Ident)
-		return ok && pkgs[x.Name] == x.Name && pureCalls[x.Name][fn.Sel.Name]
+		return ok && fs.imports[x.Name] == x.Name && pureCalls[x.Name][fn.Sel.Name]
 	case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType, *ast.StructType:
 		return true // conversion to a type literal
 	case *ast.StarExpr:
-		// (*T)(nil), the "var _ I = (*T)(nil)" idiom, is a conversion when T
-		// is a type of this package; (*p)() with p a variable is a call.
-		// (*pkg.T)(x) is treated as a call: the gate cannot see pkg.
+		// (*T)(nil), the "var _ I = (*T)(nil)" idiom, is a conversion when
+		// T is provably a type of this package; (*p)() with p a variable is
+		// a call. A dot import could supply a same-named non-type, and the
+		// gate cannot see what pkg.X in (*pkg.X)(v) is: both count as calls.
 		id, ok := fn.X.(*ast.Ident)
-		return ok && shadow[id.Name]
+		return ok && !fs.dotted && fs.pkg.types[fs.pkgName][id.Name]
 	}
 	return false
 }
