@@ -35,6 +35,37 @@ const (
 	maxListed     = 100 // sections, symbols, libraries, archive entries
 )
 
+// Budget bounds the bytes DescribeBinary hands to the structured parsers
+// and decompresses, across every call that shares it (one module's
+// binaries). nil means no shared bound, only the per-file caps.
+type Budget struct {
+	Left int64
+}
+
+// take reserves n bytes; it reports false, reserving nothing, when fewer
+// are left.
+func (b *Budget) take(n int64) bool {
+	if b == nil {
+		return true
+	}
+	if b.Left < n {
+		return false
+	}
+	b.Left -= n
+	return true
+}
+
+// left is n, or less if the budget has less left.
+func (b *Budget) left(n int64) int64 {
+	if b == nil {
+		return n
+	}
+	return min(n, max(b.Left, 0))
+}
+
+// budgetNote is printed in place of what a spent budget skipped.
+const budgetNote = "the gate's parse budget for this module is spent"
+
 // DescribeBinary renders bytes a reviewer cannot read as text: size,
 // SHA-256, the type its magic number names, the structure the standard
 // library's parsers find (ELF, Mach-O and PE/COFF headers, sections,
@@ -43,10 +74,10 @@ const (
 // version (hadOld) it also compares the two. Everything it prints from the
 // file (names, strings) is third-party data; the caller writes the result
 // as untrusted evidence.
-func DescribeBinary(cur, old []byte, hadOld bool) string {
+func DescribeBinary(cur, old []byte, hadOld bool, budget *Budget) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "size: %d bytes\nsha256: %x\ntype: %s\n", len(cur), sha256.Sum256(cur), magicType(cur))
-	if s := structure(cur); s != "" {
+	if s := structure(cur, budget); s != "" {
 		b.WriteString("\nstructure (parsed by the gate):\n")
 		b.WriteString(s)
 	}
@@ -146,13 +177,23 @@ func guard(what string, f func() string) (s string) {
 	return f()
 }
 
-func structure(b []byte) string {
+func structure(b []byte, budget *Budget) string {
+	t := magicType(b)
+	switch {
+	case t == "ELF", strings.HasPrefix(t, "PE"), strings.HasPrefix(t, "COFF"), strings.HasPrefix(t, "Mach-O"),
+		t == "zip archive", t == "tar archive", t == "gzip":
+	default:
+		return ""
+	}
 	if len(b) > maxParse {
 		return fmt.Sprintf("  not parsed: larger than %d bytes\n", maxParse)
 	}
+	if !budget.take(int64(len(b))) {
+		return "  not parsed: " + budgetNote + "\n"
+	}
 	var out strings.Builder
 	r := bytes.NewReader(b)
-	switch t := magicType(b); {
+	switch {
 	case t == "ELF":
 		out.WriteString(guard("ELF", func() string { return describeELF(r) }))
 	case strings.HasPrefix(t, "PE"), strings.HasPrefix(t, "COFF"):
@@ -164,9 +205,7 @@ func structure(b []byte) string {
 	case t == "tar archive":
 		out.WriteString(guard("tar", func() string { return describeTar(r) }))
 	case t == "gzip":
-		out.WriteString(guard("gzip", func() string { return describeGzip(r) }))
-	default:
-		return ""
+		out.WriteString(guard("gzip", func() string { return describeGzip(r, budget) }))
 	}
 	out.WriteString(guard("Go build info", func() string { return describeBuildInfo(r) }))
 	return out.String()
@@ -324,7 +363,7 @@ func describeTar(r io.Reader) string {
 	return b.String()
 }
 
-func describeGzip(r io.Reader) string {
+func describeGzip(r io.Reader, budget *Budget) string {
 	z, err := gzip.NewReader(r)
 	if err != nil {
 		return "  gzip: not parsed: " + clip(err.Error()) + "\n"
@@ -334,8 +373,17 @@ func describeGzip(r io.Reader) string {
 	if z.Name != "" {
 		fmt.Fprintf(&b, "  gzip header name: %s\n", clip(z.Name))
 	}
-	data, err := io.ReadAll(io.LimitReader(z, maxGunzip+1))
+	limit := budget.left(maxGunzip)
+	if limit == 0 {
+		b.WriteString("  not decompressed: " + budgetNote + "\n")
+		return b.String()
+	}
+	data, err := io.ReadAll(io.LimitReader(z, limit+1))
+	budget.take(min(int64(len(data)), limit))
 	switch {
+	case int64(len(data)) > limit && limit < maxGunzip:
+		fmt.Fprintf(&b, "  decompressed: stopped after %d bytes: %s\n", limit, budgetNote)
+		data = data[:limit]
 	case len(data) > maxGunzip:
 		fmt.Fprintf(&b, "  decompressed: more than %d bytes (stopped)\n", maxGunzip)
 		data = data[:maxGunzip]

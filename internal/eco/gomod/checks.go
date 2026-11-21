@@ -11,9 +11,11 @@ import (
 	"go/token"
 	"maps"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/evidence"
@@ -109,13 +111,35 @@ type hits map[string][]string
 type report struct {
 	hits hits
 	ctx  map[string]map[string][]string // code -> item -> context blocks
+	// n counts adds of review-routed items. Past model.MaxFlagged the PR
+	// goes to a person whatever the reviewer says, so the costly context
+	// (binary renderings, decoded blobs) is no longer built (full).
+	n int
+	// budget bounds the bytes the binary renderings parse and decompress
+	// for this module.
+	budget *ecoutil.Budget
+	refs   *refIndex // built on first use, once per tree
 }
+
+// moduleParseBudget is report.budget's size.
+const moduleParseBudget = 128 << 20
 
 func newReport() *report {
-	return &report{hits: hits{}, ctx: map[string]map[string][]string{}}
+	return &report{hits: hits{}, ctx: map[string]map[string][]string{}, budget: &ecoutil.Budget{Left: moduleParseBudget}}
 }
 
+// full reports that the module already has as many flagged items as a
+// review can take: one more sends the PR to a person, so that item's
+// context would never be read.
+func (r *report) full() bool { return r.n >= model.MaxFlagged }
+
+// skipped is the context of an item flagged past the cap.
+const skipped = "(context not built: this module has more flagged items than a review can take, so a person decides)\n"
+
 func (r *report) add(code, item string, ctx ...string) {
+	if routeOf(code) == model.RouteReview {
+		r.n++
+	}
 	r.hits[code] = append(r.hits[code], item)
 	if len(ctx) == 0 {
 		return
@@ -202,20 +226,48 @@ func (r *report) render(update, from, to string) []byte {
 }
 
 // quote indents third-party text under the gate's label (see render).
+// Lines are split at "\n" (a "\r\n" pair counts as one); every other
+// line terminator (\r, \v, \f, U+0085, U+2028, U+2029), control and
+// format character is written as a visible escape, so no character of
+// the text can end the quoted line in any reader.
 func quote(label, text string) string {
 	var b strings.Builder
 	b.WriteString(label)
 	b.WriteString(":\n")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.TrimSuffix(text, "\n")
 	for _, line := range strings.Split(text, "\n") {
 		b.WriteString("    | ")
-		b.WriteString(line)
+		b.WriteString(visible(line))
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-// excerpt is lines [line-around, line+around] of src, numbered.
+// visible escapes what could end or rewrite a line: C0 controls but tab,
+// DEL, C1 controls (U+0085 among them) as <0xNN>; U+2028, U+2029 and
+// format characters (bidi controls, zero-width characters, BOM) as
+// <U+XXXX>. Invalid UTF-8 becomes U+FFFD.
+func visible(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			fmt.Fprintf(&b, "<0x%02X>", r)
+		case r == 0x2028 || r == 0x2029 || unicode.Is(unicode.Cf, r):
+			fmt.Fprintf(&b, "<U+%04X>", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// excerpt is lines [line-around, line+around] of src, numbered as the Go
+// toolchain numbers them (at "\n"). Its result is always quoted, which
+// makes any other terminator in a line visible.
 func excerpt(src []byte, line, around int) string {
 	lines := strings.Split(string(src), "\n")
 	var b strings.Builder
@@ -278,9 +330,16 @@ func CheckTrees(old, cur *ecoutil.Tree) *report {
 		testdata := slices.Contains(strings.Split(path.Dir(rel), "/"), "testdata")
 		ext := path.Ext(rel)
 		binary := func() {
+			if h.full() {
+				h.add(codeBinary, safeFile(rel), skipped)
+				return
+			}
+			if h.refs == nil {
+				h.refs = indexRefs(cur)
+			}
 			h.add(codeBinary, safeFile(rel),
-				quote("the gate's rendering of "+safeFile(rel)+" (the module diff cannot show binary content)", ecoutil.DescribeBinary(data, prev, hadOld)),
-				quote("where the module refers to "+safeFile(rel)+" (found by the gate)", binaryRefs(cur, rel)))
+				quote("the gate's rendering of "+safeFile(rel)+" (the module diff cannot show binary content)", ecoutil.DescribeBinary(data, prev, hadOld, h.budget)),
+				quote("where the module refers to "+safeFile(rel)+" (found by the gate)", h.refs.refs(rel)))
 		}
 		switch {
 		case ext == ".go":
@@ -299,9 +358,9 @@ func CheckTrees(old, cur *ecoutil.Tree) *report {
 			goDirs[dir] = true
 			checkGoFile(h, rel, prev, data, shadow[dir])
 		case ext == ".s" || ext == ".S" || ext == ".sx":
-			h.add(codeAsm, safeFile(rel), sourceFacts(rel, prev, data, hadOld))
+			h.add(codeAsm, safeFile(rel), h.sourceFacts(rel, prev, data, hadOld))
 		case cgoSourceExts[ext]:
-			h.add(codeCSource, safeFile(rel), sourceFacts(rel, prev, data, hadOld))
+			h.add(codeCSource, safeFile(rel), h.sourceFacts(rel, prev, data, hadOld))
 		case ext == ".syso":
 			binary()
 		case evidence.IsBinary(data) && !testdata:
@@ -330,15 +389,19 @@ func CheckTrees(old, cur *ecoutil.Tree) *report {
 // sourceFacts is the context for a C or assembly file: its text is in the
 // module diff, so only the gate's facts go here (and a rendering if the
 // file is not text, which the diff cannot show).
-func sourceFacts(rel string, prev, cur []byte, hadOld bool) string {
+func (r *report) sourceFacts(rel string, prev, cur []byte, hadOld bool) string {
 	var b strings.Builder
 	if hadOld {
 		fmt.Fprintf(&b, "changed: %d -> %d bytes; the change is in the module diff, read all of it\n", len(prev), len(cur))
 	} else {
 		fmt.Fprintf(&b, "new file, %d bytes; its full text is in the module diff\n", len(cur))
 	}
-	if evidence.IsBinary(cur) {
-		b.WriteString(quote("it is not text; the gate's rendering of "+safeFile(rel), ecoutil.DescribeBinary(cur, prev, hadOld)))
+	switch {
+	case !evidence.IsBinary(cur):
+	case r.full():
+		b.WriteString(skipped)
+	default:
+		b.WriteString(quote("it is not text; the gate's rendering of "+safeFile(rel), ecoutil.DescribeBinary(cur, prev, hadOld, r.budget)))
 	}
 	return b.String()
 }
@@ -722,7 +785,7 @@ type fileScope struct {
 type goFacts struct {
 	imports    map[string]int
 	cgo        bool
-	preamble   string    // the cgo preamble (the comment above import "C")
+	preamble   string    // the cgo preamble: every import "C" doc comment, raw, as cmd/cgo reads it
 	inits      []snippet // each func init
 	varInits   []snippet // each package-level var spec whose initializer may call
 	blank      map[string]int
@@ -777,11 +840,7 @@ func facts(name string, src []byte, shadow *pkgScope) goFacts {
 			}
 			pkgs[name] = p
 			if p == "C" {
-				if doc := imp.Doc; doc != nil {
-					f.preamble = doc.Text()
-				} else if gd := importDecl(file, imp); gd != nil && gd.Doc != nil {
-					f.preamble = gd.Doc.Text()
-				}
+				f.preamble += cgoPreamble(src, fset, file, imp)
 			}
 		}
 		_, f.cgo = f.imports["C"]
@@ -835,6 +894,40 @@ func facts(name string, src []byte, shadow *pkgScope) goFacts {
 		}
 	}
 	return f
+}
+
+// cgoPreamble is the C code cmd/cgo takes from one import "C": the spec's
+// doc comment or, for a lone spec, the declaration's, from the source
+// bytes with only the comment markers removed (cmd/cgo's commentText). It
+// is not ast's CommentGroup.Text, which drops directive-looking lines
+// ("//x:y" is a C label to cgo) and trims whitespace. Each preamble ends
+// in a newline so preambles join as cgo joins them.
+func cgoPreamble(src []byte, fset *token.FileSet, file *ast.File, spec *ast.ImportSpec) string {
+	cg := spec.Doc
+	if cg == nil {
+		if gd := importDecl(file, spec); gd != nil && len(gd.Specs) == 1 {
+			cg = gd.Doc
+		}
+	}
+	if cg == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range cg.List {
+		raw := string(src[fset.Position(c.Pos()).Offset:fset.Position(c.End()).Offset])
+		switch {
+		case strings.HasPrefix(raw, "//"):
+			b.WriteString(raw[2:] + "\n")
+		case strings.HasPrefix(raw, "/*") && strings.HasSuffix(raw, "*/") && len(raw) >= 4:
+			b.WriteString(raw[2 : len(raw)-2])
+		default:
+			b.WriteString(raw)
+		}
+	}
+	if s := b.String(); !strings.HasSuffix(s, "\n") {
+		return s + "\n"
+	}
+	return b.String()
 }
 
 // importDecl is the import declaration holding spec (whose doc comment is
@@ -919,7 +1012,11 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 	var blobCtx []string
 	for _, lit := range slices.Sorted(maps.Keys(n.blobs)) {
 		if _, had := o.blobs[lit]; !had {
-			blobCtx = append(blobCtx, blobContext(at(n.blobs[lit]), lit))
+			if h.full() {
+				blobCtx = append(blobCtx, skipped)
+				break
+			}
+			blobCtx = append(blobCtx, blobContext(at(n.blobs[lit]), lit, h.budget))
 		}
 	}
 	if len(blobCtx) > 0 {
@@ -932,7 +1029,7 @@ const maxBlobDecode = 1 << 20
 
 // blobContext shows one encoded literal: its start, and what it decodes
 // to if it is plain base64 or hex (rendered like a binary file).
-func blobContext(where, lit string) string {
+func blobContext(where, lit string, budget *ecoutil.Budget) string {
 	var b strings.Builder
 	head := lit[:min(len(lit), 120)]
 	b.WriteString(quote(fmt.Sprintf("string literal at %s, %d bytes; its start", where, len(lit)), head+"..."))
@@ -960,82 +1057,125 @@ func blobContext(where, lit string) string {
 	case len(dec) > maxBlobDecode:
 		fmt.Fprintf(&b, "it decodes as %s to %d bytes, more than the gate renders (%d)\n", how, len(dec), maxBlobDecode)
 	default:
-		b.WriteString(quote(fmt.Sprintf("it decodes as %s; the gate's rendering of the decoded bytes", how), ecoutil.DescribeBinary(dec, nil, false)))
+		b.WriteString(quote(fmt.Sprintf("it decodes as %s; the gate's rendering of the decoded bytes", how), ecoutil.DescribeBinary(dec, nil, false, budget)))
 	}
 	return b.String()
 }
 
-// maxRefFiles and maxRefs bound the search binaryRefs makes.
+// Bounds for indexRefs: files and bytes read, the largest file, the
+// mentions kept per name.
 const (
 	maxRefFiles   = 5000
 	maxRefFileLen = 1 << 20
+	maxRefScan    = 64 << 20
 	maxRefs       = 30
 )
 
-// binaryRefs is where the module refers to the file at rel: whether the
-// linker takes it (.syso), which //go:embed directives match it (in a
-// package at or above its directory: embed patterns cannot use ".."),
-// and which text files mention its name, test files marked as such.
-func binaryRefs(t *ecoutil.Tree, rel string) string {
-	var b strings.Builder
-	dir := path.Dir(rel)
-	if path.Ext(rel) == ".syso" {
-		goFiles := 0
-		for _, f := range t.Files {
-			if path.Dir(f) == dir && path.Ext(f) == ".go" && !strings.HasSuffix(f, "_test.go") {
-				goFiles++
-			}
-		}
-		fmt.Fprintf(&b, "a .syso file is passed to the linker whenever its package directory (%s, %d non-test Go files) is built for a GOOS/GOARCH its name does not exclude: it is linked into the program\n", safeFile(dir), goFiles)
-	}
-	embeds := 0
-	mentions := 0
-	base := path.Base(rel)
+// refIndex is one pass over a module tree for every binary's references:
+// the //go:embed directives, the non-test Go files per directory, and
+// the lines mentioning each file-name-like token.
+type refIndex struct {
+	embeds   []embedLine
+	goFiles  map[string]int      // directory -> non-test .go files
+	mentions map[string][]string // token (and its base name) -> "file:line (test file): text"
+	note     string              // why the index is incomplete, if it is
+}
+
+type embedLine struct {
+	file, dir string
+	line      int
+	args      string
+	test      bool
+}
+
+var tokenRE = regexp.MustCompile(`[A-Za-z0-9_.+@=-]+(/[A-Za-z0-9_.+@=-]+)*`)
+
+func indexRefs(t *ecoutil.Tree) *refIndex {
+	ix := &refIndex{goFiles: map[string]int{}, mentions: map[string][]string{}}
+	scanned := 0
 	for i, f := range t.Files {
-		if i == maxRefFiles {
-			fmt.Fprintf(&b, "stopped after %d files\n", maxRefFiles)
-			break
+		if path.Ext(f) == ".go" && !strings.HasSuffix(f, "_test.go") {
+			ix.goFiles[path.Dir(f)]++
 		}
-		if f == rel {
+		if i >= maxRefFiles || scanned >= maxRefScan {
+			if ix.note == "" {
+				ix.note = fmt.Sprintf("the search stopped after %d files and %d bytes; files past that were not searched\n", i, scanned)
+			}
 			continue
 		}
 		src := t.ReadFile(f)
 		if len(src) > maxRefFileLen || evidence.IsBinary(src) {
 			continue
 		}
-		test := ""
-		if strings.HasSuffix(f, "_test.go") {
-			test = " (test file)"
+		scanned += len(src)
+		test := strings.HasSuffix(f, "_test.go")
+		mark := ""
+		if test {
+			mark = " (test file)"
 		}
-		fdir := path.Dir(f)
-		above := fdir == "." || dir == fdir || strings.HasPrefix(dir, fdir+"/")
 		for n, line := range strings.Split(string(src), "\n") {
 			tl := strings.TrimSpace(line)
-			if path.Ext(f) == ".go" && above && strings.HasPrefix(tl, "//go:embed") {
-				r := rel
-				if fdir != "." {
-					r = strings.TrimPrefix(rel, fdir+"/")
-				}
-				if pat := embedMatch(strings.TrimPrefix(tl, "//go:embed"), r); pat != "" {
-					embeds++
-					fmt.Fprintf(&b, "embedded: %s:%d%s has //go:embed %s, which matches it\n", safeFile(f), n+1, test, clipText(pat))
-				}
+			if path.Ext(f) == ".go" && strings.HasPrefix(tl, "//go:embed") {
+				ix.embeds = append(ix.embeds, embedLine{f, path.Dir(f), n + 1, strings.TrimPrefix(tl, "//go:embed"), test})
 				continue
 			}
-			if strings.Contains(line, base) && mentions < maxRefs {
-				mentions++
-				fmt.Fprintf(&b, "mentioned at %s:%d%s: %s\n", safeFile(f), n+1, test, clipText(tl))
+			seen := map[string]bool{}
+			for _, tok := range tokenRE.FindAllString(line, 64) {
+				for _, k := range []string{tok, path.Base(tok)} {
+					if seen[k] || len(ix.mentions[k]) >= maxRefs {
+						continue
+					}
+					seen[k] = true
+					ix.mentions[k] = append(ix.mentions[k], fmt.Sprintf("%s:%d%s: %s", safeFile(f), n+1, mark, clipText(tl)))
+				}
 			}
+		}
+	}
+	return ix
+}
+
+// refs is where the module refers to the file at rel: whether the linker
+// takes it (.syso), which //go:embed directives match it (in a package at
+// or above its directory: embed patterns cannot use ".."), and which text
+// files mention its name, test files marked as such.
+func (ix *refIndex) refs(rel string) string {
+	var b strings.Builder
+	dir := path.Dir(rel)
+	if path.Ext(rel) == ".syso" {
+		fmt.Fprintf(&b, "a .syso file is passed to the linker whenever its package directory (%s, %d non-test Go files) is built for a GOOS/GOARCH its name does not exclude: it is linked into the program\n", safeFile(dir), ix.goFiles[dir])
+	}
+	embeds := 0
+	for _, e := range ix.embeds {
+		if !(e.dir == "." || e.dir == dir || strings.HasPrefix(dir, e.dir+"/")) {
+			continue
+		}
+		r := rel
+		if e.dir != "." {
+			r = strings.TrimPrefix(rel, e.dir+"/")
+		}
+		if pat := embedMatch(e.args, r); pat != "" {
+			embeds++
+			test := ""
+			if e.test {
+				test = " (test file)"
+			}
+			fmt.Fprintf(&b, "embedded: %s:%d%s has //go:embed %s, which matches it\n", safeFile(e.file), e.line, test, clipText(pat))
 		}
 	}
 	if embeds == 0 {
 		b.WriteString("no //go:embed directive in the module matches it\n")
 	}
-	if mentions == 0 {
+	ms := ix.mentions[path.Base(rel)]
+	for _, m := range ms {
+		b.WriteString("mentioned at " + m + "\n")
+	}
+	switch {
+	case len(ms) == 0:
 		b.WriteString("no text file in the module mentions its name\n")
-	} else if mentions == maxRefs {
+	case len(ms) == maxRefs:
 		fmt.Fprintf(&b, "(first %d mentions shown)\n", maxRefs)
 	}
+	b.WriteString(ix.note)
 	return b.String()
 }
 

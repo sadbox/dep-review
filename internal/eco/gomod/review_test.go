@@ -117,7 +117,8 @@ func TestRenderDirectivesAndImports(t *testing.T) {
 	for _, want := range []string{
 		"directive at a.go:5:\n",
 		"    |     5  //go:linkname now runtime.nanotime\n",
-		"new cgo preamble (C code compiled into the package):\n    | #include <stdlib.h>\n    | static void boom(void) { system(\"id\"); }\n",
+		// Raw, as cgo reads it: the space after "//" is kept.
+		"new cgo preamble (C code compiled into the package):\n    |  #include <stdlib.h>\n    |  static void boom(void) { system(\"id\"); }\n",
 		"import at e.go:3",
 		"item: x.c\nchanged: 26 -> 26 bytes; the change is in the module diff",
 		"item: x.s\nnew file, 22 bytes",
