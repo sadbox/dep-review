@@ -120,7 +120,8 @@ type pair struct {
 	// childSubs: lockfile key of each nested uses: in the new action.yml
 	// files -> the action subpaths it names (for transitive pairs).
 	childSubs  map[string][]string
-	start, end int // this pair's findings in findings.list
+	evTag      string // set on an extra pair for more subpaths of an analyzed range
+	start, end int    // this pair's findings in findings.list
 	update     model.Update
 }
 
@@ -145,6 +146,7 @@ type findings struct {
 type nestedNote struct {
 	idx int    // in list
 	key string // lockfile key of the nested uses:
+	sub string // the action subpath it names
 	p   *pair
 }
 
@@ -256,13 +258,6 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 	for _, t := range trans {
 		owner, repo, _ := strings.Cut(t.nwo, "/")
 		key := fetch.NormalizeName(model.GitHubActions, t.nwo) + "@" + t.oldEntry.commit + ".." + t.newEntry.commit
-		if p := pairs[key]; p != nil {
-			if !contains(p.lockNewKeys, t.newKey) {
-				p.lockNewKeys = append(p.lockNewKeys, t.newKey)
-				byNewKey[t.newKey] = append(byNewKey[t.newKey], p)
-			}
-			continue
-		}
 		var subs []string
 		for _, parent := range byNewKey[t.parentNewKey] {
 			for _, sub := range parent.childSubs[t.newKey] {
@@ -271,6 +266,28 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 				}
 			}
 		}
+		evTag := ""
+		if p := pairs[key]; p != nil {
+			// Already analyzed (a bump, or another parent's pair). It
+			// explains this key only for the subpaths it read; any other
+			// subpath the parent runs is analyzed now, as its own pair.
+			if !contains(p.lockNewKeys, t.newKey) {
+				p.lockNewKeys = append(p.lockNewKeys, t.newKey)
+				byNewKey[t.newKey] = append(byNewKey[t.newKey], p)
+			}
+			var missing []string
+			for _, sub := range subs {
+				if !p.identityOnly && !contains(p.subs, sub) && !extraCovers(pairs, key, sub) {
+					missing = append(missing, sub)
+				}
+			}
+			if len(missing) == 0 || t.sameCommit {
+				continue
+			}
+			subs = missing
+			evTag = fmt.Sprintf("sub%d", len(pairs))
+			key += "|" + evTag
+		}
 		if len(subs) == 0 && !t.sameCommit {
 			fs.add(model.RouteHuman, "actions.lock-transitive-unanalyzed", t.nwo, "transitive %s (actions.lock %s): its parent's new action.yml was not read, so the gate cannot tell which action of the repository runs", t.newKey, t.via)
 			continue
@@ -278,7 +295,7 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 		p := &pair{owner: owner, repo: repo, oldRef: t.oldEntry.commit, newRef: t.newEntry.commit, subs: subs, directory: "/",
 			lock: true, lockOldTags: []string{t.oldEntry.ref}, lockNewTags: []string{t.newEntry.ref},
 			lockEntries: []*lockEntry{t.newEntry}, lockNewKeys: []string{t.newKey},
-			transitive: true, identityOnly: t.sameCommit, via: t.via}
+			transitive: true, identityOnly: t.sameCommit, via: t.via, evTag: evTag}
 		pairs[key] = p
 		if err := run(p); err != nil {
 			return fetch.Result{}, err
@@ -734,7 +751,21 @@ func evName(p *pair, file string) string {
 	if p.transitive {
 		dir = "actions/transitive"
 	}
-	return fmt.Sprintf("%s/%s__%s/%s-%s/%s", dir, strings.ToLower(p.owner), strings.ToLower(p.repo), short(p.oldRef)[:7], short(p.newRef)[:7], file)
+	tag := ""
+	if p.evTag != "" {
+		tag = "-" + p.evTag
+	}
+	return fmt.Sprintf("%s/%s__%s/%s-%s%s/%s", dir, strings.ToLower(p.owner), strings.ToLower(p.repo), short(p.oldRef)[:7], short(p.newRef)[:7], tag, file)
+}
+
+// extraCovers reports whether an extra pair (key|subN) already covers sub.
+func extraCovers(pairs map[string]*pair, key, sub string) bool {
+	for k, p := range pairs {
+		if strings.HasPrefix(k, key+"|") && contains(p.subs, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkIdentity is the identity part of analyzePair, for a commit that did
@@ -773,8 +804,8 @@ func (f *fetcher) checkIdentity(ctx context.Context, up *upstream, def string, p
 // explainNested marks a locked pair's actions.nested-uses-changed finding
 // explained (route review, code actions.nested-uses-locked) when its new
 // actions.lock entry lists the nested action and a pair that runs that
-// lockfile key passed its own analysis (version policy and findings no
-// worse than review). Passing is computed to a fixed point, so a chain of
+// lockfile key, and read the action at that subpath, passed its own
+// analysis (version policy and findings no worse than review). Passing is computed to a fixed point, so a chain of
 // composites is explained bottom-up. A nested change the lockfile does
 // not explain keeps its route.
 func explainNested(analyzed []*pair, byNewKey map[string][]*pair, fs *findings) {
@@ -807,7 +838,10 @@ func explainNested(analyzed []*pair, byNewKey map[string][]*pair, fs *findings) 
 				continue
 			}
 			for _, q := range byNewKey[n.key] {
-				if passing[q] {
+				// q must have read the action at this subpath: a pair
+				// that analyzed another subpath of the repository does
+				// not explain it (an identity-only pair reads none).
+				if passing[q] && !q.identityOnly && contains(q.subs, n.sub) {
 					suppressed[n.idx], changed = q, true
 					break
 				}
@@ -982,8 +1016,8 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		mf, text := compareActionMeta(sub, om, nm)
 		for _, x := range mf {
 			fs.add(x.route, x.code, name, "%s", x.detail)
-			if k, _, ok := nestedKey(x.uses); ok && p.lock && x.code == "actions.nested-uses-changed" {
-				fs.nested = append(fs.nested, nestedNote{idx: len(fs.list) - 1, key: k, p: p})
+			if k, ksub, ok := nestedKey(x.uses); ok && p.lock && x.code == "actions.nested-uses-changed" {
+				fs.nested = append(fs.nested, nestedNote{idx: len(fs.list) - 1, key: k, sub: ksub, p: p})
 			}
 		}
 		if p.lock {

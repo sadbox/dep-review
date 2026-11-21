@@ -409,6 +409,16 @@ func TestActionsLockDelta(t *testing.T) {
 			pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.0"}},
 		{name: "transitive entry moves to another repository's IDs", after: map[string]string{lp: strings.Replace(strings.Replace(synthBumped(), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), "        repo_id: 3\n", "        repo_id: 30\n", 1), wfp: synthWorkflow("v1.0.1")},
 			codes: map[string]model.Route{"actions.lock-identity-changed": model.RouteHuman}, pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.0"}},
+		// A pin the bumped entry dropped, or a pair's old key, explains only
+		// its own removal: if it stays in the lockfile at another commit,
+		// that change is not analyzed and must not be accepted.
+		{name: "dropped transitive pin stays and moves", after: map[string]string{lp: strings.Replace(strings.Replace(synthBumped(), "        repo_id: 2\n        uses:\n            - 'acme/helper@v2.0.0'\n", "        repo_id: 2\n", 1), "sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1), wfp: synthWorkflow("v1.0.1")},
+			codes: map[string]model.Route{"actions.lock-entry-moved": model.RouteHuman}},
+		{name: "old key of a transitive pair stays and moves", after: map[string]string{lp: strings.Replace(strings.Replace(strings.Replace(synthBumped(),
+			"            - 'acme/helper@v2.0.0'\n", "            - 'acme/helper@v2.0.1'\n", 1),
+			"sha1-2222222222222222222222222222222222222222", "sha1-8888888888888888888888888888888888888888", 1),
+			"    'other/tool@v3.0.0':\n", "    'acme/helper@v2.0.1':\n        ref: 'v2.0.1'\n        commit: 'sha1-9999999999999999999999999999999999999999'\n        owner_id: 1\n        repo_id: 3\n    'other/tool@v3.0.0':\n", 1), wfp: synthWorkflow("v1.0.1")},
+			codes: map[string]model.Route{"actions.lock-entry-moved": model.RouteHuman}, pairs: []string{"acme/helper@v2.0.0 -> acme/helper@v2.0.1"}},
 		// An entry the base locked as is: no new code, so no pair (the
 		// composite's nested-uses finding still routes it at fetch time).
 		{name: "bumped action gains an already locked pin", after: map[string]string{lp: strings.Replace(synthBumped(), "            - 'acme/helper@v2.0.0'\n", "            - 'acme/helper@v2.0.0'\n            - 'other/tool@v3.0.0'\n", 1), wfp: synthWorkflow("v1.0.1")}},

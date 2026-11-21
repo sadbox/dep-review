@@ -35,6 +35,10 @@ func repoAPI(r map[string]any, nwo string, id, ownerID int, old, new, oldTag, ne
 type transScenario struct {
 	name    string
 	helper2 func(map[string]string) // edits acme/helper's v2.0.1 tree
+	// sub: the composite runs acme/helper/<sub> instead of the root;
+	// directHelper: the workflow also bumps acme/helper (the root) itself.
+	sub          string
+	directHelper bool
 	// lockNew replaces the head lockfile, built with lock(actTag, act, helperTag, helper).
 	lockNew  func(lock func(string, string, string, string) string, a2, h1, h2 string) string
 	api      func(r map[string]any, h1, h2 string)
@@ -58,26 +62,42 @@ func runTransitive(t *testing.T, sc transScenario) {
 		return d
 	}
 	hd := mkUp("acme/helper")
-	f2 := v2Files()
+	f1, f2 := v1Files(), v2Files()
+	if sc.sub != "" {
+		f1[sc.sub+"/action.yml"] = "name: sub\ndescription: sub action\nruns:\n  using: node24\n  main: ../dist/index.js\n"
+		f2[sc.sub+"/action.yml"] = f1[sc.sub+"/action.yml"]
+	}
 	if sc.helper2 != nil {
 		sc.helper2(f2)
 	}
-	h1 := commitTree(t, hd, v1Files(), "v2.0.0")
+	h1 := commitTree(t, hd, f1, "v2.0.0")
 	h2 := commitTree(t, hd, f2, "v2.0.1")
 	composite := func(ref string) map[string]string {
-		return map[string]string{"action.yml": "name: act\ndescription: composite\nruns:\n  using: composite\n  steps:\n    - uses: acme/helper@" + ref + "\n"}
+		path := "acme/helper"
+		if sc.sub != "" {
+			path += "/" + sc.sub
+		}
+		return map[string]string{"action.yml": "name: act\ndescription: composite\nruns:\n  using: composite\n  steps:\n    - uses: " + path + "@" + ref + "\n"}
 	}
 	ad := mkUp("acme/act")
 	a1 := commitTree(t, ad, composite("v2.0.0"), "v1.0.0")
 	a2 := commitTree(t, ad, composite("v2.0.1"), "v1.0.1")
 
 	lock := func(actTag, act, helperTag, helper string) string {
-		return "version: 'v0.0.3'\nworkflows:\n    '.github/workflows/ci.yml':\n        - 'acme/act@" + actTag + "'\ndependencies:\n" +
+		list := "        - 'acme/act@" + actTag + "'\n"
+		if sc.directHelper {
+			list += "        - 'acme/helper@" + helperTag + "'\n"
+		}
+		return "version: 'v0.0.3'\nworkflows:\n    '.github/workflows/ci.yml':\n" + list + "dependencies:\n" +
 			"    'acme/act@" + actTag + "':\n        ref: '" + actTag + "'\n        commit: 'sha1-" + act + "'\n        owner_id: 1\n        repo_id: 2\n        uses:\n            - 'acme/helper@" + helperTag + "'\n" +
 			"    'acme/helper@" + helperTag + "':\n        ref: '" + helperTag + "'\n        commit: 'sha1-" + helper + "'\n        owner_id: 1\n        repo_id: 3\n"
 	}
 	wfText := func(tag string) string {
-		return "name: ci\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-26.04\n    steps:\n      - uses: acme/act@" + tag + "\n"
+		w := "name: ci\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-26.04\n    steps:\n      - uses: acme/act@" + tag + "\n"
+		if sc.directHelper {
+			w += "      - uses: acme/helper@" + map[string]string{"v1.0.0": "v2.0.0", "v1.0.1": "v2.0.1"}[tag] + "\n"
+		}
+		return w
 	}
 	newLock := lock("v1.0.1", a2, "v2.0.1", h2)
 	if sc.lockNew != nil {
@@ -106,7 +126,11 @@ func runTransitive(t *testing.T, sc transScenario) {
 		t.Fatal(err)
 	}
 	// Through CompareDeclared as fetch.Run does: Dependabot declares only act.
-	updates, dfs := fetch.CompareDeclared(model.GitHubActions, []model.Update{{Name: "acme/act", From: "1.0.0", To: "1.0.1"}}, res.Updates)
+	declared := []model.Update{{Name: "acme/act", From: "1.0.0", To: "1.0.1"}}
+	if sc.directHelper {
+		declared = append(declared, model.Update{Name: "acme/helper", From: "2.0.0", To: "2.0.1"})
+	}
+	updates, dfs := fetch.CompareDeclared(model.GitHubActions, declared, res.Updates)
 	all := append(append([]model.Finding(nil), res.Findings...), dfs...)
 	got := policy.Combine(updates, all, false)
 	codes := map[string]bool{}
@@ -197,6 +221,25 @@ func TestFetchTransitive(t *testing.T) {
 				return lock("v1.0.1", a2, "v2.0.0", h1)
 			}},
 	}
+	// The workflow bumps acme/helper (its root action) and the composite
+	// runs acme/helper/sub over the same commits: the bump's analysis read
+	// only the root action.yml, so it cannot explain the sub action.
+	subPost := func(f map[string]string) { f["sub/action.yml"] += "  post: ../dist/index.js\n" }
+	scenarios = append(scenarios,
+		transScenario{name: "same range, other subpath, clean", sub: "sub", directHelper: true, want: model.RouteReview,
+			codes: []string{"actions.nested-uses-locked"}, notCodes: []string{"actions.nested-uses-changed"},
+			check: func(t *testing.T, res fetch.Result, ev *memEvidence) {
+				var tagged bool
+				for _, n := range ev.names() {
+					tagged = tagged || (strings.HasPrefix(n, "actions/transitive/acme__helper/") && strings.Contains(n, "-sub"))
+				}
+				if !tagged {
+					t.Errorf("sub action not analyzed as its own pair: %v", ev.names())
+				}
+			}},
+		transScenario{name: "same range, other subpath gains a post hook", sub: "sub", directHelper: true, helper2: subPost, want: model.RouteHuman,
+			codes: []string{"actions.entrypoint-added", "actions.nested-uses-changed"}, notCodes: []string{"actions.nested-uses-locked"}},
+	)
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			t.Parallel()
