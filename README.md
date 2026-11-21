@@ -35,10 +35,8 @@ PR opened/synchronized
             review   model reads ./evidence and ./repo → verdict    (read-only + OIDC)
             publish  decide, comment, status, merge on green CI     (gate app)
   schedule → sweep   merge approved PRs whose CI finished later;    (gate app)
-                     classify undecided heads again and re-run their
-                     trigger once they can be decided (e.g. a branch
-                     activity log that had not caught up: dependabot-
-                     pending); report PRs stuck without a decision
+                     report PRs stuck without a decision (including
+                     dependabot-pending ones) so a maintainer re-runs them
 ```
 
 `publish` sets a commit status `dep-review` on the head SHA (by the gate
@@ -86,8 +84,7 @@ one is reviewed by this gate too.
    (the gate app's private key), and optionally `PUSHOVER_APP_TOKEN` /
    `PUSHOVER_USER_KEY`.
 4. Install the gate app on the repository (permissions: contents, pull
-   requests, workflows, commit statuses, actions: write; checks: read).
-   Actions write lets sweep re-run a head's trigger workflow run.
+   requests, workflows, commit statuses: write; checks, actions: read).
 5. Create an active branch ruleset (any name) targeting
    `refs/heads/dependabot/**` with the rules *Restrict creations*,
    *Restrict updates* and *Restrict deletions*, and Dependabot as the only

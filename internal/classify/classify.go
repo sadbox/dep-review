@@ -232,10 +232,10 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	// authored by dependabot[bot], committed by web-flow and signed by
 	// GitHub. The branch's activity log records who moved the ref.
 	// The activity log lags the push by a little; give it a moment, and if
-	// it still has not caught up, decide nothing (sweep classifies again).
+	// it still has not caught up, decide nothing (sweep reports it).
 	why, lag := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
-	for try := 0; lag && try < historyRetries; try++ {
-		if err := sleep(ctx, historyRetryDelay); err != nil {
+	for try := 0; lag && try < len(historyBackoff); try++ {
+		if err := sleep(ctx, historyBackoff[try]); err != nil {
 			return model.Classification{}, err
 		}
 		why, lag = branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
@@ -322,11 +322,10 @@ type activity struct {
 	Actor        *user  `json:"actor"`
 }
 
-// How long classify waits for the activity log to reach the head.
-const (
-	historyRetries    = 3
-	historyRetryDelay = 10 * time.Second
-)
+// historyBackoff is how long classify waits before each re-read of an
+// activity log that has not reached the head yet: about two minutes in
+// all, inside the classify job's timeout.
+var historyBackoff = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 45 * time.Second}
 
 // branchHistoryProblem reads the head branch's activity log (oldest first)
 // and returns why it does not prove that only Dependabot moved the branch

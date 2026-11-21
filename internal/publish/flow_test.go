@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sadbox/dep-review/internal/classify"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
@@ -47,7 +46,6 @@ type fakeGH struct {
 	// GET actions/runs?head_sha=: the workflow file of each check suite.
 	workflowRuns []map[string]any
 	onCheckRuns  func(f *fakeGH, call int)
-	reruns       []string // POST actions/runs/{id}/rerun
 	merges       []map[string]string
 	commitDate   time.Time
 	patches      int
@@ -108,11 +106,6 @@ func (f *fakeGH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(b, &body)
 	}
 	switch {
-	case r.Method == "GET" && r.URL.Path == "/repos/o/r":
-		js(map[string]any{"full_name": "o/r", "private": true})
-	case r.Method == "POST" && len(parts) == 4 && parts[0] == "actions" && parts[1] == "runs" && parts[3] == "rerun":
-		f.reruns = append(f.reruns, parts[2])
-		w.WriteHeader(201)
 	case r.Method == "GET" && p == "pulls" && r.URL.Query().Get("state") == "open":
 		var list []map[string]any
 		for _, pr := range f.prs {
@@ -642,65 +635,25 @@ func TestPublishPending(t *testing.T) {
 	}
 }
 
-// Sweep classifies an undecided head again and, once it can be decided,
-// re-runs its trigger; a head that stays pending is reported as stuck.
-func TestSweepRecheck(t *testing.T) {
-	triggerRun := map[string]any{
-		"id": 55, "event": "pull_request", "path": trigger, "status": "completed", "head_sha": headSHA,
-		"head_branch": "dependabot/go_modules/x", "head_repository": map[string]any{"full_name": "o/r"},
-		"pull_requests": []any{map[string]any{"number": 7, "head": map[string]any{"sha": headSHA}}},
-	}
-	tests := []struct {
-		name     string
+// A dependabot-pending head has no status: sweep leaves it alone until
+// the stuck threshold, then reports it once so a maintainer re-runs the
+// gate. Nothing is re-run or decided by sweep itself.
+func TestSweepPendingHead(t *testing.T) {
+	for _, tc := range []struct {
 		age      time.Duration
-		runs     []map[string]any
-		kind     model.Kind
-		classify bool // classify called
-		rerun    bool
 		notified int
-	}{
-		{"still pending", time.Hour, []map[string]any{triggerRun}, model.KindPending, true, false, 0},
-		{"log caught up", time.Hour, []map[string]any{triggerRun}, model.KindDependabot, true, true, 0},
-		{"now unverified", time.Hour, []map[string]any{triggerRun}, model.KindDependabotUnverified, true, true, 0},
-		{"too young: the gate may still be running", 5 * time.Minute, []map[string]any{triggerRun}, model.KindDependabot, false, false, 0},
-		{"no trigger run", time.Hour, nil, model.KindDependabot, false, false, 0},
-		{"pending past the stuck threshold", 3 * time.Hour, []map[string]any{triggerRun}, model.KindPending, false, false, 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFake(t)
-			f.workflowRuns = tt.runs
-			cfg, n, ck := setup(t, f)
-			f.commitDate = ck.Now().Add(-tt.age)
-			called := false
-			cfg.Classify = func(_ context.Context, _ *gh.Client, ev []byte, opt classify.Options) (model.Classification, error) {
-				called = true
-				var e struct {
-					WorkflowRun struct {
-						HeadSHA      string                 `json:"head_sha"`
-						PullRequests []struct{ Number int } `json:"pull_requests"`
-					} `json:"workflow_run"`
-					Repository struct {
-						FullName string `json:"full_name"`
-						Private  bool
-					}
-				}
-				json.Unmarshal(ev, &e)
-				if e.WorkflowRun.HeadSHA != headSHA || len(e.WorkflowRun.PullRequests) != 1 || e.WorkflowRun.PullRequests[0].Number != 7 ||
-					e.Repository.FullName != "o/r" || !e.Repository.Private || opt.TriggerPath != trigger {
-					t.Errorf("event %s opt %+v", ev, opt)
-				}
-				return model.Classification{Kind: tt.kind, Reason: "x"}, nil
-			}
-			if err := Sweep(context.Background(), cfg, "o/r"); err != nil {
-				t.Fatal(err)
-			}
-			if called != tt.classify || (len(f.reruns) == 1) != tt.rerun || (tt.rerun && f.reruns[0] != "55") || len(n.msgs) != tt.notified {
-				t.Errorf("classified %v reruns %v notifications %d", called, f.reruns, len(n.msgs))
-			}
-			if len(f.merges) != 0 || len(f.statuses) != 0 {
-				t.Error("sweep merged or set a status")
-			}
-		})
+	}{{time.Hour, 0}, {3 * time.Hour, 1}} {
+		f := newFake(t)
+		cfg, n, ck := setup(t, f)
+		f.commitDate = ck.Now().Add(-tc.age)
+		if err := Sweep(context.Background(), cfg, "o/r"); err != nil {
+			t.Fatal(err)
+		}
+		if len(n.msgs) != tc.notified || len(f.merges) != 0 || len(f.statuses) != 0 {
+			t.Fatalf("age %v: notifications %v merges %d statuses %d", tc.age, n.msgs, len(f.merges), len(f.statuses))
+		}
+		if tc.notified == 1 && !strings.Contains(n.msgs[0].Body, "a maintainer can re-run the gate") {
+			t.Errorf("message %q", n.msgs[0].Body)
+		}
 	}
 }

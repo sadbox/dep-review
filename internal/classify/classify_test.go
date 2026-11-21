@@ -35,7 +35,7 @@ type fixture struct {
 	timeline []map[string]any   // GET issues/7/timeline
 	actSeq   [][]map[string]any // successive activity responses (overrides activity)
 	actCalls int
-	sleeps   int
+	slept    []time.Duration
 	tlCode   int // non-zero: GET timeline fails with this status
 }
 
@@ -168,8 +168,8 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 	c.BaseURL = srv.URL + "/"
 	c.HTTP = srv.Client()
 	ev, _ := json.Marshal(f.event)
-	return Classify(context.Background(), c, ev, Options{TriggerPath: trig, Logf: t.Logf, Sleep: func(context.Context, time.Duration) error {
-		f.sleeps++
+	return Classify(context.Background(), c, ev, Options{TriggerPath: trig, Logf: t.Logf, Sleep: func(_ context.Context, d time.Duration) error {
+		f.slept = append(f.slept, d)
 		return nil
 	}})
 }
@@ -356,17 +356,27 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// The lag case reads the log 1+historyRetries times, sleeping between.
+// The lag case re-reads the log with backoff, about two minutes in all.
 func TestClassifyPendingRetries(t *testing.T) {
 	f := defaultFixture(t)
 	f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
 	got, err := f.run(t)
-	if err != nil || got.Kind != model.KindPending || f.actCalls != 1+historyRetries || f.sleeps != historyRetries {
-		t.Errorf("kind %s err %v: %d reads, %d sleeps", got.Kind, err, f.actCalls, f.sleeps)
+	if err != nil || got.Kind != model.KindPending || f.actCalls != 1+len(historyBackoff) || len(f.slept) != len(historyBackoff) {
+		t.Errorf("kind %s err %v: %d reads, sleeps %v", got.Kind, err, f.actCalls, f.slept)
+	}
+	var total time.Duration
+	for i, d := range f.slept {
+		total += d
+		if i > 0 && d < f.slept[i-1] {
+			t.Errorf("backoff shrinks: %v", f.slept)
+		}
+	}
+	if total < 90*time.Second || total > 150*time.Second {
+		t.Errorf("waited %v in all, want about two minutes", total)
 	}
 	f = defaultFixture(t)
-	if got, _ := f.run(t); got.Kind != model.KindDependabot || f.actCalls != 1 || f.sleeps != 0 {
-		t.Errorf("clean log: kind %s, %d reads, %d sleeps", got.Kind, f.actCalls, f.sleeps)
+	if got, _ := f.run(t); got.Kind != model.KindDependabot || f.actCalls != 1 || len(f.slept) != 0 {
+		t.Errorf("clean log: kind %s, %d reads, sleeps %v", got.Kind, f.actCalls, f.slept)
 	}
 }
 
