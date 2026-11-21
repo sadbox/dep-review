@@ -81,6 +81,8 @@ one is reviewed by this gate too.
 1. Copy `examples/dep-review-trigger.yaml` and `examples/dep-review.yaml`
    into `.github/workflows/`, pin `gate.yml` by commit SHA, set the
    Anthropic IDs.
+   The repository must use immutable OIDC subjects (see "Model
+   credential").
 2. Add `.github/dep-review.md` (review notes; see `examples/dep-review.md`).
 3. Create environment `dep-review` (deployment branches: default branch
    only) with variable `DEP_REVIEW_APP_ID`, secret `DEP_REVIEW_APP_KEY`
@@ -130,15 +132,15 @@ with a fresh OIDC token each time, two minutes before expiry (federated
 tokens live about ten minutes; a review can take twenty). No API key is
 stored anywhere.
 
-Each federation rule's subject pattern is the owner's prefix in whatever
-subject format that owner uses (check the Console's authentication log):
-the sadbox user account has GitHub's default
-(`repo:sadbox/towngear:ref:refs/heads/main`), so its pattern is
-`repo:sadbox/*`; the Espresso-Aficionados org has a customized template
-with numeric IDs
-(`repo:Espresso-Aficionados@76916743/linkclean@1420833610:ref:...`), so its
-pattern is `repo:Espresso-Aficionados@76916743/*`. Rename safety comes
-from the rule's CEL checks on `repository_id`, not the subject. The rule
+Every gated repository uses GitHub's immutable OIDC subjects, which carry
+numeric IDs (e.g.
+`repo:Espresso-Aficionados@76916743/linkclean@1420833610:ref:refs/heads/main`),
+so each owner's federation rule matches `repo:<owner>@<owner_id>/*`:
+`repo:sadbox@2502941/*` and `repo:Espresso-Aficionados@76916743/*`. Before
+adding a repository to the gate, make sure it has immutable subjects
+enabled: `GET`/`PUT repos/{owner}/{repo}/actions/oidc/customization/sub`,
+`use_immutable_subject: true` (new repositories get it by default). The
+rule's CEL checks on `repository_id` add rename safety on top. The rule
 also pins `event_name == "workflow_run"`, the default branch and
 `job_workflow_ref` starting with this repository's `gate.yml`. Its scope
 is `workspace:developer`, the narrowest the Claude Console offers (the
