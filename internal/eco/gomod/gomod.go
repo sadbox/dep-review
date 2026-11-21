@@ -87,7 +87,7 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		res.Findings = append(res.Findings, fs...)
 	}
 	for _, c := range changes {
-		res.Updates = append(res.Updates, c.update)
+		res.Updates = append(res.Updates, safeUpdate(c.update))
 	}
 
 	// Direct first, then go.mod indirect, then go.sum-only.
@@ -185,7 +185,7 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 		return nil, findings, nil
 	}
 
-	fmt.Fprintf(summary, "## Module %s (directory %s)\n\n", hmf.Module, depDir)
+	fmt.Fprintf(summary, "## Module %s (directory %s)\n\n", safeImport(hmf.Module), safeDepDir)
 	if bmf.Module != hmf.Module {
 		human("gomod.module-path-changed", fmt.Sprintf("module path changed from %s to %s", safeImport(bmf.Module), safeImport(hmf.Module)))
 	}
@@ -193,7 +193,7 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 		human("gomod.toolchain-changed", fmt.Sprintf("toolchain directive changed from %q to %q", orEmpty(bmf.Toolchain, safeVersion), orEmpty(hmf.Toolchain, safeVersion)))
 	}
 	if bmf.Go != hmf.Go {
-		fmt.Fprintf(summary, "- go directive: %s -> %s (language version for this repository's code)\n", bmf.Go, hmf.Go)
+		fmt.Fprintf(summary, "- go directive: %s -> %s (language version for this repository's code)\n", orEmpty(bmf.Go, safeVersion), orEmpty(hmf.Go, safeVersion))
 	}
 	if !slices.Equal(bmf.Directives, hmf.Directives) {
 		var added, removed []string
@@ -218,7 +218,7 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 		if h, ok := hsf[key]; ok && h != bsf[key] {
 			mod, _, _ := strings.Cut(key, " ")
 			findings = append(findings, model.Finding{
-				Code: "gomod.sum-changed", Route: model.RouteRefuse, Update: mod,
+				Code: "gomod.sum-changed", Route: model.RouteRefuse, Update: safeImport(mod),
 				Detail: fmt.Sprintf("%s: go.sum hash for %s changed from %s to %s; a version's hash never changes", safeDepDir, safeSumKey(key), safeHash(bsf[key]), safeHash(h)),
 			})
 		}
@@ -240,7 +240,7 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 		switch {
 		case inBase && inHead && b.Version == h.Version:
 			if b.Indirect != h.Indirect {
-				fmt.Fprintf(summary, "- %s %s: indirect %v -> %v\n", name, h.Version, b.Indirect, h.Indirect)
+				fmt.Fprintf(summary, "- %s %s: indirect %v -> %v\n", safeImport(name), safeVersion(h.Version), b.Indirect, h.Indirect)
 			}
 		case inHead:
 			from := ""
@@ -249,9 +249,9 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 			}
 			changes = append(changes, mk(name, from, h.Version, !h.Indirect, false))
 		default:
-			fmt.Fprintf(summary, "- %s %s: no longer required\n", name, b.Version)
+			fmt.Fprintf(summary, "- %s %s: no longer required\n", safeImport(name), safeVersion(b.Version))
 			findings = append(findings, model.Finding{
-				Code: "gomod.removed", Route: model.RouteReview, Update: name,
+				Code: "gomod.removed", Route: model.RouteReview, Update: safeImport(name),
 				Detail: fmt.Sprintf("%s: %s %s is no longer required", safeDepDir, safeImport(name), safeVersion(b.Version)),
 			})
 		}
@@ -265,7 +265,7 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 			for old := range bmf.Require {
 				if p, ok := majorPrefix(old); (ok && p == prefix && old != c.update.Name) || old == prefix {
 					findings = append(findings, model.Finding{
-						Code: "gomod.major-path", Route: model.RouteHuman, Update: c.update.Name,
+						Code: "gomod.major-path", Route: model.RouteHuman, Update: safeImport(c.update.Name),
 						Detail: fmt.Sprintf("%s: %s is a new major version of %s", safeDepDir, safeImport(c.update.Name), safeImport(old)),
 					})
 				}
@@ -289,7 +289,7 @@ func moduleChanges(ctx context.Context, git ecoutil.Git, base, head, dir string,
 		}
 	}
 	for _, c := range changes {
-		u := c.update
+		u := safeUpdate(c.update)
 		kind := "indirect"
 		if u.Direct {
 			kind = "direct"
@@ -351,10 +351,10 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			if m.Error != "" {
 				switch errorClass(m.Error) {
 				case "refuse":
-					findings = append(findings, model.Finding{Code: "gomod.checksum", Route: model.RouteRefuse, Update: u.Name,
+					findings = append(findings, model.Finding{Code: "gomod.checksum", Route: model.RouteRefuse, Update: safeImport(u.Name),
 						Detail: fmt.Sprintf("%s@%s failed checksum verification (go mod download reported a checksum error)", safeImport(u.Name), safeVersion(side.ver))})
 				case "human":
-					findings = append(findings, model.Finding{Code: "gomod.download-failed", Route: model.RouteHuman, Update: u.Name,
+					findings = append(findings, model.Finding{Code: "gomod.download-failed", Route: model.RouteHuman, Update: safeImport(u.Name),
 						Detail: fmt.Sprintf("%s@%s could not be fetched from proxy.golang.org (not found or gone)", safeImport(u.Name), safeVersion(side.ver))})
 				default:
 					return nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
@@ -365,15 +365,15 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			want, wantMod := side.sum[u.Name+" "+side.ver], side.sum[u.Name+" "+side.ver+"/go.mod"]
 			switch {
 			case want == "":
-				findings = append(findings, model.Finding{Code: "gomod.sum-missing", Route: model.RouteHuman, Update: u.Name,
+				findings = append(findings, model.Finding{Code: "gomod.sum-missing", Route: model.RouteHuman, Update: safeImport(u.Name),
 					Detail: fmt.Sprintf("%s go.sum has no module hash for %s@%s", side.at, safeImport(u.Name), safeVersion(side.ver))})
 				bad = true
 			case want != m.Sum || (wantMod != "" && wantMod != m.GoModSum):
-				findings = append(findings, model.Finding{Code: "gomod.sum-mismatch", Route: model.RouteRefuse, Update: u.Name,
+				findings = append(findings, model.Finding{Code: "gomod.sum-mismatch", Route: model.RouteRefuse, Update: safeImport(u.Name),
 					Detail: fmt.Sprintf("%s go.sum hash for %s@%s (%s) differs from the checksum database (%s)", side.at, safeImport(u.Name), safeVersion(side.ver), safeHash(want), safeHash(m.Sum))})
 				bad = true
 			default:
-				fmt.Fprintf(summary, "- %s@%s: %s matches %s go.sum and sum.golang.org\n", u.Name, side.ver, m.Sum, side.at)
+				fmt.Fprintf(summary, "- %s@%s: %s matches %s go.sum and sum.golang.org\n", safeImport(u.Name), safeVersion(side.ver), safeHash(m.Sum), side.at)
 			}
 			t, err := ecoutil.DirTree(m.Dir)
 			if err != nil {
@@ -385,12 +385,12 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			continue
 		}
 		h := CheckTrees(trees[0], trees[1])
-		findings = append(findings, h.findings(u.Name)...)
+		findings = append(findings, h.findings(safeImport(u.Name))...)
 		if err := writeDiff(ctx, env, home, u, dirs); err != nil {
 			return nil, err
 		}
 		if ex := changelogExcerpt(trees[0], trees[1]); ex != nil {
-			if err := env.Evidence.AddUntrusted(evName(u, "changelog.md"), "changelog excerpt for "+u.Name+" "+u.To+" (from the module, third-party text)", ex); err != nil {
+			if err := env.Evidence.AddUntrusted(evName(u, "changelog.md"), "changelog excerpt for "+safeImport(u.Name)+" "+safeVersion(u.To)+" (from the module, third-party text)", ex); err != nil {
 				return nil, err
 			}
 		}
@@ -422,11 +422,13 @@ func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, 
 	if len(text) == 0 {
 		text = []byte("(the module trees are identical)\n")
 	}
-	desc := fmt.Sprintf("diff of module %s %s -> %s (third-party code)", u.Name, ecoutil.OrNew(u.From), u.To)
+	su := safeUpdate(u)
+	desc := fmt.Sprintf("diff of module %s %s -> %s (third-party code)", su.Name, ecoutil.OrNew(su.From), su.To)
 	return env.Evidence.AddUntrusted(evName(u, "diff"), desc, text)
 }
 
 func evName(u model.Update, suffix string) string {
+	u = safeUpdate(u)
 	return "gomod" + u.Directory + "/" + u.Name + "@" + ecoutil.OrNew(u.From) + "..." + u.To + "." + suffix
 }
 

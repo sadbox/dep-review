@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/sadbox/dep-review/internal/model"
 )
 
 // Finding Detail text is trusted: the reviewer and the PR comment read it
@@ -171,4 +173,17 @@ func safeList(vs []string, f func(string) string) []string {
 		out[i] = f(v)
 	}
 	return out
+}
+
+// safeUpdate is u as it leaves the fetcher (Evidence.Updates, evidence
+// file names and descriptions, the summary): module path and versions
+// checked like Detail values. The fetcher keeps the raw values internally
+// for downloading; a name that fails the check could not be downloaded
+// anyway, and its placeholder will not match Dependabot's declaration.
+func safeUpdate(u model.Update) model.Update {
+	u.Name = safeImport(u.Name)
+	u.From = orEmpty(u.From, safeVersion)
+	u.To = orEmpty(u.To, safeVersion)
+	u.Directory = safeDir(u.Directory)
+	return u
 }
