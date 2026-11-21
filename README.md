@@ -117,6 +117,12 @@ owner's gated repositories already means write on all of them. Revisit,
 by moving to one app per repository, if a gated repository gains
 collaborators who should not have write on the others.
 
+Caches are outside the sha256 chain that protects the gate's artifacts.
+The fetch job and the review job's host steps still hold the run's
+runtime token, so code execution in either could write cache entries
+scoped to the default branch, which the caller's other workflows would
+then restore. The gate itself uses no cache.
+
 ## Model credential
 
 Claude API workload identity federation, done by the credential proxy
