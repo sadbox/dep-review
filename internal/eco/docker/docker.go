@@ -63,6 +63,7 @@ const (
 	codeArchiveNotVerified    = "docker.archive-verification-not-run"
 	codeOtherPlatforms        = "docker.unbuilt-platforms-changed"
 	codeOSVUnavailable        = "docker.osv-unavailable"
+	codePlatformAmbiguous     = "docker.platform-ambiguous"
 )
 
 // maxDownload bounds the bytes one Fetch pulls from registries.

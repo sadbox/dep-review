@@ -51,10 +51,11 @@ type descriptor struct {
 }
 
 type ociPlatform struct {
-	OS           string `json:"os"`
-	Architecture string `json:"architecture"`
-	Variant      string `json:"variant,omitempty"`
-	OSVersion    string `json:"os.version,omitempty"`
+	OS           string   `json:"os"`
+	Architecture string   `json:"architecture"`
+	Variant      string   `json:"variant,omitempty"`
+	OSVersion    string   `json:"os.version,omitempty"`
+	OSFeatures   []string `json:"os.features,omitempty"`
 }
 
 func (p ociPlatform) String() string {
@@ -444,30 +445,6 @@ func (v *verifyingReader) Close() error {
 	return err
 }
 
-// selectPlatform picks the image manifest for one platform from an index,
-// skipping attestation manifests. "linux/arm64" matches variant "" and "v8".
-func selectPlatform(idx *manifestDoc, want string) (descriptor, bool) {
-	wos, warch, wvar := splitPlatform(want)
-	for _, d := range idx.Manifests {
-		if d.Platform == nil || d.Annotations["vnd.docker.reference.type"] != "" {
-			continue
-		}
-		p := d.Platform
-		if p.OS != wos || p.Architecture != warch {
-			continue
-		}
-		v := p.Variant
-		if warch == "arm64" && v == "v8" {
-			v = ""
-		}
-		if v != wvar {
-			continue
-		}
-		return d, true
-	}
-	return descriptor{}, false
-}
-
 func splitPlatform(p string) (os, arch, variant string) {
 	parts := strings.SplitN(p, "/", 3)
 	switch len(parts) {
@@ -482,13 +459,4 @@ func splitPlatform(p string) (os, arch, variant string) {
 		variant = ""
 	}
 	return
-}
-
-// normPlatform canonicalises "linux/arm64/v8" to "linux/arm64".
-func normPlatform(p string) string {
-	os, arch, v := splitPlatform(strings.ToLower(strings.TrimSpace(p)))
-	if v != "" {
-		return os + "/" + arch + "/" + v
-	}
-	return os + "/" + arch
 }

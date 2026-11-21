@@ -40,8 +40,8 @@ func TestRecordFixtures(t *testing.T) {
 		}
 		save(r, strings.TrimPrefix(dg, "sha256:"), body)
 		for _, p := range plats {
-			d, ok := platformDesc(doc, dg, p)
-			if !ok {
+			d, n := platformDesc(doc, dg, p)
+			if n != 1 {
 				continue
 			}
 			mb, m, _, err := reg.manifest(ctx, r, d.Digest)

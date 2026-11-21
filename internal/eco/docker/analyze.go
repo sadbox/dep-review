@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -152,11 +153,12 @@ func tagUpdateType(a, b string) model.UpdateType {
 	return model.Unknown
 }
 
-// platformDesc finds the manifest one platform uses. A pin to a single
+// platformDesc finds the manifest one platform uses, and how many entries
+// a pull for it could select (only 1 is an answer). A pin to a single
 // manifest (not an index) is used for every platform.
-func platformDesc(doc *manifestDoc, dg, plat string) (descriptor, bool) {
+func platformDesc(doc *manifestDoc, dg, plat string) (descriptor, int) {
 	if !doc.isIndex() {
-		return descriptor{MediaType: doc.MediaType, Digest: dg}, true
+		return descriptor{MediaType: doc.MediaType, Digest: dg}, 1
 	}
 	return selectPlatform(doc, plat)
 }
@@ -194,10 +196,21 @@ func (a *analyzer) analyze(ctx context.Context, ch fromChange, platforms []strin
 	var pairs []pair
 	missing := false
 	for _, p := range platforms {
-		od, ok1 := platformDesc(oldIdx, ch.Old.Digest, p)
-		nd, ok2 := platformDesc(newIdx, ch.New.Digest, p)
-		if !ok1 || !ok2 {
-			u.find(model.RouteHuman, codePlatformMissing, "%s: no %s manifest in the %s index", ch.New.Name(), p, map[bool]string{true: "new", false: "old"}[ok1])
+		od, n1 := platformDesc(oldIdx, ch.Old.Digest, p)
+		nd, n2 := platformDesc(newIdx, ch.New.Digest, p)
+		switch {
+		case n1 == 0 || n2 == 0:
+			which := "old"
+			if n1 > 0 {
+				which = "new"
+			}
+			u.find(model.RouteHuman, codePlatformMissing, "%s: no %s manifest in the %s index", ch.New.Name(), p, which)
+			missing = true
+			continue
+		case n1 > 1 || n2 > 1:
+			// Which one a build pulls then depends on the tool and on
+			// index order; the gate cannot prove what is used.
+			u.find(model.RouteHuman, codePlatformAmbiguous, "%s: %d entries in the old index and %d in the new one could be pulled for %s", ch.New.Name(), n1, n2, p)
 			missing = true
 			continue
 		}
@@ -332,27 +345,10 @@ func samePlatforms(oldDoc *manifestDoc, oldDigest string, newDoc *manifestDoc, n
 	case oldDoc.isIndex() != newDoc.isIndex() || len(plats) == 0:
 		return false
 	}
-	only := func(doc *manifestDoc, plat string) (string, bool) {
-		wos, warch, wvar := splitPlatform(plat)
-		var found []string
-		for _, d := range doc.Manifests {
-			if isAttestation(d) || d.Platform == nil {
-				continue
-			}
-			pos, parch, pvar := splitPlatform(d.Platform.String())
-			if pos == wos && parch == warch && pvar == wvar {
-				found = append(found, d.Digest)
-			}
-		}
-		if len(found) != 1 {
-			return "", false
-		}
-		return found[0], true
-	}
 	for _, p := range plats {
-		o, ok1 := only(oldDoc, p)
-		n, ok2 := only(newDoc, p)
-		if !ok1 || !ok2 || o != n {
+		o, n1 := selectPlatform(oldDoc, p)
+		n, n2 := selectPlatform(newDoc, p)
+		if n1 != 1 || n2 != 1 || o.Digest != n.Digest {
 			return false
 		}
 	}
@@ -413,6 +409,19 @@ func isAttestation(d descriptor) bool {
 		d.Platform != nil && d.Platform.OS == "unknown" && d.Platform.Architecture == "unknown"
 }
 
+// ignorable is an attestation no compared platform could pull.
+func ignorable(d descriptor, plats []string) bool {
+	if !isAttestation(d) {
+		return false
+	}
+	for _, p := range plats {
+		if newMatcher(p).match(d.Platform) {
+			return false
+		}
+	}
+	return true
+}
+
 // manifestKey identifies an index entry by its full platform (including
 // os.version, which tells Windows builds apart) and its digest.
 func manifestKey(d descriptor) (plat, key string) {
@@ -426,56 +435,71 @@ func manifestKey(d descriptor) (plat, key string) {
 	return plat, plat + " " + d.MediaType + " " + d.Digest
 }
 
-// sameManifests is the no-op proof: two indexes are the same image when
-// every non-attestation manifest in each is in the other (same platforms,
-// same digests); two single manifests when their digests are equal; an
-// index and a single manifest never. unbuilt lists the platforms that
-// differ and are not among the detected ones (evidence only).
-func sameManifests(oldDoc *manifestDoc, oldDigest string, newDoc *manifestDoc, newDigest string, detected []string) (same bool, unbuilt []string) {
+// sameManifests is the default no-op proof: two indexes are the same
+// image when their entries, in order, are identical (digest, media type,
+// platform, annotations), apart from attestations no compared platform
+// could pull; two single manifests when their digests are equal; an index
+// and a single manifest never. Order matters because the tools that pull
+// take the first matching entry. unbuilt lists the platforms of entries
+// that differ and that no compared platform matches (evidence only).
+func sameManifests(oldDoc *manifestDoc, oldDigest string, newDoc *manifestDoc, newDigest string, plats []string) (same bool, unbuilt []string) {
 	switch {
 	case !oldDoc.isIndex() && !newDoc.isIndex():
 		return oldDigest == newDigest, nil
 	case oldDoc.isIndex() != newDoc.isIndex():
 		return false, nil
 	}
-	count := func(doc *manifestDoc) (map[string]int, map[string]string) {
-		keys, plats := map[string]int{}, map[string]string{}
+	entries := func(doc *manifestDoc) []string {
+		var out []string
+		for _, d := range doc.Manifests {
+			if ignorable(d, plats) {
+				continue
+			}
+			b, err := json.Marshal(d) // map keys sorted: annotations compare exactly
+			if err != nil {
+				return nil
+			}
+			out = append(out, string(b))
+		}
+		return out
+	}
+	oe, ne := entries(oldDoc), entries(newDoc)
+	same = len(oe) > 0 && slices.Equal(oe, ne)
+
+	// Evidence: which entries differ, as a multiset.
+	count := func(doc *manifestDoc) (map[string]int, map[string]descriptor) {
+		keys, descs := map[string]int{}, map[string]descriptor{}
 		for _, d := range doc.Manifests {
 			if isAttestation(d) {
 				continue
 			}
-			plat, k := manifestKey(d)
+			_, k := manifestKey(d)
 			keys[k]++
-			plats[k] = plat
+			descs[k] = d
 		}
-		return keys, plats
+		return keys, descs
 	}
-	ok, op := count(oldDoc)
-	nk, np := count(newDoc)
-	same = len(ok) > 0
-	differ := map[string]bool{}
+	ok, od := count(oldDoc)
+	nk, nd := count(newDoc)
+	var differ []descriptor
 	for k, n := range ok {
 		if nk[k] != n {
-			same = false
-			differ[op[k]] = true
+			differ = append(differ, od[k])
 		}
 	}
 	for k, n := range nk {
 		if ok[k] != n {
-			same = false
-			differ[np[k]] = true
+			differ = append(differ, nd[k])
 		}
 	}
-	isDetected := func(plat string) bool {
-		for _, p := range detected {
-			if normPlatform(p) == normPlatform(strings.Fields(plat)[0]) {
-				return true
-			}
+	seen := map[string]bool{}
+	for _, d := range differ {
+		compared := false
+		for _, p := range plats {
+			compared = compared || newMatcher(p).match(d.Platform)
 		}
-		return false
-	}
-	for plat := range differ {
-		if !isDetected(plat) {
+		if plat, _ := manifestKey(d); !compared && !seen[plat] {
+			seen[plat] = true
 			unbuilt = append(unbuilt, plat)
 		}
 	}

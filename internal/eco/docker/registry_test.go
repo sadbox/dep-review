@@ -112,8 +112,8 @@ func TestSelectPlatform(t *testing.T) {
 		"linux/arm64/v8": "sha256:96335ac31f35abde9f40cbb1032e06d8571fc43c51230e9a90e14145debc6199",
 		"linux/mips":     "",
 	} {
-		d, ok := selectPlatform(&idx, normPlatform(p))
-		if d.Digest != want || ok != (want != "") {
+		d, n := selectPlatform(&idx, normPlatform(p))
+		if d.Digest != want || (n == 1) != (want != "") {
 			t.Errorf("%s: %s", p, d.Digest)
 		}
 	}
@@ -261,8 +261,8 @@ func TestRecordedConfigDiffs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			d, ok := platformDesc(idx, dg, tc.plat)
-			if !ok {
+			d, n := platformDesc(idx, dg, tc.plat)
+			if n != 1 {
 				t.Fatalf("%s: no %s", tc.image, tc.plat)
 			}
 			_, c, err := a.image(ctx, ref, d)
