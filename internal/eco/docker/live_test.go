@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -60,6 +61,9 @@ func TestLive(t *testing.T) {
 			start := time.Now()
 			res, err := run(ctx, fetch.Env{Class: cl, Evidence: w}, src, a)
 			if err != nil {
+				if errors.Is(err, errRateLimited) {
+					t.Skipf("skipped: the registry is still rate-limiting this IP after %d tries (Docker Hub allows 100 anonymous manifest pulls per hour); re-run later: %v", maxTries, err)
+				}
 				t.Fatal(err)
 			}
 			route := policy.Combine(res.Updates, res.Findings, false)

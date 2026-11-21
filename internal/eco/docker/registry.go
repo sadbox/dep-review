@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,6 +99,21 @@ var errDigestMismatch = errors.New("content does not match its digest")
 // errTooLarge means a size limit was hit.
 var errTooLarge = errors.New("size limit exceeded")
 
+// errRateLimited means the registry still answered 429 or 503 after
+// maxTries. It is an infrastructure error, never a finding: the fetch job
+// fails, the PR stays pending and a later run (or sweep's stuck report)
+// picks it up.
+var errRateLimited = errors.New("registry rate limit or unavailable")
+
+const (
+	maxTries      = 3                // per request, for 429 and 503
+	maxRetryAfter = 60 * time.Second // cap on a registry's Retry-After
+)
+
+type rateLimitError struct{ statusError }
+
+func (e *rateLimitError) Is(target error) bool { return target == errRateLimited }
+
 type registry struct {
 	client   *http.Client
 	endpoint func(host string) string // base URL for a registry host
@@ -106,8 +122,19 @@ type registry struct {
 	maxTotal   int64 // bytes across every blob this client downloads
 	downloaded atomic.Int64
 
+	// sleep waits between retries (replaced in tests).
+	sleep func(ctx context.Context, d time.Duration) error
+
 	mu     sync.Mutex
 	tokens map[string]string // host + "/" + repo -> bearer token
+	// manifests caches verified manifests and indexes by digest for the
+	// life of the client (one fetch run), so each is downloaded once.
+	manifests map[string]cachedManifest // host + "/" + repo + "@" + digest
+}
+
+type cachedManifest struct {
+	body []byte
+	doc  manifestDoc
 }
 
 var defaultRealmHosts = map[string]bool{"auth.docker.io": true, "ghcr.io": true, "gcr.io": true}
@@ -135,9 +162,37 @@ func newRegistry(c *http.Client, maxTotal int64) *registry {
 		realmOK: func(u *url.URL) bool {
 			return u.Scheme == "https" && defaultRealmHosts[u.Hostname()]
 		},
-		maxTotal: maxTotal,
-		tokens:   map[string]string{},
+		maxTotal:  maxTotal,
+		tokens:    map[string]string{},
+		manifests: map[string]cachedManifest{},
+		sleep:     sleepCtx,
 	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// retryDelay is how long to wait before try number try (1-based) after a
+// 429 or 503: the registry's Retry-After (seconds or an HTTP date) capped
+// at maxRetryAfter, else 2s, 4s, ...
+func retryDelay(h http.Header, try int) time.Duration {
+	d := time.Duration(1<<try) * time.Second
+	if v := strings.TrimSpace(h.Get("Retry-After")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			d = time.Duration(n) * time.Second
+		} else if t, err := http.ParseTime(v); err == nil {
+			d = time.Until(t)
+		}
+	}
+	return min(max(d, 0), maxRetryAfter)
 }
 
 func defaultEndpoint(host string) string {
@@ -151,7 +206,8 @@ func (rg *registry) tokenKey(r imageRef) string { return r.Registry + "/" + r.Re
 
 func (rg *registry) do(ctx context.Context, r imageRef, method, path, accept string) (*http.Response, error) {
 	u := rg.endpoint(r.Registry) + "/v2/" + r.Repo + "/" + path
-	for attempt := 0; ; attempt++ {
+	authed, tries := false, 0
+	for {
 		req, err := http.NewRequestWithContext(ctx, method, u, nil)
 		if err != nil {
 			return nil, err
@@ -176,13 +232,25 @@ func (rg *registry) do(ctx context.Context, r imageRef, method, path, accept str
 		challenge := resp.Header.Get("WWW-Authenticate")
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 && challenge != "" {
+		if resp.StatusCode == http.StatusUnauthorized && !authed && challenge != "" {
+			authed = true
 			if err := rg.fetchToken(ctx, r, challenge); err != nil {
 				return nil, err
 			}
 			continue
 		}
-		return nil, &statusError{Code: resp.StatusCode, What: method + " " + r.Name() + " " + path}
+		se := statusError{Code: resp.StatusCode, What: method + " " + r.Name() + " " + path}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			tries++
+			if tries >= maxTries {
+				return nil, &rateLimitError{se}
+			}
+			if err := rg.sleep(ctx, retryDelay(resp.Header, tries)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		return nil, &se
 	}
 }
 
@@ -251,6 +319,16 @@ func sha256Digest(b []byte) string {
 // a digest the body must hash to it. The returned digest is always the
 // hash of the returned bytes.
 func (rg *registry) manifest(ctx context.Context, r imageRef, reference string) ([]byte, *manifestDoc, string, error) {
+	key := rg.tokenKey(r) + "@" + reference
+	if digestRe.MatchString(reference) {
+		rg.mu.Lock()
+		c, ok := rg.manifests[key]
+		rg.mu.Unlock()
+		if ok {
+			doc := c.doc
+			return c.body, &doc, reference, nil
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, manifestTimeout)
 	defer cancel()
 	resp, err := rg.do(ctx, r, http.MethodGet, "manifests/"+reference, acceptManifests)
@@ -276,7 +354,11 @@ func (rg *registry) manifest(ctx context.Context, r imageRef, reference string) 
 	if m.MediaType == "" {
 		m.MediaType = resp.Header.Get("Content-Type")
 	}
-	return body, &m, dg, nil
+	rg.mu.Lock()
+	rg.manifests[rg.tokenKey(r)+"@"+dg] = cachedManifest{body: body, doc: m}
+	rg.mu.Unlock()
+	doc := m
+	return body, &doc, dg, nil
 }
 
 // tagDigest returns the digest a tag currently resolves to. HEAD is used

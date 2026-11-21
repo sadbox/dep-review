@@ -32,12 +32,16 @@ func TestRegistryTokenFlowAndVerification(t *testing.T) {
 	if f.hits["GET /token"] != 1 {
 		t.Errorf("token fetched %d times", f.hits["GET /token"])
 	}
-	// Second request reuses the token.
+	// Second request reuses the token, and a manifest by digest is
+	// fetched once per client.
 	if _, _, _, err := a.reg.manifest(ctx, golang, dgB); err != nil {
 		t.Fatal(err)
 	}
 	if f.hits["GET /token"] != 1 {
 		t.Errorf("token refetched")
+	}
+	if n := f.hits["GET /v2/library/golang/manifests/"+dgB]; n != 2 { // the 401 challenge and the one fetch
+		t.Errorf("manifest fetched %d times", n)
 	}
 
 	// A registry that serves different bytes for a digest is caught.
@@ -47,7 +51,7 @@ func TestRegistryTokenFlowAndVerification(t *testing.T) {
 		}
 		return b
 	}
-	if _, _, _, err := a.reg.manifest(ctx, golang, dgB); !errors.Is(err, errDigestMismatch) {
+	if _, _, _, err := f.analyzer(nil).reg.manifest(ctx, golang, dgB); !errors.Is(err, errDigestMismatch) {
 		t.Errorf("tampered manifest: %v", err)
 	}
 	f.tamper = nil
