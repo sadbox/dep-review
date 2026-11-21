@@ -30,12 +30,25 @@ func reject(format string, args ...any) error {
 // decoding error, including a JSON type that does not fit a field (a
 // string where a bool belongs), is also an ErrRejected: a zero value in
 // place of what the consumer would read is not acceptable.
-func Unmarshal(data []byte, v any) error {
+func Unmarshal(data []byte, v any) error { return unmarshal(data, v, false) }
+
+// UnmarshalMetadata is Unmarshal for registry metadata (npm version
+// documents, PyPI JSON), which carries free-form publisher text the gate
+// never reads. Exact duplicate keys are refused at any depth, but keys
+// differing only in case are refused only where the gate reads them: in
+// an object decoded into a struct, a key that is not an exact field name
+// but case-folds to one. Elsewhere (a map, or anything under an unknown
+// key such as PyPI's info.project_urls) encoding/json keeps both keys
+// apart just as JSON.parse does, so a case collision there is not an
+// ambiguity.
+func UnmarshalMetadata(data []byte, v any) error { return unmarshal(data, v, true) }
+
+func unmarshal(data []byte, v any, metadata bool) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return fmt.Errorf("strictjson: Unmarshal needs a non-nil pointer, got %T", v)
 	}
-	if err := Check(data, rv.Type().Elem()); err != nil {
+	if err := check(data, rv.Type().Elem(), metadata); err != nil {
 		return err
 	}
 	if err := json.Unmarshal(data, v); err != nil {
@@ -54,7 +67,9 @@ func Unmarshal(data []byte, v any) error {
 //   - anything after the value.
 //
 // t may be nil: then only the type-independent rules apply.
-func Check(data []byte, t reflect.Type) error {
+func Check(data []byte, t reflect.Type) error { return check(data, t, false) }
+
+func check(data []byte, t reflect.Type, metadata bool) error {
 	if !utf8.Valid(data) {
 		return reject("invalid UTF-8")
 	}
@@ -72,7 +87,7 @@ func Check(data []byte, t reflect.Type) error {
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	if err := walk(dec, t, "$"); err != nil {
+	if err := (walker{metadata}).walk(dec, t, "$"); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); err != io.EOF {
@@ -83,7 +98,11 @@ func Check(data []byte, t reflect.Type) error {
 
 // walk consumes one value. t is the Go type it will decode into, or nil
 // when that is unknown (interface{}, json.RawMessage, an unknown key).
-func walk(dec *json.Decoder, t reflect.Type, at string) error {
+type walker struct {
+	metadata bool // UnmarshalMetadata's rules
+}
+
+func (w walker) walk(dec *json.Decoder, t reflect.Type, at string) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return reject("%s: %v", at, err)
@@ -91,14 +110,14 @@ func walk(dec *json.Decoder, t reflect.Type, at string) error {
 	t = deref(t)
 	switch tok {
 	case json.Delim('{'):
-		return object(dec, t, at)
+		return w.object(dec, t, at)
 	case json.Delim('['):
 		var elem reflect.Type
 		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) && t != rawMessage {
 			elem = t.Elem()
 		}
 		for i := 0; dec.More(); i++ {
-			if err := walk(dec, elem, fmt.Sprintf("%s[%d]", at, i)); err != nil {
+			if err := w.walk(dec, elem, fmt.Sprintf("%s[%d]", at, i)); err != nil {
 				return err
 			}
 		}
@@ -108,7 +127,7 @@ func walk(dec *json.Decoder, t reflect.Type, at string) error {
 	return nil // scalar
 }
 
-func object(dec *json.Decoder, t reflect.Type, at string) error {
+func (w walker) object(dec *json.Decoder, t reflect.Type, at string) error {
 	var fields map[string]reflect.Type // exact JSON name -> field type
 	var elem reflect.Type
 	if t != nil {
@@ -127,6 +146,9 @@ func object(dec *json.Decoder, t reflect.Type, at string) error {
 		}
 		key := tok.(string)
 		f := fold(key)
+		if w.metadata {
+			f = key // only exact duplicates; the field check below covers binding
+		}
 		if prev, dup := seen[f]; dup {
 			if prev == key {
 				return reject("%s: duplicate key %q", at, key)
@@ -139,14 +161,14 @@ func object(dec *json.Decoder, t reflect.Type, at string) error {
 			ft, exact := fields[key]
 			if !exact {
 				for name := range fields {
-					if fold(name) == f || strings.EqualFold(name, key) {
+					if fold(name) == fold(key) || strings.EqualFold(name, key) {
 						return reject("%s: key %q is not %q but would be read as it", at, key, name)
 					}
 				}
 			}
 			next = ft
 		}
-		if err := walk(dec, next, at+"."+key); err != nil {
+		if err := w.walk(dec, next, at+"."+key); err != nil {
 			return err
 		}
 	}

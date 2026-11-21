@@ -88,3 +88,47 @@ func TestCheckUntyped(t *testing.T) {
 // esc turns %u into a JSON \u escape (kept out of the literals so no tool
 // along the way decodes them).
 func esc(s string) string { return strings.ReplaceAll(s, "%u", `\`+"u") }
+
+func TestUnmarshalMetadata(t *testing.T) {
+	type dist struct {
+		Tarball   string `json:"tarball"`
+		Integrity string `json:"integrity"`
+	}
+	type versionDoc struct {
+		Name string            `json:"name"`
+		Dist dist              `json:"dist"`
+		Deps map[string]string `json:"dependencies"`
+	}
+	ok := []string{
+		// Case collisions where the gate reads nothing, or reads both keys
+		// apart (a map), are publisher text, not ambiguity.
+		`{"name":"p","info":{"project_urls":{"Homepage":"a","homepage":"b"}}}`,
+		`{"name":"p","dependencies":{"JSONStream":"1","jsonstream":"2"}}`,
+		`{"name":"p","Readme":"x","readme":"y"}`,
+		`{"name":"p","dist":{"tarball":"t","Signatures":[],"signatures":[]}}`,
+	}
+	for _, s := range ok {
+		var d versionDoc
+		if err := UnmarshalMetadata([]byte(s), &d); err != nil {
+			t.Errorf("UnmarshalMetadata(%s): %v", s, err)
+		}
+		if err := Unmarshal([]byte(s), &d); !errors.Is(err, ErrRejected) {
+			t.Errorf("Unmarshal(%s) = %v; the PR-file mode must stay strict", s, err)
+		}
+	}
+	bad := []string{
+		`{"name":"p","dist":{"tarball":"a","Tarball":"b"}}`,      // a field the gate reads
+		`{"name":"p","dist":{"Integrity":"x"}}`,                  // lone miscased binding
+		`{"Name":"q"}`,                                           // top-level binding
+		`{"name":"p","dist":{"tarball":"a","tarball":"b"}}`,      // exact duplicate
+		`{"name":"p","info":{"project_urls":{"a":"1","a":"2"}}}`, // exact duplicate anywhere
+		`{"name":"p","dependencies":{"x":"1","x":"2"}}`,
+		`{"name":"p"} {}`,
+	}
+	for _, s := range bad {
+		var d versionDoc
+		if err := UnmarshalMetadata([]byte(s), &d); !errors.Is(err, ErrRejected) {
+			t.Errorf("UnmarshalMetadata(%s) = %v, want ErrRejected", s, err)
+		}
+	}
+}
