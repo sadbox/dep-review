@@ -445,9 +445,13 @@ var (
 	versionRE = regexp.MustCompile(`^[0-9A-Za-z.+-]+$`)
 )
 
+// errBadName: a lockfile name or version the gate will not put in a
+// registry URL. It is a property of the PR, so it refuses.
+var errBadName = errors.New("not a valid npm package name or version")
+
 func (f Fetcher) versionDoc(ctx context.Context, env fetch.Env, name, version string) (*versionDoc, []byte, error) {
 	if !nameRE.MatchString(name) || !versionRE.MatchString(version) {
-		return nil, nil, fmt.Errorf("refusing package %q version %q", name, version)
+		return nil, nil, fmt.Errorf("%w: package %q version %q", errBadName, name, version)
 	}
 	u := f.registry() + "/" + strings.Replace(name, "/", "%2f", 1) + "/" + url.PathEscape(version)
 	b, err := ecoutil.GetBytes(ctx, env.HTTP, u, ecoutil.MetadataLimit, map[string][]string{"Accept": {"application/json"}})
@@ -492,6 +496,10 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 		doc, _, err := f.versionDoc(ctx, env, u.Name, s.ver)
 		if errors.Is(err, gh.ErrNotFound) {
 			add(model.RouteHuman, "npm.not-on-registry", fmt.Sprintf("%s is not on %s (unpublished?)", s.ver, registryHost))
+			return findings, nil
+		}
+		if errors.Is(err, errBadName) {
+			add(model.RouteRefuse, "npm.bad-name", s.ver+": "+err.Error())
 			return findings, nil
 		}
 		if errors.Is(err, strictjson.ErrRejected) {
