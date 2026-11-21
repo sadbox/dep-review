@@ -172,7 +172,13 @@ func TestDockerInconsistentDigests(t *testing.T) {
 	}{
 		{"two digests for one tag", decl, []model.Update{copyTo("/", "1.27.3", a), copyTo("/", "1.27.3", b)}, []string{"docker.inconsistent-digests=human"}},
 		{"same digest twice", decl, []model.Update{copyTo("/", "1.27.3", a), copyTo("/", "1.27.3", a)}, nil},
-		{"other directories may differ", []model.Update{{Name: "golang", From: "1.27.2", To: "1.27.3"}}, []model.Update{copyTo("/", "1.27.3", a), copyTo("/tools", "1.27.3", b)}, nil},
+		{"v-prefixed and plain tag are one group", decl, []model.Update{copyTo("/", "v1.27.3", a), copyTo("/", "1.27.3", b)}, []string{"docker.inconsistent-digests=human"}},
+		{"v-prefixed declaration", []model.Update{{Name: "golang", Directory: "/", To: "v1.27.3"}}, []model.Update{copyTo("/", "1.27.3", a), copyTo("/", "v1.27.3", b)}, []string{"docker.inconsistent-digests=human"}},
+		// The tag-only declaration does not cover the untagged copy, which is
+		// then undeclared: human either way.
+		{"tag copy and digest copy", decl, []model.Update{copyTo("/", "1.27.3", a), copyTo("/", strings.TrimPrefix(b, "sha256:"), b)}, []string{"undeclared.update=human"}},
+		{"copy covered by two declarations", []model.Update{decl[0], {Name: "golang", Directory: "/", To: "v1.27.3"}}, []model.Update{copyTo("/", "1.27.3", a)}, []string{"docker.inconsistent-digests=human"}},
+		{"separate declarations per directory may differ", []model.Update{{Name: "golang", Directory: "/", To: "1.27.3"}, {Name: "golang", Directory: "/tools", To: "1.27.3"}}, []model.Update{copyTo("/", "1.27.3", a), copyTo("/tools", "1.27.3", b)}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, f := fetch.CompareDeclared(model.Docker, tc.decl, tc.real); !slices.Equal(codes(f), tc.want) {

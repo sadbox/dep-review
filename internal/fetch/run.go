@@ -95,8 +95,9 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]model.Update, []model.Finding) {
 	updates := slices.Clone(real)
 	var findings []model.Finding
-	covered := make([]bool, len(updates)) // real updates a declaration names, with its target
-	for _, d := range declared {
+	covered := make([]bool, len(updates))    // real updates a declaration names, with its target
+	coveredBy := make([][]int, len(updates)) // the declarations whose target each real update matches
+	for di, d := range declared {
 		i := -1
 		var matches []int
 		for j, u := range updates {
@@ -120,6 +121,7 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 		for _, j := range matches {
 			if (d.To != "" || d.ToRef != "") && sideMatches(updates[j].To, updates[j].ToRef, d.To, d.ToRef) {
 				covered[j] = true
+				coveredBy[j] = append(coveredBy[j], di)
 				if !chosen {
 					i, chosen = j, true
 				}
@@ -146,7 +148,7 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 		}
 	}
 	if eco == model.Docker {
-		findings = append(findings, inconsistentDigests(updates)...)
+		findings = append(findings, inconsistentDigests(declared, updates, coveredBy)...)
 	}
 	if eco == model.GitHubActions || eco == model.Docker {
 		for j, u := range updates {
@@ -161,33 +163,40 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 	return updates, findings
 }
 
-// inconsistentDigests: every copy of one image and tag in a directory
-// must move to the same new digest. A tag-only declaration ("golang
-// 1.27.2 -> 1.27.3") matches any digest, so two copies pinned to two
-// digests would otherwise both count as declared.
-func inconsistentDigests(updates []model.Update) []model.Finding {
-	type key struct{ dir, name, to string }
-	refs := map[key][]string{}
-	var order []key
-	for _, u := range updates {
-		k := key{dirOrRoot(u.Directory), u.Name, u.To}
-		if _, ok := refs[k]; !ok {
-			order = append(order, k)
+// inconsistentDigests works from what each declaration matched, the same
+// comparison CompareDeclared made (so "v1.2" and "1.2", or a tag and a
+// digest, are one group). Every copy a declaration covers must move to
+// the same new digest: a tag-only declaration ("golang 1.27.2 -> 1.27.3")
+// matches any digest, so two copies pinned to two digests would otherwise
+// both count as declared. A copy covered by more than one declaration is
+// flagged too, since it is unclear which one it fulfils.
+func inconsistentDigests(declared, updates []model.Update, coveredBy [][]int) []model.Finding {
+	var out []model.Finding
+	refs := make([][]string, len(declared))
+	for j, ds := range coveredBy {
+		for _, di := range ds {
+			if !slices.Contains(refs[di], updates[j].ToRef) {
+				refs[di] = append(refs[di], updates[j].ToRef)
+			}
 		}
-		if !slices.Contains(refs[k], u.ToRef) {
-			refs[k] = append(refs[k], u.ToRef)
+		if len(ds) > 1 {
+			u := updates[j]
+			out = append(out, model.Finding{
+				Code: "docker.inconsistent-digests", Route: model.RouteHuman, Update: u.Name,
+				Detail: fmt.Sprintf("%s %s in %s matches %d of Dependabot's declarations", u.Name, side(u.To, u.ToRef), dirOrRoot(u.Directory), len(ds)),
+			})
 		}
 	}
-	var out []model.Finding
-	for _, k := range order {
-		if len(refs[k]) > 1 {
+	for di, rs := range refs {
+		if len(rs) > 1 {
+			d := declared[di]
 			var short []string
-			for _, r := range refs[k] {
+			for _, r := range rs {
 				short = append(short, side("", r))
 			}
 			out = append(out, model.Finding{
-				Code: "docker.inconsistent-digests", Route: model.RouteHuman, Update: k.name,
-				Detail: fmt.Sprintf("%s:%s in %s is pinned to %d different new digests: %s", k.name, k.to, k.dir, len(refs[k]), strings.Join(short, ", ")),
+				Code: "docker.inconsistent-digests", Route: model.RouteHuman, Update: d.Name,
+				Detail: fmt.Sprintf("Dependabot declares %s -> %s in %s once, but its copies are pinned to %d different new digests: %s", d.Name, side(d.To, d.ToRef), dirOrRoot(d.Directory), len(rs), strings.Join(short, ", ")),
 			})
 		}
 	}
