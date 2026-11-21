@@ -147,6 +147,45 @@ func TestCompareDeclaredUndeclared(t *testing.T) {
 	}
 }
 
+// Re-review TestZZDockerTagOnly: a tag-only declaration matched both of
+// two copies pinned to different new digests.
+func TestDockerInconsistentDigests(t *testing.T) {
+	a := "sha256:" + strings.Repeat("a", 64)
+	b := "sha256:" + strings.Repeat("b", 64)
+	o := "sha256:" + strings.Repeat("0", 64)
+	copyTo := func(dir, to, ref string) model.Update {
+		return model.Update{Name: "golang", Directory: dir, From: "1.27.2", To: to, FromRef: o, ToRef: ref, Type: model.Patch, Direct: true}
+	}
+	decl := []model.Update{{Name: "golang", Directory: "/", From: "1.27.2", To: "1.27.3"}}
+	codes := func(fs []model.Finding) []string {
+		var c []string
+		for _, f := range fs {
+			c = append(c, f.Code+"="+string(f.Route))
+		}
+		return c
+	}
+	for _, tc := range []struct {
+		name string
+		decl []model.Update
+		real []model.Update
+		want []string
+	}{
+		{"two digests for one tag", decl, []model.Update{copyTo("/", "1.27.3", a), copyTo("/", "1.27.3", b)}, []string{"docker.inconsistent-digests=human"}},
+		{"same digest twice", decl, []model.Update{copyTo("/", "1.27.3", a), copyTo("/", "1.27.3", a)}, nil},
+		{"other directories may differ", []model.Update{{Name: "golang", From: "1.27.2", To: "1.27.3"}}, []model.Update{copyTo("/", "1.27.3", a), copyTo("/tools", "1.27.3", b)}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, f := fetch.CompareDeclared(model.Docker, tc.decl, tc.real); !slices.Equal(codes(f), tc.want) {
+				t.Errorf("findings %v, want %v", codes(f), tc.want)
+			}
+		})
+	}
+	// Lockfile ecosystems legitimately carry several copies.
+	if _, f := fetch.CompareDeclared(model.NPM, []model.Update{{Name: "golang", To: "1.27.3"}}, []model.Update{copyTo("/", "1.27.3", a), copyTo("/", "1.27.3", b)}); len(f) != 0 {
+		t.Errorf("npm: %v", codes(f))
+	}
+}
+
 func TestNewDependencies(t *testing.T) {
 	f := fetch.NewDependencies([]model.Update{{Name: "a", From: "1", To: "2"}, {Name: "b", To: "1.0.0"}})
 	if len(f) != 1 || f[0].Code != "new-dependency" || f[0].Route != model.RouteHuman || f[0].Update != "b" {

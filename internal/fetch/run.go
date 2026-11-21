@@ -145,6 +145,9 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 			}
 		}
 	}
+	if eco == model.Docker {
+		findings = append(findings, inconsistentDigests(updates)...)
+	}
 	if eco == model.GitHubActions || eco == model.Docker {
 		for j, u := range updates {
 			if !covered[j] {
@@ -156,6 +159,39 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 		}
 	}
 	return updates, findings
+}
+
+// inconsistentDigests: every copy of one image and tag in a directory
+// must move to the same new digest. A tag-only declaration ("golang
+// 1.27.2 -> 1.27.3") matches any digest, so two copies pinned to two
+// digests would otherwise both count as declared.
+func inconsistentDigests(updates []model.Update) []model.Finding {
+	type key struct{ dir, name, to string }
+	refs := map[key][]string{}
+	var order []key
+	for _, u := range updates {
+		k := key{dirOrRoot(u.Directory), u.Name, u.To}
+		if _, ok := refs[k]; !ok {
+			order = append(order, k)
+		}
+		if !slices.Contains(refs[k], u.ToRef) {
+			refs[k] = append(refs[k], u.ToRef)
+		}
+	}
+	var out []model.Finding
+	for _, k := range order {
+		if len(refs[k]) > 1 {
+			var short []string
+			for _, r := range refs[k] {
+				short = append(short, side("", r))
+			}
+			out = append(out, model.Finding{
+				Code: "docker.inconsistent-digests", Route: model.RouteHuman, Update: k.name,
+				Detail: fmt.Sprintf("%s:%s in %s is pinned to %d different new digests: %s", k.name, k.to, k.dir, len(refs[k]), strings.Join(short, ", ")),
+			})
+		}
+	}
+	return out
 }
 
 // NewDependencies flags every update that introduces a package name the
