@@ -167,7 +167,12 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 		switch {
 		case ext == ".go":
 			if strings.HasSuffix(rel, "_test.go") {
-				continue // compiled only into the dependency's own tests
+				// Compiled only into the dependency's own tests; still no
+				// binary hiding behind a .go name outside testdata/.
+				if evidence.IsBinary(data) && !testdata {
+					h.add(codeBinary, rel)
+				}
+				continue
 			}
 			dir := path.Dir(rel)
 			if _, ok := shadow[dir]; !ok {
@@ -482,7 +487,9 @@ func buildConstrained(rel string, file *ast.File) bool {
 			break
 		}
 		for _, c := range cg.List {
-			if strings.HasPrefix(c.Text, "//go:build") || strings.HasPrefix(c.Text, "// +build") {
+			// Prefix match, not constraint.IsGoBuild/IsPlusBuild: any
+			// spelling the go command might accept counts as constrained.
+			if t := strings.TrimSpace(strings.TrimPrefix(c.Text, "//")); strings.HasPrefix(t, "go:build") || strings.HasPrefix(t, "+build") {
 				return true
 			}
 		}

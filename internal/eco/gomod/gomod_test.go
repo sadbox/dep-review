@@ -265,9 +265,13 @@ func TestCheckTrees(t *testing.T) {
 		{"dot import", nil, map[string]string{"a.go": "package p\nimport . \"example.com/q\"\nvar _ = (*T)(nil)\n", "b.go": "package p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
 		// The walk compares every other declaration under a root's name.
 		{"method named like a var root",
-			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { var t T; return t.run() }\ntype T struct{}\n", "b.go": "package p\nfunc (T) run() int { return 1 }\n"},
-			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { var t T; return t.run() }\ntype T struct{}\n", "b.go": "package p\nfunc (T) run() int { return 2 }\n"},
+			// run is reached only by name: through an interface variable,
+			// T never named on the path from the root.
+			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 1 }\n"},
+			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 2 }\n"},
 			[]string{codeInitCallee}},
+		{"binary-looking test file", nil, map[string]string{"x_test.go": "\x00\x01\x02"}, []string{codeBinary}},
+		{"plus-build without space", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "//+build linux\n\npackage p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
 		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
 	}
