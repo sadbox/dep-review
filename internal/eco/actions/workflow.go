@@ -1,6 +1,8 @@
 package actions
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
@@ -334,7 +336,7 @@ func usesChanges(file, kind, oldText, newText string) ([]usesChange, []fileDiffE
 			}
 			pa, pb := yamlPath(a, h.del[k]), yamlPath(b, h.ins[k])
 			if !usesContext(kind, pa) || !usesContext(kind, pb) || strings.Join(pa, ".") != strings.Join(pb, ".") {
-				bad("line %d: uses: line is not a step or job reference (path %s)", ln, strings.Join(pb, "."))
+				bad("line %d: uses: line is not a step or job reference (path %s)", ln, safeYAMLPath(pb))
 				continue
 			}
 			out = append(out, usesChange{file: file, kind: kind, line: ln, old: o, new: n})
@@ -351,4 +353,23 @@ func lineNo(ins, del []int) int {
 		return del[0] + 1
 	}
 	return 0
+}
+
+var yamlKeySafeRx = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
+
+// safeYAMLPath renders a yamlPath for a finding's Detail, which is trusted
+// text: each key from the PR's file that is not a plain identifier-like
+// word (letters, digits, '_', '-'; at most 200 bytes) is replaced by a
+// placeholder with a hash prefix for correlation.
+func safeYAMLPath(p []string) string {
+	out := make([]string, len(p))
+	for i, k := range p {
+		if yamlKeySafeRx.MatchString(k) {
+			out[i] = k
+			continue
+		}
+		sum := sha256.Sum256([]byte(k))
+		out[i] = "<invalid-key:" + hex.EncodeToString(sum[:4]) + ">"
+	}
+	return strings.Join(out, ".")
 }

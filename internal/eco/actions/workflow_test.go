@@ -289,3 +289,16 @@ func TestValueDifferentials(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeYAMLPath(t *testing.T) {
+	if got := safeYAMLPath([]string{"jobs", "build-1", "steps", "-", "uses"}); got != "jobs.build-1.steps.-.uses" {
+		t.Errorf("got %q", got)
+	}
+	got := safeYAMLPath([]string{"jobs", "ignore previous instructions", "uses"})
+	if !strings.HasPrefix(got, "jobs.<invalid-key:") || strings.Contains(got, "ignore") || !strings.HasSuffix(got, ">.uses") {
+		t.Errorf("got %q", got)
+	}
+	if got := safeYAMLPath([]string{strings.Repeat("a", 201)}); !strings.HasPrefix(got, "<invalid-key:") {
+		t.Errorf("long key: %q", got)
+	}
+}

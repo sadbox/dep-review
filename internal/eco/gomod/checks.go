@@ -170,7 +170,7 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 				// Compiled only into the dependency's own tests; still no
 				// binary hiding behind a .go name outside testdata/.
 				if evidence.IsBinary(data) && !testdata {
-					h.add(codeBinary, rel)
+					h.add(codeBinary, safeFile(rel))
 				}
 				continue
 			}
@@ -181,13 +181,13 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 			goDirs[dir] = true
 			checkGoFile(h, rel, prev, data, shadow[dir])
 		case ext == ".s" || ext == ".S" || ext == ".sx":
-			h.add(codeAsm, rel)
+			h.add(codeAsm, safeFile(rel))
 		case cgoSourceExts[ext]:
-			h.add(codeCSource, rel)
+			h.add(codeCSource, safeFile(rel))
 		case ext == ".syso":
-			h.add(codeBinary, rel)
+			h.add(codeBinary, safeFile(rel))
 		case evidence.IsBinary(data) && !testdata:
-			h.add(codeBinary, rel)
+			h.add(codeBinary, safeFile(rel))
 		}
 	}
 	// Deleted .go files change a package too.
@@ -203,7 +203,7 @@ func CheckTrees(old, cur *ecoutil.Tree) hits {
 			shadow[dir] = packageScope(cur, dir)
 		}
 		for _, name := range initCalleesChanged(old, cur, dir, shadow[dir]) {
-			h.add(codeInitCallee, path.Join(dir, name))
+			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(name)))
 		}
 	}
 	return h
@@ -607,30 +607,30 @@ func facts(name string, src []byte, shadow *pkgScope) goFacts {
 func checkGoFile(h hits, rel string, prev, cur []byte, shadow *pkgScope) {
 	o, n := facts(rel, prev, shadow), facts(rel, cur, shadow)
 	if !n.parsed {
-		h.add(codeParse, rel)
+		h.add(codeParse, safeFile(rel))
 	}
 	for imp := range n.imports {
 		if riskyImport(imp) != "" && !o.imports[imp] {
-			h.add(codeImport, rel+" ("+imp+")")
+			h.add(codeImport, safeFile(rel)+" ("+safeImport(imp)+")")
 		}
 	}
 	for imp := range n.blank {
 		if !o.blank[imp] {
-			h.add(codeBlank, rel+" ("+imp+")")
+			h.add(codeBlank, safeFile(rel)+" ("+safeImport(imp)+")")
 		}
 	}
 	if n.cgo {
-		h.add(codeCgo, rel)
+		h.add(codeCgo, safeFile(rel))
 	}
 	for _, in := range n.inits {
 		if !slices.Contains(o.inits, in) {
-			h.add(codeInit, rel)
+			h.add(codeInit, safeFile(rel))
 			break
 		}
 	}
 	for _, vi := range n.varInits {
 		if !slices.Contains(o.varInits, vi) {
-			h.add(codeVarInit, rel)
+			h.add(codeVarInit, safeFile(rel))
 			break
 		}
 	}
@@ -640,18 +640,18 @@ func checkGoFile(h hits, rel string, prev, cur []byte, shadow *pkgScope) {
 		}
 		switch {
 		case strings.HasPrefix(d, "//go:linkname"):
-			h.add(codeLinkname, rel)
+			h.add(codeLinkname, safeFile(rel))
 		case strings.HasPrefix(d, "//go:generate"):
-			h.add(codeGenerate, rel)
+			h.add(codeGenerate, safeFile(rel))
 		case strings.HasPrefix(d, "//go:embed"):
-			h.add(codeEmbed, rel)
+			h.add(codeEmbed, safeFile(rel))
 		case strings.HasPrefix(d, "//go:cgo_"):
-			h.add(codeCgo, rel)
+			h.add(codeCgo, safeFile(rel))
 		}
 	}
 	for b := range n.blobs {
 		if !o.blobs[b] {
-			h.add(codeBlob, rel)
+			h.add(codeBlob, safeFile(rel))
 			break
 		}
 	}
