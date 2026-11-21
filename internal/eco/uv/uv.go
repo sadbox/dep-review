@@ -457,6 +457,11 @@ func wheelTags(name string) string {
 // sideTrees holds one version's extracted artifacts.
 type sideTrees struct {
 	wheel, sdist *ecoutil.Tree
+	// buildable: uv may build sdist (no pure wheel); imports: the import
+	// names of the version's wheel, which sdistBuildChanges leaves to the
+	// normal checks.
+	buildable bool
+	imports   map[string]bool
 }
 
 func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir string, c change, summary *bytes.Buffer) ([]model.Finding, error) {
@@ -522,6 +527,8 @@ func (f Fetcher) verify(ctx context.Context, env fetch.Env, home, dir string, c 
 			fmt.Fprintf(summary, "- %s==%s %s %s: %s matches the lock; %d files\n", u.Name, s.ver, a.kind, artifactName(a.art.URL), a.art.Hash, len(t.Files))
 		}
 	}
+	sides[1].buildable = sides[1].sdist != nil && !hasPureWheel(c.head)
+	sides[1].imports = topLevel(sides[1].wheel)
 	for _, fd := range checkPackage(sides[0], sides[1]) {
 		add(fd.Route, fd.Code, fd.Detail)
 	}
@@ -656,4 +663,15 @@ func topLevelCollisions(work []change, tops []map[string]bool) []model.Finding {
 		}
 	}
 	return out
+}
+
+// hasPureWheel: the lock pins a wheel every platform can install, so uv
+// never builds the sdist.
+func hasPureWheel(p Package) bool {
+	for _, w := range p.Wheels {
+		if strings.HasSuffix(artifactName(w.URL), "-none-any.whl") {
+			return true
+		}
+	}
+	return false
 }

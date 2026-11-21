@@ -120,52 +120,85 @@ func installHookFiles(old, cur *ecoutil.Tree) []string {
 	return out
 }
 
-// buildFiles are sdist files a build backend runs or reads as build
-// configuration besides setup.py (checked on its own).
-var buildFiles = []string{"setup.cfg", "hatch_build.py", "pdm_build.py", "build.py"}
+// inertSdistFile: files no build backend runs: documentation, licences,
+// images and the generated metadata (PKG-INFO, *.egg-info/), which
+// changes with every release.
+func inertSdistFile(rel string) bool {
+	base := path.Base(rel)
+	upper := strings.ToUpper(base)
+	for _, p := range []string{"LICENSE", "LICENCE", "COPYING", "AUTHORS", "NOTICE", "CHANGELOG", "CHANGES", "HISTORY", "README", "CONTRIBUTING"} {
+		if strings.HasPrefix(upper, p) && (path.Ext(base) == "" || slices.Contains([]string{".md", ".rst", ".txt"}, strings.ToLower(path.Ext(base)))) {
+			return true
+		}
+	}
+	first, _, _ := strings.Cut(rel, "/")
+	switch {
+	case rel == "PKG-INFO", strings.HasSuffix(first, ".egg-info"):
+		return true
+	}
+	switch strings.ToLower(path.Ext(base)) {
+	case ".md", ".rst", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico":
+		return true
+	}
+	return false
+}
 
-// buildCodeFiles lists the sdist files that the build runs and that are
-// new or changed since old: buildFiles, a hatch custom hook's path, and
-// the in-tree backend named by [build-system] backend-path/build-backend
-// (its module file, or its whole top-level package), on either side.
-func buildCodeFiles(old, cur *ecoutil.Tree) []string {
-	targets := slices.Clone(buildFiles)
-	var prefixes []string
+// sdistBuildChanges is the fail-closed rule for an sdist uv may build (no
+// wheel fits some platform): every file added, changed or removed since
+// old counts, except inert files and files inside the package's own
+// import directories (imports: the wheel's top-level names, at the root
+// or under src/), which the normal checks cover. Any pyproject.toml,
+// setup.cfg or setup.py, and anything under a [build-system] backend-path
+// directory, counts even there. Listing hook locations (hatch, pdm,
+// setuptools cmdclass, poetry build scripts, ...) one by one would never
+// be complete.
+func sdistBuildChanges(old, cur *ecoutil.Tree, imports map[string]bool) []string {
+	var backendDirs []string
 	for _, t := range []*ecoutil.Tree{old, cur} {
-		doc, err := ParseTOML(string(t.ReadFile("pyproject.toml")))
-		if err != nil {
-			continue
+		if doc, err := ParseTOML(string(t.ReadFile("pyproject.toml"))); err == nil {
+			for _, d := range stringList(table(doc, "build-system")["backend-path"]) {
+				backendDirs = append(backendDirs, path.Clean(d))
+			}
 		}
-		if p, ok := table(doc, "tool", "hatch", "build", "hooks", "custom")["path"].(string); ok {
-			targets = append(targets, path.Clean(p))
+	}
+	inBackend := func(f string) bool {
+		for _, d := range backendDirs {
+			if d == "." || f == d || strings.HasPrefix(f, d+"/") {
+				return true
+			}
 		}
-		bs := table(doc, "build-system")
-		backend, _ := bs["build-backend"].(string)
-		mod, _, _ := strings.Cut(backend, ":")
-		if mod == "" {
-			continue
+		return false
+	}
+	inImports := func(f string) bool {
+		first, rest, _ := strings.Cut(f, "/")
+		if first == "src" {
+			first, _, _ = strings.Cut(rest, "/")
 		}
-		for _, dir := range stringList(bs["backend-path"]) {
-			dir = path.Clean(dir)
-			modPath := path.Join(dir, strings.ReplaceAll(mod, ".", "/"))
-			targets = append(targets, modPath+".py", path.Join(modPath, "__init__.py"))
-			top, _, _ := strings.Cut(mod, ".")
-			prefixes = append(prefixes, path.Join(dir, top)+"/")
+		first = strings.TrimSuffix(first, path.Ext(first)) // "mod.py"
+		return imports[first]
+	}
+	var changed []string
+	for _, f := range cur.Files {
+		if !old.Has(f) || !bytes.Equal(old.ReadFile(f), cur.ReadFile(f)) {
+			changed = append(changed, f)
+		}
+	}
+	if old != nil {
+		for _, f := range old.Files {
+			if !cur.Has(f) {
+				changed = append(changed, f)
+			}
 		}
 	}
 	var out []string
-	for _, f := range cur.Files {
-		hit := slices.Contains(targets, f)
-		for _, p := range prefixes {
-			hit = hit || strings.HasPrefix(f, p)
-		}
-		if !hit {
-			continue
-		}
-		if old.Has(f) && bytes.Equal(old.ReadFile(f), cur.ReadFile(f)) {
+	for _, f := range changed {
+		switch base := path.Base(f); {
+		case inBackend(f), base == "pyproject.toml", base == "setup.cfg", base == "setup.py":
+		case inertSdistFile(f), inImports(f):
 			continue
 		}
 		out = append(out, f)
 	}
+	slices.Sort(out)
 	return out
 }

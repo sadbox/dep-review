@@ -1,13 +1,16 @@
 package uv
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -1098,34 +1101,49 @@ func dirTree(t *testing.T, files map[string]string) *ecoutil.Tree {
 	return tr
 }
 
-// TestPOCSdistBuildHook is the review's sdist PoC: an in-tree backend
-// (backend-path) and a hatch build hook change, with setup.py and
-// [build-system] untouched. Both run at build time.
+// TestPOCSdistBuildHook is the re-review's sdist PoC (an in-tree backend
+// via backend-path, and a hatch build hook) plus the bypasses a per-tool
+// hook list missed (hatch hooks under build.targets.*, other modules in a
+// backend-path directory, [tool.*] build tables). For an sdist uv may
+// build, any change outside the package's import directories needs a
+// person.
 func TestPOCSdistBuildHook(t *testing.T) {
 	const pp = "[build-system]\nrequires = []\nbuild-backend = \"backend\"\nbackend-path = [\".\"]\n\n[project]\nname = \"demo\"\nversion = \"1.0\"\n"
 	const hatch = "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[project]\nname = \"demo\"\nversion = \"1.0\"\n\n[tool.hatch.build.hooks.custom]\n"
 	const evil = "import os; os.system('id')\n"
+	const meta = "Name: demo\n\n"
+	imports := map[string]bool{"demo": true}
 	tests := []struct {
-		name     string
-		old, cur map[string]string
-		want     []string // files named in uv.build-code-changed
+		name      string
+		old, cur  map[string]string
+		buildable bool
+		want      []string // files named in uv.build-code-changed; nil: none
 	}{
-		{"in-tree backend", map[string]string{"pyproject.toml": pp, "backend.py": "from setuptools.build_meta import *\n", "PKG-INFO": "Name: demo\n\n"},
-			map[string]string{"pyproject.toml": pp, "backend.py": evil + "from setuptools.build_meta import *\n", "PKG-INFO": "Name: demo\n\n"}, []string{"backend.py"}},
-		{"hatch_build.py", map[string]string{"pyproject.toml": hatch, "hatch_build.py": "x=1\n", "PKG-INFO": "Name: demo\n\n"},
-			map[string]string{"pyproject.toml": hatch, "hatch_build.py": evil, "PKG-INFO": "Name: demo\n\n"}, []string{"hatch_build.py"}},
-		{"hatch custom hook path", map[string]string{"pyproject.toml": hatch + "path = \"tools/hook.py\"\n", "tools/hook.py": "x=1\n"},
-			map[string]string{"pyproject.toml": hatch + "path = \"tools/hook.py\"\n", "tools/hook.py": evil}, []string{"tools/hook.py"}},
-		{"backend package", map[string]string{"pyproject.toml": strings.Replace(pp, `"backend"`, `"_build.api:Backend"`, 1), "_build/api.py": "x=1\n", "_build/util.py": "y=1\n"},
-			map[string]string{"pyproject.toml": strings.Replace(pp, `"backend"`, `"_build.api:Backend"`, 1), "_build/api.py": "x=1\n", "_build/util.py": evil}, []string{"_build/util.py"}},
-		{"setup.cfg, pdm_build.py, build.py", map[string]string{"setup.cfg": "[metadata]\n"},
-			map[string]string{"setup.cfg": "[options]\nsetup_requires = evil\n", "pdm_build.py": evil, "build.py": evil}, []string{"setup.cfg", "pdm_build.py", "build.py"}},
-		{"unchanged", map[string]string{"pyproject.toml": pp, "backend.py": "x\n", "hatch_build.py": "x\n"},
-			map[string]string{"pyproject.toml": pp, "backend.py": "x\n", "hatch_build.py": "x\n", "src/demo.py": evil}, nil},
+		{"PoC: in-tree backend", map[string]string{"pyproject.toml": pp, "backend.py": "from setuptools.build_meta import *\n", "PKG-INFO": meta},
+			map[string]string{"pyproject.toml": pp, "backend.py": evil + "from setuptools.build_meta import *\n", "PKG-INFO": meta}, true, []string{"backend.py"}},
+		{"PoC: hatch_build.py", map[string]string{"pyproject.toml": hatch, "hatch_build.py": "x=1\n", "PKG-INFO": meta},
+			map[string]string{"pyproject.toml": hatch, "hatch_build.py": evil, "PKG-INFO": meta}, true, []string{"hatch_build.py"}},
+		{"hatch hook under build.targets", map[string]string{"pyproject.toml": hatch + "[tool.hatch.build.targets.wheel.hooks.custom]\npath = \"tools/hook.py\"\n", "tools/hook.py": "x=1\n"},
+			map[string]string{"pyproject.toml": hatch + "[tool.hatch.build.targets.wheel.hooks.custom]\npath = \"tools/hook.py\"\n", "tools/hook.py": evil}, true, []string{"tools/hook.py"}},
+		{"another module in the backend-path directory", map[string]string{"pyproject.toml": strings.Replace(pp, `["."]`, `["_build"]`, 1), "_build/backend.py": "import util\n", "_build/util.py": "y=1\n"},
+			map[string]string{"pyproject.toml": strings.Replace(pp, `["."]`, `["_build"]`, 1), "_build/backend.py": "import util\n", "_build/util.py": evil}, true, []string{"_build/util.py"}},
+		{"setuptools cmdclass in pyproject", map[string]string{"pyproject.toml": hatch},
+			map[string]string{"pyproject.toml": hatch + "[tool.setuptools.cmdclass]\nbuild_py = \"evil.Cmd\"\n"}, true, []string{"pyproject.toml"}},
+		{"setup.cfg and build scripts", map[string]string{"setup.cfg": "[metadata]\n"},
+			map[string]string{"setup.cfg": "[options]\nsetup_requires = evil\n", "pdm_build.py": evil, "build.py": evil, "csrc/ext.c": evil}, true, []string{"setup.cfg", "pdm_build.py", "build.py", "csrc/ext.c"}},
+		{"removed build file", map[string]string{"build_helpers.py": "x\n", "demo/__init__.py": ""},
+			map[string]string{"demo/__init__.py": ""}, true, []string{"build_helpers.py"}},
+		{"import directories and inert files", map[string]string{"demo/__init__.py": "", "src/demo/x.py": "", "PKG-INFO": meta, "README.md": "a", "demo.egg-info/SOURCES.txt": "a", "LICENSE": "a"},
+			map[string]string{"demo/__init__.py": evil, "src/demo/x.py": evil, "PKG-INFO": "Name: demo\nVersion: 1.1\n\n", "README.md": "b", "demo.egg-info/SOURCES.txt": "b", "LICENSE": "b"}, true, nil},
+		{"backend-path . covers the import directory", map[string]string{"pyproject.toml": pp, "demo/__init__.py": ""},
+			map[string]string{"pyproject.toml": pp, "demo/__init__.py": evil}, true, []string{"demo/__init__.py"}},
+		{"not buildable (a pure wheel exists)", map[string]string{"hatch_build.py": "x\n"},
+			map[string]string{"hatch_build.py": evil}, false, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fs := checkPackage(sideTrees{sdist: dirTree(t, tt.old)}, sideTrees{sdist: dirTree(t, tt.cur)})
+			cur := sideTrees{sdist: dirTree(t, tt.cur), buildable: tt.buildable, imports: imports}
+			fs := checkPackage(sideTrees{sdist: dirTree(t, tt.old)}, cur)
 			var hit *model.Finding
 			for i := range fs {
 				if fs[i].Code == "uv.build-code-changed" {
@@ -1148,10 +1166,86 @@ func TestPOCSdistBuildHook(t *testing.T) {
 			}
 		})
 	}
-	// Any change under [build-system] is a person's call.
+	// Any change under [build-system] is a person's call, buildable or not.
 	old := dirTree(t, map[string]string{"pyproject.toml": hatch})
 	cur := dirTree(t, map[string]string{"pyproject.toml": strings.Replace(hatch, `["hatchling"]`, `["hatchling", "evil"]`, 1)})
 	if !slices.Contains(codesOf(checkPackage(sideTrees{sdist: old}, sideTrees{sdist: cur})), "uv.build-backend-changed") {
 		t.Error("[build-system] requires change not flagged")
+	}
+	// Buildable means: no wheel every platform can install.
+	pure := Package{Wheels: []Artifact{{URL: "https://files.pythonhosted.org/x/demo-1.0-py3-none-any.whl"}, {URL: "https://files.pythonhosted.org/x/demo-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"}}}
+	plat := Package{Wheels: pure.Wheels[1:]}
+	if !hasPureWheel(pure) || hasPureWheel(plat) || hasPureWheel(Package{}) {
+		t.Error("hasPureWheel")
+	}
+}
+
+// TestBuildableSdistWired: with only a platform wheel in the lock, uv may
+// build the sdist, so verifyAndDiff applies the fail-closed sdist rule;
+// with a pure wheel it does not.
+func TestBuildableSdistWired(t *testing.T) {
+	zipOf := func(files map[string]string) []byte {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		for _, k := range slices.Sorted(maps.Keys(files)) {
+			w, _ := zw.Create(k)
+			io.WriteString(w, files[k])
+		}
+		zw.Close()
+		return buf.Bytes()
+	}
+	tgzOf := func(top string, files map[string]string) []byte {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		for _, k := range slices.Sorted(maps.Keys(files)) {
+			tw.WriteHeader(&tar.Header{Name: top + "/" + k, Mode: 0o644, Size: int64(len(files[k])), Typeflag: tar.TypeReg})
+			io.WriteString(tw, files[k])
+		}
+		tw.Close()
+		gz.Close()
+		return buf.Bytes()
+	}
+	wheel := func(v string) []byte {
+		return zipOf(map[string]string{"demo/__init__.py": "v = " + v + "\n", "demo-" + v + ".dist-info/METADATA": "Name: demo\nVersion: " + v + "\n"})
+	}
+	sdist := func(v, hook string) []byte {
+		return tgzOf("demo-"+v, map[string]string{"demo/__init__.py": "v = " + v + "\n", "hatch_build.py": hook, "PKG-INFO": "Name: demo\nVersion: " + v + "\n\n"})
+	}
+	for _, tc := range []struct {
+		tag  string
+		want bool
+	}{{"cp312-cp312-manylinux_2_17_x86_64", true}, {"py3-none-any", false}} {
+		t.Run(tc.tag, func(t *testing.T) {
+			files := map[string][]byte{
+				"demo-1.0-" + tc.tag + ".whl": wheel("1.0"), "demo-1.1-" + tc.tag + ".whl": wheel("1.1"),
+				"demo-1.0.tar.gz": sdist("1.0", "x = 1\n"), "demo-1.1.tar.gz": sdist("1.1", "import os; os.system('id')\n"),
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(files[filepath.Base(r.URL.Path)]) }))
+			defer srv.Close()
+			art := func(n string) Artifact {
+				s := sha256.Sum256(files[n])
+				return Artifact{URL: srv.URL + "/" + n, Hash: "sha256:" + hex.EncodeToString(s[:]), Size: int64(len(files[n]))}
+			}
+			pkg := func(v string) Package {
+				sd := art("demo-" + v + ".tar.gz")
+				return Package{Name: "demo", Version: v, Source: map[string]string{"registry": pypiRegistry}, Sdist: &sd, Wheels: []Artifact{art("demo-" + v + "-" + tc.tag + ".whl")}}
+			}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
+			c := change{update: model.Update{Name: "demo", From: "1.0", To: "1.1", Directory: "/"}, base: pkg("1.0"), head: pkg("1.1")}
+			var sum bytes.Buffer
+			fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(codesOf(fs), "uv.build-code-changed"); got != tc.want {
+				t.Errorf("uv.build-code-changed %v, want %v: %+v", got, tc.want, fs)
+			}
+		})
 	}
 }
