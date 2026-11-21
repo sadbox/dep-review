@@ -46,6 +46,11 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 		if len(native) > 0 {
 			add("uv.native-extension", "%s contains native extensions nobody can review as source: %s", t.kind, ecoutil.List(native, 10))
 		}
+		if t.kind == "wheel" {
+			if hooks := installHookFiles(t.old, t.cur); len(hooks) > 0 {
+				add("uv.install-hook-file", "wheel installs new or changed files outside its import package (.data/ scripts, purelib, platlib, data or headers; sitecustomize/usercustomize): %s", ecoutil.List(hooks, 10))
+			}
+		}
 		pyc, unchecked, opaque := compiledFiles(t.old, t.cur)
 		if len(pyc) > 0 {
 			detail := ""

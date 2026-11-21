@@ -958,3 +958,52 @@ func TestUnchangedLocalPathDependency(t *testing.T) {
 		wantRefuse(t, fs, "uv.project-source-invalid")
 	})
 }
+
+// TestPOCB10 is the review's wheel PoC: demo 1.1 adds a .data/scripts/ruff
+// (shadows the CI tool on PATH) and a top-level sitecustomize.py (runs at
+// every interpreter start); 1.2 ships them as .data/scripts and
+// .data/purelib. Each is a new install-location file that needs a person.
+func TestPOCB10(t *testing.T) {
+	extract := func(v string) *ecoutil.Tree {
+		tr, err := ecoutil.ExtractZip(filepath.Join("testdata/poc/installhooks", "demo-"+v+"-py3-none-any.whl"), filepath.Join(t.TempDir(), "x"), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tr
+	}
+	old := extract("1.0")
+	for v, want := range map[string][]string{
+		"1.1": {"demo-1.1.data/scripts/ruff", "sitecustomize.py"},
+		"1.2": {"demo-1.2.data/scripts/ruff", "demo-1.2.data/purelib/sitecustomize.py"},
+	} {
+		var hook *model.Finding
+		fs := checkPackage(sideTrees{wheel: old}, sideTrees{wheel: extract(v)})
+		for i := range fs {
+			if fs[i].Code == "uv.install-hook-file" {
+				hook = &fs[i]
+			}
+		}
+		if hook == nil || hook.Route != model.RouteHuman {
+			t.Errorf("%s: findings %+v lack a human uv.install-hook-file", v, fs)
+			continue
+		}
+		for _, w := range want {
+			if !strings.Contains(hook.Detail, w) {
+				t.Errorf("%s: detail %q does not name %s", v, hook.Detail, w)
+			}
+		}
+	}
+	// The same files unchanged in the next version: nothing new to flag.
+	if got := installHookFiles(extract("1.1"), extract("1.1")); len(got) != 0 {
+		t.Errorf("unchanged: %q", got)
+	}
+	for key, want := range map[string]bool{
+		"demo.data/headers/x.h": true, "demo.data/data/share/x": true, "demo.data/platlib/evil.py": true,
+		"usercustomize.py": true, "sitecustomize/__init__.py": true, "evil.pth": false, // uv.pth-file flags every .pth
+		"demo/__init__.py": false, "demo/sub.pth": false, "demo-1.0.dist-info/RECORD": false,
+	} {
+		if got := installHook(key); got != want {
+			t.Errorf("installHook(%q) = %v", key, got)
+		}
+	}
+}
