@@ -147,3 +147,27 @@ func TestArtifactsVerified(t *testing.T) {
 		}
 	}
 }
+
+// publish and sweep must know the caller's trigger workflow, or its no-op
+// check run could count as green CI.
+func TestTriggerPathPassed(t *testing.T) {
+	jobs := gateJobs(t)
+	for name, cmd := range map[string]string{"publish": `dep-review" publish`, "sweep": `dep-review" sweep`} {
+		job := jobs[name]
+		if !strings.Contains(job, "TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}") {
+			t.Errorf("%s does not get the trigger path in its env", name)
+		}
+		i := strings.Index(job, cmd)
+		if i < 0 {
+			t.Fatalf("%s does not run %s", name, cmd)
+		}
+		// The command runs to the end of its run: block.
+		run := job[i:]
+		if j := strings.Index(run, "\n      - "); j >= 0 {
+			run = run[:j]
+		}
+		if !strings.Contains(run, `--trigger-path "$TRIGGER_PATH"`) {
+			t.Errorf("%s runs %s without --trigger-path", name, cmd)
+		}
+	}
+}

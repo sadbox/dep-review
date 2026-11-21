@@ -437,13 +437,15 @@ jobs:
           DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           FETCH_RESULT: ${{ needs.fetch.result }}
           REVIEW_RESULT: ${{ needs.review.result }}
+          TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
           "$RUNNER_TEMP/in/gate-bin/dep-review" publish \
             --in "$RUNNER_TEMP/in" \
             --fetch-result "$FETCH_RESULT" \
-            --review-result "$REVIEW_RESULT"
+            --review-result "$REVIEW_RESULT" \
+            --trigger-path "$TRIGGER_PATH"
 
   sweep:
     needs: build
@@ -486,7 +488,9 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           # Only a dep-review status created by "<slug>[bot]" counts as approval.
           DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          # The caller's trigger workflow: its no-op check is not CI.
+          TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
-          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY"
+          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY" --trigger-path "$TRIGGER_PATH"
