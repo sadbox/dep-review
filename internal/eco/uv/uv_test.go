@@ -685,7 +685,7 @@ func TestCompiledAndBinaryFiles(t *testing.T) {
 	fs := checkPackage(sideTrees{wheel: old}, sideTrees{wheel: cur})
 	got := codesOf(fs)
 	slices.Sort(got)
-	if !slices.Equal(got, []string{"uv.binary-file", "uv.compiled-bytecode"}) {
+	if !slices.Equal(got, []string{"uv.binary-file", "uv.compiled-bytecode", "uv.new-top-level"}) { // testdata/ is a new import name
 		t.Fatalf("codes = %q", got)
 	}
 	for _, f := range fs {
@@ -693,6 +693,10 @@ func TestCompiledAndBinaryFiles(t *testing.T) {
 			t.Errorf("%s route %s", f.Code, f.Route)
 		}
 		switch f.Code {
+		case "uv.new-top-level":
+			if !strings.Contains(f.Detail, "testdata") {
+				t.Errorf("detail %q", f.Detail)
+			}
 		case "uv.compiled-bytecode":
 			if !strings.Contains(f.Detail, "unchecked-hash") {
 				t.Errorf("detail %q does not name the unchecked-hash pyc", f.Detail)
@@ -976,35 +980,103 @@ func TestPOCB10(t *testing.T) {
 		"1.1": {"demo-1.1.data/scripts/ruff", "sitecustomize.py"},
 		"1.2": {"demo-1.2.data/scripts/ruff", "demo-1.2.data/purelib/sitecustomize.py"},
 	} {
-		var hook *model.Finding
+		var details []string
 		fs := checkPackage(sideTrees{wheel: old}, sideTrees{wheel: extract(v)})
-		for i := range fs {
-			if fs[i].Code == "uv.install-hook-file" {
-				hook = &fs[i]
+		for _, f := range fs {
+			if f.Code == "uv.install-hook-file" {
+				details = append(details, f.Detail)
+				if f.Route != model.RouteHuman {
+					t.Errorf("%s: %+v", v, f)
+				}
 			}
 		}
-		if hook == nil || hook.Route != model.RouteHuman {
-			t.Errorf("%s: findings %+v lack a human uv.install-hook-file", v, fs)
-			continue
-		}
 		for _, w := range want {
-			if !strings.Contains(hook.Detail, w) {
-				t.Errorf("%s: detail %q does not name %s", v, hook.Detail, w)
+			if !strings.Contains(strings.Join(details, "\n"), w) {
+				t.Errorf("%s: findings %+v do not name %s", v, fs, w)
 			}
 		}
 	}
-	// The same files unchanged in the next version: nothing new to flag.
+	// .data files unchanged in the next version: nothing new to flag; a
+	// startup module is flagged whenever present.
 	if got := installHookFiles(extract("1.1"), extract("1.1")); len(got) != 0 {
 		t.Errorf("unchanged: %q", got)
 	}
+	if got := codesOf(checkPackage(sideTrees{wheel: extract("1.1")}, sideTrees{wheel: extract("1.1")})); !slices.Contains(got, "uv.install-hook-file") {
+		t.Errorf("unchanged sitecustomize not flagged: %q", got)
+	}
 	for key, want := range map[string]bool{
-		"demo.data/headers/x.h": true, "demo.data/data/share/x": true, "demo.data/platlib/evil.py": true,
-		"usercustomize.py": true, "sitecustomize/__init__.py": true, "evil.pth": false, // uv.pth-file flags every .pth
-		"demo/__init__.py": false, "demo/sub.pth": false, "demo-1.0.dist-info/RECORD": false,
+		"demo.data/headers/x.h": true, "demo.data/data/share/x": true, "demo.data/platlib/evil.py": true, "demo.data/scripts/ruff": true,
+		"evil.pth": false, "demo/__init__.py": false, "demo-1.0.dist-info/RECORD": false,
 	} {
 		if got := installHook(key); got != want {
 			t.Errorf("installHook(%q) = %v", key, got)
 		}
+	}
+	startup := dirTree(t, map[string]string{"usercustomize.py": "", "sitecustomize/__init__.py": "", "demo-1.0.data/platlib/sitecustomize.so": "",
+		"demo/sitecustomize.py": "", "demo-1.0.data/scripts/sitecustomize.py": ""})
+	if got := startupModules(startup); !slices.Equal(got, []string{"demo-1.0.data/platlib/sitecustomize.so", "sitecustomize/__init__.py", "usercustomize.py"}) {
+		t.Errorf("startupModules = %q", got)
+	}
+}
+
+// TestNewTopLevel: a wheel that adds an import name (shadowing another
+// distribution's) needs a person; for a package new to the lock the names
+// are compared with the other downloaded wheels.
+func TestNewTopLevel(t *testing.T) {
+	md := map[string]string{"demo-1.0.dist-info/METADATA": "Name: demo\n", "demo/__init__.py": ""}
+	with := func(extra ...string) *ecoutil.Tree {
+		m := maps.Clone(md)
+		for _, e := range extra {
+			m[e] = "x"
+		}
+		return dirTree(t, m)
+	}
+	old := with()
+	for name, tt := range map[string]struct {
+		cur  *ecoutil.Tree
+		want []string
+	}{
+		"package":           {with("requests/__init__.py"), []string{"requests"}},
+		"module":            {with("yaml.py"), []string{"yaml"}},
+		"native module":     {with("_yaml.cpython-312-x86_64-linux-gnu.so"), []string{"_yaml"}},
+		"via .data/purelib": {with("demo-1.0.data/purelib/urllib3/__init__.py"), []string{"urllib3"}},
+		"unchanged":         {with(), nil},
+		"inside the package, .data scripts, dist-info": {with("demo/new.py", "demo-1.0.data/scripts/x", "demo-1.0.dist-info/RECORD"), nil},
+	} {
+		var got []string
+		for _, f := range checkPackage(sideTrees{wheel: old}, sideTrees{wheel: tt.cur}) {
+			if f.Code == "uv.new-top-level" {
+				got = append(got, f.Detail)
+				if f.Route != model.RouteHuman {
+					t.Errorf("%s: %+v", name, f)
+				}
+			}
+		}
+		if (len(got) > 0) != (tt.want != nil) {
+			t.Errorf("%s: uv.new-top-level %q, want %q", name, got, tt.want)
+		}
+		for _, w := range tt.want {
+			if len(got) == 0 || !strings.Contains(got[0], w) {
+				t.Errorf("%s: %q does not name %s", name, got, w)
+			}
+		}
+	}
+	// New to the lock: no old wheel, so compare across downloads.
+	if fs := checkPackage(sideTrees{}, sideTrees{wheel: with("requests/__init__.py")}); slices.Contains(codesOf(fs), "uv.new-top-level") {
+		t.Errorf("new package got uv.new-top-level: %+v", fs)
+	}
+	work := []change{
+		{update: model.Update{Name: "evil", To: "1.0"}},
+		{update: model.Update{Name: "requests", From: "2.31.0", To: "2.32.0"}},
+		{update: model.Update{Name: "other", From: "1", To: "2"}},
+	}
+	tops := []map[string]bool{{"requests": true, "evil": true}, {"requests": true}, {"other": true}}
+	fs := topLevelCollisions(work, tops)
+	if len(fs) != 1 || fs[0].Code != "uv.top-level-collision" || fs[0].Route != model.RouteHuman || fs[0].Update != "evil" || !strings.Contains(fs[0].Detail, "requests") {
+		t.Errorf("collisions %+v", fs)
+	}
+	if fs := topLevelCollisions(work[1:], tops[1:]); len(fs) != 0 {
+		t.Errorf("no new package, collisions %+v", fs)
 	}
 }
 

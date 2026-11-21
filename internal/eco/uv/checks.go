@@ -48,7 +48,18 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 		}
 		if t.kind == "wheel" {
 			if hooks := installHookFiles(t.old, t.cur); len(hooks) > 0 {
-				add("uv.install-hook-file", "wheel installs new or changed files outside its import package (.data/ scripts, purelib, platlib, data or headers; sitecustomize/usercustomize): %s", ecoutil.List(hooks, 10))
+				add("uv.install-hook-file", "wheel installs new or changed files under .data/ (scripts, purelib, platlib, data or headers): %s", ecoutil.List(hooks, 10))
+			}
+			if s := startupModules(t.cur); len(s) > 0 {
+				add("uv.install-hook-file", "wheel installs a sitecustomize/usercustomize module (run at every interpreter start): %s", ecoutil.List(s, 10))
+			}
+			// A new import name can shadow another distribution's
+			// ("requests/", "yaml.py"). For a new package (no old wheel)
+			// Fetch compares names across the downloaded wheels instead.
+			if t.old != nil {
+				if added := newKeys(topLevel(t.old), topLevel(t.cur)); len(added) > 0 {
+					add("uv.new-top-level", "wheel adds top-level import names: %s", ecoutil.List(added, 10))
+				}
 			}
 		}
 		pyc, unchecked, opaque := compiledFiles(t.old, t.cur)

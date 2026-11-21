@@ -22,24 +22,83 @@ func wheelKey(rel string) string {
 	return name + ".data/" + rest
 }
 
-// installHook reports whether a wheel file installs somewhere that runs
-// or shadows code outside the package's own import path: anything under
-// <name>.data/ (scripts land on PATH and can shadow CI tools; purelib and
-// platlib land at the site-packages root; data and headers anywhere under
-// the prefix), and a top-level sitecustomize/usercustomize module (run at
-// every interpreter start). .pth files are uv.pth-file's: any .pth in a
-// wheel is flagged, new or not.
+// installHook reports whether a wheel file installs under <name>.data/:
+// scripts land on PATH and can shadow CI tools, purelib and platlib land
+// at the site-packages root, data and headers anywhere under the prefix.
 func installHook(key string) bool {
-	if first, _, ok := strings.Cut(key, "/"); ok && strings.HasSuffix(first, ".data") {
-		return true
-	}
-	top, _, _ := strings.Cut(key, "/")
-	mod := strings.TrimSuffix(top, ".py")
-	return mod == "sitecustomize" || mod == "usercustomize"
+	first, _, ok := strings.Cut(key, "/")
+	return ok && strings.HasSuffix(first, ".data")
 }
 
-// installHookFiles lists the wheel files of cur that installHook selects
-// and that are new or changed since old.
+// rootPath is where a wheel file lands relative to site-packages, or ""
+// for files that do not land there (.dist-info, .data scripts/data/
+// headers). <name>.data/purelib and platlib install at the root.
+func rootPath(rel string) string {
+	first, rest, _ := strings.Cut(wheelKey(rel), "/")
+	switch {
+	case strings.HasSuffix(first, ".dist-info"):
+		return ""
+	case strings.HasSuffix(first, ".data"):
+		scheme, inside, ok := strings.Cut(rest, "/")
+		if !ok || (scheme != "purelib" && scheme != "platlib") {
+			return ""
+		}
+		return inside
+	}
+	return rel
+}
+
+// topLevel is the set of import names a wheel puts at the site-packages
+// root: package directories ("requests/") and modules ("yaml.py",
+// "_yaml.cpython-312-x86_64-linux-gnu.so" -> "_yaml"). .pth files are not
+// import names (uv.pth-file flags every one).
+func topLevel(t *ecoutil.Tree) map[string]bool {
+	out := map[string]bool{}
+	if t == nil {
+		return out
+	}
+	for _, f := range t.Files {
+		r := rootPath(f)
+		if r == "" {
+			continue
+		}
+		top, _, isDir := strings.Cut(r, "/")
+		if !isDir {
+			if path.Ext(top) == ".pth" {
+				continue
+			}
+			top, _, _ = strings.Cut(top, ".")
+		}
+		if top == "" || top == "__pycache__" {
+			continue
+		}
+		out[top] = true
+	}
+	return out
+}
+
+// startupModules lists the files of a wheel that make a sitecustomize or
+// usercustomize module, which the interpreter imports at every start-up.
+func startupModules(t *ecoutil.Tree) []string {
+	var out []string
+	for _, f := range t.Files {
+		r := rootPath(f)
+		if r == "" {
+			continue
+		}
+		top, _, isDir := strings.Cut(r, "/")
+		if !isDir {
+			top, _, _ = strings.Cut(top, ".")
+		}
+		if top == "sitecustomize" || top == "usercustomize" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// installHookFiles lists the wheel files of cur under <name>.data/ that
+// are new or changed since old.
 func installHookFiles(old, cur *ecoutil.Tree) []string {
 	prev := map[string]string{}
 	if old != nil {
