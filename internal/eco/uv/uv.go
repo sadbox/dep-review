@@ -332,7 +332,7 @@ func (f Fetcher) crossCheckPyPI(ctx context.Context, env fetch.Env, c change) ([
 			} `json:"digests"`
 		} `json:"urls"`
 	}
-	if err := strictjson.Unmarshal(b, &doc); err != nil {
+	if err := strictjson.UnmarshalMetadata(b, &doc); err != nil {
 		return []model.Finding{{Code: "uv.pypi-json-ambiguous", Route: model.RouteRefuse, Update: u.Name,
 			Detail: fmt.Sprintf("PyPI JSON for %s==%s: %v", u.Name, u.To, err)}}, nil
 	}

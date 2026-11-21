@@ -145,7 +145,7 @@ func publisher(d *versionDoc) string {
 			ID           string `json:"id"`
 			OIDCConfigID string `json:"oidcConfigId"`
 		}
-		_ = strictjson.Unmarshal(d.NPMUser.TrustedPublisher, &tp)
+		_ = strictjson.UnmarshalMetadata(d.NPMUser.TrustedPublisher, &tp)
 		s += " via trusted publisher " + tp.ID + " " + tp.OIDCConfigID
 	}
 	return s
@@ -166,7 +166,7 @@ func hasProvenance(d *versionDoc) bool {
 			PredicateType string `json:"predicateType"`
 		} `json:"provenance"`
 	}
-	return len(d.Dist.Attestations) > 0 && strictjson.Unmarshal(d.Dist.Attestations, &a) == nil && a.Provenance != nil
+	return len(d.Dist.Attestations) > 0 && strictjson.UnmarshalMetadata(d.Dist.Attestations, &a) == nil && a.Provenance != nil
 }
 
 func isJS(rel string) bool {

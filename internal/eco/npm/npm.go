@@ -438,7 +438,7 @@ func (f Fetcher) versionDoc(ctx context.Context, env fetch.Env, name, version st
 		return nil, nil, err
 	}
 	var d versionDoc
-	if err := strictjson.Unmarshal(b, &d); err != nil {
+	if err := strictjson.UnmarshalMetadata(b, &d); err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", u, err)
 	}
 	if d.Name != name || d.Version != version {

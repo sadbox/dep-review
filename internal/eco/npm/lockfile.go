@@ -350,7 +350,7 @@ func (m manifest) bins() map[string]string {
 		return out
 	}
 	var s string
-	if strictjson.Unmarshal(m.Bin, &s) == nil {
+	if strictjson.UnmarshalMetadata(m.Bin, &s) == nil {
 		name := m.Name
 		if i := strings.LastIndex(name, "/"); i >= 0 {
 			name = name[i+1:]
@@ -358,7 +358,7 @@ func (m manifest) bins() map[string]string {
 		out[name] = s
 		return out
 	}
-	_ = strictjson.Unmarshal(m.Bin, &out)
+	_ = strictjson.UnmarshalMetadata(m.Bin, &out)
 	return out
 }
 
@@ -372,7 +372,7 @@ func (m manifest) runtimeDeps() map[string]bool {
 	}
 	for _, raw := range []json.RawMessage{m.BundleDependencies, m.BundledDependencies} {
 		var list []string
-		if strictjson.Unmarshal(raw, &list) == nil {
+		if strictjson.UnmarshalMetadata(raw, &list) == nil {
 			for _, k := range list {
 				out[k] = true
 			}
