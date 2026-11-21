@@ -221,7 +221,7 @@ func (a *analyzer) analyze(ctx context.Context, ch fromChange, platforms []strin
 	case len(unbuilt) > 0 && len(a.platforms) > 0:
 		u.Notes = append(u.Notes, "manifests changed only for platforms outside the declared docker_platforms (not analysed): "+strings.Join(unbuilt, ", "))
 	case len(unbuilt) > 0:
-		u.find(model.RouteReview, codeOtherPlatforms, "%s: manifests changed for platforms the gate did not detect a build for, so this is not a proven no-op and they were not analysed: %s", ch.New.Name(), strings.Join(unbuilt, ", "))
+		u.find(model.RouteHuman, codeOtherPlatforms, "%s: manifests changed for platforms the gate did not detect a build for, so this is not a proven no-op and they were not analysed: %s", ch.New.Name(), strings.Join(unbuilt, ", "))
 	}
 	if len(pairs) == 0 || missing {
 		noop = false

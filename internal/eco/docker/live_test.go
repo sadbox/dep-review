@@ -25,8 +25,8 @@ import (
 // (same layout as testdata/cases); DOCKER_LIVE_OUT=<dir> writes the
 // evidence files there.
 var liveWant = map[string]model.Route{
-	"golang-digest-noop":  model.RouteReview, // only riscv64/windows changed in the index: not a proven no-op
-	"caddy-digest-noop":   model.RouteReview, // likewise (riscv64 added, windows rebuilt)
+	"golang-digest-noop":  model.RouteHuman,  // riscv64/windows changed and were not analysed (TestRecordedCases: auto with docker_platforms)
+	"caddy-digest-noop":   model.RouteHuman,  // likewise (riscv64 added, windows rebuilt)
 	"ubuntu-refresh":      model.RouteHuman,  // arm64: apt sources file not owned by a package
 	"node-alpine-refresh": model.RouteHuman,  // see TestLive's log for the platform
 	"golang-patch":        model.RouteReview, // every file attributed; archive verification is v2

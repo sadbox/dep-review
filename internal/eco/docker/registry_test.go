@@ -122,7 +122,8 @@ func TestSelectPlatform(t *testing.T) {
 // The five recorded bumps, offline: index, platform manifests and configs
 // as the registries served them. The two digest refreshes are identical
 // for linux/amd64 and arm64 but changed riscv64 and the Windows images:
-// by default (every manifest must match) they are not proven no-ops, and
+// by default (every manifest must match) they are not proven no-ops and
+// the changed, unanalysed platforms need a person; and
 // caddy's pin is not equivalent to the tag's current index either (no
 // history offline: human). With docker_platforms=linux/amd64,linux/arm64
 // both are no-ops (auto). Decided from the indexes alone; the others'
@@ -139,8 +140,8 @@ func TestRecordedCases(t *testing.T) {
 		tag       tagState
 		code      string
 	}{
-		{"golang", "golang-digest-noop", nil, model.RouteReview, false, tagCurrent, codeOtherPlatforms + "=review"},
-		{"caddy", "caddy-digest-noop", nil, model.RouteHuman, false, tagUnavailable, codeOtherPlatforms + "=review"},
+		{"golang", "golang-digest-noop", nil, model.RouteHuman, false, tagCurrent, codeOtherPlatforms + "=human"},
+		{"caddy", "caddy-digest-noop", nil, model.RouteHuman, false, tagUnavailable, codeOtherPlatforms + "=human"},
 		{"golang, declared platforms", "golang-digest-noop", declared, model.RouteAuto, true, tagCurrent, ""},
 		{"caddy, declared platforms", "caddy-digest-noop", declared, model.RouteAuto, true, tagEquivalent, ""},
 	} {
@@ -187,7 +188,7 @@ func TestRecordedCases(t *testing.T) {
 			code  string
 			route model.Route
 		}{
-			{"superseded", fakeHistory{dgB: true, other: true}, "", model.RouteReview},
+			{"superseded", fakeHistory{dgB: true, other: true}, "", model.RouteHuman}, // riscv64 and Windows changed (unbuilt platforms: human)
 			{"never", fakeHistory{other: true}, codeTagUnattributable, model.RouteRefuse},
 			{"no history", nil, codeTagHistoryUnavailable, model.RouteHuman},
 		} {
