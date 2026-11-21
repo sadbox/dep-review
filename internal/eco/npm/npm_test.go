@@ -887,3 +887,62 @@ func TestRegistryDocCaseCollisions(t *testing.T) {
 		}
 	}
 }
+
+// TestPOCLocationSwap is the re-review's PoC: base has lodash 4.17.21 at
+// the top level and 4.17.20 nested under a; head has only 4.17.20, now at
+// the top level. Name and version sets see only "4.17.21 removed"; by
+// install location it is a top-level downgrade.
+func TestPOCLocationSwap(t *testing.T) {
+	lock := func(entries ...string) []byte {
+		return []byte(`{"lockfileVersion":3,"packages":{"":{"dependencies":{"a":"^1.0.0","lodash":"^4.17.0"}},` + strings.Join(entries, ",") + `}}`)
+	}
+	entry := func(loc, version, integrity string) string {
+		return fmt.Sprintf(`%q:{"version":%q,"resolved":%q,"integrity":%q}`, loc, version, canonicalTarball("lodash", version), integrity)
+	}
+	a := `"node_modules/a":{"version":"1.0.0","resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}`
+	i21 := "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="
+	i20 := "sha512-PlhdFcillOINfeV7Ni6oF1TAEayyZBoZ8bcshTHqOYJYlrqzRK5hagpagky5o4HfCzzd1TRkXPMFq6cKk9rGmA=="
+	base := lock(a, entry("node_modules/lodash", "4.17.21", i21), entry("node_modules/a/node_modules/lodash", "4.17.20", i20))
+	head := lock(a, entry("node_modules/lodash", "4.17.20", i20))
+	dir, b, h := gittest.Repo(t, map[string][]byte{"package-lock.json": base}, map[string][]byte{"package-lock.json": head})
+	var sum bytes.Buffer
+	cs, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("findings %+v", findings)
+	}
+	if len(cs) != 1 {
+		t.Fatalf("changes %+v, want the top-level downgrade", cs)
+	}
+	u := cs[0].update
+	if u.Name != "lodash" || u.From != "4.17.21" || u.To != "4.17.20" || u.Type != model.Unknown || !u.Direct ||
+		cs[0].head.Location != "node_modules/lodash" || cs[0].base.Location != "node_modules/lodash" {
+		t.Errorf("change %+v (base %s, head %s)", u, cs[0].base.Location, cs[0].head.Location)
+	}
+	if !strings.Contains(sum.String(), "lodash: 4.17.21 -> 4.17.20 (unknown, direct at node_modules/lodash)") {
+		t.Errorf("summary:\n%s", sum.String())
+	}
+
+	// End to end the downgrade is an undeclared change of unknown size:
+	// it needs a person, as undeclared changes do.
+	if testing.Short() {
+		return
+	}
+	class := model.Classification{Repo: "test/poc", PR: 1, BaseSHA: b, HeadSHA: h, Kind: model.KindDependabot, Ecosystem: model.NPM,
+		Declared: []model.Update{{Name: "lodash", From: "4.17.21", To: "4.17.20"}}}
+	ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ev.Close()
+	env := fetch.Env{Class: class, RepoDir: dir, Scratch: t.TempDir(), HTTP: ecoutil.NewClient()}
+	res, err := fetch.Run(context.Background(), env, fetch.Registry{model.NPM: Fetcher{}}, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Route != model.RouteHuman {
+		t.Errorf("route %s, findings %+v", res.Route, res.Findings)
+	}
+}

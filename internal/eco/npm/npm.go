@@ -313,9 +313,49 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 	}
 
 	var changes []change
+	emit := func(c change, where string) {
+		u := c.update
+		kind := "transitive"
+		if u.Direct {
+			kind = "direct"
+		}
+		fmt.Fprintf(summary, "- %s: %s -> %s (%s, %s%s)\n", u.Name, ecoutil.OrNew(u.From), u.To, u.Type, kind, where)
+		changes = append(changes, c)
+	}
+	// First by install location: what npm ci lays out at node_modules/x is
+	// what runs, so a location whose version changed is a change even when
+	// both versions exist elsewhere in the lockfile (a top-level downgrade
+	// to a version that was only nested before is invisible to name and
+	// version sets).
+	type triple struct{ name, from, to string }
+	byLoc := map[triple]bool{}
+	locFrom, locTo := map[string][]string{}, map[string][]string{}
+	for _, loc := range slices.Sorted(maps.Keys(hloc)) {
+		h := hloc[loc]
+		b, ok := bloc[loc]
+		if !ok || b.Name != h.Name || b.Version == h.Version || b.Bundled || h.Bundled || b.Link || h.Link {
+			continue
+		}
+		locFrom[h.Name] = append(locFrom[h.Name], b.Version)
+		locTo[h.Name] = append(locTo[h.Name], h.Version)
+		k := triple{h.Name, b.Version, h.Version}
+		if byLoc[k] {
+			continue
+		}
+		byLoc[k] = true
+		u := model.Update{
+			Ecosystem: model.NPM, Directory: depDir, Name: h.Name, From: b.Version, To: h.Version,
+			Type: ecoutil.TypeOf(b.Version, h.Version), Direct: hl.Direct[h.Name],
+		}
+		emit(change{update: u, base: b, head: h, lockKind: hl.Kind}, " at "+loc)
+	}
+	// Then by name, for versions that appeared or disappeared without a
+	// location to pair them (new packages, hoisting moves).
 	names := slices.Sorted(maps.Keys(ecoutil.Union(bv, hv)))
 	for _, name := range names {
 		removed, added := ecoutil.DiffSets(bv[name], hv[name])
+		removed = slices.DeleteFunc(removed, func(v string) bool { return slices.Contains(locFrom[name], v) })
+		added = slices.DeleteFunc(added, func(v string) bool { return slices.Contains(locTo[name], v) })
 		if len(removed) == 0 && len(added) == 0 {
 			continue
 		}
@@ -337,12 +377,10 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 					c.base = hk[key{name, p[0]}][0] // a kept copy
 				}
 			}
-			kind := "transitive"
-			if u.Direct {
-				kind = "direct"
+			if byLoc[triple{name, u.From, u.To}] {
+				continue
 			}
-			fmt.Fprintf(summary, "- %s: %s -> %s (%s, %s)\n", name, ecoutil.OrNew(u.From), u.To, u.Type, kind)
-			changes = append(changes, c)
+			emit(c, "")
 		}
 	}
 	summary.WriteString("\n")
