@@ -14,6 +14,7 @@ import (
 const (
 	kindWorkflow = "workflow"
 	kindAction   = "action"
+	kindLock     = "actions.lock"
 )
 
 // codeLineBreak is the finding for YAML (a caller workflow or action.yml,
@@ -21,9 +22,13 @@ const (
 const codeLineBreak = "actions.yaml-line-break"
 
 // fileKind classifies a path in the caller repository: a workflow
-// (.github/workflows/*.yml|yaml, top level only, as GitHub reads them) or an
-// action metadata file (action.yml|yaml anywhere). Anything else is "".
+// (.github/workflows/*.yml|yaml, top level only, as GitHub reads them), the
+// workflow lockfile (.github/workflows/actions.lock) or an action metadata
+// file (action.yml|yaml anywhere). Anything else is "".
 func fileKind(p string) string {
+	if p == actionsLockPath {
+		return kindLock
+	}
 	dir, base := path.Split(p)
 	if dir == ".github/workflows/" && (strings.HasSuffix(base, ".yml") || strings.HasSuffix(base, ".yaml")) {
 		return kindWorkflow
@@ -279,8 +284,19 @@ func usesContext(kind string, p []string) bool {
 type usesChange struct {
 	file     string
 	kind     string
-	line     int // 1-based, in the new file
+	line     int  // 1-based, in the new file
+	job      bool // a job-level reusable-workflow call (jobs.<id>.uses), which no lockfile covers
 	old, new usesRef
+	// lock is set when the line is a step of a workflow onboarded to
+	// actions.lock: the commits come from the lockfile, not the line.
+	lock *usesLock
+}
+
+// usesLock is what actions.lock says about one rewritten line.
+type usesLock struct {
+	oldKey, newKey       string // lockfile keys
+	oldCommit, newCommit string // 40-hex
+	oldEntry, newEntry   *lockEntry
 }
 
 // fileDiffError is a reason a changed caller file is not a pure `uses:`
@@ -339,7 +355,7 @@ func usesChanges(file, kind, oldText, newText string) ([]usesChange, []fileDiffE
 				bad("line %d: uses: line is not a step or job reference (path %s)", ln, safeYAMLPath(pb))
 				continue
 			}
-			out = append(out, usesChange{file: file, kind: kind, line: ln, old: o, new: n})
+			out = append(out, usesChange{file: file, kind: kind, line: ln, job: kind == kindWorkflow && len(pb) == 3, old: o, new: n})
 		}
 	}
 	return out, errs

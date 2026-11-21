@@ -9,6 +9,14 @@
 // of every changed dist/ byte to a changed first-party file or a changed
 // locked package, with what is left over listed as residual.
 //
+// A step of a workflow onboarded to .github/workflows/actions.lock names
+// an exact tag instead (`uses: owner/repo@vX.Y.Z`), and the commit comes
+// from the lockfile; the same checks then run on the locked commits, which
+// must be the named tag's, in the repository with the locked IDs. The
+// lockfile change must be exactly the bumped entries plus the transitive
+// entries a bumped composite moved, and each of those is analyzed as a
+// bump of its own (see transitiveWalk and lockDelta in actionslock.go).
+//
 // Upstream code is only read: a blobless, checkout-less clone queried with
 // git cat-file/diff, plus public REST endpoints. Nothing from the caller
 // repository or upstream is executed, and dist/ is not rebuilt (see
@@ -29,6 +37,7 @@ import (
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/policy"
 	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
@@ -52,6 +61,10 @@ type Config struct {
 	// MaxResidual routes to a human when any changed bundle has more than
 	// this fraction of its bytes unexplained (default 0.005).
 	MaxResidual float64
+	// MaxTransitive caps the transitive actions.lock entries one PR may
+	// change and still have analyzed; above it they go to a human
+	// (default 8).
+	MaxTransitive int
 	// MaxTagDerefs caps REST calls spent dereferencing annotated tags per
 	// commit (default 25).
 	MaxTagDerefs int
@@ -73,6 +86,9 @@ func New(cfg Config) fetch.Ecosystem {
 	if cfg.MaxResidual == 0 {
 		cfg.MaxResidual = 0.005
 	}
+	if cfg.MaxTransitive == 0 {
+		cfg.MaxTransitive = 8
+	}
 	if cfg.MaxTagDerefs == 0 {
 		cfg.MaxTagDerefs = 25
 	}
@@ -88,12 +104,53 @@ type pair struct {
 	subs        []string // action subpaths used ("" = repository root)
 	changes     []usesChange
 	directory   string
+	// lock: some lines are steps of workflows onboarded to actions.lock,
+	// so oldRef/newRef are the lockfile's commits, the lines name these
+	// tags, and lockEntries are the new lockfile entries.
+	lock                     bool
+	lockOldTags, lockNewTags []string
+	lockEntries              []*lockEntry
+	lockNewKeys              []string // the new lockfile keys that run newRef
+	lockOldKeys              []string // the old lockfile keys that ran oldRef
+	// transitive: a transitive actions.lock entry, not a uses: line; via
+	// is its path through the lockfile (bumped key > ... > its key).
+	// identityOnly: the same commit under another key, so only its
+	// identity is checked.
+	transitive, identityOnly bool
+	via                      string
+	// childSubs: lockfile key of each nested uses: in the new action.yml
+	// files -> the action subpaths it names (for transitive pairs).
+	childSubs map[string][]string
+	// oldChildSubs: the same for the old action.yml files, by old key.
+	oldChildSubs map[string][]string
+	evTag        string // set on an extra pair for more subpaths of an analyzed range
+	start, end   int    // this pair's findings in findings.list
+	update       model.Update
+}
+
+// label names the pair in evidence descriptions.
+func (p *pair) label() string {
+	if p.transitive {
+		return p.name() + " (transitive, actions.lock " + p.via + ")"
+	}
+	return p.name()
 }
 
 func (p *pair) name() string { return p.owner + "/" + p.repo }
 
 type findings struct {
 	list []model.Finding
+	// nested notes each actions.nested-uses-changed finding of a locked
+	// pair, so Fetch can mark it explained when actions.lock locks that
+	// nested action and its transitive pair passes.
+	nested []nestedNote
+}
+
+type nestedNote struct {
+	idx int    // in list
+	key string // lockfile key of the nested uses:
+	sub string // the action subpath it names
+	p   *pair
 }
 
 func (f *findings) add(route model.Route, code, update, format string, args ...any) {
@@ -125,14 +182,19 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 	}
 	var fs findings
 	var all []usesChange
+	lockChanged := false
 	for _, fc := range files {
 		kind := fileKind(fc.path)
 		if kind == "" {
-			fs.add(model.RouteRefuse, "actions.unexpected-file", "", "the PR changes a file that is not a workflow or action.yml: %s", safePath(fc.path))
+			fs.add(model.RouteRefuse, "actions.unexpected-file", "", "the PR changes a file that is not a workflow, action.yml or actions.lock: %s", safePath(fc.path))
 			continue
 		}
 		if fc.status != 'M' || fc.oldMode != fc.newMode {
 			fs.add(model.RouteRefuse, "actions.unexpected-file", "", "the PR adds, deletes or changes the mode of %s", safePath(fc.path))
+			continue
+		}
+		if kind == kindLock {
+			lockChanged = true
 			continue
 		}
 		oldText, err := caller.show(ctx, base, fc.path)
@@ -157,18 +219,111 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 		fs.add(model.RouteRefuse, "actions.no-uses-change", "", "the PR changes no uses: line")
 	}
 
-	pairs, order := groupPairs(all, &fs)
-	var updates []model.Update
 	var summary strings.Builder
 	summary.WriteString("# github_actions updates\n\n")
-	for _, key := range order {
-		p := pairs[key]
+	trans, err := checkActionsLock(ctx, caller, env, base, head, lockChanged, all, f.cfg.MaxTransitive, &fs, &summary)
+	if err != nil {
+		return fetch.Result{}, err
+	}
+
+	pairs, order := groupPairs(all, &fs)
+	var updates []model.Update
+	var analyzed []*pair
+	byNewKey := map[string][]*pair{} // lockfile key -> analyzed pairs that run it
+	run := func(p *pair) error {
+		p.start = len(fs.list)
 		u, err := f.analyzePair(ctx, env, p, &fs, &summary)
 		if err != nil {
-			return fetch.Result{}, fmt.Errorf("actions: %s: %w", p.name(), err)
+			return fmt.Errorf("actions: %s: %w", p.name(), err)
 		}
-		updates = append(updates, u)
+		p.end, p.update = len(fs.list), u
+		if p.transitive {
+			for i := p.start; i < p.end; i++ {
+				fs.list[i].Detail = "transitive (actions.lock " + p.via + "): " + fs.list[i].Detail
+			}
+		}
+		if !p.identityOnly {
+			updates = append(updates, u)
+		}
+		analyzed = append(analyzed, p)
+		for _, k := range p.lockNewKeys {
+			byNewKey[k] = append(byNewKey[k], p)
+		}
+		return nil
 	}
+	for _, key := range order {
+		if err := run(pairs[key]); err != nil {
+			return fetch.Result{}, err
+		}
+	}
+	// Transitive pairs, parents first (transitiveWalk's order), through the
+	// same analysis as a bump.
+	for _, t := range trans {
+		owner, repo, _ := strings.Cut(t.nwo, "/")
+		key := fetch.NormalizeName(model.GitHubActions, t.nwo) + "@" + t.oldEntry.commit + ".." + t.newEntry.commit
+		// The subpaths the parent runs now. Only one its old version ran
+		// under the old key has a baseline; any other is new code.
+		var subs, fresh []string
+		for _, parent := range byNewKey[t.parentNewKey] {
+			for _, sub := range parent.childSubs[t.newKey] {
+				switch {
+				case contains(parent.oldChildSubs[t.oldKey], sub):
+					if !contains(subs, sub) {
+						subs = append(subs, sub)
+					}
+				case !contains(fresh, sub):
+					fresh = append(fresh, sub)
+				}
+			}
+		}
+		for _, sub := range fresh {
+			fs.add(model.RouteHuman, "actions.lock-transitive-new-subpath", t.nwo, "transitive %s (actions.lock %s): the parent now runs %s, which its old version did not run under %s: no baseline to diff", t.newKey, t.via, safePath(path.Join(t.nwo, sub)), t.oldKey)
+		}
+		if len(subs) == 0 && !t.sameCommit {
+			if len(fresh) == 0 {
+				fs.add(model.RouteHuman, "actions.lock-transitive-unanalyzed", t.nwo, "transitive %s (actions.lock %s): the gate read no step of its parent's new action.yml that runs it, so it cannot tell which action of the repository runs", t.newKey, t.via)
+			}
+			continue
+		}
+		evTag := ""
+		if p := pairs[key]; p != nil {
+			// Already analyzed (a bump, or another parent's pair). It
+			// explains this key only for the subpaths it read; any other
+			// subpath the parent runs is analyzed now, as its own pair.
+			if !contains(p.lockNewKeys, t.newKey) {
+				p.lockNewKeys = append(p.lockNewKeys, t.newKey)
+				byNewKey[t.newKey] = append(byNewKey[t.newKey], p)
+			}
+			if !contains(p.lockOldKeys, t.oldKey) {
+				p.lockOldKeys = append(p.lockOldKeys, t.oldKey)
+			}
+			// This entry's ref and IDs were not checked with p.
+			if err := f.checkMergedEntry(ctx, env, p, t.newEntry, t.oldEntry, &fs); err != nil {
+				return fetch.Result{}, err
+			}
+			var missing []string
+			for _, sub := range subs {
+				if !p.identityOnly && !contains(p.subs, sub) && !extraCovers(pairs, key, sub) {
+					missing = append(missing, sub)
+				}
+			}
+			if len(missing) == 0 || t.sameCommit {
+				continue
+			}
+			subs = missing
+			evTag = fmt.Sprintf("sub%d", len(pairs))
+			key += "|" + evTag
+		}
+		p := &pair{owner: owner, repo: repo, oldRef: t.oldEntry.commit, newRef: t.newEntry.commit, subs: subs, directory: "/",
+			lock: true, lockOldTags: []string{t.oldEntry.ref}, lockNewTags: []string{t.newEntry.ref},
+			lockEntries: []*lockEntry{t.newEntry}, lockNewKeys: []string{t.newKey}, lockOldKeys: []string{t.oldKey},
+			transitive: true, identityOnly: t.sameCommit, via: t.via, evTag: evTag}
+		pairs[key] = p
+		if err := run(p); err != nil {
+			return fetch.Result{}, err
+		}
+	}
+	explainNested(analyzed, byNewKey, &fs)
 	if err := env.Evidence.Add("actions/summary.md", "github_actions fetcher summary: pins, versions, upstream checks, provenance and bundle attribution numbers", []byte(summary.String())); err != nil {
 		return fetch.Result{}, err
 	}
@@ -190,19 +345,46 @@ func groupPairs(all []usesChange, fs *findings) (map[string]*pair, []string) {
 			fs.add(model.RouteRefuse, "actions.non-uses-change", "", "%s:%d: only the comment changed; the pin is the same", safePath(c.file), c.line)
 			continue
 		}
-		key := fetch.NormalizeName(model.GitHubActions, owner+"/"+repo) + "@" + c.old.ref + ".." + c.new.ref
+		oldRef, newRef := c.old.ref, c.new.ref
+		if c.lock != nil {
+			// The commits the runner runs are the lockfile's.
+			oldRef, newRef = c.lock.oldCommit, c.lock.newCommit
+		}
+		key := fetch.NormalizeName(model.GitHubActions, owner+"/"+repo) + "@" + oldRef + ".." + newRef
 		p := pairs[key]
 		if p == nil {
 			dir := "/"
 			if c.kind == kindAction {
 				dir = path.Clean("/" + path.Dir(c.file))
 			}
-			p = &pair{owner: owner, repo: repo, oldRef: c.old.ref, newRef: c.new.ref, directory: dir}
+			p = &pair{owner: owner, repo: repo, oldRef: oldRef, newRef: newRef, directory: dir}
 			pairs[key] = p
 			order = append(order, key)
 		}
 		if !contains(p.subs, sub) {
 			p.subs = append(p.subs, sub)
+		}
+		if c.lock != nil {
+			p.lock = true
+			// The ref the entry records is the one the runner checks the
+			// commit against: the tag the line names, or for a SHA-pinned
+			// line the tag gh-actions-lock found. Either must be upstream's
+			// vX.Y.Z tag on that commit (analyzePair).
+			if !contains(p.lockNewKeys, c.lock.newKey) {
+				p.lockNewKeys = append(p.lockNewKeys, c.lock.newKey)
+			}
+			if !contains(p.lockOldKeys, c.lock.oldKey) {
+				p.lockOldKeys = append(p.lockOldKeys, c.lock.oldKey)
+			}
+			if e := c.lock.newEntry; e != nil {
+				if !contains(p.lockNewTags, e.ref) {
+					p.lockNewTags = append(p.lockNewTags, e.ref)
+				}
+				p.lockEntries = append(p.lockEntries, e)
+			}
+			if e := c.lock.oldEntry; e != nil && !contains(p.lockOldTags, e.ref) {
+				p.lockOldTags = append(p.lockOldTags, e.ref)
+			}
 		}
 		p.changes = append(p.changes, c)
 	}
@@ -301,7 +483,7 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		FromRef:   p.oldRef,
 		ToRef:     p.newRef,
 		Type:      model.Unknown,
-		Direct:    true,
+		Direct:    !p.transitive,
 	}
 	for _, d := range env.Class.Declared {
 		if fetch.SameName(model.GitHubActions, d.Name, name) {
@@ -309,16 +491,28 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 			u.Advisory = append(u.Advisory, d.Advisory...)
 		}
 	}
-	fmt.Fprintf(sum, "## %s %s -> %s\n\n", name, short(p.oldRef), short(p.newRef))
+	if p.transitive {
+		fmt.Fprintf(sum, "## transitive %s %s -> %s\n\n- actions.lock: %s\n", name, short(p.oldRef), short(p.newRef), p.via)
+	} else {
+		fmt.Fprintf(sum, "## %s %s -> %s\n\n", name, short(p.oldRef), short(p.newRef))
+	}
 	for _, c := range p.changes {
 		fmt.Fprintf(sum, "- %s:%d\n", safePath(c.file), c.line)
 	}
 	sum.WriteString("\n")
-	if !shaRx.MatchString(p.newRef) {
-		fs.add(model.RouteRefuse, "actions.ref-not-sha", name, "the new ref is not a full 40-hex commit SHA")
-	}
-	if !shaRx.MatchString(p.oldRef) {
-		fs.add(model.RouteRefuse, "actions.old-ref-not-sha", name, "the old ref is not a full 40-hex commit SHA; the gate only reviews SHA-pinned actions")
+	switch {
+	case p.lock:
+		if !shaRx.MatchString(p.newRef) || !shaRx.MatchString(p.oldRef) {
+			// checkActionsLock refused already: an entry is missing.
+			fs.add(model.RouteRefuse, "actions.lock-uses-mismatch", name, "actions.lock has no commit for the old or the new tag")
+		}
+	default:
+		if !shaRx.MatchString(p.newRef) {
+			fs.add(model.RouteRefuse, "actions.ref-not-sha", name, "the new ref is not a full 40-hex commit SHA, and actions.lock does not lock this line")
+		}
+		if !shaRx.MatchString(p.oldRef) {
+			fs.add(model.RouteRefuse, "actions.old-ref-not-sha", name, "the old ref is not a full 40-hex commit SHA, and actions.lock does not lock this line")
+		}
 	}
 	if fs.worst(name) == model.RouteRefuse {
 		u.From, u.To = strings.TrimPrefix(p.oldRef, "v"), strings.TrimPrefix(p.newRef, "v")
@@ -337,6 +531,18 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 	}
 	if !safePathRx.MatchString(info.DefaultBranch) {
 		return u, fmt.Errorf("unexpected default branch name")
+	}
+	for _, e := range p.lockEntries {
+		// The runner checks these IDs; the gate checks them against the
+		// repository it is about to verify.
+		if e.ownerID != info.Owner.ID || e.repoID != info.ID {
+			fs.add(model.RouteRefuse, "actions.lock-identity-mismatch", name, "actions.lock records owner/repo IDs %d/%d, upstream is %d/%d", e.ownerID, e.repoID, info.Owner.ID, info.ID)
+		}
+	}
+	if p.identityOnly {
+		// The same commit as before under another key: it is the code the
+		// base already ran, so only its identity needs checking.
+		return u, f.checkIdentity(ctx, up, info.DefaultBranch, p, fs, sum)
 	}
 
 	// Ancestry: the new pin must be on the default branch (or a release
@@ -380,17 +586,28 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		return u, err
 	}
 	dFrom, dTo := declaredHints(env.Class, name)
-	oldHits, _, err := up.tagsAt(ctx, tags, p.oldRef, append(commentHints(p.changes, true), dFrom...), nil, f.cfg.MaxTagDerefs)
+	// A locked line names its tag; it outranks a version comment.
+	oldHints := append(append([]string(nil), p.lockOldTags...), commentHints(p.changes, true)...)
+	newHints := append(append([]string(nil), p.lockNewTags...), commentHints(p.changes, false)...)
+	oldHits, _, err := up.tagsAt(ctx, tags, p.oldRef, append(oldHints, dFrom...), nil, f.cfg.MaxTagDerefs)
 	if err != nil {
 		return u, err
 	}
 	var oldTag *tagRef
 	if len(oldHits) > 0 {
-		t := pickTag(oldHits, commentHints(p.changes, true))
+		t := pickTag(oldHits, oldHints)
 		oldTag = &t
 	}
+	if p.transitive {
+		// Nothing declares a transitive pair's old version, so the old ref
+		// must anchor it; the highest tag on the old commit is upstream's
+		// to choose (an extra v3.0.0 there turns a major into a minor).
+		if oldTag, err = f.anchorOldTag(ctx, up, tags, p, oldTag, fs); err != nil {
+			return u, err
+		}
+	}
 	accept := func(v semver) bool { return oldTag == nil || v.cmp(oldTag.v) > 0 }
-	newHits, derefs, err := up.tagsAt(ctx, tags, p.newRef, append(commentHints(p.changes, false), dTo...), accept, f.cfg.MaxTagDerefs)
+	newHits, derefs, err := up.tagsAt(ctx, tags, p.newRef, append(newHints, dTo...), accept, f.cfg.MaxTagDerefs)
 	if err != nil {
 		return u, err
 	}
@@ -398,9 +615,37 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 	if len(newHits) == 0 {
 		fs.add(model.RouteRefuse, "actions.no-version-tag", name, "no vX.Y.Z tag dereferences to the new SHA (%d annotated tags dereferenced)", derefs)
 	} else {
-		t := pickTag(newHits, commentHints(p.changes, false))
+		t := pickTag(newHits, newHints)
 		newTag = &t
 		u.To = t.v.String()
+	}
+	// The tag a locked line names must be upstream's tag on the locked
+	// commit, not merely some tag there.
+	for _, tn := range p.lockNewTags {
+		ok, err := up.tagIs(ctx, tags, tn, p.newRef)
+		if err != nil {
+			return u, err
+		}
+		if !ok {
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "%s is not an upstream vX.Y.Z tag that dereferences to the commit actions.lock records for it (%s)", safeRef(tn), short(p.newRef))
+		} else if newTag != nil && newTag.name != tn {
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "actions.lock records %s, but the version the gate read for the locked commit is %s", tn, newTag.name)
+		}
+	}
+	// The baseline: the old exact tag must still be upstream's tag on the
+	// old commit. If it moved, the diff starts from code the tag no longer
+	// names. (A floating old ref such as v5 moves by design.)
+	for _, tn := range p.lockOldTags {
+		if _, exact := parseTag(tn); !exact {
+			continue
+		}
+		ok, err := up.tagIs(ctx, tags, tn, p.oldRef)
+		if err != nil {
+			return u, err
+		}
+		if !ok {
+			fs.add(model.RouteHuman, "actions.lock-old-tag-moved", name, "%s no longer dereferences to the commit the base actions.lock recorded for it (%s)", tn, short(p.oldRef))
+		}
 	}
 	if oldTag == nil {
 		fs.add(model.RouteHuman, "actions.old-version-unknown", name, "no vX.Y.Z tag dereferences to the old SHA; the update size is unknown")
@@ -476,7 +721,7 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 					fmt.Fprintf(&sb, "  %s %s\n", v.Package.Name, v.VulnerableVersionRange)
 				}
 			}
-			if err := env.Evidence.AddUntrusted(evName(p, "advisories.txt"), "GitHub advisories matching the new version of "+name, []byte(sb.String())); err != nil {
+			if err := env.Evidence.AddUntrusted(evName(p, "advisories.txt"), "GitHub advisories matching the new version of "+p.label(), []byte(sb.String())); err != nil {
 				return u, err
 			}
 		}
@@ -495,7 +740,7 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		fs.add(model.RouteHuman, "actions.provenance-regressed", name, "the old release was immutable with a release attestation; the new one is not")
 	}
 	if newRel != nil && newRel.Body != "" {
-		if err := env.Evidence.AddUntrusted(evName(p, "release-notes.md"), "release notes for "+name+" "+tagName(newTag)+" (written by upstream)", []byte(newRel.Body)); err != nil {
+		if err := env.Evidence.AddUntrusted(evName(p, "release-notes.md"), "release notes for "+p.label()+" "+tagName(newTag)+" (written by upstream)", []byte(newRel.Body)); err != nil {
 			return u, err
 		}
 	}
@@ -510,7 +755,7 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 			subject, _, _ := strings.Cut(c.Commit.Message, "\n")
 			fmt.Fprintf(&sb, "%s %s <%s> %s\n", short(c.SHA), c.Commit.Author.Name, login, subject)
 		}
-		if err := env.Evidence.AddUntrusted(evName(p, "commits.txt"), "upstream commits between the pins of "+name, []byte(sb.String())); err != nil {
+		if err := env.Evidence.AddUntrusted(evName(p, "commits.txt"), "upstream commits between the pins of "+p.label(), []byte(sb.String())); err != nil {
 			return u, err
 		}
 	}
@@ -550,7 +795,249 @@ func safeWord(s string) string {
 }
 
 func evName(p *pair, file string) string {
-	return fmt.Sprintf("actions/%s__%s/%s-%s/%s", strings.ToLower(p.owner), strings.ToLower(p.repo), short(p.oldRef)[:7], short(p.newRef)[:7], file)
+	dir := "actions"
+	if p.transitive {
+		dir = "actions/transitive"
+	}
+	tag := ""
+	if p.evTag != "" {
+		tag = "-" + p.evTag
+	}
+	return fmt.Sprintf("%s/%s__%s/%s-%s%s/%s", dir, strings.ToLower(p.owner), strings.ToLower(p.repo), short(p.oldRef)[:7], short(p.newRef)[:7], tag, file)
+}
+
+// extraCovers reports whether an extra pair (key|subN) already covers sub.
+func extraCovers(pairs map[string]*pair, key, sub string) bool {
+	for k, p := range pairs {
+		if strings.HasPrefix(k, key+"|") && contains(p.subs, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkIdentity is the identity part of analyzePair, for a commit that did
+// not change: on the default (or a release) branch, and the tag
+// actions.lock records for it is upstream's tag on it.
+func (f *fetcher) checkIdentity(ctx context.Context, up *upstream, def string, p *pair, fs *findings, sum *strings.Builder) error {
+	name := p.name()
+	branch, err := up.onReleaseBranch(ctx, def, p.newRef)
+	if err != nil {
+		return err
+	}
+	switch branch {
+	case "":
+		fs.add(model.RouteRefuse, "actions.not-on-default-branch", name, "the locked SHA is not an ancestor of %s or of a release branch (a fork or unmerged commit?)", def)
+	case def:
+	default:
+		fs.add(model.RouteHuman, "actions.release-branch-only", name, "the locked SHA is reachable from release branch %s but not from the default branch %s", safePath(branch), def)
+	}
+	tags, err := up.semverTags(ctx)
+	if err != nil {
+		return err
+	}
+	for _, tn := range p.lockNewTags {
+		ok, err := up.tagIs(ctx, tags, tn, p.newRef)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "%s is not an upstream vX.Y.Z tag that dereferences to the commit actions.lock records for it (%s)", safeRef(tn), short(p.newRef))
+		}
+	}
+	fmt.Fprintf(sum, "- same commit as before under a new key; identity checked (reachable from %s)\n\n", orNone(branch))
+	return nil
+}
+
+// explainNested marks a locked pair's actions.nested-uses-changed finding
+// explained (route review, code actions.nested-uses-locked) when its new
+// actions.lock entry lists the nested action and a pair that runs that
+// lockfile key, and read the action at that subpath, passed its own
+// analysis (version policy and findings no worse than review). Passing is computed to a fixed point, so a chain of
+// composites is explained bottom-up. A nested change the lockfile does
+// not explain keeps its route.
+func explainNested(analyzed []*pair, byNewKey map[string][]*pair, fs *findings) {
+	if len(fs.nested) == 0 {
+		return
+	}
+	suppressed := map[int]*pair{}
+	passing := map[*pair]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range analyzed {
+			if passing[p] {
+				continue
+			}
+			r := model.RouteAuto
+			if !p.identityOnly {
+				r = policy.RouteFor(p.update)
+			}
+			for i := p.start; i < p.end; i++ {
+				if suppressed[i] == nil {
+					r = model.Worse(r, fs.list[i].Route)
+				}
+			}
+			if model.Worse(r, model.RouteReview) == model.RouteReview {
+				passing[p], changed = true, true
+			}
+		}
+		for _, n := range fs.nested {
+			if suppressed[n.idx] != nil || !entriesUse(n.p.lockEntries, n.key) {
+				continue
+			}
+			for _, q := range byNewKey[n.key] {
+				// q must have read the action at this subpath: a pair
+				// that analyzed another subpath of the repository does
+				// not explain it (an identity-only pair reads none).
+				if passing[q] && !q.identityOnly && contains(q.subs, n.sub) && ranBefore(n.p, q, n.sub) {
+					suppressed[n.idx], changed = q, true
+					break
+				}
+			}
+		}
+	}
+	for i, q := range suppressed {
+		x := &fs.list[i]
+		x.Route, x.Code = model.RouteReview, "actions.nested-uses-locked"
+		x.Detail += fmt.Sprintf("; actions.lock locks it and the gate analyzed %s %s -> %s", q.name(), short(q.oldRef), short(q.newRef))
+	}
+}
+
+// ranBefore reports whether parent's old version ran sub of q's action
+// under one of q's old keys: the baseline q's diff starts from.
+func ranBefore(parent, q *pair, sub string) bool {
+	for _, k := range q.lockOldKeys {
+		if contains(parent.oldChildSubs[k], sub) {
+			return true
+		}
+	}
+	return false
+}
+
+var floatingTagRx = regexp.MustCompile(`^v(0|[1-9][0-9]{0,8})(\.(0|[1-9][0-9]{0,8}))?$`)
+
+// anchorOldTag returns the old version of a transitive pair as its old ref
+// anchors it. An exact vX.Y.Z ref is the tag (pickTag preferred it; if it
+// no longer names the commit, actions.lock-old-tag-moved reports that). A
+// floating vN or vN.M ref counts only tags under that prefix. Any other
+// ref (a branch, or a SHA key's non-version ref) needs the old commit to
+// carry exactly one vX.Y.Z tag. Otherwise the old version is unknown, and
+// analyzePair sends the pair to a human.
+func (f *fetcher) anchorOldTag(ctx context.Context, up *upstream, tags []tagRef, p *pair, picked *tagRef, fs *findings) (*tagRef, error) {
+	if len(p.lockOldTags) != 1 {
+		return nil, nil
+	}
+	ref := p.lockOldTags[0]
+	if _, exact := parseTag(ref); exact {
+		return picked, nil
+	}
+	all, complete, err := up.allTagsAt(ctx, tags, p.oldRef, f.cfg.MaxTagDerefs)
+	if err != nil {
+		return nil, err
+	}
+	var best *tagRef
+	if floatingTagRx.MatchString(ref) {
+		for i, t := range all {
+			if strings.HasPrefix(t.name, ref+".") && (best == nil || t.v.cmp(best.v) > 0) {
+				best = &all[i]
+			}
+		}
+		if best == nil {
+			fs.add(model.RouteHuman, "actions.lock-old-version-unanchored", p.name(), "no %s.* tag names the old commit %s, so its version is unknown", ref, short(p.oldRef))
+		}
+		return best, nil
+	}
+	if complete && len(all) == 1 {
+		return &all[0], nil
+	}
+	fs.add(model.RouteHuman, "actions.lock-old-version-unanchored", p.name(), "the old ref is not a version and the old commit %s carries %d vX.Y.Z tags (complete list: %t), so its version is unknown", short(p.oldRef), len(all), complete)
+	return nil, nil
+}
+
+// checkMergedEntry checks, for an actions.lock transitive pair that
+// resolves to the commit range p already analyzed, what p did not: the
+// new entry's IDs against upstream's and its recorded tag on the new
+// commit, and the old entry's exact tag on the old commit.
+func (f *fetcher) checkMergedEntry(ctx context.Context, env fetch.Env, p *pair, e, old *lockEntry, fs *findings) error {
+	checkNew := true
+	for _, x := range p.lockEntries {
+		if x == e || (x.ref == e.ref && x.ownerID == e.ownerID && x.repoID == e.repoID) {
+			checkNew = false
+		}
+	}
+	_, exactOld := parseTag(old.ref)
+	checkOld := exactOld && !contains(p.lockOldTags, old.ref)
+	if !checkNew && !checkOld {
+		return nil
+	}
+	if checkNew {
+		p.lockEntries = append(p.lockEntries, e)
+		if !contains(p.lockNewTags, e.ref) {
+			p.lockNewTags = append(p.lockNewTags, e.ref)
+		}
+	}
+	if checkOld {
+		p.lockOldTags = append(p.lockOldTags, old.ref)
+	}
+	name := p.name()
+	up := &upstream{gh: env.GitHub, owner: p.owner, repo: p.repo, tagDeref: map[string]string{}}
+	var info repoInfo
+	if err := up.get(ctx, "", &info); err != nil {
+		if errors.Is(err, gh.ErrNotFound) {
+			fs.add(model.RouteRefuse, "actions.repo-not-found", name, "upstream repository not found")
+			return nil
+		}
+		return err
+	}
+	tags, err := up.semverTags(ctx)
+	if err != nil {
+		return err
+	}
+	if checkNew {
+		if e.ownerID != info.Owner.ID || e.repoID != info.ID {
+			fs.add(model.RouteRefuse, "actions.lock-identity-mismatch", name, "actions.lock records owner/repo IDs %d/%d, upstream is %d/%d", e.ownerID, e.repoID, info.Owner.ID, info.ID)
+		}
+		ok, err := up.tagIs(ctx, tags, e.ref, p.newRef)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "%s is not an upstream vX.Y.Z tag that dereferences to the commit actions.lock records for it (%s)", safeRef(e.ref), short(p.newRef))
+		}
+	}
+	if checkOld {
+		ok, err := up.tagIs(ctx, tags, old.ref, p.oldRef)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fs.add(model.RouteHuman, "actions.lock-old-tag-moved", name, "%s no longer dereferences to the commit the base actions.lock recorded for it (%s)", old.ref, short(p.oldRef))
+		}
+	}
+	return nil
+}
+
+func entriesUse(es []*lockEntry, key string) bool {
+	for _, e := range es {
+		if contains(e.uses, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// nestedKey is the lockfile key and action subpath of a composite step's
+// uses: value, or ok=false for a local, docker:// or malformed one.
+func nestedKey(u string) (key, sub string, ok bool) {
+	action, ref, found := strings.Cut(u, "@")
+	if !found || ref == "" {
+		return "", "", false
+	}
+	owner, repo, sub, err := splitAction(action)
+	if err != nil {
+		return "", "", false
+	}
+	return pinKey(owner, repo, ref), sub, true
 }
 
 type provFacts struct {
@@ -691,6 +1178,24 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		mf, text := compareActionMeta(sub, om, nm)
 		for _, x := range mf {
 			fs.add(x.route, x.code, name, "%s", x.detail)
+			if k, ksub, ok := nestedKey(x.uses); ok && p.lock && x.code == "actions.nested-uses-changed" {
+				fs.nested = append(fs.nested, nestedNote{idx: len(fs.list) - 1, key: k, sub: ksub, p: p})
+			}
+		}
+		if p.lock {
+			if p.childSubs == nil {
+				p.childSubs, p.oldChildSubs = map[string][]string{}, map[string][]string{}
+			}
+			for _, side := range []struct {
+				uses []string
+				m    map[string][]string
+			}{{nm.stepUses, p.childSubs}, {om.stepUses, p.oldChildSubs}} {
+				for _, u := range side.uses {
+					if k, s, ok := nestedKey(u); ok && !contains(side.m[k], s) {
+						side.m[k] = append(side.m[k], s)
+					}
+				}
+			}
 		}
 		metaText.WriteString(text)
 		if d := unifiedDiff("a/"+oldPath, "b/"+newPath, string(oldY), string(newY), 3); d != "" {
@@ -704,7 +1209,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		entries = append(entries, es...)
 	}
 	if metaText.Len() > 0 {
-		if err := env.Evidence.AddUntrusted(evName(p, "action-yml.txt"), "structured and raw action.yml diff for "+name, []byte(metaText.String())); err != nil {
+		if err := env.Evidence.AddUntrusted(evName(p, "action-yml.txt"), "structured and raw action.yml diff for "+p.label(), []byte(metaText.String())); err != nil {
 			return err
 		}
 	}
@@ -846,7 +1351,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		if pkgNotes.Len() > 0 {
 			text += "\npackage.json:\n" + pkgNotes.String()
 		}
-		if err := env.Evidence.AddUntrusted(evName(p, "npm-packages.txt"), "npm packages whose locked versions changed in "+name+" (NEW, DOWNGRADE flagged)", []byte(text)); err != nil {
+		if err := env.Evidence.AddUntrusted(evName(p, "npm-packages.txt"), "npm packages whose locked versions changed in "+p.label()+" (NEW, DOWNGRADE flagged)", []byte(text)); err != nil {
 			return err
 		}
 	}
@@ -868,7 +1373,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		if err != nil {
 			return err
 		}
-		if err := env.Evidence.AddUntrusted(evName(p, "source.diff"), "first-party source diff of "+name+" (dist/ and lockfiles excluded)", []byte(d)); err != nil {
+		if err := env.Evidence.AddUntrusted(evName(p, "source.diff"), "first-party source diff of "+p.label()+" (dist/ and lockfiles excluded)", []byte(d)); err != nil {
 			return err
 		}
 	}
@@ -935,12 +1440,12 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		bundleText.WriteString("\n==== dist text files\n" + d)
 	}
 	if bundleText.Len() > 0 {
-		if err := env.Evidence.AddUntrusted(evName(p, "dist.txt"), "dist/ attribution for "+name+": residual list, then residual and first-party per-module/per-source diffs", []byte(bundleText.String())); err != nil {
+		if err := env.Evidence.AddUntrusted(evName(p, "dist.txt"), "dist/ attribution for "+p.label()+": residual list, then residual and first-party per-module/per-source diffs", []byte(bundleText.String())); err != nil {
 			return err
 		}
 	}
 	if pkgText.Len() > 0 {
-		if err := env.Evidence.AddUntrusted(evName(p, "dist-packages.diff"), "per-source/per-module diffs of bundled npm packages whose locked version changed ("+name+")", []byte(pkgText.String())); err != nil {
+		if err := env.Evidence.AddUntrusted(evName(p, "dist-packages.diff"), "per-source/per-module diffs of bundled npm packages whose locked version changed ("+p.label()+")", []byte(pkgText.String())); err != nil {
 			return err
 		}
 	}
