@@ -101,6 +101,10 @@ type Options struct {
 	Logf       func(format string, args ...any)
 	// Sleep waits between activity-log reads (tests replace it).
 	Sleep func(ctx context.Context, d time.Duration) error
+	// IgnoreEcosystems (the ignore_ecosystems input, model.ParseEcosystems)
+	// turns a KindDependabot PR whose whole update set is in these
+	// ecosystems into KindIgnored.
+	IgnoreEcosystems map[model.Ecosystem]bool
 }
 
 // Classify reads the workflow_run event and the API and returns the
@@ -260,7 +264,7 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 		return unverified(why)
 	}
 
-	eco, ok := ecosystemFromBranch(pr.Head.Ref)
+	eco, ok := model.EcosystemFromBranch(pr.Head.Ref)
 	if !ok {
 		return unverified("the branch name does not name a supported ecosystem")
 	}
@@ -309,6 +313,15 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 		return unverified("the pull request changes no files")
 	}
 
+	// Only a PR that passed every check above is ever ignored; anything
+	// else returned before this point and is handled as usual.
+	if why, ok := ignoredBy(opt.IgnoreEcosystems, eco, cl.Declared); ok {
+		cl.Kind, cl.Reason = model.KindIgnored, why
+		logf("kind=dependabot-ignored: %s #%d: %s", repoName, num, why)
+		return cl, nil
+	} else if why != "" {
+		logf("not ignored: %s", why)
+	}
 	cl.Kind = model.KindDependabot
 	cl.Reason = "authored, committed and signed by Dependabot only"
 	logf("kind=dependabot: %s #%d %s (%d declared updates)", repoName, num, eco, len(cl.Declared))
@@ -544,26 +557,37 @@ func findPR(ctx context.Context, c *gh.Client, ev *Event) (int, error) {
 	return nums[0], nil
 }
 
-var ecosystems = map[string]model.Ecosystem{
-	string(model.GoModules):     model.GoModules,
-	string(model.NPM):           model.NPM,
-	string(model.UV):            model.UV,
-	string(model.GitHubActions): model.GitHubActions,
-	string(model.Docker):        model.Docker,
-	string(model.GitSubmodule):  model.GitSubmodule,
+// ignoredBy decides whether a verified Dependabot PR is left to another
+// process: its branch's ecosystem and every declared update's ecosystem
+// must agree and be in ignore. A mixed or disagreeing update set, or an
+// empty one, is not ignored (ok false; why says why, for the log).
+//
+// Dependabot's updated-dependencies block carries no ecosystem today, so
+// each declared update's ecosystem is the branch's; the check still runs
+// on Declared so that nothing classify records can widen what is ignored.
+func ignoredBy(ignore map[model.Ecosystem]bool, branch model.Ecosystem, declared []model.Update) (why string, ok bool) {
+	switch {
+	case len(ignore) == 0 || !ignore[branch]:
+		return "", false
+	case len(declared) == 0:
+		return "no declared updates", false
+	}
+	for _, d := range declared {
+		switch {
+		case d.Ecosystem != branch && ignore[d.Ecosystem]:
+			return fmt.Sprintf("a declared update's ecosystem %s disagrees with the branch's %s", safeEco(d.Ecosystem), branch), false
+		case d.Ecosystem != branch:
+			return fmt.Sprintf("the update set mixes %s with %s", branch, safeEco(d.Ecosystem)), false
+		}
+	}
+	return fmt.Sprintf("every declared update is in ignored ecosystem %s (ignore_ecosystems): another process owns these pull requests", branch), true
 }
 
-func ecosystemFromBranch(ref string) (model.Ecosystem, bool) {
-	rest, ok := strings.CutPrefix(ref, branchPrefix)
-	if !ok {
-		return "", false
+func safeEco(e model.Ecosystem) string {
+	if typeRe.MatchString(string(e)) {
+		return string(e)
 	}
-	name, _, ok := strings.Cut(rest, "/")
-	if !ok {
-		return "", false
-	}
-	e, ok := ecosystems[name]
-	return e, ok
+	return "unknown"
 }
 
 func updateType(s string) model.UpdateType {

@@ -36,6 +36,15 @@ on:
           index must be unchanged.
         type: string
         default: ""
+      ignore_ecosystems:
+        description: >-
+          Comma-separated ecosystems, as in Dependabot's branch names (e.g.
+          submodules, not gitsubmodule), whose PRs another trusted process
+          owns. A verified Dependabot PR whose whole update set is in these
+          gets no status, comment or notification; anything else is gated
+          as usual. An unknown name fails the run. Empty: none.
+        type: string
+        default: ""
       model:
         type: string
         default: claude-opus-5-5
@@ -162,10 +171,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
+          IGNORE_ECOSYSTEMS: ${{ inputs.ignore_ecosystems }}
         run: |
           "$RUNNER_TEMP/bin/dep-review" classify \
             --event "$GITHUB_EVENT_PATH" \
             --trigger-path "$TRIGGER_PATH" \
+            --ignore-ecosystems "$IGNORE_ECOSYSTEMS" \
             --out "$RUNNER_TEMP/out/classification.json"
       - name: Checksum the artifact
         id: sums
@@ -500,7 +511,9 @@ jobs:
           DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           # The caller's trigger workflow: its no-op check is not CI.
           TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
+          # Sweep skips PRs in these ecosystems, as classify ignores them.
+          IGNORE_ECOSYSTEMS: ${{ inputs.ignore_ecosystems }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
-          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY" --trigger-path "$TRIGGER_PATH"
+          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY" --trigger-path "$TRIGGER_PATH" --ignore-ecosystems "$IGNORE_ECOSYSTEMS"

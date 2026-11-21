@@ -4,24 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/classify"
 	"github.com/sadbox/dep-review/internal/gh"
+	"github.com/sadbox/dep-review/internal/model"
 )
+
+// ignoreUsage is shared by classify and sweep, which must agree.
+const ignoreUsage = "optional: comma-separated ecosystems, as in Dependabot's branch names (e.g. submodules), whose verified Dependabot PRs another process owns; the gate leaves them alone. An unknown name is an error"
 
 func runClassify(args []string) error {
 	fs := newFlagSet("classify")
 	event := fs.String("event", "", "workflow_run event payload (GITHUB_EVENT_PATH) (required)")
 	trigger := fs.String("trigger-path", "", "path of the caller's trigger workflow (required)")
 	out := fs.String("out", "", "where to write classification.json (required)")
+	ignoreList := fs.String("ignore-ecosystems", "", ignoreUsage)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *event == "" || *trigger == "" || *out == "" {
 		return errors.New("classify: --event, --trigger-path and --out are required")
+	}
+	ignore, err := model.ParseEcosystems(*ignoreList)
+	if err != nil {
+		return fmt.Errorf("--ignore-ecosystems: %w", err)
 	}
 	ev, err := os.ReadFile(*event)
 	if err != nil {
@@ -34,8 +44,9 @@ func runClassify(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	cl, err := classify.Classify(ctx, c, ev, classify.Options{
-		TriggerPath: *trigger,
-		ExpectRepo:  os.Getenv("GITHUB_REPOSITORY"),
+		TriggerPath:      *trigger,
+		ExpectRepo:       os.Getenv("GITHUB_REPOSITORY"),
+		IgnoreEcosystems: ignore,
 	})
 	if err != nil {
 		return err

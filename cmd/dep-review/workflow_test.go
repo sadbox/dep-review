@@ -188,3 +188,68 @@ func TestDockerPlatformsPassed(t *testing.T) {
 		t.Error("the example does not set docker_platforms")
 	}
 }
+
+// The ignore_ecosystems input reaches classify (which ignores) and sweep
+// (which must skip what classify ignores), through env only, and the
+// example documents it commented out.
+func TestIgnoreEcosystemsPassed(t *testing.T) {
+	gate, err := os.ReadFile("../../.github/workflows/gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := string(gate)
+	call := g[strings.Index(g, "workflow_call:"):strings.Index(g, "\n    secrets:\n")]
+	if i := strings.Index(call, "\n      ignore_ecosystems:\n"); i < 0 || !strings.Contains(call[i:], `default: ""`) {
+		t.Error("gate.yml does not declare an optional ignore_ecosystems input defaulting to empty")
+	}
+	jobs := gateJobs(t)
+	for name, cmd := range map[string]string{"classify": `dep-review" classify`, "sweep": `dep-review" sweep`} {
+		job := jobs[name]
+		if !strings.Contains(job, "IGNORE_ECOSYSTEMS: ${{ inputs.ignore_ecosystems }}") {
+			t.Errorf("%s does not get ignore_ecosystems in its env", name)
+		}
+		i := strings.Index(job, cmd)
+		if i < 0 {
+			t.Fatalf("%s does not run %s", name, cmd)
+		}
+		run := job[i:]
+		if j := strings.Index(run, "\n      - "); j >= 0 {
+			run = run[:j]
+		}
+		if !strings.Contains(run, `--ignore-ecosystems "$IGNORE_ECOSYSTEMS"`) {
+			t.Errorf("%s runs %s without --ignore-ecosystems", name, cmd)
+		}
+	}
+	for name, job := range jobs {
+		if name != "classify" && name != "sweep" && strings.Contains(job, "ignore_ecosystems") {
+			t.Errorf("%s uses ignore_ecosystems; only classify and sweep should", name)
+		}
+	}
+	if strings.Contains(g, "${{ inputs.ignore_ecosystems }}\"") || regexp.MustCompile(`run:[^\n]*inputs\.ignore_ecosystems`).MatchString(g) {
+		t.Error("ignore_ecosystems is expanded inside a run: script")
+	}
+	example, err := os.ReadFile("../../examples/dep-review.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(example), "      # ignore_ecosystems: submodules\n") {
+		t.Error("the example does not show ignore_ecosystems commented out")
+	}
+}
+
+// An unknown ecosystem name fails classify and sweep before they read
+// anything or call the API.
+func TestIgnoreEcosystemsUnknownFails(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	for cmd, args := range map[string][]string{
+		"classify": {"--event", "/nonexistent", "--trigger-path", "t", "--out", "/nonexistent/c.json"},
+		"sweep":    {"--repo", "o/r", "--trigger-path", "t"},
+	} {
+		for _, bad := range []string{"gitsubmodule", "submodules,", "*"} {
+			err := commands[cmd](append(args, "--ignore-ecosystems", bad))
+			if err == nil || !strings.Contains(err.Error(), "--ignore-ecosystems: unknown ecosystem") {
+				t.Errorf("%s --ignore-ecosystems %q: %v", cmd, bad, err)
+			}
+		}
+	}
+}

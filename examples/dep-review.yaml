@@ -39,3 +39,9 @@ jobs:
       anthropic_workspace_id: wrkspc_REPLACE
       # Must list exactly the platforms this repository builds its images for.
       docker_platforms: linux/amd64,linux/arm64
+      # Only when another trusted process owns these ecosystems' Dependabot
+      # PRs (e.g. a routine that supersedes every submodule bump with its
+      # own PR): verified Dependabot PRs entirely in them get no status,
+      # comment or notification. Names as in Dependabot's branch names
+      # (submodules, not gitsubmodule); an unknown name fails the run.
+      # ignore_ecosystems: submodules
