@@ -696,7 +696,7 @@ func TestCompiledAndBinaryFiles(t *testing.T) {
 	fs := checkPackage(sideTrees{wheel: old}, sideTrees{wheel: cur})
 	got := codesOf(fs)
 	slices.Sort(got)
-	if !slices.Equal(got, []string{"uv.binary-file", "uv.compiled-bytecode", "uv.new-top-level"}) { // testdata/ is a new import name
+	if !slices.Equal(got, []string{"uv.binary-file", "uv.compiled-bytecode"}) {
 		t.Fatalf("codes = %q", got)
 	}
 	for _, f := range fs {
@@ -704,10 +704,6 @@ func TestCompiledAndBinaryFiles(t *testing.T) {
 			t.Errorf("%s route %s", f.Code, f.Route)
 		}
 		switch f.Code {
-		case "uv.new-top-level":
-			if !strings.Contains(f.Detail, "testdata") {
-				t.Errorf("detail %q", f.Detail)
-			}
 		case "uv.compiled-bytecode":
 			if !strings.Contains(f.Detail, "unchecked-hash") {
 				t.Errorf("detail %q does not name the unchecked-hash pyc", f.Detail)
@@ -1030,9 +1026,10 @@ func TestPOCB10(t *testing.T) {
 	}
 }
 
-// TestNewTopLevel: a wheel that adds an import name (shadowing another
-// distribution's) needs a person; for a package new to the lock the names
-// are compared with the other downloaded wheels.
+// TestNewTopLevel: import-name exemptions come from the old version's
+// wheel only. A name it lacked, a hook name, any odd root entry, and every
+// name of a package with no old wheel (new to the lock, or sdist-only
+// before) need a person.
 func TestNewTopLevel(t *testing.T) {
 	md := map[string]string{"demo-1.0.dist-info/METADATA": "Name: demo\n", "demo/__init__.py": ""}
 	with := func(extra ...string) *ecoutil.Tree {
@@ -1042,52 +1039,54 @@ func TestNewTopLevel(t *testing.T) {
 		}
 		return dirTree(t, m)
 	}
-	old := with()
-	for name, tt := range map[string]struct {
+	old := with("setup.py", "_demo.cpython-312-x86_64-linux-gnu.so")
+	tests := []struct {
+		name string
+		old  *ecoutil.Tree
 		cur  *ecoutil.Tree
-		want []string
+		top  []string // names in uv.new-top-level
+		odd  []string // files in uv.root-file
 	}{
-		"package":           {with("requests/__init__.py"), []string{"requests"}},
-		"module":            {with("yaml.py"), []string{"yaml"}},
-		"native module":     {with("_yaml.cpython-312-x86_64-linux-gnu.so"), []string{"_yaml"}},
-		"via .data/purelib": {with("demo-1.0.data/purelib/urllib3/__init__.py"), []string{"urllib3"}},
-		"unchanged":         {with(), nil},
-		"inside the package, .data scripts, dist-info": {with("demo/new.py", "demo-1.0.data/scripts/x", "demo-1.0.dist-info/RECORD"), nil},
-	} {
-		var got []string
-		for _, f := range checkPackage(sideTrees{wheel: old}, sideTrees{wheel: tt.cur}) {
-			if f.Code == "uv.new-top-level" {
-				got = append(got, f.Detail)
+		{"package", old, with("requests/__init__.py"), []string{"requests"}, nil},
+		{"module", old, with("yaml.py"), []string{"yaml"}, nil},
+		{"bytecode module", old, with("evil.pyc"), []string{"evil"}, nil},
+		{"native, abi3, pyd", old, with("a.abi3.so", "b.cp312-win_amd64.pyd", "c.so"), []string{"a", "b", "c"}, nil},
+		{"via .data/purelib", old, with("demo-1.0.data/purelib/urllib3/__init__.py"), []string{"urllib3"}, nil},
+		{"unchanged names", old, with("_demo.cpython-312-x86_64-linux-gnu.so", "demo/new.py", "demo-1.0.data/scripts/x"), nil, nil},
+		{"hook name never exempt", old, with("setup.py"), []string{"setup"}, nil},
+		{"odd root entries", old, with("README", "data.json", "foo-bar/x.py", "x.so.1", "1abc.py"), nil, []string{"1abc.py", "README", "data.json", "foo-bar/x.py", "x.so.1"}},
+		{"no old wheel: even its own name", nil, with(), []string{"demo"}, nil},
+		{"always-human set left out", old, with("sitecustomize.py", "evil.pth", "__pycache__/x.pyc"), nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var top, odd string
+			for _, f := range rootFindings(tt.old, tt.cur) {
 				if f.Route != model.RouteHuman {
-					t.Errorf("%s: %+v", name, f)
+					t.Errorf("%+v", f)
+				}
+				switch f.Code {
+				case "uv.new-top-level":
+					top = f.Detail
+				case "uv.root-file":
+					odd = f.Detail
 				}
 			}
-		}
-		if (len(got) > 0) != (tt.want != nil) {
-			t.Errorf("%s: uv.new-top-level %q, want %q", name, got, tt.want)
-		}
-		for _, w := range tt.want {
-			if len(got) == 0 || !strings.Contains(got[0], w) {
-				t.Errorf("%s: %q does not name %s", name, got, w)
+			for _, c := range []struct {
+				detail string
+				want   []string
+				code   string
+			}{{top, tt.top, "uv.new-top-level"}, {odd, tt.odd, "uv.root-file"}} {
+				if (c.detail != "") != (c.want != nil) {
+					t.Errorf("%s %q, want %q", c.code, c.detail, c.want)
+				}
+				for _, w := range c.want {
+					if !strings.Contains(c.detail, w) {
+						t.Errorf("%s %q does not name %s", c.code, c.detail, w)
+					}
+				}
 			}
-		}
-	}
-	// New to the lock: no old wheel, so compare across downloads.
-	if fs := checkPackage(sideTrees{}, sideTrees{wheel: with("requests/__init__.py")}); slices.Contains(codesOf(fs), "uv.new-top-level") {
-		t.Errorf("new package got uv.new-top-level: %+v", fs)
-	}
-	work := []change{
-		{update: model.Update{Name: "evil", To: "1.0"}},
-		{update: model.Update{Name: "requests", From: "2.31.0", To: "2.32.0"}},
-		{update: model.Update{Name: "other", From: "1", To: "2"}},
-	}
-	tops := []map[string]bool{{"requests": true, "evil": true}, {"requests": true}, {"other": true}}
-	fs := topLevelCollisions(work, tops)
-	if len(fs) != 1 || fs[0].Code != "uv.top-level-collision" || fs[0].Route != model.RouteHuman || fs[0].Update != "evil" || !strings.Contains(fs[0].Detail, "requests") {
-		t.Errorf("collisions %+v", fs)
-	}
-	if fs := topLevelCollisions(work[1:], tops[1:]); len(fs) != 0 {
-		t.Errorf("no new package, collisions %+v", fs)
+		})
 	}
 }
 

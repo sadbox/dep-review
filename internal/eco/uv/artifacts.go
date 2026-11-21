@@ -96,7 +96,7 @@ func (f Fetcher) checkOtherArtifacts(ctx context.Context, env fetch.Env, home, d
 		var fs []model.Finding
 		if strings.HasSuffix(name, ".whl") {
 			ref := sides[1].wheel
-			fs = checkPackage(sideTrees{wheel: ref}, sideTrees{wheel: t})
+			fs = append(checkPackage(sideTrees{wheel: ref}, sideTrees{wheel: t}), rootFindings(sides[0].wheel, t)...)
 			if differ := variantFiles(ref, t); len(differ) > 0 {
 				add("uv.wheel-variant-differs", fmt.Sprintf("%s %s differs from the reviewed %s in: %s", u.To, name, artifactName(wheel.URL), ecoutil.List(differ, 10)))
 				diffs, cut, err := ecoutil.DiffTrees(ctx, home, dir, filepath.Base(ref.Dir), filepath.Base(t.Dir))

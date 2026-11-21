@@ -53,14 +53,6 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 			if s := startupModules(t.cur); len(s) > 0 {
 				add("uv.install-hook-file", "wheel installs a sitecustomize/usercustomize module (run at every interpreter start): %s", ecoutil.List(s, 10))
 			}
-			// A new import name can shadow another distribution's
-			// ("requests/", "yaml.py"). For a new package (no old wheel)
-			// Fetch compares names across the downloaded wheels instead.
-			if t.old != nil {
-				if added := newKeys(topLevel(t.old), topLevel(t.cur)); len(added) > 0 {
-					add("uv.new-top-level", "wheel adds top-level import names: %s", ecoutil.List(added, 10))
-				}
-			}
 		}
 		pyc, unchecked, opaque := compiledFiles(t.old, t.cur)
 		if len(pyc) > 0 {

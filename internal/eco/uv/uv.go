@@ -123,15 +123,13 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		}
 		res.Findings = append(res.Findings, fs...)
 	}
-	tops := make([]map[string]bool, len(work))
 	for i, c := range work {
-		fs, err := f.verify(ctx, env, home, filepath.Join(env.Scratch, "uv", fmt.Sprint(i)), c, &summary, &tops[i])
+		fs, err := f.verifyAndDiff(ctx, env, home, filepath.Join(env.Scratch, "uv", fmt.Sprint(i)), c, &summary)
 		if err != nil {
 			return fetch.Result{}, err
 		}
 		res.Findings = append(res.Findings, fs...)
 	}
-	res.Findings = append(res.Findings, topLevelCollisions(work, tops)...)
 	if err := env.Evidence.Add("uv-summary.md", "uv change set, hash verification and checks run by the gate", summary.Bytes()); err != nil {
 		return fetch.Result{}, err
 	}
@@ -460,12 +458,6 @@ type sideTrees struct {
 }
 
 func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir string, c change, summary *bytes.Buffer) ([]model.Finding, error) {
-	return f.verify(ctx, env, home, dir, c, summary, nil)
-}
-
-// verify is verifyAndDiff; if tops is not nil it receives the top-level
-// import names of the new version's diffed wheel.
-func (f Fetcher) verify(ctx context.Context, env fetch.Env, home, dir string, c change, summary *bytes.Buffer, tops *map[string]bool) ([]model.Finding, error) {
 	u := c.update
 	var findings []model.Finding
 	add := func(route model.Route, code, detail string) {
@@ -525,8 +517,11 @@ func (f Fetcher) verify(ctx context.Context, env fetch.Env, home, dir string, c 
 	for _, fd := range checkPackage(sides[0], sides[1]) {
 		add(fd.Route, fd.Code, fd.Detail)
 	}
-	if tops != nil {
-		*tops = topLevel(sides[1].wheel)
+	// Import-name exemptions come from the OLD version's wheel only.
+	if sides[1].wheel != nil {
+		for _, fd := range rootFindings(sides[0].wheel, sides[1].wheel) {
+			add(fd.Route, fd.Code, fd.Detail)
+		}
 	}
 
 	// uv installs whichever wheel fits the machine, or builds the sdist,
@@ -626,34 +621,4 @@ func pkgOrigin(p Package) string { return fmt.Sprint(p.Source, p.Sdist, p.Wheels
 
 func human(code, update, detail string) model.Finding {
 	return model.Finding{Code: code, Route: model.RouteHuman, Update: update, Detail: detail}
-}
-
-// topLevelCollisions: a package new to the lock whose wheel's top-level
-// import names overlap another downloaded distribution's would shadow it
-// (or be shadowed) once installed. Only wheels the gate downloads are
-// compared; an unchanged distribution's names are not known.
-func topLevelCollisions(work []change, tops []map[string]bool) []model.Finding {
-	var out []model.Finding
-	for i, c := range work {
-		if c.update.From != "" {
-			continue
-		}
-		for j, o := range work {
-			if i == j || o.update.Name == c.update.Name {
-				continue
-			}
-			var shared []string
-			for n := range tops[i] {
-				if tops[j][n] {
-					shared = append(shared, n)
-				}
-			}
-			if len(shared) > 0 {
-				slices.Sort(shared)
-				out = append(out, human("uv.top-level-collision", c.update.Name, fmt.Sprintf("%s==%s is new and installs top-level import names that %s==%s also installs: %s",
-					c.update.Name, c.update.To, o.update.Name, o.update.To, strings.Join(shared, ", "))))
-			}
-		}
-	}
-	return out
 }
