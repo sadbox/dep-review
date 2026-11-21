@@ -3,6 +3,7 @@ package publish
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -570,5 +571,37 @@ func TestBotLoginFromSlug(t *testing.T) {
 		if _, err := BotLoginFromSlug(s); err == nil {
 			t.Errorf("accepted %q", s)
 		}
+	}
+}
+
+func TestTriggerPathRequired(t *testing.T) {
+	f := newFake(t)
+	cfg, _, _ := setup(t, f)
+	cfg.TriggerPath = ""
+	if err := Publish(context.Background(), cfg, reviewInputs()); !errors.Is(err, errNoTrigger) {
+		t.Errorf("publish: %v", err)
+	}
+	if err := Sweep(context.Background(), cfg, "o/r"); !errors.Is(err, errNoTrigger) {
+		t.Errorf("sweep: %v", err)
+	}
+	if len(f.merges) != 0 || len(f.statuses) != 0 {
+		t.Error("acted without a trigger path")
+	}
+}
+
+// The classification's trigger path is excluded too, even when the
+// configured one differs: a no-op run from either never counts.
+func TestPublishExcludesClassifiedTrigger(t *testing.T) {
+	f := newFake(t)
+	f.checkRuns = []map[string]any{ghaRun("noop", "completed", "success", 3)}
+	f.workflowRuns = append(f.workflowRuns, map[string]any{"path": ".github/workflows/custom-trigger.yml", "check_suite_id": 3})
+	cfg, _, _ := setup(t, f)
+	in := reviewInputs()
+	in.Class.TriggerPath = ".github/workflows/custom-trigger.yml"
+	if err := Publish(context.Background(), cfg, in); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.merges) != 0 {
+		t.Error("merged on the classified trigger's no-op run")
 	}
 }

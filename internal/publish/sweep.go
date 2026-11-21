@@ -29,6 +29,9 @@ type ghStatus struct {
 // branch and CI itself.
 func Sweep(ctx context.Context, cfg Config, repo string) error {
 	cfg.defaults()
+	if cfg.TriggerPath == "" {
+		return errNoTrigger
+	}
 	if !gh.ValidRepo(repo) {
 		return fmt.Errorf("invalid repository %.100q", repo)
 	}
@@ -93,7 +96,7 @@ func sweepOne(ctx context.Context, cfg Config, repo string, pr ghPull) error {
 			cfg.Logf("#%d: approved but %s", pr.Number, why)
 			return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionHuman, "approved but not merged: "+why, false)
 		}
-		ci, note, err := ciState(ctx, cfg, repo, head, cfg.TriggerPath)
+		ci, note, err := ciState(ctx, cfg, repo, head, []string{cfg.TriggerPath})
 		if err != nil {
 			return err
 		}

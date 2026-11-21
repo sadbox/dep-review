@@ -20,12 +20,17 @@ import (
 
 const statusContext = "dep-review"
 
+// errNoTrigger: without the trigger path the trigger's no-op run could pass
+// as CI, so publish and sweep refuse to run.
+var errNoTrigger = errors.New("no trigger workflow path configured")
+
 // Config is what Publish and Sweep need besides their inputs.
 type Config struct {
 	GitHub   *gh.Client
 	BotLogin string // "<app-slug>[bot]"; our comments and statuses are recognised by it
 	// TriggerPath is the caller's no-op trigger workflow, whose check runs
-	// never count as CI. Publish uses the classification's when it has one.
+	// never count as CI. Required. Publish also excludes the path in the
+	// classification.
 	TriggerPath string
 	Notifier    Notifier // nil: notifications off
 	ServerURL   string   // https://github.com
@@ -187,6 +192,9 @@ type ghComment struct {
 // Publish acts on the decision for one classified PR.
 func Publish(ctx context.Context, cfg Config, in Inputs) error {
 	cfg.defaults()
+	if cfg.TriggerPath == "" {
+		return errNoTrigger
+	}
 	o := Decide(in)
 	cl := in.Class
 	cfg.Logf("decision=%s state=%s reason=%q", o.Decision, o.State, o.Reason)
@@ -216,9 +224,10 @@ func Publish(ctx context.Context, cfg Config, in Inputs) error {
 			o = human(o.Route, why, nil)
 		}
 	}
-	trigger := cfg.TriggerPath
-	if cl.TriggerPath != "" {
-		trigger = cl.TriggerPath
+	// Both the configured trigger and the one the event matched are excluded.
+	triggers := []string{cfg.TriggerPath}
+	if cl.TriggerPath != "" && cl.TriggerPath != cfg.TriggerPath {
+		triggers = append(triggers, cl.TriggerPath)
 	}
 
 	prev, err := findComment(ctx, cfg, cl.Repo, cl.PR)
@@ -244,7 +253,7 @@ func Publish(ctx context.Context, cfg Config, in Inputs) error {
 	notify := o.Decision == model.DecisionHuman
 	reason := o.Reason
 	if o.Decision == model.DecisionMerge {
-		res, err := mergeWhenGreen(ctx, cfg, cl.Repo, cl.PR, cl.HeadSHA, cl.BaseRef, trigger, cfg.MergeWait)
+		res, err := mergeWhenGreen(ctx, cfg, cl.Repo, cl.PR, cl.HeadSHA, cl.BaseRef, triggers, cfg.MergeWait)
 		if err != nil {
 			return err
 		}
@@ -316,11 +325,11 @@ type mergeResult struct {
 // mergeWhenGreen polls CI on sha until it settles or wait runs out, then
 // merges exactly sha. Running out of time is not a failure: sweep picks
 // it up.
-func mergeWhenGreen(ctx context.Context, cfg Config, repo string, pr int, sha, base, trigger string, wait time.Duration) (mergeResult, error) {
+func mergeWhenGreen(ctx context.Context, cfg Config, repo string, pr int, sha, base string, triggers []string, wait time.Duration) (mergeResult, error) {
 	deadline := cfg.Now().Add(wait)
 	delay := cfg.PollMin
 	for {
-		st, note, err := ciState(ctx, cfg, repo, sha, trigger)
+		st, note, err := ciState(ctx, cfg, repo, sha, triggers)
 		if err != nil {
 			return mergeResult{}, err
 		}
@@ -404,7 +413,7 @@ const (
 // A check run from GitHub Actions counts only when its check suite maps to
 // a workflow run on sha whose workflow file is not the trigger; one that
 // cannot be mapped never counts.
-func ciState(ctx context.Context, cfg Config, repo, sha, trigger string) (ci, string, error) {
+func ciState(ctx context.Context, cfg Config, repo, sha string, triggers []string) (ci, string, error) {
 	c := cfg.GitHub
 	gateSlug := strings.TrimSuffix(cfg.BotLogin, "[bot]")
 	var runs []checkRun
@@ -457,7 +466,7 @@ func ciState(ctx context.Context, cfg Config, repo, sha, trigger string) (ci, st
 		}
 		switch r.Conclusion {
 		case "success":
-			if r.countsAsCI(gateSlug, trigger, suitePath) {
+			if r.countsAsCI(gateSlug, triggers, suitePath) {
 				real++
 			}
 		case "neutral", "skipped":
@@ -510,16 +519,24 @@ type checkRun struct {
 
 // countsAsCI reports whether a successful check run is real CI (see
 // ciState). Without a trigger path no Actions run counts.
-func (r checkRun) countsAsCI(gateSlug, trigger string, suitePath map[int64]string) bool {
+func (r checkRun) countsAsCI(gateSlug string, triggers []string, suitePath map[int64]string) bool {
 	if r.Name == statusContext || r.App == nil || r.App.Slug == "" || r.App.Slug == gateSlug {
 		return false
 	}
 	if r.App.Slug != "github-actions" {
 		return true
 	}
-	if r.CheckSuite == nil || trigger == "" {
+	if r.CheckSuite == nil || len(triggers) == 0 {
 		return false
 	}
 	p, ok := suitePath[r.CheckSuite.ID]
-	return ok && p != "" && p != trigger
+	if !ok || p == "" {
+		return false
+	}
+	for _, t := range triggers {
+		if t == "" || p == t {
+			return false
+		}
+	}
+	return true
 }

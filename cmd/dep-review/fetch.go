@@ -95,6 +95,6 @@ func removeScratch(dir string) {
 		return nil
 	})
 	if err := os.RemoveAll(dir); err != nil {
-		fmt.Fprintln(os.Stderr, "dep-review fetch: removing scratch:", err)
+		fmt.Fprintln(os.Stderr, logLine("dep-review fetch: removing scratch: "+err.Error()))
 	}
 }

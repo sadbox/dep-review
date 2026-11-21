@@ -40,3 +40,18 @@ func TestLineWriter(t *testing.T) {
 		t.Errorf("%q", got)
 	}
 }
+
+// A missing trigger path would let the trigger's no-op run count as CI,
+// so publish and sweep refuse to start without one.
+func TestTriggerPathRequired(t *testing.T) {
+	for name, run := range map[string]func() error{
+		"publish":       func() error { return runPublish([]string{"--in", t.TempDir()}) },
+		"publish empty": func() error { return runPublish([]string{"--in", t.TempDir(), "--trigger-path", ""}) },
+		"sweep":         func() error { return runSweep([]string{"--repo", "o/r"}) },
+		"sweep empty":   func() error { return runSweep([]string{"--repo", "o/r", "--trigger-path="}) },
+	} {
+		if err := run(); err == nil || !strings.Contains(err.Error(), "--trigger-path") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
