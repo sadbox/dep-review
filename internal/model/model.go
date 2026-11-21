@@ -32,8 +32,9 @@ const (
 	// token cannot see it). The commits alone cannot prove this:
 	// Dependabot's own commits and a person's squash-merge of another
 	// Dependabot PR into the branch both read author dependabot[bot],
-	// committer web-flow, signed by GitHub. Only these PRs are ever
-	// reviewed or merged.
+	// committer web-flow, signed by GitHub. The PR's base must also never
+	// have been changed (its timeline has no base_ref_changed). Only these
+	// PRs are ever reviewed or merged.
 	KindDependabot Kind = "dependabot"
 	// KindDependabotUnverified: looks like a Dependabot PR (author or
 	// branch) but fails a check above, e.g. someone pushed to the branch.

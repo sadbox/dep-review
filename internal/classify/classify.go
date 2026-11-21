@@ -227,6 +227,11 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	if why := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA); why != "" {
 		return unverified(why)
 	}
+	// A PR retargeted to another base after Dependabot opened it is not the
+	// update Dependabot proposed.
+	if why := timelineProblem(ctx, c, repoName, num); why != "" {
+		return unverified(why)
+	}
 	// The log shows who moved the branch; a ruleset makes sure nobody else
 	// could. Its bypass list (Dependabot only) is the owner's to maintain:
 	// a read-only token cannot see it.
@@ -336,6 +341,24 @@ func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head 
 	}
 	if prev != head {
 		return "the branch's push history does not reach the head commit yet"
+	}
+	return ""
+}
+
+// timelineProblem reads the PR's timeline and returns why it disqualifies
+// the PR (its base branch was changed), or "". An unreadable timeline is
+// not proof either.
+func timelineProblem(ctx context.Context, c *gh.Client, repo string, pr int) string {
+	events, err := gh.List[struct {
+		Event string `json:"event"`
+	}](ctx, c, fmt.Sprintf("repos/%s/issues/%d/timeline", repo, pr))
+	if err != nil {
+		return fmt.Sprintf("the pull request's timeline could not be read (HTTP %d)", gh.StatusCode(err))
+	}
+	for _, e := range events {
+		if e.Event == "base_ref_changed" {
+			return "the pull request's base branch was changed after it was opened"
+		}
 	}
 	return ""
 }

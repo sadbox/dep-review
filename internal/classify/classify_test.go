@@ -31,6 +31,8 @@ type fixture struct {
 	rulesets []map[string]any // full rulesets; the list endpoint serves their summaries
 	rsCode   int              // non-zero: GET rulesets fails with this status
 	rsGet    int              // non-zero: GET rulesets/{id} fails with this status
+	timeline []map[string]any // GET issues/7/timeline
+	tlCode   int              // non-zero: GET timeline fails with this status
 }
 
 // dependabotRuleset is the ruleset the owner created in every repository.
@@ -108,6 +110,17 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 			return
 		}
 		json.NewEncoder(w).Encode(f.activity)
+	})
+	mux.HandleFunc("GET /repos/o/r/issues/7/timeline", func(w http.ResponseWriter, r *http.Request) {
+		if f.tlCode != 0 {
+			w.WriteHeader(f.tlCode)
+			return
+		}
+		tl := f.timeline
+		if tl == nil {
+			tl = []map[string]any{}
+		}
+		json.NewEncoder(w).Encode(tl)
 	})
 	mux.HandleFunc("GET /repos/o/r/rulesets", func(w http.ResponseWriter, r *http.Request) {
 		if f.rsCode != 0 {
@@ -250,6 +263,14 @@ func TestClassify(t *testing.T) {
 			f.activity = []map[string]any{{"activity_type": "branch_creation", "before": zero, "after": head}}
 		}, model.KindDependabotUnverified, "someone other than dependabot"},
 		{"history unreadable", func(f *fixture) { f.actCode = http.StatusForbidden }, model.KindDependabotUnverified, "could not be read (HTTP 403)"},
+		// Re-review R1a: a retargeted PR is not what Dependabot proposed.
+		{"ordinary timeline", func(f *fixture) {
+			f.timeline = []map[string]any{{"event": "labeled"}, {"event": "head_ref_force_pushed"}, {"event": "commented"}}
+		}, model.KindDependabot, ""},
+		{"base changed", func(f *fixture) {
+			f.timeline = []map[string]any{{"event": "labeled"}, {"event": "base_ref_changed"}}
+		}, model.KindDependabotUnverified, "base branch was changed"},
+		{"timeline unreadable", func(f *fixture) { f.tlCode = http.StatusForbidden }, model.KindDependabotUnverified, "timeline could not be read (HTTP 403)"},
 		// The dependabot/** ruleset that keeps everyone but Dependabot off
 		// the branches. Its name and bypass list are not checked.
 		{"ruleset renamed", func(f *fixture) { f.rulesets[0]["name"] = "anything" }, model.KindDependabot, ""},
