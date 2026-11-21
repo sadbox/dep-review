@@ -450,6 +450,21 @@ func TestSweep(t *testing.T) {
 			approve(f, headSHA)
 			f.checkRuns = nil
 		}, time.Hour, false, 0, "approved=" + headSHA},
+		// Approved but no real CI ever passes: reported once, like a stuck
+		// head, keeping the approval comment and its record.
+		{"approved, no CI after the stuck threshold", func(f *fakeGH) {
+			approve(f, headSHA)
+			f.checkRuns = nil
+		}, 3 * time.Hour, false, 1, "stuck=" + headSHA + " approved=" + headSHA + " -->\n### dep-review: approved"},
+		{"approved, CI still running after the threshold", func(f *fakeGH) {
+			approve(f, headSHA)
+			f.checkRuns = []map[string]any{ghaRun("test", "queued", "", ciSuite)}
+		}, 3 * time.Hour, false, 1, "stuck=" + headSHA},
+		{"approved and stuck already reported", func(f *fakeGH) {
+			approve(f, headSHA)
+			f.comments[7][0].Body = marker{Stuck: []string{headSHA}, Approved: headSHA}.String() + "\n### dep-review: approved\n"
+			f.checkRuns = nil
+		}, 3 * time.Hour, false, 0, "approved=" + headSHA},
 		{"status without an approval record", func(f *fakeGH) { approve(f, "") }, time.Hour, false, 1, "notified=" + headSHA},
 		{"approval record for another head", func(f *fakeGH) { approve(f, other) }, time.Hour, false, 1, "notified=" + headSHA},
 		{"approval record in someone else's comment", func(f *fakeGH) {

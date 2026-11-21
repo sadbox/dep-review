@@ -103,7 +103,13 @@ func sweepOne(ctx context.Context, cfg Config, repo string, pr ghPull) error {
 		switch ci {
 		case ciPending:
 			cfg.Logf("#%d: approved, %s", pr.Number, note)
-			return nil
+			// Approved but never mergeable (no real CI, or CI that never
+			// finishes) is reported like a stuck head, not left silent.
+			old, err := headOlderThan(ctx, cfg, repo, head, cfg.StuckAfter)
+			if err != nil || !old {
+				return err
+			}
+			return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionPending, "approved but not merged: "+note, true)
 		case ciRed:
 			cfg.Logf("#%d: approved but %s", pr.Number, note)
 			return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionHuman, "approved but not merged: "+note, false)
@@ -121,6 +127,16 @@ func sweepOne(ctx context.Context, cfg Config, repo string, pr ghPull) error {
 		return nil // a person decides; publish already notified
 	}
 	// No decision (no status, or the gate's last attempt errored).
+	old, err := headOlderThan(ctx, cfg, repo, head, cfg.StuckAfter)
+	if err != nil || !old {
+		return err
+	}
+	cfg.Logf("#%d: no decision for head %s", pr.Number, head[:12])
+	return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionPending, "stuck without a decision", true)
+}
+
+// headOlderThan reports whether head was committed more than d ago.
+func headOlderThan(ctx context.Context, cfg Config, repo, head string, d time.Duration) (bool, error) {
 	var commit struct {
 		Commit struct {
 			Committer struct {
@@ -129,18 +145,15 @@ func sweepOne(ctx context.Context, cfg Config, repo string, pr ghPull) error {
 		} `json:"commit"`
 	}
 	if err := cfg.GitHub.Get(ctx, fmt.Sprintf("repos/%s/commits/%s", repo, head), &commit); err != nil {
-		return err
+		return false, err
 	}
-	if age := cfg.Now().Sub(commit.Commit.Committer.Date); age < cfg.StuckAfter {
-		return nil
-	}
-	cfg.Logf("#%d: no decision for head %s", pr.Number, head[:12])
-	return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionPending, "stuck without a decision", true)
+	return cfg.Now().Sub(commit.Commit.Committer.Date) >= d, nil
 }
 
 // notifyOnce records the notification in our comment's marker, so each
 // head is reported once. stuck selects the "stuck" record and rewrites the
-// comment; otherwise only the marker changes.
+// comment, unless the comment records an approval of this head (that
+// stays, with the new marker); otherwise only the marker changes.
 func notifyOnce(ctx context.Context, cfg Config, repo string, pr int, head string, d model.Decision, reason string, stuck bool) error {
 	prev, err := findComment(ctx, cfg, repo, pr)
 	if err != nil {
@@ -165,7 +178,7 @@ func notifyOnce(ctx context.Context, cfg Config, repo string, pr int, head strin
 	*list = add(*list, head)
 	var body string
 	switch {
-	case stuck:
+	case stuck && (prev == nil || mk.Approved != head):
 		body = renderStuck(head, mk)
 	case prev != nil:
 		body = replaceMarker(prev.Body, mk)
