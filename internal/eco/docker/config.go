@@ -27,14 +27,26 @@ type imageConfig struct {
 }
 
 func (c *imageConfig) env() map[string]string {
+	m, _ := c.envDups()
+	return m
+}
+
+// envDups is env plus the variables set more than once. Which of the
+// values a container sees is up to the runtime, so a duplicate is never
+// "unchanged".
+func (c *imageConfig) envDups() (map[string]string, []string) {
 	var list []string
 	json.Unmarshal(c.Config["Env"], &list)
 	m := map[string]string{}
+	var dups []string
 	for _, kv := range list {
 		k, v, _ := strings.Cut(kv, "=")
+		if _, ok := m[k]; ok && !slices.Contains(dups, k) {
+			dups = append(dups, k)
+		}
 		m[k] = v
 	}
-	return m
+	return m, dups
 }
 
 func (c *imageConfig) labels() map[string]string {
@@ -88,6 +100,9 @@ func diffConfig(a, b *imageConfig) configDiff {
 		switch k {
 		case "Env":
 			ea, eb := a.env(), b.env()
+			if _, dups := b.envDups(); len(dups) > 0 {
+				d.Other = append(d.Other, "Env sets "+strings.Join(dups, ", ")+" more than once")
+			}
 			for _, v := range sortedKeys(union(ea, eb)) {
 				x, xok := ea[v]
 				y, yok := eb[v]

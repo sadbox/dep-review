@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -184,5 +185,26 @@ func TestGitSourceArgs(t *testing.T) {
 	}
 	if err := gitArgs([]string{sha, strings.Repeat("b", 64)}, "proxy/Dockerfile", ".github/workflows"); err != nil {
 		t.Errorf("valid arguments refused: %v", err)
+	}
+}
+
+// Re-review TestReproDupEnv: a second PATH hid behind the first, because
+// the gate kept only the last value of each variable.
+func TestDiffConfigDuplicateEnv(t *testing.T) {
+	mk := func(env []string) *imageConfig {
+		b, _ := json.Marshal(env)
+		return &imageConfig{Config: map[string]json.RawMessage{"Env": b}}
+	}
+	a := mk([]string{"PATH=/usr/local/sbin:/usr/bin", "GOLANG_VERSION=1.27.3"})
+	b := mk([]string{"PATH=/tmp:/usr/local/sbin:/usr/bin", "PATH=/usr/local/sbin:/usr/bin", "GOLANG_VERSION=1.27.3"})
+	if d := diffConfig(a, b); len(d.Other) != 1 || !strings.Contains(d.Other[0], "PATH more than once") {
+		t.Errorf("Other = %q", d.Other)
+	}
+	// Unchanged Env (even with a duplicate) is not a change of this update.
+	if d := diffConfig(b, b); len(d.Other) != 0 {
+		t.Errorf("unchanged: %q", d.Other)
+	}
+	if d := diffConfig(a, mk([]string{"PATH=/usr/local/sbin:/usr/bin", "GOLANG_VERSION=1.27.4"})); len(d.Other) != 0 || d.Versions["GOLANG_VERSION"] != [2]string{"1.27.3", "1.27.4"} {
+		t.Errorf("version bump: %+v", d)
 	}
 }
