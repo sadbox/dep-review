@@ -138,3 +138,24 @@ func TestOSVUnavailableRoutesHuman(t *testing.T) {
 		t.Errorf("route %s %s", r, codes(u.Findings))
 	}
 }
+
+// A distribution OSV.dev is not queried for leaves the changed packages
+// unchecked, which is not the same as clean.
+func TestOSVUnknownDistroRoutesHuman(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	osv := &osvClient{http: srv.Client(), url: srv.URL}
+	unknown := func(img []tfile) []tfile {
+		img[0] = osRel("someos", "1")
+		return img
+	}
+	old := [][]tfile{unknown(debImage("1.0", "foo1", "foo1", "20000"))}
+	u, r := runSynthetic(t, "debian", nil, nil, old, [][]tfile{unknown(debImage("1.1", "foo2", "foo2", "20000"))}, osv)
+	if r != model.RouteHuman || !strings.Contains(codes(u.Findings), codeOSVUnavailable+"=human") || calls != 0 {
+		t.Errorf("route %s %s, %d OSV calls", r, codes(u.Findings), calls)
+	}
+}
