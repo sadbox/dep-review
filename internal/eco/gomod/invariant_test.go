@@ -1,6 +1,8 @@
 package gomod
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"debug/elf"
@@ -164,6 +166,18 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"gzip of an unread ELF, embedded", nil, map[string]string{"x.gz": gz("\x7fELF\x02\x01\x01 truncated"), "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.gz\nvar b []byte\n"}, codeBinary, "x.gz", false},
 		{"gzip of a complete ELF, embedded", nil, map[string]string{"x.gz": gz(string(minimalELF())), "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.gz\nvar b []byte\n"}, codeBinary, "x.gz", true},
 		{"testdata PNG in a module without cgo", nil, map[string]string{"testdata/logo.png": png, "p.go": "package p\n", "a.go": "package p\n\nfunc init() {}\n"}, codeInit, "a.go", true},
+		// Round 7: archives read in full, polyglots and case folding.
+		{"embedded tar of regular members", nil, embedding("x.tar", archTar(tar.TypeReg, false)), codeBinary, "x.tar", true},
+		{"embedded tar.gz of regular members", nil, embedding("x.tar.gz", gz(archTar(tar.TypeReg, false))), codeBinary, "x.tar.gz", true},
+		{"embedded zip of regular members", nil, embedding("x.zip", archZip()), codeBinary, "x.zip", true},
+		{"embedded tar with a contiguous member", nil, embedding("x.tar", archTar(tar.TypeCont, true)), codeBinary, "x.tar", false},
+		{"embedded tar with junk after its end", nil, embedding("x.tar", archTar(tar.TypeReg, false)+"\x7fELF trailer"), codeBinary, "x.tar", false},
+		{"embedded tar/zip polyglot", nil, embedding("x.tar", archTar(tar.TypeReg, false)+archZip()), codeBinary, "x.tar", false},
+		{"COFF .syso that is also a tar", nil, map[string]string{"r_windows_amd64.syso": coffTar(), "p.go": "package p\n"}, codeBinary, "r_windows_amd64.syso", false},
+		{"//go:embed in another case", map[string]string{"payload.bin": "\x00\x01 v1", "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed PAYLOAD.BIN\nvar b []byte\n"},
+			map[string]string{"payload.bin": "\x00\x01 v2", "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed PAYLOAD.BIN\nvar b []byte\n"}, codeBinary, "payload.bin", false},
+		{"testdata binary embedded in another case", nil, map[string]string{"testdata/x.bin": "\x00\x02 evil", "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed TESTDATA/X.BIN\nvar b []byte\n"}, codeBinary, "testdata/x.bin", false},
+		{"nested text encoded in an unknown form", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat(`\x7f\x45\x4c\x46`, 200))) + "\"\n"}, codeBlob, "b.go", false},
 		{"PNG with the reference search capped", nil, capped(map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}), codeBinary, "fixtures/logo.png", false},
 		{"COFF listing fewer sections than it has", nil, map[string]string{"x.syso": string(coffSections(5, 2)), "p.go": "package p\n"}, codeBinary, "x.syso", false},
 	}
@@ -216,6 +230,46 @@ func TestInvariantShownInFull(t *testing.T) {
 const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 
 const cgoFile = "package p\n\n/*\n#cgo LDFLAGS: -L${SRCDIR}/lib -L${SRCDIR}/testdata -lfoo\nint evil(void);\n*/\nimport \"C\"\n\nfunc F() int { return int(C.evil()) }\n"
+
+// embedding is a module whose non-test code embeds name (so it is never
+// "no way to the build": only a complete rendering keeps it on review).
+func embedding(name, data string) map[string]string {
+	return map[string]string{name: data, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed " + name + "\nvar b []byte\n"}
+}
+
+// archTar is a tar of a text member and a minimal ELF member of type flag
+// (with an unread ELF when broken).
+func archTar(flag byte, broken bool) string {
+	elfData := minimalELF()
+	if broken {
+		elfData = []byte("\x7fELF\x02\x01\x01 truncated")
+	}
+	var b bytes.Buffer
+	tw := tar.NewWriter(&b)
+	tw.WriteHeader(&tar.Header{Name: "README", Typeflag: tar.TypeReg, Size: 6, Mode: 0o644, Format: tar.FormatUSTAR})
+	tw.Write([]byte("hello\n"))
+	tw.WriteHeader(&tar.Header{Name: "bin/tool.o", Typeflag: flag, Size: int64(len(elfData)), Mode: 0o755, Format: tar.FormatUSTAR})
+	tw.Write(elfData)
+	tw.Close()
+	return b.String()
+}
+
+func archZip() string {
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	w, _ := zw.Create("README.txt")
+	w.Write([]byte("hello\n"))
+	w, _ = zw.Create("bin/tool.o")
+	w.Write(minimalELF())
+	zw.Close()
+	return b.String()
+}
+
+// coffTar is a COFF object whose first 512 bytes are also a tar header.
+func coffTar() string {
+	b := []byte(r6SysoTar([]byte("resource payload")))
+	return string(b)
+}
 
 func gz(s string) string {
 	var b bytes.Buffer

@@ -97,7 +97,7 @@ func TestChildMemoryLimit(t *testing.T) {
 		t.Skip("RLIMIT_AS is enforced on Linux only")
 	}
 	withIsolation(t, childIsolation(t, "alloc", time.Minute))
-	res := isolation.run([]byte("\x7fELF"), 0)
+	res := isolation.run([]byte("\x7fELF"), 0, Generic)
 	if res.Complete {
 		t.Errorf("a child allocating %d bytes was not stopped: %+v", 4*childMemory, res)
 	}

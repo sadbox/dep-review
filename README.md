@@ -101,7 +101,13 @@ Testdata binaries, and files with a library or object extension
 (`.a`, `.o`, `.so`, ...), are flagged whenever the module could reach
 them. Archives and compressed streams are complete only if every member
 or the stream's content is complete or plain text (three levels deep at
-most), and decoded literals that look encoded again are decoded again. Everything else is listed under `gomod.not-shown-in-full`
+most), every entry type is one the gate models, and every byte is
+accounted for (a tar's tail is zero padding; a zip has nothing before its
+first header or after its end record); a file matching more than one
+type's magic is never complete, and a `.syso` or library is sniffed as
+the linker sniffs it. Embed patterns and mentions are compared with case
+folded, as on macOS and Windows. Decoded literals that look encoded again
+are decoded again, and are for a person if that fails. Everything else is listed under `gomod.not-shown-in-full`
 and goes to a person, as do unparseable Go files, truncated evidence and a
 module with more flagged items than a review can take. Module diffs do not
 detect renames.

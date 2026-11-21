@@ -52,7 +52,7 @@ var isolation *Isolation
 // render in-process.
 func Isolate(i *Isolation) { isolation = i }
 
-func (i *Isolation) run(b []byte, limit int64) childResult {
+func (i *Isolation) run(b []byte, limit int64, sn Sniff) childResult {
 	fail := func(why string) childResult {
 		return childResult{Text: "  not parsed: the isolated parser " + why + "\n"}
 	}
@@ -65,6 +65,7 @@ func (i *Isolation) run(b []byte, limit int64) childResult {
 	cmd := exec.CommandContext(ctx, i.Command[0], i.Command[1:]...)
 	var in bytes.Buffer
 	binary.Write(&in, binary.LittleEndian, limit)
+	in.WriteByte(byte(sn))
 	in.Write(b)
 	cmd.Stdin = &in
 	cmd.Env = append([]string{"GOTRACEBACK=none"}, i.Env...)
@@ -104,8 +105,8 @@ func (l *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 // ChildMain is the describe-binary subcommand: it limits its own memory,
-// then reads an 8-byte little-endian decompression limit followed by the
-// file, renders the structure and writes the result as JSON.
+// then reads an 8-byte little-endian decompression limit, one Sniff byte
+// and the file, renders the structure and writes the result as JSON.
 func ChildMain(stdin io.Reader, stdout io.Writer) error {
 	if err := limitMemory(childMemory); err != nil {
 		return fmt.Errorf("limiting memory: %w", err)
@@ -115,6 +116,10 @@ func ChildMain(stdin io.Reader, stdout io.Writer) error {
 	if err := binary.Read(stdin, binary.LittleEndian, &limit); err != nil {
 		return err
 	}
+	var sn [1]byte
+	if _, err := io.ReadFull(stdin, sn[:]); err != nil {
+		return err
+	}
 	b, err := io.ReadAll(io.LimitReader(stdin, maxParse+1))
 	if err != nil {
 		return err
@@ -122,5 +127,5 @@ func ChildMain(stdin io.Reader, stdout io.Writer) error {
 	if len(b) > maxParse || limit < 0 {
 		return errors.New("input over the limit")
 	}
-	return json.NewEncoder(stdout).Encode(structureLocal(b, limit))
+	return json.NewEncoder(stdout).Encode(structureLocal(b, limit, Sniff(sn[0])))
 }

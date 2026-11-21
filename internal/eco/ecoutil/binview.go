@@ -143,9 +143,29 @@ type Description struct {
 // as untrusted evidence. Only the structure step parses the file; the rest
 // is linear scanning, done in this process.
 func DescribeBinary(cur, old []byte, hadOld bool, budget *Budget) Description {
+	return DescribeAs(cur, old, hadOld, budget, Generic)
+}
+
+// Sniff is how the file's consumer decides what it is.
+type Sniff byte
+
+const (
+	// Generic: by magic number, as DescribeBinary always did.
+	Generic Sniff = iota
+	// LinkerInput: as cmd/link's ldobj does for a .syso or a library or
+	// object file: ELF, Mach-O, COFF (machine at bytes 0-1), XCOFF first.
+	LinkerInput
+)
+
+// DescribeAs is DescribeBinary for a file its consumer sniffs as s.
+func DescribeAs(cur, old []byte, hadOld bool, budget *Budget, s Sniff) Description {
 	var b strings.Builder
-	fmt.Fprintf(&b, "size: %d bytes\nsha256: %x\ntype: %s\n", len(cur), sha256.Sum256(cur), magicType(cur))
-	text, complete := structure(cur, budget)
+	t, all := typeFor(cur, s)
+	fmt.Fprintf(&b, "size: %d bytes\nsha256: %x\ntype: %s\n", len(cur), sha256.Sum256(cur), t)
+	if len(all) > 1 {
+		fmt.Fprintf(&b, "its bytes match more than one type's magic: %s\n", strings.Join(all, "; "))
+	}
+	text, complete := structure(cur, budget, s)
 	b.WriteString("\nstructure (parsed by the gate):\n")
 	b.WriteString(text)
 	if complete {
@@ -171,53 +191,79 @@ func DescribeBinary(cur, old []byte, hadOld bool, budget *Budget) Description {
 	return Description{Text: b.String(), Complete: complete}
 }
 
-// magicType names a file by its leading bytes. http.DetectContentType is
-// the fallback.
-func magicType(b []byte) string {
-	has := func(off int, magic string) bool {
-		return len(b) >= off+len(magic) && string(b[off:off+len(magic)]) == magic
+// magics are the types the gate recognizes by magic number, in the
+// order magicType names them. Each is tested on its own: a file that
+// matches more than one (a polyglot, read differently by different
+// consumers) is never rendered complete.
+var magics = []struct {
+	name  string
+	match func(b []byte) bool
+}{
+	{"ELF", func(b []byte) bool { return has(b, 0, "\x7fELF") }},
+	{"PE (Windows executable or DLL) or DOS MZ", func(b []byte) bool { return has(b, 0, "MZ") }},
+	{"Mach-O", func(b []byte) bool {
+		return has(b, 0, "\xfe\xed\xfa\xce") || has(b, 0, "\xce\xfa\xed\xfe") || has(b, 0, "\xfe\xed\xfa\xcf") || has(b, 0, "\xcf\xfa\xed\xfe")
+	}},
+	{"Mach-O universal (fat) binary or Java class file", func(b []byte) bool { return has(b, 0, "\xca\xfe\xba\xbe") }},
+	{"ar archive (static library, e.g. a Go .a or C .a)", func(b []byte) bool { return has(b, 0, "!<arch>\n") }},
+	{"zip archive", func(b []byte) bool { return has(b, 0, "PK\x03\x04") || has(b, 0, "PK\x05\x06") }},
+	{"gzip", func(b []byte) bool { return has(b, 0, "\x1f\x8b") }},
+	{"tar archive", func(b []byte) bool { return has(b, 257, "ustar") }},
+	{"WebAssembly module", func(b []byte) bool { return has(b, 0, "\x00asm") }},
+	{"PNG image", func(b []byte) bool { return has(b, 0, "\x89PNG\r\n\x1a\n") }},
+	{"JPEG image", func(b []byte) bool { return has(b, 0, "\xff\xd8\xff") }},
+	{"GIF image", func(b []byte) bool { return has(b, 0, "GIF87a") || has(b, 0, "GIF89a") }},
+	{"PDF document", func(b []byte) bool { return has(b, 0, "%PDF-") }},
+	{"bzip2", func(b []byte) bool { return has(b, 0, "BZh") }},
+	{"xz", func(b []byte) bool { return has(b, 0, "\xfd7zXZ\x00") }},
+	{"zstd", func(b []byte) bool { return has(b, 0, "\x28\xb5\x2f\xfd") }},
+	{"7-zip archive", func(b []byte) bool { return has(b, 0, "7z\xbc\xaf\x27\x1c") }},
+	{"SQLite database", func(b []byte) bool { return has(b, 0, "SQLite format 3\x00") }},
+	{"COFF object", func(b []byte) bool { return coffMachine(b) != "" }},
+	{"XCOFF object", func(b []byte) bool { return has(b, 0, "\x01\xdf") || has(b, 0, "\x01\xf7") }},
+}
+
+func has(b []byte, off int, magic string) bool {
+	return len(b) >= off+len(magic) && string(b[off:off+len(magic)]) == magic
+}
+
+// magicTypes is every type whose magic b matches.
+func magicTypes(b []byte) []string {
+	var out []string
+	for _, m := range magics {
+		if m.match(b) {
+			name := m.name
+			if name == "COFF object" {
+				name += " (" + coffMachine(b) + ")"
+			}
+			out = append(out, name)
+		}
 	}
-	switch {
-	case has(0, "\x7fELF"):
-		return "ELF"
-	case has(0, "MZ"):
-		return "PE (Windows executable or DLL) or DOS MZ"
-	case has(0, "\xfe\xed\xfa\xce"), has(0, "\xce\xfa\xed\xfe"), has(0, "\xfe\xed\xfa\xcf"), has(0, "\xcf\xfa\xed\xfe"):
-		return "Mach-O"
-	case has(0, "\xca\xfe\xba\xbe"):
-		return "Mach-O universal (fat) binary or Java class file"
-	case has(0, "!<arch>\n"):
-		return "ar archive (static library, e.g. a Go .a or C .a)"
-	case has(0, "PK\x03\x04"), has(0, "PK\x05\x06"):
-		return "zip archive"
-	case has(0, "\x1f\x8b"):
-		return "gzip"
-	case has(257, "ustar"):
-		return "tar archive"
-	case has(0, "\x00asm"):
-		return "WebAssembly module"
-	case has(0, "\x89PNG\r\n\x1a\n"):
-		return "PNG image"
-	case has(0, "\xff\xd8\xff"):
-		return "JPEG image"
-	case has(0, "GIF87a"), has(0, "GIF89a"):
-		return "GIF image"
-	case has(0, "%PDF-"):
-		return "PDF document"
-	case has(0, "BZh"):
-		return "bzip2"
-	case has(0, "\xfd7zXZ\x00"):
-		return "xz"
-	case has(0, "\x28\xb5\x2f\xfd"):
-		return "zstd"
-	case has(0, "7z\xbc\xaf\x27\x1c"):
-		return "7-zip archive"
-	case has(0, "SQLite format 3\x00"):
-		return "SQLite database"
-	case coffMachine(b) != "":
-		return "COFF object (" + coffMachine(b) + ")"
+	return out
+}
+
+// magicType names a file by its leading bytes: the first type it matches,
+// http.DetectContentType's guess if none.
+func magicType(b []byte) string {
+	if ts := magicTypes(b); len(ts) > 0 {
+		return ts[0]
 	}
 	return "unknown magic; content sniffing says " + http.DetectContentType(b)
+}
+
+// typeFor is the type the consumer s sees, and every type b matches.
+func typeFor(b []byte, s Sniff) (string, []string) {
+	all := magicTypes(b)
+	if s == LinkerInput {
+		for _, want := range []string{"ELF", "Mach-O", "COFF object", "XCOFF object"} {
+			for _, t := range all {
+				if strings.HasPrefix(t, want) {
+					return t, all
+				}
+			}
+		}
+	}
+	return magicType(b), all
 }
 
 // coffMachine recognizes a bare COFF object (what a Windows .syso is) by
@@ -248,8 +294,11 @@ func parsed(t string) bool {
 // structure renders the file's structure: here, or in the isolated child
 // process when Isolate was called. The bytes parsed are charged first;
 // what the parsers decompress is charged after.
-func structure(b []byte, budget *Budget) (string, bool) {
-	switch t := magicType(b); {
+func structure(b []byte, budget *Budget, sn Sniff) (string, bool) {
+	t, all := typeFor(b, sn)
+	switch {
+	case len(all) > 1:
+		return "  not parsed: a file of more than one type is read differently by different tools\n", false
 	case !parsed(t):
 		return "  not parsed: the gate has no parser for this type\n", false
 	case len(b) > maxParse:
@@ -260,9 +309,9 @@ func structure(b []byte, budget *Budget) (string, bool) {
 	limit := budget.left(maxGunzip)
 	var res childResult
 	if iso := isolation; iso != nil {
-		res = iso.run(b, limit)
+		res = iso.run(b, limit, sn)
 	} else {
-		res = structureLocal(b, limit)
+		res = structureLocal(b, limit, sn)
 	}
 	budget.Take(min(res.Used, limit))
 	return res.Text, res.Complete
@@ -783,9 +832,9 @@ func PlainText(b []byte) bool {
 	return true
 }
 
-func structureLocal(b []byte, limit int64) childResult {
+func structureLocal(b []byte, limit int64, sn Sniff) childResult {
 	rd := &renderer{limit: limit}
-	text, complete := rd.render(b, 0)
+	text, complete := rd.render(b, 0, sn)
 	return childResult{Text: text, Complete: complete, Used: rd.used}
 }
 
@@ -793,11 +842,15 @@ func structureLocal(b []byte, limit int64) childResult {
 // if the describer for b's type reached its end, and, for an archive or
 // a compressed stream, every member (or the stream's content) is itself
 // complete or plain text quoted whole.
-func (rd *renderer) render(b []byte, depth int) (string, bool) {
+func (rd *renderer) render(b []byte, depth int, sn Sniff) (string, bool) {
 	r := bytes.NewReader(b)
 	var text string
 	var complete, exe bool
-	switch t := magicType(b); {
+	t, all := typeFor(b, sn)
+	if len(all) > 1 {
+		return "  not parsed: its bytes match more than one type's magic (" + strings.Join(all, "; ") + ")\n", false
+	}
+	switch {
 	case t == "ELF":
 		text, complete = step("ELF", func() (string, bool) { return describeELF(b, r) })
 		exe = true
@@ -847,7 +900,7 @@ func (rd *renderer) inner(name string, data []byte, depth int) (string, bool) {
 		b.WriteString("  not read: nested too deep\n")
 		return b.String(), false
 	}
-	text, ok := rd.render(data, depth+1)
+	text, ok := rd.render(data, depth+1, Generic)
 	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
 		b.WriteString("    " + line + "\n")
 	}
@@ -882,8 +935,13 @@ func (rd *renderer) describeZip(r *bytes.Reader, depth int) (string, bool) {
 	if !list(&b, "zip entries", names, maxListed) {
 		return b.String(), false
 	}
+	if why := zipAccounted(r, z); why != "" {
+		b.WriteString("  zip: " + why + "\n")
+		return b.String(), false
+	}
 	for _, f := range z.File {
-		if f.FileInfo().IsDir() {
+		// A directory entry is skipped only if it holds nothing.
+		if f.FileInfo().IsDir() && f.CompressedSize64 == 0 && f.UncompressedSize64 == 0 {
 			continue
 		}
 		rc, err := f.Open()
@@ -893,7 +951,11 @@ func (rd *renderer) describeZip(r *bytes.Reader, depth int) (string, bool) {
 		}
 		data, ok, err := rd.take(rc)
 		rc.Close()
-		if !ok || err != nil {
+		switch {
+		case err != nil:
+			fmt.Fprintf(&b, "  %s: not read: %s\n", clip(f.Name), clip(err.Error()))
+			return b.String(), false
+		case !ok:
 			fmt.Fprintf(&b, "  %s: not read in full (%s)\n", clip(f.Name), budgetNote)
 			return b.String(), false
 		}
@@ -906,14 +968,73 @@ func (rd *renderer) describeZip(r *bytes.Reader, depth int) (string, bool) {
 	return b.String(), true
 }
 
-// describeTar lists every entry to the end of the archive and renders
-// each regular file's content.
-func (rd *renderer) describeTar(r io.Reader, depth int) (string, bool) {
+// zipAccounted checks that the archive's entries and directories account
+// for every byte: the first local header at offset 0, each entry's data
+// right after its header, the central directory right after the last
+// entry (and its data descriptor), the end record right after the central
+// directory, and nothing after the end record but its comment. It returns
+// why not, or "".
+func zipAccounted(r *bytes.Reader, z *zip.Reader) string {
+	b := make([]byte, r.Size())
+	if _, err := r.ReadAt(b, 0); err != nil {
+		return "unreadable"
+	}
+	e := bytes.LastIndex(b, []byte("PK\x05\x06"))
+	if e < 0 || e+22 > len(b) {
+		return "no end-of-central-directory record"
+	}
+	comment := int(binary.LittleEndian.Uint16(b[e+20:]))
+	cdSize := uint64(binary.LittleEndian.Uint32(b[e+12:]))
+	cdOff := uint64(binary.LittleEndian.Uint32(b[e+16:]))
+	switch {
+	case e+22+comment != len(b):
+		return "bytes after the end-of-central-directory record and its comment"
+	case cdOff == 0xffffffff || cdSize == 0xffffffff:
+		return "zip64 layout, which the gate does not account for"
+	case cdOff+cdSize != uint64(e):
+		return "bytes between the central directory and its end record"
+	}
+	pos := uint64(0)
+	for _, f := range z.File {
+		if pos+30 > uint64(len(b)) || string(b[pos:pos+4]) != "PK\x03\x04" {
+			return "data before or between the local file headers"
+		}
+		hdr := 30 + uint64(binary.LittleEndian.Uint16(b[pos+26:])) + uint64(binary.LittleEndian.Uint16(b[pos+28:]))
+		data, err := f.DataOffset()
+		if err != nil || uint64(data) != pos+hdr {
+			return "an entry whose data does not follow its local header"
+		}
+		pos = uint64(data) + f.CompressedSize64
+		if f.Flags&0x8 != 0 { // data descriptor
+			if pos+4 <= uint64(len(b)) && string(b[pos:pos+4]) == "PK\x07\x08" {
+				pos += 4
+			}
+			pos += 12
+		}
+	}
+	if pos != cdOff {
+		return "bytes between the last entry and the central directory"
+	}
+	return ""
+}
+
+// describeTar lists every entry to the end of the archive, renders the
+// content of every entry that has any, and accounts for every byte: what
+// the reader consumed plus an all-zero tail is the whole file. Entry
+// types it does not model, or a header-only type with a size, make the
+// rendering incomplete.
+func (rd *renderer) describeTar(r *bytes.Reader, depth int) (string, bool) {
 	var b strings.Builder
 	tr := tar.NewReader(r)
 	for n := 0; ; n++ {
 		h, err := tr.Next()
 		if err == io.EOF {
+			rest := make([]byte, r.Len())
+			r.Read(rest)
+			if len(bytes.Trim(rest, "\x00")) > 0 {
+				fmt.Fprintf(&b, "  tar: %d bytes after the end of the archive are not padding\n", len(rest))
+				return b.String(), false
+			}
 			return b.String(), true
 		}
 		if err != nil {
@@ -925,8 +1046,18 @@ func (rd *renderer) describeTar(r io.Reader, depth int) (string, bool) {
 			return b.String(), false
 		}
 		fmt.Fprintf(&b, "  tar entry %s (type %q, %d bytes, mode %o)\n", clip(h.Name), h.Typeflag, h.Size, h.Mode)
-		if h.Typeflag != tar.TypeReg {
+		switch h.Typeflag {
+		case tar.TypeReg, tar.TypeCont, tar.TypeGNUSparse:
+			// Content: read and rendered below.
+		case tar.TypeLink, tar.TypeSymlink, tar.TypeChar, tar.TypeBlock, tar.TypeDir, tar.TypeFifo:
+			if h.Size > 0 {
+				b.WriteString("  tar: a header-only entry with a size; what tools do with it differs\n")
+				return b.String(), false
+			}
 			continue
+		default:
+			b.WriteString("  tar: an entry type the gate does not model\n")
+			return b.String(), false
 		}
 		data, ok, err := rd.take(tr)
 		if !ok || err != nil {

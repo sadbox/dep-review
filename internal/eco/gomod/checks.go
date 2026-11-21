@@ -566,7 +566,7 @@ func (ix *refIndex) nonTestEmbed(rel string) bool {
 		if d != "." {
 			r = strings.TrimPrefix(rel, d+"/")
 		}
-		for _, e := range ix.embeds[d] {
+		for _, e := range ix.embeds[fold(d)] {
 			if !e.test && embedMatches(e.pat, r) {
 				return true
 			}
@@ -596,7 +596,7 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 	if len(tdBins) > 0 {
 		names := map[string]bool{}
 		for _, rel := range tdBins {
-			names[path.Base(rel)] = true
+			names[fold(path.Base(rel))] = true
 		}
 		ix := indexRefs(cur, names)
 		for _, rel := range tdBins {
@@ -617,7 +617,7 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 	}
 	names := map[string]bool{}
 	for _, rel := range bins {
-		names[path.Base(rel)] = true
+		names[fold(path.Base(rel))] = true
 	}
 	ix := indexRefs(cur, names)
 	for _, rel := range bins {
@@ -625,7 +625,12 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 		if hadOld {
 			prev = old.ReadFile(rel)
 		}
-		d := ecoutil.DescribeBinary(data, prev, hadOld, r.budget)
+		// A .syso or library is sniffed as the linker sniffs it.
+		sn := ecoutil.Generic
+		if path.Ext(rel) == ".syso" || linkExts[path.Ext(rel)] {
+			sn = ecoutil.LinkerInput
+		}
+		d := ecoutil.DescribeAs(data, prev, hadOld, r.budget, sn)
 		refs, inert, _ := ix.refs(rel, links)
 		item := safeFile(rel)
 		r.add(codeBinary, item, binaryShown(d, inert),
@@ -1377,15 +1382,20 @@ func renderDecoded(dec []byte, how string, depth int, budget *ecoutil.Budget) (s
 	}
 	if ecoutil.PlainText(dec) {
 		if c := stripSpace(string(dec)); len(c) > blobMin && looksEncoded(c) {
-			if inner, innerHow := decodeEncoded(c); inner != nil {
-				if depth >= maxBlobDepth {
-					fmt.Fprintf(&b, "%s, to text that looks encoded again; decoded %d times, the gate stops here\n", how, depth)
-					return b.String(), false
-				}
-				fmt.Fprintf(&b, "%s, to text that looks encoded again (%d bytes); decoding it once more:\n", how, len(dec))
-				text, ok := renderDecoded(inner, innerHow, depth+1, budget)
-				return b.String() + text, ok
+			inner, innerHow := decodeEncoded(c)
+			switch {
+			case inner == nil:
+				// Looks encoded in a form the gate does not decode: what it
+				// stands for is not shown.
+				fmt.Fprintf(&b, "%s, to text that looks encoded again (%d bytes) in a form the gate does not decode\n", how, len(dec))
+				return b.String(), false
+			case depth >= maxBlobDepth:
+				fmt.Fprintf(&b, "%s, to text that looks encoded again; decoded %d times, the gate stops here\n", how, depth)
+				return b.String(), false
 			}
+			fmt.Fprintf(&b, "%s, to text that looks encoded again (%d bytes); decoding it once more:\n", how, len(dec))
+			text, ok := renderDecoded(inner, innerHow, depth+1, budget)
+			return b.String() + text, ok
 		}
 		if len(dec) > evidence.DefaultFileCap {
 			fmt.Fprintf(&b, "%s, to %d bytes of text, more than an evidence file holds (%d)\n", how, len(dec), evidence.DefaultFileCap)
@@ -1510,7 +1520,7 @@ func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
 				}
 				patterns += len(pats)
 				for _, p := range pats {
-					ix.embeds[path.Dir(f)] = append(ix.embeds[path.Dir(f)], embedPat{safeFile(f), lineNo, strings.TrimPrefix(p, "all:"), test})
+					ix.embeds[fold(path.Dir(f))] = append(ix.embeds[fold(path.Dir(f))], embedPat{safeFile(f), lineNo, strings.TrimPrefix(p, "all:"), test})
 				}
 			}
 			// Every line is searched for mentions, //go:embed lines too.
@@ -1554,7 +1564,7 @@ func (ix *refIndex) tokens(line []byte, wanted map[string]bool, f string, lineNo
 		}
 		tok := line[i:j]
 		i = j
-		k := string(tok[bytes.LastIndexByte(tok, '/')+1:])
+		k := fold(string(tok[bytes.LastIndexByte(tok, '/')+1:]))
 		if !wanted[k] || seen[k] {
 			continue
 		}
@@ -1618,7 +1628,7 @@ func (ix *refIndex) refs(rel string, links string) (text string, inert bool, why
 		if d != "." {
 			r = strings.TrimPrefix(rel, d+"/")
 		}
-		for _, e := range ix.embeds[d] {
+		for _, e := range ix.embeds[fold(d)] {
 			if embedMatches(e.pat, r) {
 				embeds++
 				test := ""
@@ -1639,7 +1649,7 @@ func (ix *refIndex) refs(rel string, links string) (text string, inert bool, why
 		why = append(why, "its name has characters the search does not match")
 		b.WriteString("its name has characters the gate's search does not match, so mentions of it were not searched for\n")
 	}
-	m := ix.mentions[base]
+	m := ix.mentions[fold(base)]
 	if m == nil {
 		m = &mentionList{}
 	}
@@ -1698,7 +1708,14 @@ func embedMatch(args, rel string) string {
 }
 
 // embedMatches: pattern p matches rel or one of its parent directories.
+// fold is the case folding of a case-insensitive file system (macOS,
+// Windows), where //go:embed PAYLOAD.BIN embeds payload.bin: names,
+// patterns and mentions are compared folded. Over-matching is the safe
+// side.
+func fold(s string) string { return strings.ToLower(s) }
+
 func embedMatches(p, rel string) bool {
+	p, rel = fold(p), fold(rel)
 	for r := rel; r != "." && r != ""; r = path.Dir(r) {
 		if ok, err := path.Match(p, r); err == nil && ok {
 			return true
