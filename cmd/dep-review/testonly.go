@@ -103,7 +103,7 @@ func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
 // runFakeAnthropic: dep-review fake-anthropic --listen :9000 --verdict <file> --model <m> ...
 func runFakeAnthropic(args []string) error {
-	fs := flag.NewFlagSet("fake-anthropic", flag.ContinueOnError)
+	fs := newFlagSet("fake-anthropic")
 	listen := fs.String("listen", ":9000", "listen address")
 	verdict := fs.String("verdict", "", "StructuredOutput the script returns")
 	model := fs.String("model", "", "expected model")

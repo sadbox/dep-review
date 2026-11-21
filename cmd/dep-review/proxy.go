@@ -29,12 +29,12 @@ var testUpstream = func(*flag.FlagSet) *string { return nil }
 // ACTIONS_* tokens), mints the first Claude token before it listens (so a broken federation setup fails fast), prints "proxy: ready"
 // and serves until killed.
 func runProxy(args []string) error {
-	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
+	fs := newFlagSet("proxy")
 	listen := fs.String("listen", ":8080", "listen address")
-	socket := fs.String("identity-socket", "", "unix socket of the host's OIDC helper (dep-review review)")
-	model := fs.String("model", "", "the only model requests may name")
-	rule := fs.String("federation-rule-id", "", "workload identity federation rule (fdrl_...)")
-	org := fs.String("organization-id", "", "Anthropic organization ID")
+	socket := fs.String("identity-socket", "", "unix socket of the host's OIDC helper (dep-review review) (required)")
+	model := fs.String("model", "", "the only model requests may name (required)")
+	rule := fs.String("federation-rule-id", "", "workload identity federation rule (fdrl_...) (required)")
+	org := fs.String("organization-id", "", "Anthropic organization ID (required)")
 	ws := fs.String("workspace-id", "", "workspace (wrkspc_...), optional")
 	svac := fs.String("service-account-id", "", "service account (svac_...), optional")
 	maxReq := fs.Int64("max-requests", proxy.DefaultMaxRequests, "Messages requests allowed per run")

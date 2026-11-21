@@ -31,14 +31,14 @@ var reviewTestFlags = func(*flag.FlagSet) func(*sandbox.Config) error {
 // that passed validation. Anything else exits non-zero with no verdict,
 // which publish treats as "needs a human".
 func runReview(args []string) error {
-	fs := flag.NewFlagSet("review", flag.ContinueOnError)
-	prep := fs.String("prep-dir", "", "review-prep's output (prompt.md, settings.json, schema.json)")
-	evidence := fs.String("evidence", "", "evidence directory (read-only in the sandbox)")
-	repo := fs.String("repo", "", "default-branch checkout (read-only in the sandbox)")
-	out := fs.String("out", "", "verdict.json to write")
-	reviewer := fs.String("reviewer-image", "", "reviewer image (sandbox/Dockerfile)")
-	proxyImage := fs.String("proxy-image", "", "proxy image (sandbox/Dockerfile, target proxy)")
-	model := fs.String("model", "", "model")
+	fs := newFlagSet("review")
+	prep := fs.String("prep-dir", "", "review-prep's output (prompt.md, settings.json, schema.json) (required)")
+	evidence := fs.String("evidence", "", "evidence directory (read-only in the sandbox) (required)")
+	repo := fs.String("repo", "", "default-branch checkout (read-only in the sandbox) (required)")
+	out := fs.String("out", "", "verdict.json to write (required)")
+	reviewer := fs.String("reviewer-image", "", "reviewer image (sandbox/Dockerfile) (required)")
+	proxyImage := fs.String("proxy-image", "", "proxy image (sandbox/Dockerfile, target proxy) (required)")
+	model := fs.String("model", "", "model (required)")
 	rule := fs.String("federation-rule-id", "", "workload identity federation rule (fdrl_...)")
 	org := fs.String("organization-id", "", "Anthropic organization ID")
 	ws := fs.String("workspace-id", "", "workspace (wrkspc_...), optional")

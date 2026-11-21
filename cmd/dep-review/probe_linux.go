@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -26,7 +25,7 @@ import (
 // this static binary, bind-mounted read-only, because the reviewer image
 // has no shell and no interpreter. Exit status 0 means every probe passed.
 func runProbe(args []string) error {
-	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs := newFlagSet("probe")
 	proxy := fs.String("proxy", "", "the proxy's address")
 	model := fs.String("model", "", "the gate's model")
 	var denyTCP, denyDNS, denyHTTP, readonly stringList

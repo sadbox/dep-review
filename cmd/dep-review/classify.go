@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,10 +13,10 @@ import (
 )
 
 func runClassify(args []string) error {
-	fs := flag.NewFlagSet("classify", flag.ContinueOnError)
-	event := fs.String("event", "", "workflow_run event payload (GITHUB_EVENT_PATH)")
-	trigger := fs.String("trigger-path", "", "path of the caller's trigger workflow")
-	out := fs.String("out", "", "where to write classification.json")
+	fs := newFlagSet("classify")
+	event := fs.String("event", "", "workflow_run event payload (GITHUB_EVENT_PATH) (required)")
+	trigger := fs.String("trigger-path", "", "path of the caller's trigger workflow (required)")
+	out := fs.String("out", "", "where to write classification.json (required)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

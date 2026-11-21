@@ -32,7 +32,8 @@ on:
         description: >-
           Comma-separated platforms the repository builds its images for
           (e.g. linux/amd64,linux/arm64). The docker fetcher proves a digest
-          refresh a no-op only for these. Empty: fetch's default.
+          refresh a no-op only for these. Empty: every platform in the image
+          index must be unchanged.
         type: string
         default: ""
       model:

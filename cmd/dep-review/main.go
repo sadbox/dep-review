@@ -12,6 +12,17 @@ import (
 	"unicode/utf8"
 )
 
+// commands are the gate's subcommands.
+var commands = map[string]func([]string) error{
+	"classify":    runClassify,
+	"fetch":       runFetch,
+	"review-prep": runReviewPrep,
+	"review":      runReview,
+	"proxy":       runProxy,
+	"publish":     runPublish,
+	"sweep":       runSweep,
+}
+
 // extraCommands holds the sandboxtest build's test-only commands.
 var extraCommands = map[string]func([]string) error{}
 
@@ -26,27 +37,12 @@ func main() {
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
-	switch cmd {
-	case "classify":
-		err = runClassify(args)
-	case "fetch":
-		err = runFetch(args)
-	case "review-prep":
-		err = runReviewPrep(args)
-	case "review":
-		err = runReview(args)
-	case "proxy":
-		err = runProxy(args)
-	case "publish":
-		err = runPublish(args)
-	case "sweep":
-		err = runSweep(args)
-	default:
-		if f, ok := extraCommands[cmd]; ok {
-			err = f(args)
-		} else {
-			err = fmt.Errorf("unknown command %q", cmd)
-		}
+	if f, ok := commands[cmd]; ok {
+		err = f(args)
+	} else if f, ok := extraCommands[cmd]; ok {
+		err = f(args)
+	} else {
+		err = fmt.Errorf("unknown command %q", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, logLine("dep-review: "+err.Error()))
