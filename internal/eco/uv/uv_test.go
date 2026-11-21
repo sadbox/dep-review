@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
@@ -426,7 +427,8 @@ func TestCrossCheckPyPI(t *testing.T) {
 			pyyaml = p
 		}
 	}
-	release := func(skip string, tamper string) []byte {
+	win := artifactName(pyyaml.Wheels[len(pyyaml.Wheels)-1].URL) // never downloaded by the gate
+	release := func(skip string, tamper string, sizeOff int64) []byte {
 		var urls []map[string]any
 		for _, a := range pyyaml.Artifacts() {
 			name := artifactName(a.URL)
@@ -437,20 +439,25 @@ func TestCrossCheckPyPI(t *testing.T) {
 			if name == tamper {
 				h = strings.Repeat("0", 64)
 			}
-			urls = append(urls, map[string]any{"filename": name, "digests": map[string]string{"sha256": h}})
+			size := a.Size
+			if name == win {
+				size += sizeOff
+			}
+			urls = append(urls, map[string]any{"filename": name, "size": size, "digests": map[string]string{"sha256": h}})
 		}
 		out, _ := json.Marshal(map[string]any{"urls": urls})
 		return out
 	}
-	win := artifactName(pyyaml.Wheels[len(pyyaml.Wheels)-1].URL) // never downloaded by the gate
 	tests := []struct {
 		name string
 		body []byte
 		want string
 	}{
-		{"matches", release("", ""), ""},
-		{"lock has a file PyPI lacks", release(win, ""), "uv.hash-not-on-pypi"},
-		{"lock hash differs from PyPI", release("", win), "uv.hash-not-on-pypi"},
+		{"matches", release("", "", 0), ""},
+		{"lock size understated", release("", "", 1000), "uv.hash-not-on-pypi"},
+		{"PyPI gives no size", release("", "", -1<<40), "uv.hash-not-on-pypi"},
+		{"lock has a file PyPI lacks", release(win, "", 0), "uv.hash-not-on-pypi"},
+		{"lock hash differs from PyPI", release("", win, 0), "uv.hash-not-on-pypi"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -741,5 +748,80 @@ func TestPoCWheelVariants(t *testing.T) {
 	}
 	if variants != 2 {
 		t.Errorf("evidence %+v: want two variant diffs", ev.Files())
+	}
+}
+
+// TestArtifactCapCountsDownloads: the cap on further artifacts trusts no
+// size from the lock. A missing size stops before any download; an
+// understated one is caught by counting the bytes that arrive.
+func TestArtifactCapCountsDownloads(t *testing.T) {
+	names := []string{"demo-1.0-py3-none-any.whl", "demo-1.0-py3-none-macosx_11_0_arm64.whl", "demo-1.0-py3-none-manylinux_2_17_x86_64.whl"}
+	files := map[string][]byte{}
+	for _, n := range names {
+		b, err := os.ReadFile(filepath.Join("testdata/poc/wheels", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[n] = b
+	}
+	old := maxArtifactsBytes
+	maxArtifactsBytes = int64(len(files[names[1]])) + 10 // room for one further wheel
+	defer func() { maxArtifactsBytes = old }()
+	tests := []struct {
+		name      string
+		size      func(n string) int64
+		wantCode  bool
+		downloads int // of the further wheels
+	}{
+		{"declared sizes honest", func(n string) int64 { return int64(len(files[n])) }, true, 0}, // declared total already over the cap
+		{"declared sizes understated", func(string) int64 { return 1 }, true, 2},
+		{"size missing", func(n string) int64 {
+			if n == names[2] {
+				return 0
+			}
+			return 1
+		}, true, 0},
+		{"one further wheel fits", func(string) int64 { return 1 }, false, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wheels := names
+			if !tt.wantCode {
+				wheels = names[:2]
+			}
+			var mu sync.Mutex
+			got := map[string]int{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				got[filepath.Base(r.URL.Path)]++
+				mu.Unlock()
+				w.Write(files[filepath.Base(r.URL.Path)])
+			}))
+			defer srv.Close()
+			p := Package{Name: "demo", Version: "1.0", Source: map[string]string{"registry": pypiRegistry}}
+			for _, n := range wheels {
+				sum := sha256.Sum256(files[n])
+				p.Wheels = append(p.Wheels, Artifact{URL: srv.URL + "/" + n, Hash: "sha256:" + hex.EncodeToString(sum[:]), Size: tt.size(n)})
+			}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
+			c := change{update: model.Update{Name: "demo", To: "1.0", Directory: "/"}, head: p}
+			var sum bytes.Buffer
+			fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if has := slices.Contains(codesOf(fs), "uv.not-verified"); has != tt.wantCode {
+				t.Errorf("codes %q: uv.not-verified %v, want %v", codesOf(fs), has, tt.wantCode)
+			}
+			further := got[names[1]] + got[names[2]]
+			if further != tt.downloads {
+				t.Errorf("further wheels downloaded %d times, want %d (%v)", further, tt.downloads, got)
+			}
+		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,9 @@ const (
 	MaxArtifactsBytes = 1 << 30
 )
 
+// maxArtifactsBytes is MaxArtifactsBytes; tests lower it.
+var maxArtifactsBytes int64 = MaxArtifactsBytes
+
 // checkOtherArtifacts downloads, verifies and checks every artifact the
 // lock pins for the new version besides the diffed wheel and sdist
 // (sides[1]). Each other wheel is checked against the diffed wheel; a
@@ -31,19 +35,37 @@ func (f Fetcher) checkOtherArtifacts(ctx context.Context, env fetch.Env, home, d
 	u := c.update
 	var rest []Artifact
 	var size int64
+	unsized := false
 	for _, a := range c.head.Artifacts() {
 		if (wheel != nil && a.URL == wheel.URL) || (sdist != nil && a.URL == sdist.URL) {
 			continue
 		}
 		rest = append(rest, a)
 		size += a.Size
+		// The lock's size is the PR's word; a missing one could hide
+		// anything, so it counts as over the cap.
+		unsized = unsized || a.Size <= 0
 	}
 	if len(rest) == 0 {
 		return nil, nil
 	}
-	if len(rest) > MaxArtifacts || size > MaxArtifactsBytes {
-		return []model.Finding{human("uv.not-verified", u.Name, fmt.Sprintf("%s: %d further artifacts (%d bytes) exceed what the gate downloads; only the diffed one was checked",
-			u.To, len(rest), size))}, nil
+	notVerified := func(why string) model.Finding {
+		return human("uv.not-verified", u.Name, fmt.Sprintf("%s: %s; the remaining artifacts were not checked", u.To, why))
+	}
+	switch {
+	case unsized:
+		return []model.Finding{notVerified("the lock gives an artifact no positive size")}, nil
+	case len(rest) > MaxArtifacts || size > maxArtifactsBytes:
+		return []model.Finding{notVerified(fmt.Sprintf("%d further artifacts (%d bytes declared) exceed what the gate downloads", len(rest), size))}, nil
+	}
+	// Declared sizes can understate: count what actually arrives, and
+	// stop once that is over the cap.
+	var downloaded int64
+	overCap := func(dst string) bool {
+		if fi, err := os.Stat(dst + ".dl"); err == nil {
+			downloaded += fi.Size()
+		}
+		return downloaded > maxArtifactsBytes
 	}
 	var out []model.Finding
 	add := func(code, detail string) {
@@ -53,9 +75,14 @@ func (f Fetcher) checkOtherArtifacts(ctx context.Context, env fetch.Env, home, d
 	seen := map[string]bool{}
 	for n, a := range rest {
 		name := artifactName(a.URL)
-		t, bad, err := f.fetchArtifact(ctx, env, filepath.Join(dir, fmt.Sprintf("extra-%d", n)), a)
+		dst := filepath.Join(dir, fmt.Sprintf("extra-%d", n))
+		t, bad, err := f.fetchArtifact(ctx, env, dst, a)
 		if err != nil {
 			return nil, err
+		}
+		if overCap(dst) {
+			out = append(out, notVerified(fmt.Sprintf("downloads reached %d bytes, over the gate's %d", downloaded, maxArtifactsBytes)))
+			break
 		}
 		if bad != nil {
 			bad.Detail = u.To + " " + name + ": " + bad.Detail
@@ -91,9 +118,14 @@ func (f Fetcher) checkOtherArtifacts(ctx context.Context, env fetch.Env, home, d
 			}
 		} else {
 			if oldSdist == nil && u.From != "" && c.base.Sdist != nil {
-				ot, bad, err := f.fetchArtifact(ctx, env, filepath.Join(dir, "old-sdist-extra"), *c.base.Sdist)
+				odst := filepath.Join(dir, "old-sdist-extra")
+				ot, bad, err := f.fetchArtifact(ctx, env, odst, *c.base.Sdist)
 				if err != nil {
 					return nil, err
+				}
+				if overCap(odst) {
+					out = append(out, notVerified(fmt.Sprintf("downloads reached %d bytes, over the gate's %d", downloaded, maxArtifactsBytes)))
+					break
 				}
 				if bad != nil {
 					bad.Detail = u.From + " sdist: " + bad.Detail

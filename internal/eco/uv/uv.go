@@ -326,6 +326,7 @@ func (f Fetcher) crossCheckPyPI(ctx context.Context, env fetch.Env, c change) ([
 	var doc struct {
 		URLs []struct {
 			Filename string `json:"filename"`
+			Size     int64  `json:"size"`
 			Digests  struct {
 				SHA256 string `json:"sha256"`
 			} `json:"digests"`
@@ -335,20 +336,33 @@ func (f Fetcher) crossCheckPyPI(ctx context.Context, env fetch.Env, c change) ([
 		return []model.Finding{{Code: "uv.pypi-json-ambiguous", Route: model.RouteRefuse, Update: u.Name,
 			Detail: fmt.Sprintf("PyPI JSON for %s==%s: %v", u.Name, u.To, err)}}, nil
 	}
-	onPyPI := map[string]string{}
-	for _, f := range doc.URLs {
-		onPyPI[f.Filename] = "sha256:" + strings.ToLower(f.Digests.SHA256)
+	// The lock's size is checked too: the gate's download cap budgets
+	// with it, so an understated one must not pass.
+	type file struct {
+		hash string
+		size int64
 	}
+	onPyPI := map[string]file{}
 	var bad []string
+	for _, f := range doc.URLs {
+		if _, dup := onPyPI[f.Filename]; dup {
+			bad = append(bad, f.Filename+" (listed twice by PyPI)")
+		}
+		onPyPI[f.Filename] = file{"sha256:" + strings.ToLower(f.Digests.SHA256), f.Size}
+	}
 	for _, a := range c.head.Artifacts() {
 		name := artifactName(a.URL)
-		if got, ok := onPyPI[name]; !ok || got != a.Hash {
+		got, ok := onPyPI[name]
+		switch {
+		case !ok || got.hash != a.Hash:
 			bad = append(bad, name)
+		case got.size <= 0 || got.size != a.Size:
+			bad = append(bad, fmt.Sprintf("%s (lock size %d, PyPI %d)", name, a.Size, got.size))
 		}
 	}
 	if len(bad) > 0 {
 		return []model.Finding{{Code: "uv.hash-not-on-pypi", Route: model.RouteRefuse, Update: u.Name,
-			Detail: fmt.Sprintf("%s==%s: lock artifacts missing from PyPI's release or with a different sha256: %s", u.Name, u.To, ecoutil.List(bad, 10))}}, nil
+			Detail: fmt.Sprintf("%s==%s: lock artifacts missing from PyPI's release or with a different sha256 or size: %s", u.Name, u.To, ecoutil.List(bad, 10))}}, nil
 	}
 	return nil, nil
 }
