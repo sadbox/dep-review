@@ -45,6 +45,14 @@ func Sweep(ctx context.Context, cfg Config, repo string) error {
 			!strings.EqualFold(pr.Head.Repo.FullName, repo) || !gh.ValidSHA(pr.Head.SHA) || pr.Number <= 0 {
 			continue
 		}
+		// Left to another process (ignore_ecosystems). Sweep cannot
+		// classify, so it goes by the branch: such a PR gets no stuck
+		// report and no merge. Publish has already set `failure` on any
+		// that classify did not verify, which sweep leaves alone anyway.
+		if eco, ok := model.EcosystemFromBranch(pr.Head.Ref); ok && cfg.IgnoreEcosystems[eco] {
+			cfg.Logf("#%d: skipped: ecosystem %s is in ignore_ecosystems", pr.Number, eco)
+			continue
+		}
 		if err := sweepOne(ctx, cfg, repo, pr); err != nil {
 			cfg.Logf("#%d: %v", pr.Number, err)
 			errs = append(errs, fmt.Errorf("#%d: %w", pr.Number, err))

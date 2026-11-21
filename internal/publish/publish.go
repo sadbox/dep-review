@@ -43,6 +43,10 @@ type Config struct {
 	Now        func() time.Time
 	Sleep      func(ctx context.Context, d time.Duration) error
 	Logf       func(format string, args ...any)
+
+	// IgnoreEcosystems: sweep skips every Dependabot PR whose branch names
+	// one of these (classify ignores them, so they never get a status).
+	IgnoreEcosystems map[model.Ecosystem]bool
 }
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -153,6 +157,7 @@ type ghPull struct {
 	} `json:"user"`
 	Head struct {
 		SHA  string `json:"sha"`
+		Ref  string `json:"ref"`
 		Repo *struct {
 			FullName string `json:"full_name"`
 		} `json:"repo"`

@@ -106,6 +106,9 @@ func Decide(in Inputs) Outcome {
 	switch c.Kind {
 	case model.KindOther, model.KindStale:
 		return Outcome{Decision: model.DecisionIgnore, Reason: "not a current Dependabot pull request"}
+	case model.KindIgnored:
+		// gate.yml does not run publish for these; this is the backstop.
+		return Outcome{Decision: model.DecisionIgnore, Reason: "its ecosystem is in ignore_ecosystems"}
 	case model.KindDependabotUnverified:
 		return human("", "not verified as Dependabot's alone", nil)
 	case model.KindPending:

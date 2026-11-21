@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/gh"
+	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/publish"
 )
 
@@ -48,11 +50,16 @@ func runSweep(args []string) error {
 	fs := newFlagSet("sweep")
 	repo := fs.String("repo", "", "owner/name (required)")
 	trigger := fs.String("trigger-path", "", triggerPathUsage)
+	ignoreList := fs.String("ignore-ecosystems", "", ignoreUsage)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *repo == "" || *trigger == "" {
 		return errors.New("sweep: --repo and --trigger-path are required")
+	}
+	ignore, err := model.ParseEcosystems(*ignoreList)
+	if err != nil {
+		return fmt.Errorf("--ignore-ecosystems: %w", err)
 	}
 	c, err := gh.NewFromEnv()
 	if err != nil {
@@ -63,6 +70,7 @@ func runSweep(args []string) error {
 		return err
 	}
 	cfg.TriggerPath = *trigger
+	cfg.IgnoreEcosystems = ignore
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 	return publish.Sweep(ctx, cfg, *repo)

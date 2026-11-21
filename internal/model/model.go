@@ -47,6 +47,12 @@ const (
 	// nothing, and sweep reports the head as stuck after the usual time so
 	// a maintainer re-runs the gate.
 	KindPending Kind = "dependabot-pending"
+	// KindIgnored: a KindDependabot PR whose whole declared update set is
+	// in ecosystems the caller listed in ignore_ecosystems (another trusted
+	// process owns those PRs). Every check above still passed; only then
+	// is a PR ignored. fetch, review and publish do not run, sweep skips
+	// it: no status, no comment, no notification.
+	KindIgnored Kind = "dependabot-ignored"
 	// KindOther: neither authored by dependabot[bot] nor on a dependabot/
 	// branch. The gate does nothing at all for these.
 	KindOther Kind = "other"
@@ -188,6 +194,6 @@ type Decision string
 const (
 	DecisionMerge   Decision = "merge"   // approved; merge once CI is green
 	DecisionHuman   Decision = "human"   // needs a person; notify
-	DecisionIgnore  Decision = "ignore"  // not ours (KindOther, KindStale)
+	DecisionIgnore  Decision = "ignore"  // not ours (KindOther, KindStale, KindIgnored)
 	DecisionPending Decision = "pending" // a job failed for infrastructure reasons; leave pending, retry
 )

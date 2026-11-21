@@ -1,0 +1,13 @@
+build(deps): bump tools/upstream/adblock-lists
+
+Bumps [tools/upstream/adblock-lists](https://github.com/brave/adblock-lists) from `8846788` to `9778b88`.
+- [Commits](https://github.com/brave/adblock-lists/compare/8846788d578bf89696ad4ec5cdff845dfb170f1a...9778b880ffce465d7230aa83afdf78dcbf9c26f3)
+
+---
+updated-dependencies:
+- dependency-name: tools/upstream/adblock-lists
+  dependency-version: 9778b880ffce465d7230aa83afdf78dcbf9c26f3
+  dependency-type: direct:production
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>

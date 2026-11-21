@@ -99,6 +99,30 @@ one is reviewed by this gate too.
    to tokens that may edit the ruleset), so keeping that list to
    Dependabot alone is the owner's job.
 
+### Ignoring an ecosystem
+
+`ignore_ecosystems` (comma-separated, default empty) is for an ecosystem
+whose Dependabot PRs another trusted process already owns, e.g. a routine
+that opens its own PR for every submodule bump and closes Dependabot's as
+superseded. Use it only then: an ignored PR is never reviewed, merged or
+reported. Names are the ones in Dependabot's branch names
+(`dependabot/<ecosystem>/...`): `docker`, `github_actions`, `go_modules`,
+`npm_and_yarn`, `submodules`, `uv`, not the `package-ecosystem` names in
+`dependabot.yml` (`gitsubmodule`, `gomod`, ...). An unknown name fails the
+run.
+
+classify still runs every check above. Only a PR that passes them all
+(kind `dependabot`) and whose branch ecosystem and every declared update
+are in the list becomes `dependabot-ignored`: fetch, review and publish
+do not run, so it gets no status, comment or notification, and the
+classify log says why. An unverified PR, or an update set that mixes an
+ignored ecosystem with another, is gated as usual. Dependabot's
+`updated-dependencies` metadata names no ecosystem, so in practice the
+branch name decides. Sweep cannot classify, so it skips every open
+Dependabot PR whose branch names an ignored ecosystem; such a PR is
+therefore never reported as stuck either (publish has already marked an
+unverified one `failure`).
+
 ### Trust boundaries
 
 Each owner has one gate GitHub App: sadbox uses app 5855685 (installed on

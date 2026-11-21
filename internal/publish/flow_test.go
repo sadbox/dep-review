@@ -49,6 +49,7 @@ type fakeGH struct {
 	merges       []map[string]string
 	commitDate   time.Time
 	patches      int
+	requests     []string // "METHOD path" of every request, in order
 }
 
 func newFake(t *testing.T) *fakeGH {
@@ -97,6 +98,7 @@ func setBase(f *fakeGH, ref, defaultBranch string) {
 func (f *fakeGH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	p := strings.TrimPrefix(r.URL.Path, "/repos/o/r/")
 	parts := strings.Split(p, "/")
 	js := func(v any) { json.NewEncoder(w).Encode(v) }
