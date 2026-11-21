@@ -29,6 +29,7 @@ import (
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 // MaxPackages bounds how many changed packages are downloaded and diffed;
@@ -92,6 +93,11 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		if err != nil {
 			return fetch.Result{}, err
 		}
+		mf, err := manifestChanges(ctx, git, base, env.Class.HeadSHA, dir, env.Class.Declared)
+		if err != nil {
+			return fetch.Result{}, err
+		}
+		fs = append(fs, mf...)
 		changes = append(changes, cs...)
 		res.Findings = append(res.Findings, fs...)
 	}
@@ -130,14 +136,35 @@ func readAt(ctx context.Context, git ecoutil.Git, sha, p string) ([]byte, error)
 	return b, err
 }
 
+// errMultipleLocks: the directory has more than one lockfile. dirChanges
+// refuses when the PR changes any of them, since the gate cannot know which
+// one CI installs; with only package.json changed a person decides.
+var errMultipleLocks = errors.New("more than one lockfile")
+
+var lockNames = []string{"npm-shrinkwrap.json", "package-lock.json", "yarn.lock"}
+
+// loadLock parses the directory's lockfile. With more than one lockfile
+// the gate cannot know which one CI installs from (npm ci prefers the
+// shrinkwrap and ignores yarn.lock; yarn the reverse), so that is an
+// ambiguity.
 func loadLock(ctx context.Context, git ecoutil.Git, sha, dir string) (*Lock, error) {
-	for _, name := range []string{"npm-shrinkwrap.json", "package-lock.json", "yarn.lock"} {
+	var present []string
+	for _, name := range lockNames {
 		b, err := readAt(ctx, git, sha, path.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
-		if b == nil {
-			continue
+		if b != nil {
+			present = append(present, name)
+		}
+	}
+	if len(present) > 1 {
+		return nil, fmt.Errorf("%w (%s); which one CI installs from is unknown", errMultipleLocks, strings.Join(present, ", "))
+	}
+	for _, name := range present {
+		b, err := readAt(ctx, git, sha, path.Join(dir, name))
+		if err != nil {
+			return nil, err
 		}
 		if name == "yarn.lock" {
 			l, err := ParseYarnLock(b)
@@ -155,7 +182,15 @@ func loadLock(ctx context.Context, git ecoutil.Git, sha, dir string) (*Lock, err
 			}
 			return l, nil
 		}
-		return ParsePackageLock(b)
+		pj, err := readAt(ctx, git, sha, path.Join(dir, "package.json"))
+		if err != nil {
+			return nil, err
+		}
+		ws, err := Workspaces(pj)
+		if err != nil {
+			return nil, fmt.Errorf("package.json: %w", err)
+		}
+		return parsePackageLock(b, ws)
 	}
 	return nil, nil
 }
@@ -171,6 +206,22 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			var exit interface{ ExitCode() int }
 			if errors.As(e, &exit) {
 				return nil, nil, e // git itself failed
+			}
+			if errors.Is(e, errMultipleLocks) {
+				changed, err := locksChanged(ctx, git, base, head, dir)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !changed {
+					findings = append(findings, human("npm.multiple-lockfiles", "", depDir+": "+e.Error()+"; only package.json changed"))
+					return nil, findings, nil
+				}
+				findings = append(findings, model.Finding{Code: "npm.lockfile-ambiguous", Route: model.RouteRefuse, Detail: depDir + ": " + e.Error() + ", and the PR changes one"})
+				return nil, findings, nil
+			}
+			if isAmbiguous(e) {
+				findings = append(findings, model.Finding{Code: "npm.lockfile-ambiguous", Route: model.RouteRefuse, Detail: depDir + ": " + e.Error()})
+				return nil, findings, nil
 			}
 			findings = append(findings, human("npm.lockfile-unsupported", "", depDir+": "+e.Error()))
 			return nil, findings, nil
@@ -250,17 +301,61 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			findings = append(findings, human("npm.link", h.Name, fmt.Sprintf("%s: %s is a workspace link (%s)", depDir, h.Name, loc)))
 		case h.Bundled:
 			findings = append(findings, human("npm.bundled-changed", h.Name, fmt.Sprintf("%s: %s@%s at %s is bundled inside its parent and not verified on its own", depDir, h.Name, h.Version, loc)))
-		case !registryURL(h.Resolved, hl.Kind):
-			refuse("npm.resolved-off-registry", h.Name, fmt.Sprintf("%s@%s at %s resolves to %q, not %s", h.Name, h.Version, loc, h.Resolved, registryHost))
-		case sha512Of(h.Integrity) == nil:
-			findings = append(findings, human("npm.weak-integrity", h.Name, fmt.Sprintf("%s: %s@%s at %s has no sha512 integrity in the lockfile", depDir, h.Name, h.Version, loc)))
+		case !canonicalResolved(h, hl.Kind):
+			refuse("npm.resolved-off-registry", h.Name, fmt.Sprintf("%s@%s at %s resolves to %q, not %s", h.Name, h.Version, loc, h.Resolved, canonicalTarball(h.Name, h.Version)))
+		default:
+			if _, err := sriSHA512(h.Integrity); errors.Is(err, errWeakIntegrity) {
+				findings = append(findings, human("npm.weak-integrity", h.Name, fmt.Sprintf("%s: %s@%s at %s has no sha512 integrity in the lockfile", depDir, h.Name, h.Version, loc)))
+			} else if err != nil {
+				refuse("npm.integrity-ambiguous", h.Name, fmt.Sprintf("%s@%s at %s: %v", h.Name, h.Version, loc, err))
+			}
 		}
 	}
 
 	var changes []change
+	emit := func(c change, where string) {
+		u := c.update
+		kind := "transitive"
+		if u.Direct {
+			kind = "direct"
+		}
+		fmt.Fprintf(summary, "- %s: %s -> %s (%s, %s%s)\n", u.Name, ecoutil.OrNew(u.From), u.To, u.Type, kind, where)
+		changes = append(changes, c)
+	}
+	// First by install location: what npm ci lays out at node_modules/x is
+	// what runs, so a location whose version changed is a change even when
+	// both versions exist elsewhere in the lockfile (a top-level downgrade
+	// to a version that was only nested before is invisible to name and
+	// version sets).
+	type triple struct{ name, from, to string }
+	byLoc := map[triple]bool{}
+	locFrom, locTo := map[string][]string{}, map[string][]string{}
+	for _, loc := range slices.Sorted(maps.Keys(hloc)) {
+		h := hloc[loc]
+		b, ok := bloc[loc]
+		if !ok || b.Name != h.Name || b.Version == h.Version || b.Bundled || h.Bundled || b.Link || h.Link {
+			continue
+		}
+		locFrom[h.Name] = append(locFrom[h.Name], b.Version)
+		locTo[h.Name] = append(locTo[h.Name], h.Version)
+		k := triple{h.Name, b.Version, h.Version}
+		if byLoc[k] {
+			continue
+		}
+		byLoc[k] = true
+		u := model.Update{
+			Ecosystem: model.NPM, Directory: depDir, Name: h.Name, From: b.Version, To: h.Version,
+			Type: ecoutil.TypeOf(b.Version, h.Version), Direct: hl.Direct[h.Name],
+		}
+		emit(change{update: u, base: b, head: h, lockKind: hl.Kind}, " at "+loc)
+	}
+	// Then by name, for versions that appeared or disappeared without a
+	// location to pair them (new packages, hoisting moves).
 	names := slices.Sorted(maps.Keys(ecoutil.Union(bv, hv)))
 	for _, name := range names {
 		removed, added := ecoutil.DiffSets(bv[name], hv[name])
+		removed = slices.DeleteFunc(removed, func(v string) bool { return slices.Contains(locFrom[name], v) })
+		added = slices.DeleteFunc(added, func(v string) bool { return slices.Contains(locTo[name], v) })
 		if len(removed) == 0 && len(added) == 0 {
 			continue
 		}
@@ -282,12 +377,10 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 					c.base = hk[key{name, p[0]}][0] // a kept copy
 				}
 			}
-			kind := "transitive"
-			if u.Direct {
-				kind = "direct"
+			if byLoc[triple{name, u.From, u.To}] {
+				continue
 			}
-			fmt.Fprintf(summary, "- %s: %s -> %s (%s, %s)\n", name, ecoutil.OrNew(u.From), u.To, u.Type, kind)
-			changes = append(changes, c)
+			emit(c, "")
 		}
 	}
 	summary.WriteString("\n")
@@ -299,26 +392,69 @@ func stripFragment(u string) string {
 	return u
 }
 
-// registryURL: an https tarball URL on the public registry. yarn v1 writes
-// registry.yarnpkg.com, which serves the same registry.
-func registryURL(raw, kind string) bool {
-	hosts := []string{registryHost}
-	if kind == "yarn" {
-		hosts = append(hosts, "registry.yarnpkg.com")
-	}
-	return ecoutil.CheckHost(stripFragment(raw), hosts...) == nil
+const yarnRegistryHost = "registry.yarnpkg.com"
+
+// canonicalTarball is the URL registry.npmjs.org serves name@version's
+// tarball at (its dist.tarball).
+func canonicalTarball(name, version string) string {
+	base := name[strings.LastIndex(name, "/")+1:]
+	return "https://" + registryHost + "/" + name + "/-/" + base + "-" + version + ".tgz"
 }
 
-// sha512Of returns the sha512 digest in an SRI integrity string.
-func sha512Of(integrity string) []byte {
-	for _, h := range strings.Fields(integrity) {
-		if b64, ok := strings.CutPrefix(h, "sha512-"); ok {
-			if d, err := base64.StdEncoding.DecodeString(b64); err == nil && len(d) == sha512.Size {
-				return d
-			}
+var yarnFragmentRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// tarballURL is what the package manager downloads for e: the lockfile's
+// resolved URL, without yarn's "#<sha1>" fragment. registryForm is the
+// same URL on registry.npmjs.org (yarn v1 writes registry.yarnpkg.com,
+// which serves the same registry), for comparing with dist.tarball.
+func tarballURL(e Entry, kind string) (download, registryForm, sha1hex string) {
+	download = e.Resolved
+	registryForm = download
+	if kind == "yarn" {
+		download, sha1hex, _ = strings.Cut(download, "#")
+		registryForm = download
+		if rest, ok := strings.CutPrefix(download, "https://"+yarnRegistryHost+"/"); ok {
+			registryForm = "https://" + registryHost + "/" + rest
 		}
 	}
-	return nil
+	return download, registryForm, sha1hex
+}
+
+// canonicalResolved: the lockfile entry downloads exactly the public
+// registry's tarball for its own name@version. A host check alone would
+// let is-number@7.0.0 resolve to left-pad's tarball.
+func canonicalResolved(e Entry, kind string) bool {
+	_, reg, frag := tarballURL(e, kind)
+	if frag != "" && !yarnFragmentRE.MatchString(frag) {
+		return false
+	}
+	return nameRE.MatchString(e.Name) && versionRE.MatchString(e.Version) && reg == canonicalTarball(e.Name, e.Version)
+}
+
+var (
+	errWeakIntegrity = errors.New("no sha512 integrity")
+	sha512SRIRE      = regexp.MustCompile(`^sha512-[A-Za-z0-9+/]{86}==$`)
+	sha1SRIRE        = regexp.MustCompile(`^sha1-[A-Za-z0-9+/]{27}=$`)
+)
+
+// sriSHA512 returns the digest of an integrity string that is exactly one
+// sha512 token. ssri (npm) accepts a download matching ANY token of a
+// multi-hash string, so a second token would let other bytes through than
+// the ones the gate verified: that, and anything else but one sha512 or
+// one legacy sha1 token (errWeakIntegrity, as is no integrity at all), is
+// an error.
+func sriSHA512(integrity string) ([]byte, error) {
+	switch {
+	case integrity == "" || sha1SRIRE.MatchString(integrity):
+		return nil, errWeakIntegrity
+	case !sha512SRIRE.MatchString(integrity):
+		return nil, fmt.Errorf("integrity %q is not exactly one sha512 hash", integrity)
+	}
+	d, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(integrity, "sha512-"))
+	if err != nil || len(d) != sha512.Size {
+		return nil, fmt.Errorf("integrity %q is not a sha512 hash", integrity)
+	}
+	return d, nil
 }
 
 // versionDoc is the registry's document for one version.
@@ -347,9 +483,13 @@ var (
 	versionRE = regexp.MustCompile(`^[0-9A-Za-z.+-]+$`)
 )
 
+// errBadName: a lockfile name or version the gate will not put in a
+// registry URL. It is a property of the PR, so it refuses.
+var errBadName = errors.New("not a valid npm package name or version")
+
 func (f Fetcher) versionDoc(ctx context.Context, env fetch.Env, name, version string) (*versionDoc, []byte, error) {
 	if !nameRE.MatchString(name) || !versionRE.MatchString(version) {
-		return nil, nil, fmt.Errorf("refusing package %q version %q", name, version)
+		return nil, nil, fmt.Errorf("%w: package %q version %q", errBadName, name, version)
 	}
 	u := f.registry() + "/" + strings.Replace(name, "/", "%2f", 1) + "/" + url.PathEscape(version)
 	b, err := ecoutil.GetBytes(ctx, env.HTTP, u, ecoutil.MetadataLimit, map[string][]string{"Accept": {"application/json"}})
@@ -357,7 +497,7 @@ func (f Fetcher) versionDoc(ctx context.Context, env fetch.Env, name, version st
 		return nil, nil, err
 	}
 	var d versionDoc
-	if err := json.Unmarshal(b, &d); err != nil {
+	if err := strictjson.UnmarshalMetadata(b, &d); err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", u, err)
 	}
 	if d.Name != name || d.Version != version {
@@ -396,24 +536,50 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 			add(model.RouteHuman, "npm.not-on-registry", fmt.Sprintf("%s is not on %s (unpublished?)", s.ver, registryHost))
 			return findings, nil
 		}
+		if errors.Is(err, errBadName) {
+			add(model.RouteRefuse, "npm.bad-name", s.ver+": "+err.Error())
+			return findings, nil
+		}
+		if errors.Is(err, strictjson.ErrRejected) {
+			add(model.RouteRefuse, "npm.registry-json-ambiguous", fmt.Sprintf("%s: registry document: %v", s.ver, err))
+			return findings, nil
+		}
 		if err != nil {
 			return nil, err
 		}
-		want := sha512Of(s.entry.Integrity)
-		if want == nil {
+		want, err := sriSHA512(s.entry.Integrity)
+		if errors.Is(err, errWeakIntegrity) {
 			add(model.RouteHuman, "npm.weak-integrity", s.ver+": lockfile has no sha512 integrity; not verified")
 			return findings, nil
 		}
-		if reg := sha512Of(doc.Dist.Integrity); reg == nil || !bytes.Equal(reg, want) {
+		if err != nil {
+			add(model.RouteRefuse, "npm.integrity-ambiguous", s.ver+": lockfile "+err.Error())
+			return findings, nil
+		}
+		if reg, err := sriSHA512(doc.Dist.Integrity); err != nil || !bytes.Equal(reg, want) {
 			add(model.RouteRefuse, "npm.integrity-mismatch", fmt.Sprintf("%s: lockfile integrity %s differs from the registry's %s", s.ver, s.entry.Integrity, doc.Dist.Integrity))
 			return findings, nil
 		}
-		if err := ecoutil.CheckHost(doc.Dist.Tarball, registryHost); err != nil && f.Registry == "" {
-			add(model.RouteRefuse, "npm.tarball-off-registry", s.ver+": "+err.Error())
+		// Download what the package manager downloads (the lockfile's
+		// resolved URL), and only if it is the registry's own tarball for
+		// this exact name@version.
+		dl, regForm, frag := tarballURL(s.entry, c.lockKind)
+		if regForm != doc.Dist.Tarball {
+			add(model.RouteRefuse, "npm.resolved-mismatch", fmt.Sprintf("%s: lockfile resolved %q is not the registry's tarball %q", s.ver, s.entry.Resolved, doc.Dist.Tarball))
+			return findings, nil
+		}
+		if f.Registry == "" {
+			if err := ecoutil.CheckHost(dl, registryHost, yarnRegistryHost); err != nil {
+				add(model.RouteRefuse, "npm.tarball-off-registry", s.ver+": "+err.Error())
+				return findings, nil
+			}
+		}
+		if frag != "" && frag != doc.Dist.Shasum {
+			add(model.RouteRefuse, "npm.integrity-mismatch", fmt.Sprintf("%s: yarn.lock sha1 fragment %s differs from the registry's shasum %s", s.ver, frag, doc.Dist.Shasum))
 			return findings, nil
 		}
 		tgz := filepath.Join(dir, s.label+".tgz")
-		if err := ecoutil.GetFile(ctx, env.HTTP, doc.Dist.Tarball, tgz, ecoutil.ArtifactLimit); err != nil {
+		if err := ecoutil.GetFile(ctx, env.HTTP, dl, tgz, ecoutil.ArtifactLimit); err != nil {
 			return nil, err
 		}
 		data, err := os.ReadFile(tgz)
@@ -441,8 +607,10 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 		}
 		sd := &side{doc: doc, tree: tree}
 		if pj := tree.ReadFile("package.json"); pj != nil {
-			if err := json.Unmarshal(pj, &sd.pkg); err != nil {
-				add(model.RouteHuman, "npm.bad-package-json", fmt.Sprintf("%s: package.json: %v", s.ver, err))
+			if err := strictjson.Unmarshal(pj, &sd.pkg); err != nil {
+				// npm installs from this file; a reading it could take
+				// differently from the gate's is never a formatting nit.
+				add(model.RouteRefuse, "npm.bad-package-json", fmt.Sprintf("%s: package.json: %v", s.ver, err))
 			}
 		} else {
 			add(model.RouteHuman, "npm.bad-package-json", s.ver+": tarball has no package.json")
@@ -482,4 +650,23 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 
 func human(code, update, detail string) model.Finding {
 	return model.Finding{Code: code, Route: model.RouteHuman, Update: update, Detail: detail}
+}
+
+// locksChanged reports whether any lockfile in dir differs between base
+// and head (added, removed or edited).
+func locksChanged(ctx context.Context, git ecoutil.Git, base, head, dir string) (bool, error) {
+	for _, name := range lockNames {
+		b, err := readAt(ctx, git, base, path.Join(dir, name))
+		if err != nil {
+			return false, err
+		}
+		h, err := readAt(ctx, git, head, path.Join(dir, name))
+		if err != nil {
+			return false, err
+		}
+		if (b == nil) != (h == nil) || !bytes.Equal(b, h) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

@@ -1,13 +1,17 @@
 package uv
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +19,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
@@ -111,7 +116,7 @@ func TestParseLockFixture(t *testing.T) {
 	var names []string
 	for _, p := range l.Packages {
 		names = append(names, p.Name+"=="+p.Version)
-		if p.IsProject() {
+		if _, ok := p.projectPath(); ok {
 			if !slices.Equal(p.Deps, []string{"ansible", "ansible-core"}) {
 				t.Errorf("project deps = %v", p.Deps)
 			}
@@ -270,9 +275,9 @@ func TestCheckPackage(t *testing.T) {
 		{"native", with(map[string]string{"p/_x.cpython-312-x86_64-linux-gnu.so": "\x7fELF"}), nil, nil, []string{"uv.native-extension"}},
 		{"new requires", with(map[string]string{"p-1.1.dist-info/METADATA": md[:len(md)-len("\nDescription Requires-Dist: evil\n")] + "Requires-Dist: requests\n\n"}), nil, nil, []string{"uv.new-requires-dist"}},
 		{"new entry point", with(map[string]string{"p-1.1.dist-info/entry_points.txt": eps + "q = p.evil:main\n"}), nil, nil, []string{"uv.new-entry-point"}},
-		{"setup.py changed", nil, map[string]string{"setup.py": "setup()", "PKG-INFO": md}, map[string]string{"setup.py": "import os; setup()", "PKG-INFO": md}, []string{"uv.setup-py-changed"}},
-		{"backend changed", nil, map[string]string{"pyproject.toml": pyproject, "PKG-INFO": md}, map[string]string{"pyproject.toml": strings.Replace(pyproject, "setuptools.build_meta", "evil_backend", 1), "PKG-INFO": md}, []string{"uv.build-backend-changed"}},
-		{"sdist new script", nil, map[string]string{"pyproject.toml": pyproject, "PKG-INFO": md}, map[string]string{"pyproject.toml": pyproject + "[project.scripts]\nx = \"p:x\"\n", "PKG-INFO": md}, []string{"uv.new-entry-point"}},
+		{"setup.py changed", nil, map[string]string{"setup.py": "setup()", "PKG-INFO": md}, map[string]string{"setup.py": "import os; setup()", "PKG-INFO": md}, []string{"uv.sdist-changed", "uv.setup-py-changed"}},
+		{"backend changed", nil, map[string]string{"pyproject.toml": pyproject, "PKG-INFO": md}, map[string]string{"pyproject.toml": strings.Replace(pyproject, "setuptools.build_meta", "evil_backend", 1), "PKG-INFO": md}, []string{"uv.build-backend-changed", "uv.sdist-changed"}},
+		{"sdist new script", nil, map[string]string{"pyproject.toml": pyproject, "PKG-INFO": md}, map[string]string{"pyproject.toml": pyproject + "[project.scripts]\nx = \"p:x\"\n", "PKG-INFO": md}, []string{"uv.new-entry-point", "uv.sdist-changed"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -344,8 +349,16 @@ func TestFetchNetwork(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(out, "gate", "uv-summary.md")); err == nil {
 		t.Logf("summary:\n%s", b)
 	}
-	if res.Route != model.RouteReview {
-		t.Errorf("route = %s, want review", res.Route)
+	// Both sdists change beyond PKG-INFO (code, docs, tests), and any sdist
+	// difference needs a person: this fixture routed review before the
+	// fail-closed sdist rule and is human now, for that reason only.
+	if res.Route != model.RouteHuman {
+		t.Errorf("route = %s, want human", res.Route)
+	}
+	for _, f := range res.Findings {
+		if f.Code != "uv.sdist-changed" {
+			t.Errorf("unexpected finding %s %s: %s", f.Code, f.Route, f.Detail)
+		}
 	}
 }
 
@@ -425,7 +438,8 @@ func TestCrossCheckPyPI(t *testing.T) {
 			pyyaml = p
 		}
 	}
-	release := func(skip string, tamper string) []byte {
+	win := artifactName(pyyaml.Wheels[len(pyyaml.Wheels)-1].URL) // never downloaded by the gate
+	release := func(skip string, tamper string, sizeOff int64) []byte {
 		var urls []map[string]any
 		for _, a := range pyyaml.Artifacts() {
 			name := artifactName(a.URL)
@@ -436,20 +450,25 @@ func TestCrossCheckPyPI(t *testing.T) {
 			if name == tamper {
 				h = strings.Repeat("0", 64)
 			}
-			urls = append(urls, map[string]any{"filename": name, "digests": map[string]string{"sha256": h}})
+			size := a.Size
+			if name == win {
+				size += sizeOff
+			}
+			urls = append(urls, map[string]any{"filename": name, "size": size, "digests": map[string]string{"sha256": h}})
 		}
 		out, _ := json.Marshal(map[string]any{"urls": urls})
 		return out
 	}
-	win := artifactName(pyyaml.Wheels[len(pyyaml.Wheels)-1].URL) // never downloaded by the gate
 	tests := []struct {
 		name string
 		body []byte
 		want string
 	}{
-		{"matches", release("", ""), ""},
-		{"lock has a file PyPI lacks", release(win, ""), "uv.hash-not-on-pypi"},
-		{"lock hash differs from PyPI", release("", win), "uv.hash-not-on-pypi"},
+		{"matches", release("", "", 0), ""},
+		{"lock size understated", release("", "", 1000), "uv.hash-not-on-pypi"},
+		{"PyPI gives no size", release("", "", -1<<40), "uv.hash-not-on-pypi"},
+		{"lock has a file PyPI lacks", release(win, "", 0), "uv.hash-not-on-pypi"},
+		{"lock hash differs from PyPI", release("", win, 0), "uv.hash-not-on-pypi"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -474,6 +493,757 @@ func TestCrossCheckPyPI(t *testing.T) {
 			}
 			if len(fs) != 1 || fs[0].Code != tt.want || fs[0].Route != model.RouteRefuse {
 				t.Errorf("findings %+v, want %s refuse", fs, tt.want)
+			}
+		})
+	}
+}
+
+func wantRoute(t *testing.T, fs []model.Finding, code string, route model.Route) {
+	t.Helper()
+	for _, f := range fs {
+		if f.Code == code {
+			if f.Route != route {
+				t.Errorf("%s route %s, want %s", code, f.Route, route)
+			}
+			return
+		}
+	}
+	t.Errorf("findings %+v lack %s", fs, code)
+}
+
+func wantRefuse(t *testing.T, fs []model.Finding, code string) {
+	t.Helper()
+	for _, f := range fs {
+		if f.Code == code {
+			if f.Route != model.RouteRefuse {
+				t.Errorf("%s route %s, want refuse", code, f.Route)
+			}
+			return
+		}
+	}
+	t.Errorf("findings %+v lack %s", fs, code)
+}
+
+func codesOf(fs []model.Finding) []string {
+	var out []string
+	for _, f := range fs {
+		out = append(out, f.Code)
+	}
+	return out
+}
+
+// TestPoCDualKeySource: the review's uv.lock lists six with
+// { registry = "https://evil.example/simple", editable = "." }; the gate
+// took it for the project and skipped it, uv fetches it from the index.
+func TestPoCDualKeySource(t *testing.T) {
+	head := gittest.ReadDir(t, "testdata/poc/dualsource")
+	base := map[string][]byte{"pyproject.toml": head["pyproject.toml"]}
+	for name, lock := range map[string][]byte{
+		"dual key":               head["uv.lock"],
+		"editable, not a member": bytes.Replace(head["uv.lock"], []byte(`{ registry = "https://evil.example/simple", editable = "." }`), []byte(`{ editable = "." }`), 1),
+		"virtual elsewhere":      bytes.Replace(head["uv.lock"], []byte(`{ registry = "https://evil.example/simple", editable = "." }`), []byte(`{ virtual = "vendor/six" }`), 1),
+		"outside the workspace":  bytes.Replace(head["uv.lock"], []byte(`{ registry = "https://evil.example/simple", editable = "." }`), []byte(`{ editable = "../six" }`), 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := map[string][]byte{"pyproject.toml": head["pyproject.toml"], "uv.lock": lock}
+			dir, b, hs := gittest.Repo(t, base, h)
+			var sum bytes.Buffer
+			_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, hs, ".", &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := "uv.project-source-invalid"
+			if name == "dual key" {
+				code = "uv.source-ambiguous"
+			}
+			wantRefuse(t, findings, code)
+			// Never silently skipped: it is also an off-registry package.
+			wantRefuse(t, findings, "uv.source-off-registry")
+		})
+	}
+}
+
+func TestWorkspaceMembers(t *testing.T) {
+	root := []byte("[project]\nname = \"root\"\nversion = \"0\"\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\nexclude = [\"packages/skip\"]\n")
+	member := func(name string) []byte { return []byte("[project]\nname = \"" + name + "\"\nversion = \"1\"\n") }
+	lock := func(pkgs ...string) []byte {
+		s := "version = 1\nrevision = 3\n\n[[package]]\nname = \"root\"\nversion = \"0\"\nsource = { virtual = \".\" }\n"
+		for _, p := range pkgs {
+			s += "\n" + p
+		}
+		return []byte(s)
+	}
+	files := map[string][]byte{"pyproject.toml": root, "packages/a/pyproject.toml": member("a"), "packages/skip/pyproject.toml": member("skip")}
+	tests := []struct {
+		name string
+		pkg  string
+		want string
+	}{
+		{"declared member", "[[package]]\nname = \"a\"\nversion = \"1\"\nsource = { editable = \"packages/a\" }\n", ""},
+		{"excluded member", "[[package]]\nname = \"skip\"\nversion = \"1\"\nsource = { editable = \"packages/skip\" }\n", "uv.project-source-invalid"},
+		{"member named differently", "[[package]]\nname = \"evil\"\nversion = \"1\"\nsource = { editable = \"packages/a\" }\n", "uv.project-source-invalid"},
+		{"no pyproject there", "[[package]]\nname = \"b\"\nversion = \"1\"\nsource = { editable = \"packages/b\" }\n", "uv.project-source-invalid"},
+		{"root name taken", "[[package]]\nname = \"evil\"\nversion = \"1\"\nsource = { virtual = \".\" }\n", "uv.project-source-invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := maps.Clone(files)
+			base["uv.lock"] = lock()
+			head := maps.Clone(files)
+			head["uv.lock"] = lock(tt.pkg)
+			dir, b, h := gittest.Repo(t, base, head)
+			var sum bytes.Buffer
+			_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want == "" {
+				if len(findings) != 0 {
+					t.Errorf("findings %+v", findings)
+				}
+				return
+			}
+			wantRefuse(t, findings, tt.want)
+		})
+	}
+}
+
+func TestManifestChanges(t *testing.T) {
+	base, err := os.ReadFile("testdata/homelab/base/pyproject.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := []model.Update{{Name: "ansible-core", From: "2.21.6", To: "2.21.7", Directory: "/ansible"}}
+	bump := strings.Replace(string(base), `"ansible-core==2.21.6"`, `"ansible-core==2.21.7"`, 1)
+	tests := []struct {
+		name     string
+		head     string
+		declared []model.Update
+		want     string
+	}{
+		{"unchanged", string(base), nil, ""},
+		{"declared bump", bump, declared, ""},
+		{"undeclared bump", bump, []model.Update{{Name: "ansible", To: "2.21.7"}}, "uv.manifest-changed"},
+		{"other version", strings.Replace(bump, "2.21.7", "2.21.8", 1), declared, "uv.manifest-changed"},
+		{"operator changed", strings.Replace(string(base), `"ansible-core==2.21.6"`, `"ansible-core>=2.21.7"`, 1), declared, "uv.manifest-requirement"},
+		{"marker added", strings.Replace(string(base), `"ansible-core==2.21.6"`, `"ansible-core==2.21.7; sys_platform == 'linux'"`, 1), declared, "uv.manifest-requirement"},
+		{"requirement added", strings.Replace(bump, `"ansible==14.6.0",`, `"ansible==14.6.0", "evil",`, 1), declared, "uv.manifest-requirement"},
+		{"index added", bump + "\n[[tool.uv.index]]\nurl = \"https://evil.example/simple\"\ndefault = true\n", declared, "uv.manifest-changed"},
+		{"source added", bump + "\n[tool.uv.sources]\nansible = { git = \"https://github.com/evil/ansible\" }\n", declared, "uv.manifest-changed"},
+		{"package flipped", strings.Replace(bump, "package = false", "package = true", 1), declared, "uv.manifest-changed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, b, h := gittest.Repo(t, map[string][]byte{"ansible/pyproject.toml": base}, map[string][]byte{"ansible/pyproject.toml": []byte(tt.head)})
+			fs, err := manifestChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, "ansible", tt.declared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want == "" {
+				if len(fs) != 0 {
+					t.Errorf("findings %+v", fs)
+				}
+				return
+			}
+			if tt.want == "uv.manifest-requirement" {
+				wantRoute(t, fs, tt.want, model.RouteHuman)
+				if slices.Contains(codesOf(fs), "uv.manifest-changed") {
+					t.Errorf("findings %+v also refuse", fs)
+				}
+				return
+			}
+			wantRefuse(t, fs, tt.want)
+		})
+	}
+}
+
+// TestPoCBuildSystem: the review's pyproject.toml adds an attacker build
+// backend and a default index with uv.lock unchanged.
+func TestPoCBuildSystem(t *testing.T) {
+	base := gittest.ReadDir(t, "testdata/poc/buildsystem/base")
+	head := gittest.ReadDir(t, "testdata/poc/buildsystem/head")
+	if !bytes.Equal(base["uv.lock"], head["uv.lock"]) {
+		t.Fatal("fixture: the lock must not change")
+	}
+	dir, b, h := gittest.Repo(t, base, head)
+	fs, err := manifestChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var details []string
+	for _, f := range fs {
+		details = append(details, f.Detail)
+	}
+	for _, want := range []string{"[build-system.build-backend]", "[tool.uv.index]", "[build-system] requires changed"} {
+		if !strings.Contains(strings.Join(details, "\n"), want) {
+			t.Errorf("findings %q do not name %s", details, want)
+		}
+	}
+	wantRefuse(t, fs, "uv.manifest-changed")
+}
+
+// TestCompiledAndBinaryFiles: .pyc (the review's unchecked-hash one), and
+// binaries anywhere, including tests/ and testdata/.
+func TestCompiledAndBinaryFiles(t *testing.T) {
+	pyc, err := os.ReadFile("testdata/poc/pyc/mod.cpython-315.pyc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := "Metadata-Version: 2.4\nName: p\nVersion: 1.0\n"
+	old := zipTree(t, map[string]string{"p/__init__.py": "", "p-1.0.dist-info/METADATA": md, "tests/data.bin": "\x00\x01"})
+	cur := zipTree(t, map[string]string{"p/__init__.py": "", "p-1.0.dist-info/METADATA": md, "tests/data.bin": "\x00\x01",
+		"p/__pycache__/mod.cpython-315.pyc": string(pyc), "testdata/blob.bin": "\x00\x02\x03", "tests/tool": "\x7fELF\x02\x01"})
+	fs := checkPackage(sideTrees{wheel: old}, sideTrees{wheel: cur})
+	got := codesOf(fs)
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"uv.binary-file", "uv.compiled-bytecode"}) {
+		t.Fatalf("codes = %q", got)
+	}
+	for _, f := range fs {
+		if f.Route != model.RouteHuman {
+			t.Errorf("%s route %s", f.Code, f.Route)
+		}
+		switch f.Code {
+		case "uv.compiled-bytecode":
+			if !strings.Contains(f.Detail, "unchecked-hash") {
+				t.Errorf("detail %q does not name the unchecked-hash pyc", f.Detail)
+			}
+		case "uv.binary-file":
+			if !strings.Contains(f.Detail, "testdata/blob.bin") || !strings.Contains(f.Detail, "tests/tool") || strings.Contains(f.Detail, "tests/data.bin") {
+				t.Errorf("detail %q", f.Detail)
+			}
+		}
+	}
+}
+
+// TestPoCWheelVariants: the review's three wheels of demo 1.0. The gate
+// diffed only the py3-none-any one; uv on macOS or Linux installs a
+// platform wheel with different code.
+func TestPoCWheelVariants(t *testing.T) {
+	names := []string{"demo-1.0-py3-none-any.whl", "demo-1.0-py3-none-macosx_11_0_arm64.whl", "demo-1.0-py3-none-manylinux_2_17_x86_64.whl"}
+	files := map[string][]byte{}
+	for _, n := range names {
+		b, err := os.ReadFile(filepath.Join("testdata/poc/wheels", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[n] = b
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, ok := files[filepath.Base(r.URL.Path)]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(b)
+	}))
+	defer srv.Close()
+	p := Package{Name: "demo", Version: "1.0", Source: map[string]string{"registry": pypiRegistry}}
+	for _, n := range names {
+		sum := sha256.Sum256(files[n])
+		p.Wheels = append(p.Wheels, Artifact{URL: srv.URL + "/" + n, Hash: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(files[n]))})
+	}
+	out := filepath.Join(t.TempDir(), "ev")
+	ev, err := evidence.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ev.Close()
+	env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
+	c := change{update: model.Update{Name: "demo", To: "1.0", Directory: "/"}, head: p}
+	var sum bytes.Buffer
+	fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, f := range fs {
+		if f.Code == "uv.wheel-variant-differs" {
+			n++
+			if f.Route != model.RouteHuman || !strings.Contains(f.Detail, "demo/__init__.py") {
+				t.Errorf("finding %+v", f)
+			}
+		}
+	}
+	if n != 2 {
+		t.Errorf("findings %+v: want uv.wheel-variant-differs for both platform wheels", fs)
+	}
+	variants := 0
+	for _, f := range ev.Files() {
+		if strings.HasSuffix(f.Path, ".variant.diff") {
+			variants++
+			if !f.Untrusted {
+				t.Errorf("%s is not untrusted", f.Path)
+			}
+		}
+	}
+	if variants != 2 {
+		t.Errorf("evidence %+v: want two variant diffs", ev.Files())
+	}
+}
+
+// TestArtifactCapCountsDownloads: the cap on further artifacts trusts no
+// size from the lock. A missing size stops before any download; an
+// understated one is caught by counting the bytes that arrive.
+func TestArtifactCapCountsDownloads(t *testing.T) {
+	names := []string{"demo-1.0-py3-none-any.whl", "demo-1.0-py3-none-macosx_11_0_arm64.whl", "demo-1.0-py3-none-manylinux_2_17_x86_64.whl"}
+	files := map[string][]byte{}
+	for _, n := range names {
+		b, err := os.ReadFile(filepath.Join("testdata/poc/wheels", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[n] = b
+	}
+	old := maxArtifactsBytes
+	maxArtifactsBytes = int64(len(files[names[1]])) + 10 // room for one further wheel
+	defer func() { maxArtifactsBytes = old }()
+	tests := []struct {
+		name      string
+		size      func(n string) int64
+		wantCode  bool
+		downloads int // of the further wheels
+	}{
+		{"declared sizes honest", func(n string) int64 { return int64(len(files[n])) }, true, 0}, // declared total already over the cap
+		{"declared sizes understated", func(string) int64 { return 1 }, true, 2},
+		{"size missing", func(n string) int64 {
+			if n == names[2] {
+				return 0
+			}
+			return 1
+		}, true, 0},
+		{"one further wheel fits", func(string) int64 { return 1 }, false, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wheels := names
+			if !tt.wantCode {
+				wheels = names[:2]
+			}
+			var mu sync.Mutex
+			got := map[string]int{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				got[filepath.Base(r.URL.Path)]++
+				mu.Unlock()
+				w.Write(files[filepath.Base(r.URL.Path)])
+			}))
+			defer srv.Close()
+			p := Package{Name: "demo", Version: "1.0", Source: map[string]string{"registry": pypiRegistry}}
+			for _, n := range wheels {
+				sum := sha256.Sum256(files[n])
+				p.Wheels = append(p.Wheels, Artifact{URL: srv.URL + "/" + n, Hash: "sha256:" + hex.EncodeToString(sum[:]), Size: tt.size(n)})
+			}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
+			c := change{update: model.Update{Name: "demo", To: "1.0", Directory: "/"}, head: p}
+			var sum bytes.Buffer
+			fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if has := slices.Contains(codesOf(fs), "uv.not-verified"); has != tt.wantCode {
+				t.Errorf("codes %q: uv.not-verified %v, want %v", codesOf(fs), has, tt.wantCode)
+			}
+			further := got[names[1]] + got[names[2]]
+			if further != tt.downloads {
+				t.Errorf("further wheels downloaded %d times, want %d (%v)", further, tt.downloads, got)
+			}
+		})
+	}
+}
+
+// TestPoCRoute runs the review's PoCs through fetch.Run end to end: the
+// route is refuse, for the gate's own reason, and not a job error.
+func TestPoCRoute(t *testing.T) {
+	dual := gittest.ReadDir(t, "testdata/poc/dualsource")
+	tests := []struct {
+		name       string
+		base, head map[string][]byte
+		declared   []model.Update
+		code       string
+		network    bool
+	}{
+		{"buildsystem", gittest.ReadDir(t, "testdata/poc/buildsystem/base"), gittest.ReadDir(t, "testdata/poc/buildsystem/head"), nil, "uv.manifest-changed", false},
+		{"dualsource", map[string][]byte{"pyproject.toml": dual["pyproject.toml"]}, dual, []model.Update{{Name: "six", To: "1.16.0"}}, "uv.source-ambiguous", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.network && testing.Short() {
+				t.Skip("network")
+			}
+			dir, b, h := gittest.Repo(t, tt.base, tt.head)
+			class := model.Classification{Repo: "test/poc", PR: 1, BaseSHA: b, HeadSHA: h, Kind: model.KindDependabot, Ecosystem: model.UV, Declared: tt.declared}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Class: class, RepoDir: dir, Scratch: t.TempDir(), HTTP: ecoutil.NewClient()}
+			res, err := fetch.Run(context.Background(), env, fetch.Registry{model.UV: Fetcher{}}, ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Route != model.RouteRefuse {
+				t.Errorf("route = %s", res.Route)
+			}
+			wantRefuse(t, res.Findings, tt.code)
+		})
+	}
+}
+
+// TestBuildRequiresBump: a [build-system] requires change needs a person;
+// a build-backend change refuses.
+func TestBuildRequiresBump(t *testing.T) {
+	const bs = "[project]\nname = \"p\"\nversion = \"0\"\n\n[build-system]\nrequires = [\"setuptools>=70\"]\nbuild-backend = \"setuptools.build_meta\"\n"
+	for head, want := range map[string][2]string{
+		strings.Replace(bs, ">=70", ">=80", 1):                          {"uv.manifest-requirement", string(model.RouteHuman)},
+		strings.Replace(bs, "setuptools.build_meta", "evil_backend", 1): {"uv.manifest-changed", string(model.RouteRefuse)},
+	} {
+		dir, b, h := gittest.Repo(t, map[string][]byte{"pyproject.toml": []byte(bs)}, map[string][]byte{"pyproject.toml": []byte(head)})
+		fs, err := manifestChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fs) != 1 {
+			t.Errorf("findings %+v, want one %s", fs, want[0])
+			continue
+		}
+		wantRoute(t, fs, want[0], model.Route(want[1]))
+	}
+}
+
+// TestUnchangedLocalPathDependency: an editable dependency outside the
+// workspace that the base already has is the owner's choice; adding or
+// changing one refuses, and a changed package that resolves through an
+// unchanged one needs a person.
+func TestUnchangedLocalPathDependency(t *testing.T) {
+	pyproject := []byte("[project]\nname = \"root\"\nversion = \"0\"\ndependencies = [\"lib\"]\n\n[tool.uv.sources]\nlib = { path = \"../lib\", editable = true }\n")
+	six := func(v string) string {
+		h := strings.Repeat(v[len(v)-1:], 64)
+		return "[[package]]\nname = \"six\"\nversion = \"" + v + "\"\nsource = { registry = \"https://pypi.org/simple\" }\n" +
+			"wheels = [\n    { url = \"https://files.pythonhosted.org/packages/aa/six-" + v + "-py2.py3-none-any.whl\", hash = \"sha256:" + h + "\", size = 1 },\n]\n"
+	}
+	lib := func(v string) string {
+		return "[[package]]\nname = \"lib\"\nversion = \"" + v + "\"\nsource = { editable = \"../lib\" }\ndependencies = [\n    { name = \"six\" },\n]\n"
+	}
+	lock := func(pkgs ...string) []byte {
+		return []byte("version = 1\nrevision = 3\n\n[[package]]\nname = \"root\"\nversion = \"0\"\nsource = { virtual = \".\" }\ndependencies = [\n    { name = \"lib\" },\n]\n\n" + strings.Join(pkgs, "\n"))
+	}
+	run := func(t *testing.T, base, head []byte) ([]change, []model.Finding) {
+		dir, b, h := gittest.Repo(t, map[string][]byte{"pyproject.toml": pyproject, "uv.lock": base}, map[string][]byte{"pyproject.toml": pyproject, "uv.lock": head})
+		var sum bytes.Buffer
+		cs, fs, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cs, fs
+	}
+	t.Run("unchanged, a dependency of it changes", func(t *testing.T) {
+		cs, fs := run(t, lock(lib("1.0"), six("1.16.0")), lock(lib("1.0"), six("1.17.0")))
+		if len(cs) != 1 || cs[0].update.Name != "six" {
+			t.Errorf("changes %+v", cs)
+		}
+		if got := codesOf(fs); !slices.Equal(got, []string{"uv.local-path-dependency"}) {
+			t.Errorf("codes %q, want only uv.local-path-dependency", got)
+		}
+		wantRoute(t, fs, "uv.local-path-dependency", model.RouteHuman)
+	})
+	t.Run("unchanged, nothing through it changes", func(t *testing.T) {
+		extra := "[[package]]\nname = \"other\"\nversion = \"1.0\"\nsource = { registry = \"https://pypi.org/simple\" }\nwheels = [\n    { url = \"https://files.pythonhosted.org/packages/aa/other-1.0-py3-none-any.whl\", hash = \"sha256:" + strings.Repeat("a", 64) + "\", size = 1 },\n]\n"
+		_, fs := run(t, lock(lib("1.0"), six("1.16.0")), lock(lib("1.0"), six("1.16.0"), extra))
+		if len(fs) != 0 {
+			t.Errorf("findings %+v", fs)
+		}
+	})
+	t.Run("changed by the PR", func(t *testing.T) {
+		_, fs := run(t, lock(lib("1.0"), six("1.16.0")), lock(lib("1.1"), six("1.16.0")))
+		wantRefuse(t, fs, "uv.project-source-invalid")
+	})
+	t.Run("added by the PR", func(t *testing.T) {
+		_, fs := run(t, lock(six("1.16.0")), lock(lib("1.0"), six("1.16.0")))
+		wantRefuse(t, fs, "uv.project-source-invalid")
+	})
+}
+
+// TestPOCB10 is the review's wheel PoC: demo 1.1 adds a .data/scripts/ruff
+// (shadows the CI tool on PATH) and a top-level sitecustomize.py (runs at
+// every interpreter start); 1.2 ships them as .data/scripts and
+// .data/purelib. Each is a new install-location file that needs a person.
+func TestPOCB10(t *testing.T) {
+	extract := func(v string) *ecoutil.Tree {
+		tr, err := ecoutil.ExtractZip(filepath.Join("testdata/poc/installhooks", "demo-"+v+"-py3-none-any.whl"), filepath.Join(t.TempDir(), "x"), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tr
+	}
+	old := extract("1.0")
+	for v, want := range map[string][]string{
+		"1.1": {"demo-1.1.data/scripts/ruff", "sitecustomize.py"},
+		"1.2": {"demo-1.2.data/scripts/ruff", "demo-1.2.data/purelib/sitecustomize.py"},
+	} {
+		var details []string
+		fs := checkPackage(sideTrees{wheel: old}, sideTrees{wheel: extract(v)})
+		for _, f := range fs {
+			if f.Code == "uv.install-hook-file" {
+				details = append(details, f.Detail)
+				if f.Route != model.RouteHuman {
+					t.Errorf("%s: %+v", v, f)
+				}
+			}
+		}
+		for _, w := range want {
+			if !strings.Contains(strings.Join(details, "\n"), w) {
+				t.Errorf("%s: findings %+v do not name %s", v, fs, w)
+			}
+		}
+	}
+	// .data files unchanged in the next version: nothing new to flag; a
+	// startup module is flagged whenever present.
+	if got := installHookFiles(extract("1.1"), extract("1.1")); len(got) != 0 {
+		t.Errorf("unchanged: %q", got)
+	}
+	if got := codesOf(checkPackage(sideTrees{wheel: extract("1.1")}, sideTrees{wheel: extract("1.1")})); !slices.Contains(got, "uv.install-hook-file") {
+		t.Errorf("unchanged sitecustomize not flagged: %q", got)
+	}
+	for key, want := range map[string]bool{
+		"demo.data/headers/x.h": true, "demo.data/data/share/x": true, "demo.data/platlib/evil.py": true, "demo.data/scripts/ruff": true,
+		"evil.pth": false, "demo/__init__.py": false, "demo-1.0.dist-info/RECORD": false,
+	} {
+		if got := installHook(key); got != want {
+			t.Errorf("installHook(%q) = %v", key, got)
+		}
+	}
+	startup := dirTree(t, map[string]string{"usercustomize.py": "", "sitecustomize/__init__.py": "", "demo-1.0.data/platlib/sitecustomize.so": "",
+		"demo/sitecustomize.py": "", "demo-1.0.data/scripts/sitecustomize.py": ""})
+	if got := startupModules(startup); !slices.Equal(got, []string{"demo-1.0.data/platlib/sitecustomize.so", "sitecustomize/__init__.py", "usercustomize.py"}) {
+		t.Errorf("startupModules = %q", got)
+	}
+}
+
+// TestNewTopLevel: import-name exemptions come from the old version's
+// wheel only. A name it lacked, a hook name, any odd root entry, and every
+// name of a package with no old wheel (new to the lock, or sdist-only
+// before) need a person.
+func TestNewTopLevel(t *testing.T) {
+	md := map[string]string{"demo-1.0.dist-info/METADATA": "Name: demo\n", "demo/__init__.py": ""}
+	with := func(extra ...string) *ecoutil.Tree {
+		m := maps.Clone(md)
+		for _, e := range extra {
+			m[e] = "x"
+		}
+		return dirTree(t, m)
+	}
+	old := with("setup.py", "_demo.cpython-312-x86_64-linux-gnu.so")
+	tests := []struct {
+		name string
+		old  *ecoutil.Tree
+		cur  *ecoutil.Tree
+		top  []string // names in uv.new-top-level
+		odd  []string // files in uv.root-file
+	}{
+		{"package", old, with("requests/__init__.py"), []string{"requests"}, nil},
+		{"module", old, with("yaml.py"), []string{"yaml"}, nil},
+		{"bytecode module", old, with("evil.pyc"), []string{"evil"}, nil},
+		{"native, abi3, pyd", old, with("a.abi3.so", "b.cp312-win_amd64.pyd", "c.so"), []string{"a", "b", "c"}, nil},
+		{"via .data/purelib", old, with("demo-1.0.data/purelib/urllib3/__init__.py"), []string{"urllib3"}, nil},
+		{"unchanged names", old, with("_demo.cpython-312-x86_64-linux-gnu.so", "demo/new.py", "demo-1.0.data/scripts/x"), nil, nil},
+		{"hook name never exempt", old, with("setup.py"), []string{"setup"}, nil},
+		{"odd root entries", old, with("README", "data.json", "foo-bar/x.py", "x.so.1", "1abc.py"), nil, []string{"1abc.py", "README", "data.json", "foo-bar/x.py", "x.so.1"}},
+		{"no old wheel: even its own name", nil, with(), []string{"demo"}, nil},
+		{"always-human set left out", old, with("sitecustomize.py", "evil.pth", "__pycache__/x.pyc"), nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var top, odd string
+			for _, f := range rootFindings(tt.old, tt.cur) {
+				if f.Route != model.RouteHuman {
+					t.Errorf("%+v", f)
+				}
+				switch f.Code {
+				case "uv.new-top-level":
+					top = f.Detail
+				case "uv.root-file":
+					odd = f.Detail
+				}
+			}
+			for _, c := range []struct {
+				detail string
+				want   []string
+				code   string
+			}{{top, tt.top, "uv.new-top-level"}, {odd, tt.odd, "uv.root-file"}} {
+				if (c.detail != "") != (c.want != nil) {
+					t.Errorf("%s %q, want %q", c.code, c.detail, c.want)
+				}
+				for _, w := range c.want {
+					if !strings.Contains(c.detail, w) {
+						t.Errorf("%s %q does not name %s", c.code, c.detail, w)
+					}
+				}
+			}
+		})
+	}
+}
+
+func dirTree(t *testing.T, files map[string]string) *ecoutil.Tree {
+	t.Helper()
+	d := t.TempDir()
+	for k, v := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(d, k)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, k), []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr, err := ecoutil.DirTree(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr
+}
+
+// TestPOCSdistBuildHook is the re-review's sdist PoC (an in-tree backend
+// via backend-path, and a hatch build hook) plus the bypasses later
+// reviews found in narrower rules (hatch hooks under build.targets.*,
+// modules beside an in-tree backend, [tool.*] build tables, import
+// directories, "inert" files, egg-info). Any sdist difference outside
+// PKG-INFO needs a person.
+func TestPOCSdistBuildHook(t *testing.T) {
+	const pp = "[build-system]\nrequires = []\nbuild-backend = \"backend\"\nbackend-path = [\".\"]\n\n[project]\nname = \"demo\"\nversion = \"1.0\"\n"
+	const hatch = "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[project]\nname = \"demo\"\nversion = \"1.0\"\n\n[tool.hatch.build.hooks.custom]\n"
+	const evil = "import os; os.system('id')\n"
+	const meta = "Name: demo\n\n"
+	tests := []struct {
+		name     string
+		old, cur map[string]string
+		want     []string // files named in uv.sdist-changed; nil: none
+		not      []string // files it must not name
+	}{
+		{"PoC: in-tree backend", map[string]string{"pyproject.toml": pp, "backend.py": "from setuptools.build_meta import *\n", "PKG-INFO": meta},
+			map[string]string{"pyproject.toml": pp, "backend.py": evil + "from setuptools.build_meta import *\n", "PKG-INFO": meta}, []string{"backend.py"}, nil},
+		{"PoC: hatch_build.py", map[string]string{"pyproject.toml": hatch, "hatch_build.py": "x=1\n", "PKG-INFO": meta},
+			map[string]string{"pyproject.toml": hatch, "hatch_build.py": evil, "PKG-INFO": meta}, []string{"hatch_build.py"}, nil},
+		{"hatch hook under build.targets", map[string]string{"pyproject.toml": hatch + "[tool.hatch.build.targets.wheel.hooks.custom]\npath = \"tools/hook.py\"\n", "tools/hook.py": "x=1\n"},
+			map[string]string{"pyproject.toml": hatch + "[tool.hatch.build.targets.wheel.hooks.custom]\npath = \"tools/hook.py\"\n", "tools/hook.py": evil}, []string{"tools/hook.py"}, nil},
+		{"setuptools cmdclass in pyproject", map[string]string{"pyproject.toml": hatch},
+			map[string]string{"pyproject.toml": hatch + "[tool.setuptools.cmdclass]\nbuild_py = \"evil.Cmd\"\n"}, []string{"pyproject.toml"}, nil},
+		{"import directory, docs, egg-info", map[string]string{"demo/__init__.py": "", "README.md": "a", "demo.egg-info/SOURCES.txt": "a", "PKG-INFO": meta},
+			map[string]string{"demo/__init__.py": evil, "README.md": "b", "demo.egg-info/SOURCES.txt": "b", "PKG-INFO": "Name: demo\nVersion: 1.1\n\n"},
+			[]string{"demo/__init__.py", "README.md", "demo.egg-info/SOURCES.txt"}, []string{"PKG-INFO"}},
+		{"removed file", map[string]string{"build_helpers.py": "x\n", "demo/__init__.py": ""},
+			map[string]string{"demo/__init__.py": ""}, []string{"build_helpers.py"}, nil},
+		{"only PKG-INFO differs", map[string]string{"demo/__init__.py": "", "PKG-INFO": meta},
+			map[string]string{"demo/__init__.py": "", "PKG-INFO": "Name: demo\nVersion: 1.1\n\n"}, nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := checkPackage(sideTrees{sdist: dirTree(t, tt.old)}, sideTrees{sdist: dirTree(t, tt.cur)})
+			var hit *model.Finding
+			for i := range fs {
+				if fs[i].Code == "uv.sdist-changed" {
+					hit = &fs[i]
+				}
+			}
+			if tt.want == nil {
+				if hit != nil {
+					t.Errorf("unexpected %+v", *hit)
+				}
+				return
+			}
+			if hit == nil || hit.Route != model.RouteHuman {
+				t.Fatalf("findings %+v lack a human uv.sdist-changed", fs)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(hit.Detail, w) {
+					t.Errorf("detail %q does not name %s", hit.Detail, w)
+				}
+			}
+			for _, n := range tt.not {
+				if _, list, _ := strings.Cut(hit.Detail, ": "); strings.Contains(list, n) {
+					t.Errorf("detail %q names %s", hit.Detail, n)
+				}
+			}
+		})
+	}
+	// Any change under [build-system] keeps its own finding.
+	old := dirTree(t, map[string]string{"pyproject.toml": hatch})
+	cur := dirTree(t, map[string]string{"pyproject.toml": strings.Replace(hatch, `["hatchling"]`, `["hatchling", "evil"]`, 1)})
+	if !slices.Contains(codesOf(checkPackage(sideTrees{sdist: old}, sideTrees{sdist: cur})), "uv.build-backend-changed") {
+		t.Error("[build-system] requires change not flagged")
+	}
+}
+
+// TestSdistAlwaysCompared: verifyAndDiff compares the old and new sdist
+// whether the lock also pins a platform wheel or a "pure" one; there is no
+// purity shortcut.
+func TestSdistAlwaysCompared(t *testing.T) {
+	zipOf := func(files map[string]string) []byte {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		for _, k := range slices.Sorted(maps.Keys(files)) {
+			w, _ := zw.Create(k)
+			io.WriteString(w, files[k])
+		}
+		zw.Close()
+		return buf.Bytes()
+	}
+	tgzOf := func(top string, files map[string]string) []byte {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		for _, k := range slices.Sorted(maps.Keys(files)) {
+			tw.WriteHeader(&tar.Header{Name: top + "/" + k, Mode: 0o644, Size: int64(len(files[k])), Typeflag: tar.TypeReg})
+			io.WriteString(tw, files[k])
+		}
+		tw.Close()
+		gz.Close()
+		return buf.Bytes()
+	}
+	wheel := func(v string) []byte {
+		return zipOf(map[string]string{"demo/__init__.py": "v = " + v + "\n", "demo-" + v + ".dist-info/METADATA": "Name: demo\nVersion: " + v + "\n"})
+	}
+	sdist := func(v, hook string) []byte {
+		return tgzOf("demo-"+v, map[string]string{"demo/__init__.py": "v = " + v + "\n", "hatch_build.py": hook, "PKG-INFO": "Name: demo\nVersion: " + v + "\n\n"})
+	}
+	for _, tc := range []struct {
+		tag  string
+		want bool
+	}{{"cp312-cp312-manylinux_2_17_x86_64", true}, {"py3-none-any", true}} {
+		t.Run(tc.tag, func(t *testing.T) {
+			files := map[string][]byte{
+				"demo-1.0-" + tc.tag + ".whl": wheel("1.0"), "demo-1.1-" + tc.tag + ".whl": wheel("1.1"),
+				"demo-1.0.tar.gz": sdist("1.0", "x = 1\n"), "demo-1.1.tar.gz": sdist("1.1", "import os; os.system('id')\n"),
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(files[filepath.Base(r.URL.Path)]) }))
+			defer srv.Close()
+			art := func(n string) Artifact {
+				s := sha256.Sum256(files[n])
+				return Artifact{URL: srv.URL + "/" + n, Hash: "sha256:" + hex.EncodeToString(s[:]), Size: int64(len(files[n]))}
+			}
+			pkg := func(v string) Package {
+				sd := art("demo-" + v + ".tar.gz")
+				return Package{Name: "demo", Version: v, Source: map[string]string{"registry": pypiRegistry}, Sdist: &sd, Wheels: []Artifact{art("demo-" + v + "-" + tc.tag + ".whl")}}
+			}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
+			c := change{update: model.Update{Name: "demo", From: "1.0", To: "1.1", Directory: "/"}, base: pkg("1.0"), head: pkg("1.1")}
+			var sum bytes.Buffer
+			fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(codesOf(fs), "uv.sdist-changed"); got != tc.want {
+				t.Errorf("uv.sdist-changed %v, want %v: %+v", got, tc.want, fs)
 			}
 		})
 	}

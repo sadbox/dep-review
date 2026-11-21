@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +27,7 @@ import (
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 // MaxPackages bounds how many changed packages are downloaded and diffed;
@@ -94,6 +94,11 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		if err != nil {
 			return fetch.Result{}, err
 		}
+		mf, err := manifestChanges(ctx, git, base, env.Class.HeadSHA, dir, env.Class.Declared)
+		if err != nil {
+			return fetch.Result{}, err
+		}
+		fs = append(fs, mf...)
 		changes = append(changes, cs...)
 		res.Findings = append(res.Findings, fs...)
 	}
@@ -166,22 +171,65 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 	}
 	fmt.Fprintf(summary, "## %s (uv.lock)\n\n", depDir)
 
+	refuse := func(code, name, detail string) {
+		findings = append(findings, model.Finding{Code: code, Route: model.RouteRefuse, Update: name, Detail: depDir + ": " + detail})
+	}
+
+	// The workspace's own packages are never downloaded, so which ones
+	// they are comes from the head's pyproject.toml files, not the lock.
+	hw, err := loadWorkspace(ctx, git, head, dir)
+	if err != nil {
+		if errors.As(err, &exit) {
+			return nil, nil, err
+		}
+		findings = append(findings, human("uv.manifest-unparseable", "", fmt.Sprintf("%s: %v", depDir, err)))
+		return nil, findings, nil
+	}
+	headProject := map[int]bool{}
+	baseLocal := map[string]bool{}
+	for _, p := range bl.Packages {
+		if _, ok := p.projectPath(); ok {
+			baseLocal[localKey(p)] = true
+		}
+	}
+	var unchangedLocal []Package
 	direct := map[string]bool{}
-	for _, p := range hl.Packages {
-		if p.IsProject() {
-			for _, d := range p.Deps {
-				direct[d] = true
+	for i, p := range hl.Packages {
+		if len(p.Source) != 1 {
+			refuse("uv.source-ambiguous", Normalize(p.Name), fmt.Sprintf("%s==%s has source %v; a uv source has exactly one key", p.Name, p.Version, p.Source))
+			continue
+		}
+		rel, ok := p.projectPath()
+		if !ok {
+			continue
+		}
+		why, err := hw.checkProject(ctx, p, rel)
+		if err != nil {
+			return nil, nil, err
+		}
+		if why != "" {
+			// A local path package (an editable dependency outside the
+			// workspace, say) that the base already has, unchanged, is the
+			// owner's choice; one the PR adds or changes refuses.
+			if !baseLocal[localKey(p)] {
+				refuse("uv.project-source-invalid", Normalize(p.Name), fmt.Sprintf("source %v: %s", p.Source, why))
+				continue
 			}
+			unchangedLocal = append(unchangedLocal, p)
+		}
+		headProject[i] = true
+		for _, d := range p.Deps {
+			direct[d] = true
 		}
 	}
 	type key struct{ name, version string }
 	// Every copy is kept: uv.lock can list one name==version more than once
 	// (resolution forks), and each copy's artifacts are installable.
-	index := func(l *Lock) (map[string][]string, map[key][]Package) {
+	index := func(l *Lock, isProject func(int, Package) bool) (map[string][]string, map[key][]Package) {
 		vers := map[string][]string{}
 		byKey := map[key][]Package{}
-		for _, p := range l.Packages {
-			if p.IsProject() {
+		for i, p := range l.Packages {
+			if isProject(i, p) {
 				continue
 			}
 			n := Normalize(p.Name)
@@ -193,11 +241,9 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 		}
 		return vers, byKey
 	}
-	bv, bk := index(bl)
-	hv, hk := index(hl)
-	refuse := func(code, name, detail string) {
-		findings = append(findings, model.Finding{Code: code, Route: model.RouteRefuse, Update: name, Detail: depDir + ": " + detail})
-	}
+	// The base is trusted: its workspace packages are whatever it says.
+	bv, bk := index(bl, func(_ int, p Package) bool { _, ok := p.projectPath(); return ok })
+	hv, hk := index(hl, func(i int, _ Package) bool { return headProject[i] })
 	for _, k := range slices.SortedFunc(maps.Keys(hk), func(a, b key) int { return strings.Compare(a.name+"=="+a.version, b.name+"=="+b.version) }) {
 		copies := hk[k]
 		for _, p := range copies[1:] {
@@ -262,8 +308,28 @@ func dirChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, su
 			changes = append(changes, c)
 		}
 	}
+	// A changed package installed because an unchanged local package
+	// depends on it resolves through code the gate never sees.
+	for _, p := range unchangedLocal {
+		var through []string
+		for _, c := range changes {
+			if slices.Contains(p.Deps, c.update.Name) {
+				through = append(through, c.update.Name)
+			}
+		}
+		if len(through) > 0 {
+			findings = append(findings, human("uv.local-path-dependency", Normalize(p.Name), fmt.Sprintf("%s: %s (source %v, unchanged since the base, not a declared workspace member) depends on changed %s",
+				depDir, p.Name, p.Source, strings.Join(through, ", "))))
+		}
+	}
 	summary.WriteString("\n")
 	return changes, findings, nil
+}
+
+// localKey identifies a local (virtual/editable) package entry exactly,
+// so "unchanged since the base" means byte-for-byte the same lock entry.
+func localKey(p Package) string {
+	return fmt.Sprint(Normalize(p.Name), "\x00", p.Version, "\x00", p.Source, "\x00", p.Deps, "\x00", p.Sdist, "\x00", p.Wheels)
 }
 
 var (
@@ -293,28 +359,43 @@ func (f Fetcher) crossCheckPyPI(ctx context.Context, env fetch.Env, c change) ([
 	var doc struct {
 		URLs []struct {
 			Filename string `json:"filename"`
+			Size     int64  `json:"size"`
 			Digests  struct {
 				SHA256 string `json:"sha256"`
 			} `json:"digests"`
 		} `json:"urls"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, fmt.Errorf("PyPI JSON for %s==%s: %w", u.Name, u.To, err)
+	if err := strictjson.UnmarshalMetadata(b, &doc); err != nil {
+		return []model.Finding{{Code: "uv.pypi-json-ambiguous", Route: model.RouteRefuse, Update: u.Name,
+			Detail: fmt.Sprintf("PyPI JSON for %s==%s: %v", u.Name, u.To, err)}}, nil
 	}
-	onPyPI := map[string]string{}
-	for _, f := range doc.URLs {
-		onPyPI[f.Filename] = "sha256:" + strings.ToLower(f.Digests.SHA256)
+	// The lock's size is checked too: the gate's download cap budgets
+	// with it, so an understated one must not pass.
+	type file struct {
+		hash string
+		size int64
 	}
+	onPyPI := map[string]file{}
 	var bad []string
+	for _, f := range doc.URLs {
+		if _, dup := onPyPI[f.Filename]; dup {
+			bad = append(bad, f.Filename+" (listed twice by PyPI)")
+		}
+		onPyPI[f.Filename] = file{"sha256:" + strings.ToLower(f.Digests.SHA256), f.Size}
+	}
 	for _, a := range c.head.Artifacts() {
 		name := artifactName(a.URL)
-		if got, ok := onPyPI[name]; !ok || got != a.Hash {
+		got, ok := onPyPI[name]
+		switch {
+		case !ok || got.hash != a.Hash:
 			bad = append(bad, name)
+		case got.size <= 0 || got.size != a.Size:
+			bad = append(bad, fmt.Sprintf("%s (lock size %d, PyPI %d)", name, a.Size, got.size))
 		}
 	}
 	if len(bad) > 0 {
 		return []model.Finding{{Code: "uv.hash-not-on-pypi", Route: model.RouteRefuse, Update: u.Name,
-			Detail: fmt.Sprintf("%s==%s: lock artifacts missing from PyPI's release or with a different sha256: %s", u.Name, u.To, ecoutil.List(bad, 10))}}, nil
+			Detail: fmt.Sprintf("%s==%s: lock artifacts missing from PyPI's release or with a different sha256 or size: %s", u.Name, u.To, ecoutil.List(bad, 10))}}, nil
 	}
 	return nil, nil
 }
@@ -434,6 +515,23 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 		}
 	}
 	for _, fd := range checkPackage(sides[0], sides[1]) {
+		add(fd.Route, fd.Code, fd.Detail)
+	}
+	// Import-name exemptions come from the OLD version's wheel only.
+	if sides[1].wheel != nil {
+		for _, fd := range rootFindings(sides[0].wheel, sides[1].wheel) {
+			add(fd.Route, fd.Code, fd.Detail)
+		}
+	}
+
+	// uv installs whichever wheel fits the machine, or builds the sdist,
+	// so every artifact the lock pins for the new version gets the same
+	// hard checks, not only the one diffed above.
+	extra, err := f.checkOtherArtifacts(ctx, env, home, dir, c, newWheel, newSdist, sides, summary)
+	if err != nil {
+		return nil, err
+	}
+	for _, fd := range extra {
 		add(fd.Route, fd.Code, fd.Detail)
 	}
 

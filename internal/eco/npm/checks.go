@@ -2,7 +2,6 @@ package npm
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"path"
@@ -13,6 +12,7 @@ import (
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 // installScripts run on `npm install` (prepare also runs for git deps;
@@ -84,7 +84,7 @@ func checkPackage(old, cur *side) []model.Finding {
 	if np.Gypfile != nil && *np.Gypfile {
 		add("npm.native-addon", "package.json sets gypfile")
 	}
-	var native, binaries, minified, obfuscated []string
+	var native, binaries, opaque, minified, obfuscated []string
 	for _, rel := range cur.tree.Files {
 		base := path.Base(rel)
 		if base == "binding.gyp" || path.Ext(rel) == ".node" {
@@ -99,8 +99,13 @@ func checkPackage(old, cur *side) []model.Finding {
 				continue
 			}
 		}
-		if isExecutable(data) && path.Ext(rel) != ".node" {
+		// No directory is exempt: everything in the tarball lands in
+		// node_modules and can be required.
+		switch {
+		case isExecutable(data) && path.Ext(rel) != ".node":
 			binaries = append(binaries, rel)
+		case evidence.IsBinary(data) && path.Ext(rel) != ".node":
+			opaque = append(opaque, rel)
 		}
 		if !isJS(rel) || evidence.IsBinary(data) {
 			continue
@@ -117,6 +122,9 @@ func checkPackage(old, cur *side) []model.Finding {
 	}
 	if len(binaries) > 0 {
 		add("npm.executable", "executable binaries added or changed: %s", ecoutil.List(binaries, 10))
+	}
+	if len(opaque) > 0 {
+		add("npm.binary-file", "binary files added or changed (not reviewable as text): %s", ecoutil.List(opaque, 10))
 	}
 	if len(minified) > 0 {
 		add("npm.minified-new-file", "new minified files nobody can review: %s", ecoutil.List(minified, 10))
@@ -137,7 +145,7 @@ func publisher(d *versionDoc) string {
 			ID           string `json:"id"`
 			OIDCConfigID string `json:"oidcConfigId"`
 		}
-		_ = json.Unmarshal(d.NPMUser.TrustedPublisher, &tp)
+		_ = strictjson.UnmarshalMetadata(d.NPMUser.TrustedPublisher, &tp)
 		s += " via trusted publisher " + tp.ID + " " + tp.OIDCConfigID
 	}
 	return s
@@ -158,7 +166,7 @@ func hasProvenance(d *versionDoc) bool {
 			PredicateType string `json:"predicateType"`
 		} `json:"provenance"`
 	}
-	return len(d.Dist.Attestations) > 0 && json.Unmarshal(d.Dist.Attestations, &a) == nil && a.Provenance != nil
+	return len(d.Dist.Attestations) > 0 && strictjson.UnmarshalMetadata(d.Dist.Attestations, &a) == nil && a.Provenance != nil
 }
 
 func isJS(rel string) bool {

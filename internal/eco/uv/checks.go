@@ -46,6 +46,25 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 		if len(native) > 0 {
 			add("uv.native-extension", "%s contains native extensions nobody can review as source: %s", t.kind, ecoutil.List(native, 10))
 		}
+		if t.kind == "wheel" {
+			if hooks := installHookFiles(t.old, t.cur); len(hooks) > 0 {
+				add("uv.install-hook-file", "wheel installs new or changed files under .data/ (scripts, purelib, platlib, data or headers): %s", ecoutil.List(hooks, 10))
+			}
+			if s := startupModules(t.cur); len(s) > 0 {
+				add("uv.install-hook-file", "wheel installs a sitecustomize/usercustomize module (run at every interpreter start): %s", ecoutil.List(s, 10))
+			}
+		}
+		pyc, unchecked, opaque := compiledFiles(t.old, t.cur)
+		if len(pyc) > 0 {
+			detail := ""
+			if len(unchecked) > 0 {
+				detail = fmt.Sprintf("; unchecked-hash .pyc (run without looking at the source): %s", ecoutil.List(unchecked, 10))
+			}
+			add("uv.compiled-bytecode", "%s contains Python bytecode nobody can review as source: %s%s", t.kind, ecoutil.List(pyc, 10), detail)
+		}
+		if len(opaque) > 0 {
+			add("uv.binary-file", "%s has binary files added or changed (not reviewable as text): %s", t.kind, ecoutil.List(opaque, 10))
+		}
 	}
 
 	// Entry points and dependencies, from the wheel's metadata (or the
@@ -70,6 +89,9 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 	if cur.sdist != nil {
 		if s := cur.sdist.ReadFile("setup.py"); s != nil && !bytes.Equal(s, old.sdist.ReadFile("setup.py")) {
 			add("uv.setup-py-changed", "sdist setup.py added or changed (runs at build time)")
+		}
+		if files := sdistDiff(old.sdist, cur.sdist); len(files) > 0 {
+			add("uv.sdist-changed", "the sdist (which uv builds wherever no wheel fits) differs from the previous version's outside PKG-INFO: %s", ecoutil.List(files, 10))
 		}
 		ob, err1 := buildSystem(old.sdist.ReadFile("pyproject.toml"))
 		cb, err2 := buildSystem(cur.sdist.ReadFile("pyproject.toml"))

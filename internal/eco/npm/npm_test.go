@@ -9,7 +9,10 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +26,7 @@ import (
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 func TestParsePackageLockFixture(t *testing.T) {
@@ -43,7 +47,7 @@ func TestParsePackageLockFixture(t *testing.T) {
 			cli = &l.Entries[i]
 		}
 	}
-	if cli == nil || cli.Name != "@tailwindcss/cli" || cli.Version != "4.3.5" || sha512Of(cli.Integrity) == nil ||
+	if cli == nil || cli.Name != "@tailwindcss/cli" || cli.Version != "4.3.5" || func() bool { _, err := sriSHA512(cli.Integrity); return err != nil }() ||
 		cli.Resolved != "https://registry.npmjs.org/@tailwindcss/cli/-/cli-4.3.5.tgz" {
 		t.Errorf("cli entry = %+v", cli)
 	}
@@ -86,10 +90,6 @@ lodash@^4.17.21:
 	}
 	if _, err := ParseYarnLock([]byte("__metadata:\n  version: 6\n")); err == nil {
 		t.Error("berry lockfile accepted")
-	}
-	if !registryURL(want[0].Resolved, "yarn") || registryURL(want[0].Resolved, "npm") ||
-		registryURL("git+ssh://git@github.com/x/y.git#abc", "npm") || registryURL("http://registry.npmjs.org/x/-/x-1.tgz", "npm") {
-		t.Error("registryURL")
 	}
 }
 
@@ -305,16 +305,23 @@ func integrity(b []byte) string {
 func TestVerifyAndDiffFakeRegistry(t *testing.T) {
 	v1 := tgz(t, map[string]string{"package.json": `{"name":"p","version":"1.0.0"}`, "index.js": "module.exports = 1\n"})
 	v2 := tgz(t, map[string]string{"package.json": `{"name":"p","version":"1.0.1"}`, "index.js": "module.exports = 2\n"})
-	pkgs := map[string][]byte{"p@1.0.0": v1, "p@1.0.1": v2}
+	other := tgz(t, map[string]string{"package.json": `{"name":"q","version":"9.0.0"}`, "index.js": "evil()\n"})
+	pkgs := map[string][]byte{"p@1.0.0": v1, "p@1.0.1": v2, "q@9.0.0": other}
 	tests := []struct {
 		name     string
 		tamper   map[string]bool
 		lockInt  string
 		wantCode string
+		resolved string // path on the fake registry; default tgz/p@1.0.1
 	}{
-		{"clean", nil, integrity(v2), ""},
-		{"lockfile integrity differs from registry", nil, integrity([]byte("other")), "npm.integrity-mismatch"},
-		{"tarball bytes differ", map[string]bool{"p@1.0.1": true}, integrity(v2), "npm.integrity-mismatch"},
+		// The review's npm ci PoC: is-number's entry resolved to left-pad's
+		// tarball with both packages' hashes; ssri accepts either.
+		{"resolved is another package's tarball", nil, integrity(v2) + " " + integrity(other), "npm.integrity-ambiguous", "tgz/q@9.0.0"},
+		{"resolved elsewhere on the registry", nil, integrity(v2), "npm.resolved-mismatch", "tgz/q@9.0.0"},
+		{"multi-hash integrity", nil, integrity(v2) + " " + integrity(other), "npm.integrity-ambiguous", ""},
+		{"clean", nil, integrity(v2), "", ""},
+		{"lockfile integrity differs from registry", nil, integrity([]byte("other")), "npm.integrity-mismatch", ""},
+		{"tarball bytes differ", map[string]bool{"p@1.0.1": true}, integrity(v2), "npm.integrity-mismatch", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -325,10 +332,15 @@ func TestVerifyAndDiffFakeRegistry(t *testing.T) {
 			}
 			defer ev.Close()
 			env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
+			res := "tgz/p@1.0.1"
+			if tt.resolved != "" {
+				res = tt.resolved
+			}
 			c := change{
-				update: model.Update{Name: "p", From: "1.0.0", To: "1.0.1", Directory: "/"},
-				base:   Entry{Integrity: integrity(v1)},
-				head:   Entry{Integrity: tt.lockInt},
+				update:   model.Update{Name: "p", From: "1.0.0", To: "1.0.1", Directory: "/"},
+				base:     Entry{Integrity: integrity(v1), Resolved: srv.URL + "/tgz/p@1.0.0"},
+				head:     Entry{Integrity: tt.lockInt, Resolved: srv.URL + "/" + res},
+				lockKind: "npm",
 			}
 			var sum bytes.Buffer
 			fs, err := Fetcher{Registry: srv.URL}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
@@ -447,5 +459,490 @@ func TestDuplicateCopiesValidated(t *testing.T) {
 				t.Errorf("findings %+v lack %s", findings, tt.want)
 			}
 		})
+	}
+}
+
+func codesOf(fs []model.Finding) []string {
+	var out []string
+	for _, f := range fs {
+		out = append(out, f.Code)
+	}
+	return out
+}
+
+func wantRoute(t *testing.T, fs []model.Finding, code string, route model.Route) {
+	t.Helper()
+	for _, f := range fs {
+		if f.Code == code {
+			if f.Route != route {
+				t.Errorf("%s route %s, want %s", code, f.Route, route)
+			}
+			return
+		}
+	}
+	t.Errorf("findings %+v lack %s", fs, code)
+}
+
+// wantRefuse fails unless fs has code with RouteRefuse.
+func wantRefuse(t *testing.T, fs []model.Finding, code string) {
+	t.Helper()
+	for _, f := range fs {
+		if f.Code == code {
+			if f.Route != model.RouteRefuse {
+				t.Errorf("%s route %s, want refuse", code, f.Route)
+			}
+			return
+		}
+	}
+	t.Errorf("findings %+v lack %s", fs, code)
+}
+
+func readPoC(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	return gittest.ReadDir(t, filepath.Join("testdata", "poc", dir))
+}
+
+const pocBaseLock = `{"name":"poc","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"poc","version":"1.0.0"}}}`
+
+// TestPoCLockfilesRefused runs the review's proof-of-concept lockfiles
+// (each verified with a real `npm ci --ignore-scripts`) through the
+// change-set computation.
+func TestPoCLockfilesRefused(t *testing.T) {
+	tests := []struct {
+		dir   string
+		codes []string
+	}{
+		// is-number's entry resolves to left-pad's tarball with both
+		// packages' sha512s; npm ci installed left-pad as is-number.
+		{"multihash", []string{"npm.resolved-off-registry"}},
+		// resolved/integrity twice, in two cases: npm reads the lower-case
+		// (left-pad) pair, encoding/json the last (is-number) one.
+		{"dualcase", []string{"npm.lockfile-ambiguous"}},
+		// An entry outside node_modules/ that the gate used to drop.
+		{"nonmodules", []string{"npm.lockfile-ambiguous"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dir, func(t *testing.T) {
+			head := readPoC(t, tt.dir)
+			base := map[string][]byte{"package.json": head["package.json"], "package-lock.json": []byte(pocBaseLock)}
+			dir, b, h := gittest.Repo(t, base, head)
+			var sum bytes.Buffer
+			_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range tt.codes {
+				wantRefuse(t, findings, c)
+			}
+		})
+	}
+	// The multi-hash integrity alone, at the right URL.
+	head := readPoC(t, "multihash")
+	head["package-lock.json"] = bytes.Replace(head["package-lock.json"], []byte("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"), []byte("https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz"), 1)
+	dir, b, h := gittest.Repo(t, map[string][]byte{"package.json": head["package.json"], "package-lock.json": []byte(pocBaseLock)}, head)
+	var sum bytes.Buffer
+	_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRefuse(t, findings, "npm.integrity-ambiguous")
+}
+
+func TestSRIAndCanonical(t *testing.T) {
+	const good = "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="
+	if _, err := sriSHA512(good); err != nil {
+		t.Error(err)
+	}
+	for _, weak := range []string{"", "sha1-3g4XhyrRh0+GDaUO79S0hNTo3jM="} {
+		if _, err := sriSHA512(weak); !errors.Is(err, errWeakIntegrity) {
+			t.Errorf("sriSHA512(%q) = %v, want weak", weak, err)
+		}
+	}
+	for _, bad := range []string{good + " " + good, " " + good, good + "\n", "sha256-" + good[7:], "sha512-" + good[8:], good + "?foo", "sha1-x sha512-y"} {
+		if _, err := sriSHA512(bad); err == nil || errors.Is(err, errWeakIntegrity) {
+			t.Errorf("sriSHA512(%q) = %v, want an ambiguity error", bad, err)
+		}
+	}
+	tests := []struct {
+		e    Entry
+		kind string
+		ok   bool
+	}{
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"}, "npm", true},
+		{Entry{Name: "@tailwindcss/cli", Version: "4.3.5", Resolved: "https://registry.npmjs.org/@tailwindcss/cli/-/cli-4.3.5.tgz"}, "npm", true},
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz#679591c564c3bffaae8454cf0b3df370c3d6911c"}, "yarn", true},
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz"}, "npm", false},
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz#x"}, "yarn", false},
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz#abc"}, "npm", false},
+		{Entry{Name: "is-number", Version: "7.0.0", Resolved: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}, "npm", false},
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.20.tgz"}, "npm", false},
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz?x=1"}, "npm", false},
+		{Entry{Name: "lodash", Version: "4.17.21", Resolved: "http://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"}, "npm", false},
+		{Entry{Name: "x", Version: "1.0.0", Resolved: "git+ssh://git@github.com/x/y.git#abc"}, "npm", false},
+		{Entry{Name: "../x", Version: "1.0.0", Resolved: "https://registry.npmjs.org/../x/-/x-1.0.0.tgz"}, "npm", false},
+	}
+	for _, tt := range tests {
+		if got := canonicalResolved(tt.e, tt.kind); got != tt.ok {
+			t.Errorf("canonicalResolved(%+v, %s) = %v", tt.e, tt.kind, got)
+		}
+	}
+}
+
+func TestParseYarnLockStrict(t *testing.T) {
+	const entry = "lodash@^4.17.21:\n  version \"4.17.21\"\n  resolved \"https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz\"\n  integrity sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==\n"
+	// Quoted keys are read, not skipped: yarn unquotes them.
+	l, err := ParseYarnLock([]byte(strings.Replace(entry, "  resolved ", "  \"resolved\" ", 1)))
+	if err != nil || len(l.Entries) != 1 || l.Entries[0].Resolved != "https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz" {
+		t.Fatalf("quoted key: %+v %v", l, err)
+	}
+	for name, src := range map[string]string{
+		"quoted key repeats a field": entry + "  \"resolved\" \"https://evil.example/x.tgz\"\n",
+		"field repeated":             entry + "  integrity sha512-x\n",
+		"key: value":                 strings.Replace(entry, "  version \"4.17.21\"", "  version: \"4.17.21\"", 1),
+		"unknown field":              entry + "  resolution \"x\"\n",
+		"odd indentation":            entry + "   x \"y\"\n",
+		"deep indentation":           entry + "  dependencies:\n    a \"^1\"\n      b \"^2\"\n",
+		"dependency outside a block": entry + "    a \"^1\"\n",
+		"backslash escape":           strings.Replace(entry, "lodash-4.17.21.tgz", "lodash-4.17.21\\u002etgz", 1),
+		"tab":                        strings.Replace(entry, "  version", "\tversion", 1),
+		"two packages in one header": strings.Replace(entry, "lodash@^4.17.21:", "lodash@^4.17.21, evil@^1.0.0:", 1),
+		"spec twice":                 entry + "\n" + entry,
+		"trailing comment":           strings.Replace(entry, "\"4.17.21\"\n", "\"4.17.21\" # x\n", 1),
+		"no version":                 "lodash@^4:\n  resolved \"x\"\n",
+		"field outside an entry":     "  version \"1\"\n",
+	} {
+		if _, err := ParseYarnLock([]byte(src)); !isAmbiguous(err) {
+			t.Errorf("%s: err = %v, want ambiguous", name, err)
+		}
+	}
+	// A dependency block parses.
+	if _, err := ParseYarnLock([]byte(entry + "  dependencies:\n    \"@babel/x\" \"^1.0.0\"\n    y ^2\n  optionalDependencies:\n    z \"1\"\n")); err != nil {
+		t.Error(err)
+	}
+	if _, err := ParseYarnLock([]byte("\"a@npm:lodash@^4\":\n  version \"4.17.21\"\n")); err == nil || isAmbiguous(err) {
+		t.Errorf("alias: err = %v, want unsupported", err)
+	}
+}
+
+func TestMultipleLockfilesRefused(t *testing.T) {
+	b, err := os.ReadFile("testdata/towngear40/base/package-lock.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := os.ReadFile("testdata/towngear40/head/package-lock.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yarn := []byte("lodash@^4:\n  version \"4.17.21\"\n")
+	dir, bs, hs := gittest.Repo(t, map[string][]byte{"package-lock.json": b, "yarn.lock": yarn}, map[string][]byte{"package-lock.json": h, "yarn.lock": yarn})
+	var sum bytes.Buffer
+	_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, bs, hs, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRefuse(t, findings, "npm.lockfile-ambiguous")
+}
+
+func TestManifestChanges(t *testing.T) {
+	base, err := os.ReadFile("testdata/towngear40/base/package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := os.ReadFile("testdata/towngear40/head/package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := []model.Update{{Name: "@tailwindcss/cli", From: "4.3.4", To: "4.3.5", Directory: "/"}}
+	tests := []struct {
+		name     string
+		head     string
+		declared []model.Update
+		want     string
+	}{
+		{"declared range bump", string(head), declared, ""},
+		{"undeclared range bump", string(head), []model.Update{{Name: "esbuild", To: "0.28.3"}}, "npm.manifest-changed"},
+		{"bump to another version", strings.Replace(string(head), `"^4.3.5"`, `"^4.3.6"`, 1), declared, "npm.manifest-changed"},
+		{"operator changed", strings.Replace(string(head), `"^4.3.5"`, `">=4.3.5"`, 1), declared, "npm.manifest-range"},
+		{"range swapped for a git url", strings.Replace(string(head), `"^4.3.5"`, `"github:evil/cli#4.3.5"`, 1), declared, "npm.manifest-range"},
+		{"root install hook", strings.Replace(string(head), `"scripts": {`, `"scripts": {"preinstall": "node evil.js",`, 1), declared, "npm.manifest-changed"},
+		{"overrides added", strings.Replace(string(head), `"private": true,`, `"private": true, "overrides": {"esbuild": "npm:evil@1"},`, 1), declared, "npm.manifest-range"},
+		{"dependency added", strings.Replace(string(head), `"esbuild"`, `"evil": "1.0.0", "esbuild"`, 1), declared, "npm.manifest-range"},
+		{"multi-comparator range", strings.Replace(string(head), `"^4.3.5"`, `">=4.3.5 <5"`, 1), declared, "npm.manifest-range"},
+		{"dependency section malformed", strings.Replace(string(head), `"@tailwindcss/cli": "^4.3.5"`, `"@tailwindcss/cli": 4`, 1), declared, "npm.manifest-changed"},
+		{"workspaces added", strings.Replace(string(head), `"private": true,`, `"private": true, "workspaces": ["x"],`, 1), declared, "npm.manifest-changed"},
+		{"duplicate key", strings.Replace(string(head), `"private": true,`, `"private": true, "Scripts": {},`, 1), declared, "npm.manifest-ambiguous"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, b, h := gittest.Repo(t, map[string][]byte{"package.json": base}, map[string][]byte{"package.json": []byte(tt.head)})
+			fs, err := manifestChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", tt.declared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want == "" {
+				if len(fs) != 0 {
+					t.Errorf("findings %+v", fs)
+				}
+				return
+			}
+			if tt.want == "npm.manifest-range" {
+				wantRoute(t, fs, tt.want, model.RouteHuman)
+				if slices.Contains(codesOf(fs), "npm.manifest-changed") {
+					t.Errorf("findings %+v also refuse", fs)
+				}
+				return
+			}
+			wantRefuse(t, fs, tt.want)
+		})
+	}
+}
+
+// TestBinaryAnywhere: a binary under tests/ or testdata/ is installed and
+// requirable like any other file, so it is flagged too.
+func TestBinaryAnywhere(t *testing.T) {
+	const pkg = `{"name":"p","version":"1.0.0"}`
+	old := mkSide(t, pkg, map[string]string{"testdata/blob.bin": "\x00\x01old"}, "")
+	for _, f := range []string{"tests/fixture.bin", "testdata/blob.bin"} {
+		cur := mkSide(t, pkg, map[string]string{f: "\x00\x01\x02new"}, "")
+		if got := codesOf(checkPackage(old, cur)); !slices.Contains(got, "npm.binary-file") {
+			t.Errorf("%s: codes %q lack npm.binary-file", f, got)
+		}
+	}
+	same := mkSide(t, pkg, map[string]string{"testdata/blob.bin": "\x00\x01old"}, "")
+	if got := codesOf(checkPackage(old, same)); slices.Contains(got, "npm.binary-file") {
+		t.Errorf("unchanged binary flagged: %q", got)
+	}
+}
+
+// TestNonModuleEntries: an entry outside node_modules/ is accepted only as
+// a declared workspace or a link target, whatever it carries.
+func TestNonModuleEntries(t *testing.T) {
+	lock := func(entries string) []byte {
+		return []byte(`{"lockfileVersion":3,"packages":{"":{"name":"root"}` + entries + `}}`)
+	}
+	const wsLink = `,"node_modules/a":{"resolved":"packages/a","link":true}`
+	tests := []struct {
+		name       string
+		lock       []byte
+		workspaces []string
+		ok         bool
+	}{
+		{"declared workspace with link", lock(wsLink + `,"packages/a":{"name":"a","version":"1.0.0","dependencies":{"x":"^1"}}`), []string{"packages/*"}, true},
+		{"declared workspace, exact path", lock(`,"packages/a":{"name":"a","version":"1.0.0"}`), []string{"packages/a"}, true},
+		{"link target only (file: dependency)", lock(`,"node_modules/lib":{"resolved":"../lib","link":true},"../lib":{"name":"lib","version":"1.0.0"}`), nil, true},
+		{"workspace's own dependency", lock(wsLink + `,"packages/a":{"name":"a"},"packages/a/node_modules/x":{"version":"1.0.0","resolved":"https://registry.npmjs.org/x/-/x-1.0.0.tgz","integrity":"sha512-x"}`), []string{"packages/*"}, true},
+		{"undeclared directory with only name and version", lock(`,"tools/left-pad":{"name":"left-pad","version":"1.3.0"}`), nil, false},
+		{"undeclared directory with dependencies", lock(`,"tools/x":{"dependencies":{"evil":"1"}}`), []string{"packages/*"}, false},
+		{"empty undeclared entry", lock(`,"tools/x":{}`), nil, false},
+		{"link whose resolved is another path", lock(`,"node_modules/a":{"resolved":"packages/b","link":true},"packages/a":{"name":"a"}`), nil, false},
+		{"workspace with a download", lock(`,"packages/a":{"version":"1.0.0","resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz"}`), []string{"packages/*"}, false},
+		{"node_modules under an undeclared directory", lock(`,"tools/node_modules/x":{"version":"1.0.0"}`), nil, false},
+		{"not a path segment", lock(`,"toolsnode_modules/x":{"version":"1.0.0"}`), nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parsePackageLock(tt.lock, tt.workspaces)
+			if tt.ok && err != nil {
+				t.Errorf("err = %v", err)
+			}
+			if !tt.ok && !isAmbiguous(err) {
+				t.Errorf("err = %v, want ambiguous", err)
+			}
+		})
+	}
+	for src, want := range map[string][]string{
+		`{"workspaces":["packages/*"]}`:              {"packages/*"},
+		`{"workspaces":{"packages":["packages/*"]}}`: {"packages/*"},
+		`{"name":"x"}`: nil,
+	} {
+		got, err := Workspaces([]byte(src))
+		if err != nil || !slices.Equal(got, want) {
+			t.Errorf("Workspaces(%s) = %q, %v", src, got, err)
+		}
+	}
+	if _, err := Workspaces([]byte(`{"workspaces":"packages/*"}`)); !isAmbiguous(err) {
+		t.Errorf("string workspaces: err = %v", err)
+	}
+	// Through dirChanges, with the workspaces read from package.json.
+	pkg := []byte(`{"name":"root","workspaces":["packages/*"]}`)
+	base := lock("")
+	head := lock(wsLink + `,"packages/a":{"name":"a","version":"1.0.0"}`)
+	dir, b, h := gittest.Repo(t, map[string][]byte{"package.json": pkg, "package-lock.json": base}, map[string][]byte{"package.json": pkg, "package-lock.json": head})
+	var sum bytes.Buffer
+	_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := codesOf(findings); !slices.Equal(got, []string{"npm.link"}) {
+		t.Errorf("codes = %q, want only npm.link", got)
+	}
+}
+
+// TestPoCRoute runs the review's PoCs through fetch.Run end to end: the
+// route is refuse, for the gate's own reason, and not a job error.
+func TestPoCRoute(t *testing.T) {
+	tests := []struct {
+		dir     string
+		code    string
+		network bool
+	}{
+		{"dualcase", "npm.lockfile-ambiguous", false},
+		{"nonmodules", "npm.lockfile-ambiguous", false},
+		{"multihash", "npm.resolved-off-registry", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dir, func(t *testing.T) {
+			if tt.network && testing.Short() {
+				t.Skip("network")
+			}
+			head := readPoC(t, tt.dir)
+			base := map[string][]byte{"package.json": head["package.json"], "package-lock.json": []byte(pocBaseLock)}
+			dir, b, h := gittest.Repo(t, base, head)
+			class := model.Classification{Repo: "test/poc", PR: 1, BaseSHA: b, HeadSHA: h, Kind: model.KindDependabot, Ecosystem: model.NPM,
+				Declared: []model.Update{{Name: "is-number", To: "7.0.0"}}}
+			ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ev.Close()
+			env := fetch.Env{Class: class, RepoDir: dir, Scratch: t.TempDir(), HTTP: ecoutil.NewClient()}
+			res, err := fetch.Run(context.Background(), env, fetch.Registry{model.NPM: Fetcher{}}, ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Route != model.RouteRefuse {
+				t.Errorf("route = %s", res.Route)
+			}
+			wantRefuse(t, res.Findings, tt.code)
+		})
+	}
+}
+
+// TestMultipleLockfilesPackageJSONOnly: two lockfiles, neither changed;
+// only package.json changed. A person decides; nothing is refused.
+func TestMultipleLockfilesPackageJSONOnly(t *testing.T) {
+	lock, err := os.ReadFile("testdata/towngear40/base/package-lock.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yarn := []byte("lodash@^4:\n  version \"4.17.21\"\n")
+	base := map[string][]byte{"package-lock.json": lock, "yarn.lock": yarn, "package.json": []byte(`{"name":"x","dependencies":{"a":"^1.0.0"}}`)}
+	head := maps.Clone(base)
+	head["package.json"] = []byte(`{"name":"x","dependencies":{"a":"^1.0.1"}}`)
+	dir, b, h := gittest.Repo(t, base, head)
+	var sum bytes.Buffer
+	_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoute(t, findings, "npm.multiple-lockfiles", model.RouteHuman)
+	for _, f := range findings {
+		if f.Route == model.RouteRefuse {
+			t.Errorf("refused: %+v", f)
+		}
+	}
+}
+
+// TestBadNameRefused: a lockfile name the gate will not put in a registry
+// URL is a refusal, not a job error.
+func TestBadNameRefused(t *testing.T) {
+	ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ev.Close()
+	env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: http.DefaultClient}
+	for _, u := range []model.Update{{Name: "../evil", To: "1.0.0"}, {Name: "x", To: "1.0.0/../../y"}} {
+		c := change{update: u, lockKind: "npm"}
+		var sum bytes.Buffer
+		fs, err := Fetcher{Registry: "http://127.0.0.1:1"}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(t.TempDir(), "w"), c, &sum)
+		if err != nil {
+			t.Fatalf("%+v: %v", u, err)
+		}
+		wantRefuse(t, fs, "npm.bad-name")
+	}
+}
+
+// TestRegistryDocCaseCollisions: case collisions in registry text the gate
+// never reads pass; one on a field the gate reads refuses.
+func TestRegistryDocCaseCollisions(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+	defer srv.Close()
+	env := fetch.Env{HTTP: srv.Client()}
+	f := Fetcher{Registry: srv.URL}
+	for doc, ok := range map[string]bool{
+		`{"name":"p","version":"1.0.0","Readme":"a","readme":"b","dependencies":{"JSONStream":"1","jsonstream":"1"}}`: true,
+		`{"name":"p","version":"1.0.0","dist":{"tarball":"a","Tarball":"b"}}`:                                         false,
+		`{"name":"p","version":"1.0.0","Version":"6.6.6"}`:                                                            false,
+		`{"name":"p","version":"1.0.0","readme":"a","readme":"b"}`:                                                    false,
+	} {
+		body = doc
+		_, _, err := f.versionDoc(context.Background(), env, "p", "1.0.0")
+		if ok && err != nil {
+			t.Errorf("%s: %v", doc, err)
+		}
+		if !ok && !errors.Is(err, strictjson.ErrRejected) {
+			t.Errorf("%s: err = %v, want ErrRejected", doc, err)
+		}
+	}
+}
+
+// TestPOCLocationSwap is the re-review's PoC: base has lodash 4.17.21 at
+// the top level and 4.17.20 nested under a; head has only 4.17.20, now at
+// the top level. Name and version sets see only "4.17.21 removed"; by
+// install location it is a top-level downgrade.
+func TestPOCLocationSwap(t *testing.T) {
+	lock := func(entries ...string) []byte {
+		return []byte(`{"lockfileVersion":3,"packages":{"":{"dependencies":{"a":"^1.0.0","lodash":"^4.17.0"}},` + strings.Join(entries, ",") + `}}`)
+	}
+	entry := func(loc, version, integrity string) string {
+		return fmt.Sprintf(`%q:{"version":%q,"resolved":%q,"integrity":%q}`, loc, version, canonicalTarball("lodash", version), integrity)
+	}
+	a := `"node_modules/a":{"version":"1.0.0","resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}`
+	i21 := "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="
+	i20 := "sha512-PlhdFcillOINfeV7Ni6oF1TAEayyZBoZ8bcshTHqOYJYlrqzRK5hagpagky5o4HfCzzd1TRkXPMFq6cKk9rGmA=="
+	base := lock(a, entry("node_modules/lodash", "4.17.21", i21), entry("node_modules/a/node_modules/lodash", "4.17.20", i20))
+	head := lock(a, entry("node_modules/lodash", "4.17.20", i20))
+	dir, b, h := gittest.Repo(t, map[string][]byte{"package-lock.json": base}, map[string][]byte{"package-lock.json": head})
+	var sum bytes.Buffer
+	cs, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("findings %+v", findings)
+	}
+	if len(cs) != 1 {
+		t.Fatalf("changes %+v, want the top-level downgrade", cs)
+	}
+	u := cs[0].update
+	if u.Name != "lodash" || u.From != "4.17.21" || u.To != "4.17.20" || u.Type != model.Unknown || !u.Direct ||
+		cs[0].head.Location != "node_modules/lodash" || cs[0].base.Location != "node_modules/lodash" {
+		t.Errorf("change %+v (base %s, head %s)", u, cs[0].base.Location, cs[0].head.Location)
+	}
+	if !strings.Contains(sum.String(), "lodash: 4.17.21 -> 4.17.20 (unknown, direct at node_modules/lodash)") {
+		t.Errorf("summary:\n%s", sum.String())
+	}
+
+	// End to end the downgrade is an undeclared change of unknown size:
+	// it needs a person, as undeclared changes do.
+	if testing.Short() {
+		return
+	}
+	class := model.Classification{Repo: "test/poc", PR: 1, BaseSHA: b, HeadSHA: h, Kind: model.KindDependabot, Ecosystem: model.NPM,
+		Declared: []model.Update{{Name: "lodash", From: "4.17.21", To: "4.17.20"}}}
+	ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ev.Close()
+	env := fetch.Env{Class: class, RepoDir: dir, Scratch: t.TempDir(), HTTP: ecoutil.NewClient()}
+	res, err := fetch.Run(context.Background(), env, fetch.Registry{model.NPM: Fetcher{}}, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Route != model.RouteHuman {
+		t.Errorf("route %s, findings %+v", res.Route, res.Findings)
 	}
 }
