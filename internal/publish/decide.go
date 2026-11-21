@@ -108,6 +108,10 @@ func Decide(in Inputs) Outcome {
 		return Outcome{Decision: model.DecisionIgnore, Reason: "not a current Dependabot pull request"}
 	case model.KindDependabotUnverified:
 		return human("", "not verified as Dependabot's alone", nil)
+	case model.KindPending:
+		// No status, no comment, no notification: sweep classifies the
+		// PR again and reports it if it stays undecided.
+		return Outcome{Decision: model.DecisionPending, Reason: "the branch's push history has not caught up with the head yet"}
 	case model.KindDependabot:
 	default:
 		return human("", "unknown classification", nil)

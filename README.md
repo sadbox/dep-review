@@ -4,7 +4,9 @@ A merge gate for Dependabot pull requests. It replaces an LLM session that
 held write credentials and merged PRs itself with a split design:
 
 - **Deterministic code decides who a PR belongs to and what changed.** It
-  verifies the PR is Dependabot's alone, recomputes the real change set from
+  verifies the PR is Dependabot's alone (Dependabot's signed commits, a
+  branch activity log in which only Dependabot ever pushed, and a ruleset
+  that keeps everyone else off `dependabot/` branches), recomputes the real change set from
   the manifests and lockfiles, downloads both versions of every changed
   dependency and diffs them, and runs hard checks (provenance, hashes,
   install scripts, new packages, …). Nothing from the PR or a dependency is
@@ -33,7 +35,8 @@ PR opened/synchronized
             review   model reads ./evidence and ./repo → verdict    (read-only + OIDC)
             publish  decide, comment, status, merge on green CI     (gate app)
   schedule → sweep   merge approved PRs whose CI finished later;    (gate app)
-                     report PRs stuck without a decision
+                     report PRs stuck without a decision (including
+                     dependabot-pending ones) so a maintainer re-runs them
 ```
 
 `publish` sets a commit status `dep-review` on the head SHA (by the gate
@@ -46,9 +49,9 @@ a newer head can never be merged on an old verdict.
 
 | Route | When | Result |
 |---|---|---|
-| auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh with identical manifests for every built platform) | merge on green CI |
+| auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, or, when the caller sets `docker_platforms`, for exactly those platforms) | merge on green CI |
 | review | patch/minor/digest updates whose deterministic checks all passed | model review; merge only on `pass` |
-| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags, truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed to | comment + notification, no merge |
+| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags, truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
 | refuse | the PR is malformed (no updates, tag instead of SHA pin, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |
 
 ## Layout
@@ -82,6 +85,14 @@ one is reviewed by this gate too.
    `PUSHOVER_USER_KEY`.
 4. Install the gate app on the repository (permissions: contents, pull
    requests, workflows, commit statuses: write; checks, actions: read).
+5. Create an active branch ruleset (any name) targeting
+   `refs/heads/dependabot/**` with the rules *Restrict creations*,
+   *Restrict updates* and *Restrict deletions*, and Dependabot as the only
+   bypass actor. classify reads the repository's rulesets with its
+   read-only token and treats every PR as `dependabot-unverified` without
+   one. It cannot see the bypass list (GitHub returns `bypass_actors` only
+   to tokens that may edit the ruleset), so keeping that list to
+   Dependabot alone is the owner's job.
 
 ## Model credential
 

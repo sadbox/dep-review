@@ -88,7 +88,17 @@ func (o *osvClient) query(ctx context.Context, qs []osvQuery) ([][]string, error
 // delta queries the old and new versions of every changed package.
 func (o *osvClient) delta(ctx context.Context, eco string, changes []pkgChange) osvDelta {
 	d := osvDelta{Ecosystem: eco, Fixed: map[string][]string{}, Introduced: map[string][]string{}}
-	if o == nil || eco == "" || len(changes) == 0 {
+	if o == nil || len(changes) == 0 {
+		return d
+	}
+	if eco == "" {
+		// Not "no vulnerabilities": nothing was checked (see codeOSVUnavailable).
+		for _, c := range changes {
+			if c.From != "" && c.To != "" && !c.Rebuilt {
+				d.Err = "the image's distribution is not one OSV.dev is queried for, so the changed packages were not checked"
+				break
+			}
+		}
 		return d
 	}
 	type key struct{ src, ver string }

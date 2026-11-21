@@ -80,8 +80,11 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 // CompareDeclared matches Dependabot's declared updates to the real change
 // set. A declared update missing from the real set, or declared with a
 // different target, refuses the PR. A different "from" needs a person.
-// Undeclared real updates are expected (transitive changes) and are simply
-// reviewed. Matched updates inherit the declared security flag and
+// Undeclared real updates are expected where a lockfile carries transitive
+// changes (Go, npm, uv) and are simply reviewed. GitHub Actions and Docker
+// have no transitive changes in the repository, so there every real update
+// must be named by a declaration with its target, or a person looks at
+// it. Matched updates inherit the declared security flag and
 // advisories, which only Dependabot knows. Names match per NormalizeName.
 //
 // Each side is compared on what Dependabot declared for it: the version
@@ -92,7 +95,9 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]model.Update, []model.Finding) {
 	updates := slices.Clone(real)
 	var findings []model.Finding
-	for _, d := range declared {
+	covered := make([]bool, len(updates))    // real updates a declaration names, with its target
+	coveredBy := make([][]int, len(updates)) // the declarations whose target each real update matches
+	for di, d := range declared {
 		i := -1
 		var matches []int
 		for j, u := range updates {
@@ -109,13 +114,20 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 			})
 			continue
 		}
-		// Several copies (lockfile duplicates): prefer the one with the declared target.
+		// Several copies (lockfile duplicates, one image in two Dockerfiles,
+		// one action in two workflows): every copy with the declared target
+		// is declared, and the first of them is the one compared below.
+		chosen := false
 		for _, j := range matches {
-			if sideMatches(updates[j].To, updates[j].ToRef, d.To, d.ToRef) {
-				i = j
-				break
+			if (d.To != "" || d.ToRef != "") && sideMatches(updates[j].To, updates[j].ToRef, d.To, d.ToRef) {
+				covered[j] = true
+				coveredBy[j] = append(coveredBy[j], di)
+				if !chosen {
+					i, chosen = j, true
+				}
 			}
 		}
+		covered[i] = true // compared below; a wrong target is its own finding
 		u := &updates[i]
 		if (d.To == "" && d.ToRef == "") || !sideMatches(u.To, u.ToRef, d.To, d.ToRef) {
 			findings = append(findings, model.Finding{
@@ -135,7 +147,60 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 			}
 		}
 	}
+	if eco == model.Docker {
+		findings = append(findings, inconsistentDigests(declared, updates, coveredBy)...)
+	}
+	if eco == model.GitHubActions || eco == model.Docker {
+		for j, u := range updates {
+			if !covered[j] {
+				findings = append(findings, model.Finding{
+					Code: "undeclared.update", Route: model.RouteHuman, Update: u.Name,
+					Detail: fmt.Sprintf("the change set has %s %s -> %s in %s, which Dependabot's metadata does not declare", u.Name, side(u.From, u.FromRef), side(u.To, u.ToRef), dirOrRoot(u.Directory)),
+				})
+			}
+		}
+	}
 	return updates, findings
+}
+
+// inconsistentDigests works from what each declaration matched, the same
+// comparison CompareDeclared made (so "v1.2" and "1.2", or a tag and a
+// digest, are one group). Every copy a declaration covers must move to
+// the same new digest: a tag-only declaration ("golang 1.27.2 -> 1.27.3")
+// matches any digest, so two copies pinned to two digests would otherwise
+// both count as declared. A copy covered by more than one declaration is
+// flagged too, since it is unclear which one it fulfils.
+func inconsistentDigests(declared, updates []model.Update, coveredBy [][]int) []model.Finding {
+	var out []model.Finding
+	refs := make([][]string, len(declared))
+	for j, ds := range coveredBy {
+		for _, di := range ds {
+			if !slices.Contains(refs[di], updates[j].ToRef) {
+				refs[di] = append(refs[di], updates[j].ToRef)
+			}
+		}
+		if len(ds) > 1 {
+			u := updates[j]
+			out = append(out, model.Finding{
+				Code: "docker.inconsistent-digests", Route: model.RouteHuman, Update: u.Name,
+				Detail: fmt.Sprintf("%s %s in %s matches %d of Dependabot's declarations", u.Name, side(u.To, u.ToRef), dirOrRoot(u.Directory), len(ds)),
+			})
+		}
+	}
+	for di, rs := range refs {
+		if len(rs) > 1 {
+			d := declared[di]
+			var short []string
+			for _, r := range rs {
+				short = append(short, side("", r))
+			}
+			out = append(out, model.Finding{
+				Code: "docker.inconsistent-digests", Route: model.RouteHuman, Update: d.Name,
+				Detail: fmt.Sprintf("Dependabot declares %s -> %s in %s once, but its copies are pinned to %d different new digests: %s", d.Name, side(d.To, d.ToRef), dirOrRoot(d.Directory), len(rs), strings.Join(short, ", ")),
+			})
+		}
+	}
+	return out
 }
 
 // NewDependencies flags every update that introduces a package name the

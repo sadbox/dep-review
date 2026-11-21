@@ -32,12 +32,16 @@ func TestRegistryTokenFlowAndVerification(t *testing.T) {
 	if f.hits["GET /token"] != 1 {
 		t.Errorf("token fetched %d times", f.hits["GET /token"])
 	}
-	// Second request reuses the token.
+	// Second request reuses the token, and a manifest by digest is
+	// fetched once per client.
 	if _, _, _, err := a.reg.manifest(ctx, golang, dgB); err != nil {
 		t.Fatal(err)
 	}
 	if f.hits["GET /token"] != 1 {
 		t.Errorf("token refetched")
+	}
+	if n := f.hits["GET /v2/library/golang/manifests/"+dgB]; n != 2 { // the 401 challenge and the one fetch
+		t.Errorf("manifest fetched %d times", n)
 	}
 
 	// A registry that serves different bytes for a digest is caught.
@@ -47,7 +51,7 @@ func TestRegistryTokenFlowAndVerification(t *testing.T) {
 		}
 		return b
 	}
-	if _, _, _, err := a.reg.manifest(ctx, golang, dgB); !errors.Is(err, errDigestMismatch) {
+	if _, _, _, err := f.analyzer(nil).reg.manifest(ctx, golang, dgB); !errors.Is(err, errDigestMismatch) {
 		t.Errorf("tampered manifest: %v", err)
 	}
 	f.tamper = nil
@@ -108,39 +112,53 @@ func TestSelectPlatform(t *testing.T) {
 		"linux/arm64/v8": "sha256:96335ac31f35abde9f40cbb1032e06d8571fc43c51230e9a90e14145debc6199",
 		"linux/mips":     "",
 	} {
-		d, ok := selectPlatform(&idx, normPlatform(p))
-		if d.Digest != want || ok != (want != "") {
+		d, n := selectPlatform(&idx, normPlatform(p))
+		if d.Digest != want || (n == 1) != (want != "") {
 			t.Errorf("%s: %s", p, d.Digest)
 		}
 	}
 }
 
 // The five recorded bumps, offline: index, platform manifests and configs
-// as the registries served them. The two digest no-ops are decided from
-// the indexes alone; the others' config diffs are checked from the
-// recorded configs (their layers are only fetched by TestLive).
+// as the registries served them. The two digest refreshes are identical
+// for linux/amd64 and arm64 but changed riscv64 and the Windows images:
+// by default (every manifest must match) they are not proven no-ops and
+// the changed, unanalysed platforms need a person; and
+// caddy's pin is not equivalent to the tag's current index either (no
+// history offline: human). With docker_platforms=linux/amd64,linux/arm64
+// both are no-ops (auto). Decided from the indexes alone; the others'
+// config diffs are checked from the recorded configs (their layers are
+// only fetched by TestLive).
 func TestRecordedCases(t *testing.T) {
+	declared := []string{"linux/amd64", "linux/arm64"}
 	for _, tc := range []struct {
-		name  string
-		route model.Route
-		noop  bool
-		tag   tagState
+		name      string
+		case_     string
+		platforms []string
+		route     model.Route
+		noop      bool
+		tag       tagState
+		code      string
 	}{
-		{"golang-digest-noop", model.RouteAuto, true, tagCurrent},
-		{"caddy-digest-noop", model.RouteAuto, true, tagEquivalent},
+		{"golang", "golang-digest-noop", nil, model.RouteHuman, false, tagCurrent, codeOtherPlatforms + "=human"},
+		{"caddy", "caddy-digest-noop", nil, model.RouteHuman, false, tagUnavailable, codeOtherPlatforms + "=human"},
+		{"golang, declared platforms", "golang-digest-noop", declared, model.RouteAuto, true, tagCurrent, ""},
+		{"caddy, declared platforms", "caddy-digest-noop", declared, model.RouteAuto, true, tagEquivalent, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeRegistry(t)
-			cl, src := loadCase(t, filepath.Join("testdata/cases", tc.name))
+			cl, src := loadCase(t, filepath.Join("testdata/cases", tc.case_))
 			w := newMemWriter()
-			res, err := run(context.Background(), fetch.Env{Class: cl, Evidence: w}, src, f.analyzer(nil))
+			a := f.analyzer(nil)
+			a.platforms = tc.platforms
+			res, err := run(context.Background(), fetch.Env{Class: cl, Evidence: w}, src, a)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(res.Updates) != 1 || res.Updates[0].NoOp != tc.noop || res.Updates[0].Type != model.Digest {
 				t.Fatalf("updates %+v", res.Updates)
 			}
-			if r := policy.Combine(res.Updates, res.Findings, false); r != tc.route {
+			if r := policy.Combine(res.Updates, res.Findings, false); r != tc.route || (tc.code != "" && !strings.Contains(codes(res.Findings), tc.code)) || (tc.code == "" && len(res.Findings) > 0) {
 				t.Errorf("route %s, want %s (%s)", r, tc.route, codes(res.Findings))
 			}
 			var summary string
@@ -149,7 +167,7 @@ func TestRecordedCases(t *testing.T) {
 					summary = b
 				}
 			}
-			if !strings.Contains(summary, "**"+string(tc.tag)+"**") || !strings.Contains(summary, "no-op proven: true") {
+			if !strings.Contains(summary, "**"+string(tc.tag)+"**") || !strings.Contains(summary, fmt.Sprintf("no-op proven: %v", tc.noop)) {
 				t.Errorf("summary:\n%s", summary)
 			}
 			for _, n := range []string{"docker/01-golang-details.md", "docker/01-caddy-details.md"} {
@@ -170,9 +188,9 @@ func TestRecordedCases(t *testing.T) {
 			code  string
 			route model.Route
 		}{
-			{"superseded", fakeHistory{dgB: true, other: true}, "", model.RouteAuto},
+			{"superseded", fakeHistory{dgB: true, other: true}, "", model.RouteHuman}, // riscv64 and Windows changed (unbuilt platforms: human)
 			{"never", fakeHistory{other: true}, codeTagUnattributable, model.RouteRefuse},
-			{"no history", nil, codeTagHistoryUnavailable, model.RouteReview},
+			{"no history", nil, codeTagHistoryUnavailable, model.RouteHuman},
 		} {
 			f := newFakeRegistry(t)
 			f.tags["library/golang:1.27"] = other
@@ -244,8 +262,8 @@ func TestRecordedConfigDiffs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			d, ok := platformDesc(idx, dg, tc.plat)
-			if !ok {
+			d, n := platformDesc(idx, dg, tc.plat)
+			if n != 1 {
 				t.Fatalf("%s: no %s", tc.image, tc.plat)
 			}
 			_, c, err := a.image(ctx, ref, d)

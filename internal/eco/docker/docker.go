@@ -9,10 +9,13 @@
 //   - which platforms the repository builds (from its workflows) and which
 //     stage the image is used in;
 //   - tag attribution: the pinned index is the tag's current value, is
-//     equivalent to it on the built platforms, or is a former value in
+//     the same image (see below), or is a former value in
 //     docker-library/repo-info's history;
-//   - a no-op: identical platform manifests for every built platform, the
-//     only route to auto-merge;
+//   - a no-op, the only route to auto-merge: the old and new index are the
+//     same image. By default that means every non-attestation manifest is
+//     identical; with WithPlatforms (gate input docker_platforms) it means
+//     identical manifests for exactly the declared platforms, each present
+//     in both indexes. Detected platforms only add to that set;
 //   - otherwise, per built platform: the config diff, the file-level layer
 //     diff, and attribution of every changed file to a changed distro
 //     package, an upstream payload or known build noise.
@@ -29,8 +32,10 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -58,6 +63,10 @@ const (
 	codeUnexplainedFiles      = "docker.unexplained-files"
 	codeOSVIntroduced         = "docker.osv-introduced"
 	codeArchiveNotVerified    = "docker.archive-verification-not-run"
+	codeOtherPlatforms        = "docker.unbuilt-platforms-changed"
+	codeOSVUnavailable        = "docker.osv-unavailable"
+	codePlatformAmbiguous     = "docker.platform-ambiguous"
+	codeStagePlatformArg      = "docker.stage-platform-arg"
 )
 
 // maxDownload bounds the bytes one Fetch pulls from registries.
@@ -65,6 +74,7 @@ const maxDownload = 8 << 30
 
 type options struct {
 	noHistory   bool
+	platforms   []string
 	noOSV       bool
 	maxParallel int
 }
@@ -78,6 +88,15 @@ func WithoutTagHistory() Option { return func(o *options) { o.noHistory = true }
 
 // WithoutOSV skips the OSV.dev vulnerability delta.
 func WithoutOSV() Option { return func(o *options) { o.noOSV = true } }
+
+// WithPlatforms declares the platforms the repository builds (gate input
+// docker_platforms, already checked by ParsePlatforms). The no-op proof
+// and tag equivalence then need identity on exactly those platforms (plus
+// any a stage names), each present in both indexes; manifests for other
+// platforms may differ. Without it every manifest must be identical.
+func WithPlatforms(platforms []string) Option {
+	return func(o *options) { o.platforms = append([]string(nil), platforms...) }
+}
 
 // New returns the docker ecosystem fetcher.
 func New(opts ...Option) fetch.Ecosystem {
@@ -99,7 +118,44 @@ type source interface {
 
 type gitSource struct{ dir string }
 
+// gitArgs checks what reaches a git command line: revisions must be full
+// commit IDs and paths clean repository-relative paths, so nothing can be
+// read as an option or a revision expression.
+func gitArgs(revs []string, paths ...string) error {
+	for _, r := range revs {
+		if !gh.ValidSHA(r) {
+			return fmt.Errorf("git: %.80q is not a full commit ID", r)
+		}
+	}
+	for _, p := range paths {
+		if !safeRepoPath(p) {
+			return fmt.Errorf("git: %.200q is not a safe repository path", p)
+		}
+	}
+	return nil
+}
+
+func safeRepoPath(p string) bool {
+	if p == "" || len(p) > 4096 || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "-") || path.Clean(p) != p || p == "." {
+		return false
+	}
+	for _, el := range strings.Split(p, "/") {
+		if el == ".." || strings.HasPrefix(el, "-") {
+			return false
+		}
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f || r == utf8.RuneError || r == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 func (g gitSource) show(ctx context.Context, rev, p string) (string, bool, error) {
+	if err := gitArgs([]string{rev}, p); err != nil {
+		return "", false, err
+	}
 	cmd := gitCmd(ctx, g.dir, "cat-file", "-e", rev+":"+p)
 	if cmd.Run() != nil {
 		return "", false, nil
@@ -115,7 +171,10 @@ func (g gitSource) show(ctx context.Context, rev, p string) (string, bool, error
 }
 
 func (g gitSource) list(ctx context.Context, rev, dir string) ([]string, error) {
-	out, err := gitCmd(ctx, g.dir, "ls-tree", "--name-only", rev, dir+"/").Output()
+	if err := gitArgs([]string{rev}, dir); err != nil {
+		return nil, err
+	}
+	out, err := gitCmd(ctx, g.dir, "ls-tree", "--name-only", rev, "--", dir+"/").Output()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
 			return nil, nil
@@ -126,7 +185,10 @@ func (g gitSource) list(ctx context.Context, rev, dir string) ([]string, error) 
 }
 
 func (g gitSource) changed(ctx context.Context, base, head string) ([]string, error) {
-	out, err := gitCmd(ctx, g.dir, "diff", "--no-ext-diff", "--name-only", "--no-renames", base, head).Output()
+	if err := gitArgs([]string{base, head}); err != nil {
+		return nil, err
+	}
+	out, err := gitCmd(ctx, g.dir, "diff", "--no-ext-diff", "--name-only", "--no-renames", base, head, "--").Output()
 	if err != nil {
 		return nil, fmt.Errorf("git diff %s %s: %w", base, head, err)
 	}
@@ -135,7 +197,7 @@ func (g gitSource) changed(ctx context.Context, base, head string) ([]string, er
 
 func (e *ecosystem) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error) {
 	reg := newRegistry(env.HTTP, maxDownload)
-	a := &analyzer{reg: reg, maxParallel: e.opts.maxParallel}
+	a := &analyzer{reg: reg, maxParallel: e.opts.maxParallel, platforms: e.opts.platforms}
 	if !e.opts.noHistory && env.Scratch != "" {
 		a.hist = newRepoInfo(env.Scratch)
 	}
@@ -210,7 +272,7 @@ func run(ctx context.Context, env fetch.Env, src source, a *analyzer) (fetch.Res
 		}
 		pi := detectPlatforms(workflows, f)
 		for _, ch := range changes {
-			plats := pi.stagePlatforms(ch.Stage.Platform)
+			plats := a.platformsFor(pi.stagePlatforms(ch.Stage.Platform))
 			key := f + " " + ch.Old.String() + " " + ch.New.String() + " " + strings.Join(plats, ",")
 			if first, ok := seen[key]; ok {
 				first.Notes = append(first.Notes, fmt.Sprintf("the same change is also on line %d", ch.Line))
@@ -221,6 +283,11 @@ func run(ctx context.Context, env fetch.Env, src source, a *analyzer) (fetch.Res
 				return res, fmt.Errorf("%s:%d %s: %w", f, ch.Line, ch.New, err)
 			}
 			u.Notes = append(u.Notes, platformNotes(pi, ch.Stage)...)
+			if len(a.platforms) > 0 && platformFromArg(ch.Stage.Platform) {
+				// The declared set only covers what the build pulls if
+				// the stage's platform is one of them; an ARG can name any.
+				u.find(model.RouteHuman, codeStagePlatformArg, "%s:%d: FROM --platform=%s comes from a build argument, so docker_platforms does not say which platform this stage pulls", f, ch.Line, sanitize(ch.Stage.Platform))
+			}
 			results = append(results, u)
 			seen[key] = u
 			if err := ew.write(len(results), u, stages, newBody); err != nil {
@@ -234,6 +301,19 @@ func run(ctx context.Context, env fetch.Env, src source, a *analyzer) (fetch.Res
 	}
 	sort.SliceStable(res.Findings, func(i, j int) bool { return res.Findings[i].Code < res.Findings[j].Code })
 	return res, nil
+}
+
+// platformFromArg reports a FROM --platform value that uses a variable
+// other than BuildKit's own $BUILDPLATFORM / $TARGETPLATFORM.
+func platformFromArg(flag string) bool {
+	if !strings.Contains(flag, "$") {
+		return false
+	}
+	switch strings.TrimSpace(flag) {
+	case "$BUILDPLATFORM", "${BUILDPLATFORM}", "$TARGETPLATFORM", "${TARGETPLATFORM}":
+		return false
+	}
+	return true
 }
 
 func platformNotes(pi platformInfo, st stage) []string {

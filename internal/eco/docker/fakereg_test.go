@@ -31,10 +31,15 @@ type fakeRegistry struct {
 	// tamper, if set, rewrites a response body before it is sent.
 	tamper func(path string, b []byte) []byte
 	hits   map[string]int
+	// throttle: answer this many more requests for a path with
+	// throttleCode (default 429) and Retry-After retryAfter.
+	throttle     map[string]int
+	throttleCode int
+	retryAfter   string
 }
 
 func newFakeRegistry(t *testing.T) *fakeRegistry {
-	f := &fakeRegistry{t: t, blobs: map[string][]byte{}, tags: map[string]string{}, hits: map[string]int{}}
+	f := &fakeRegistry{t: t, blobs: map[string][]byte{}, tags: map[string]string{}, hits: map[string]int{}, throttle: map[string]int{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -109,6 +114,23 @@ func (f *fakeRegistry) serve(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer tok-"+repo {
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="fake",scope="repository:%s:pull"`, f.srv.URL, repo))
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	f.mu.Lock()
+	throttled := f.throttle[r.URL.Path] != 0
+	if f.throttle[r.URL.Path] > 0 {
+		f.throttle[r.URL.Path]--
+	}
+	f.mu.Unlock()
+	if throttled {
+		if f.retryAfter != "" {
+			w.Header().Set("Retry-After", f.retryAfter)
+		}
+		code := f.throttleCode
+		if code == 0 {
+			code = http.StatusTooManyRequests
+		}
+		w.WriteHeader(code)
 		return
 	}
 	if kind == "manifests" && !strings.HasPrefix(ref, "sha256:") {

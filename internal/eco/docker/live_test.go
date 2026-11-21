@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,11 +25,11 @@ import (
 // (same layout as testdata/cases); DOCKER_LIVE_OUT=<dir> writes the
 // evidence files there.
 var liveWant = map[string]model.Route{
-	"golang-digest-noop":  model.RouteAuto,   // only riscv64/windows changed in the index
-	"caddy-digest-noop":   model.RouteAuto,   // likewise
-	"ubuntu-refresh":      model.RouteHuman,  // arm64: apt sources file not owned by a package
-	"node-alpine-refresh": model.RouteHuman,  // see TestLive's log for the platform
-	"golang-patch":        model.RouteReview, // every file attributed; archive verification is v2
+	"golang-digest-noop":  model.RouteHuman, // riscv64/windows changed and were not analysed (TestRecordedCases: auto with docker_platforms)
+	"caddy-digest-noop":   model.RouteHuman, // likewise (riscv64 added, windows rebuilt)
+	"ubuntu-refresh":      model.RouteHuman, // arm64: apt sources file not owned by a package
+	"node-alpine-refresh": model.RouteHuman, // see TestLive's log for the platform
+	"golang-patch":        model.RouteHuman, // files attributed, but the other platforms changed unanalysed (review with docker_platforms)
 }
 
 func TestLive(t *testing.T) {
@@ -60,6 +61,9 @@ func TestLive(t *testing.T) {
 			start := time.Now()
 			res, err := run(ctx, fetch.Env{Class: cl, Evidence: w}, src, a)
 			if err != nil {
+				if errors.Is(err, errRateLimited) {
+					t.Skipf("skipped: the registry is still rate-limiting this IP after %d tries (Docker Hub allows 100 anonymous manifest pulls per hour); re-run later: %v", maxTries, err)
+				}
 				t.Fatal(err)
 			}
 			route := policy.Combine(res.Updates, res.Findings, false)

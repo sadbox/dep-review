@@ -23,14 +23,30 @@ type Kind string
 
 const (
 	// KindDependabot: authored by dependabot[bot], same-repo branch under
-	// dependabot/, every commit authored and committed by Dependabot (or
-	// GitHub's web-flow committer on a Dependabot rebase) with a verified
-	// signature. Only these PRs are ever reviewed or merged.
+	// dependabot/, every commit authored by dependabot[bot] with a valid
+	// GitHub signature, AND the branch's activity log shows that only
+	// dependabot[bot] created and pushed the branch since its last
+	// creation, ending at the head, AND an active ruleset restricts
+	// creating, updating and deleting refs/heads/dependabot/** (its
+	// bypass list, Dependabot only, is the owner's to keep; a read-only
+	// token cannot see it). The commits alone cannot prove this:
+	// Dependabot's own commits and a person's squash-merge of another
+	// Dependabot PR into the branch both read author dependabot[bot],
+	// committer web-flow, signed by GitHub. The PR's base must also never
+	// have been changed (its timeline has no base_ref_changed). Only these
+	// PRs are ever reviewed or merged.
 	KindDependabot Kind = "dependabot"
 	// KindDependabotUnverified: looks like a Dependabot PR (author or
 	// branch) but fails a check above, e.g. someone pushed to the branch.
 	// Always goes to a human; never treated as "not Dependabot".
 	KindDependabotUnverified Kind = "dependabot-unverified"
+	// KindPending: everything checked so far is Dependabot's, but the
+	// branch's activity log has not caught up with the head yet (GitHub
+	// records it shortly after the push; classify waits about two
+	// minutes). Nothing is decided: publish sets no status and sends
+	// nothing, and sweep reports the head as stuck after the usual time so
+	// a maintainer re-runs the gate.
+	KindPending Kind = "dependabot-pending"
 	// KindOther: neither authored by dependabot[bot] nor on a dependabot/
 	// branch. The gate does nothing at all for these.
 	KindOther Kind = "other"
@@ -66,8 +82,10 @@ type Update struct {
 	Advisory  []string   `json:"advisories,omitempty"` // GHSA IDs this update is meant to fix
 	// NoOp is set only by a fetcher that has proven, byte for byte, that the
 	// update changes nothing the repo builds or runs (e.g. a Docker digest
-	// refresh whose manifests for every built platform are identical). It is
-	// the only way an update reaches RouteAuto.
+	// refresh whose old and new indexes hold the same image manifest for
+	// every platform, attestations aside, or for exactly the platforms the
+	// caller declared in docker_platforms). It is the only way an update
+	// reaches RouteAuto.
 	NoOp bool `json:"no_op,omitempty"`
 }
 
@@ -90,6 +108,9 @@ type Classification struct {
 	// bump declares To = the tag, FromRef/ToRef = the short digests.
 	Declared []Update `json:"declared,omitempty"`
 	Files    []string `json:"files,omitempty"` // paths the PR changes
+	// TriggerPath is the caller's trigger workflow (the gate's own input,
+	// which the event matched). Publish never counts its runs as CI.
+	TriggerPath string `json:"trigger_path,omitempty"`
 }
 
 // Route is where a PR goes. Ordered from most to least automatic; combining

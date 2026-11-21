@@ -20,13 +20,21 @@ import (
 
 const statusContext = "dep-review"
 
+// errNoTrigger: without the trigger path the trigger's no-op run could pass
+// as CI, so publish and sweep refuse to run.
+var errNoTrigger = errors.New("no trigger workflow path configured")
+
 // Config is what Publish and Sweep need besides their inputs.
 type Config struct {
-	GitHub    *gh.Client
-	BotLogin  string   // "<app-slug>[bot]"; our comments and statuses are recognised by it
-	Notifier  Notifier // nil: notifications off
-	ServerURL string   // https://github.com
-	RunURL    string   // this workflow run, or ""
+	GitHub   *gh.Client
+	BotLogin string // "<app-slug>[bot]"; our comments and statuses are recognised by it
+	// TriggerPath is the caller's no-op trigger workflow, whose check runs
+	// never count as CI. Required. Publish also excludes the path in the
+	// classification.
+	TriggerPath string
+	Notifier    Notifier // nil: notifications off
+	ServerURL   string   // https://github.com
+	RunURL      string   // this workflow run, or ""
 
 	MergeWait  time.Duration // how long publish waits for CI before leaving it to sweep
 	PollMin    time.Duration
@@ -149,6 +157,28 @@ type ghPull struct {
 			FullName string `json:"full_name"`
 		} `json:"repo"`
 	} `json:"head"`
+	Base struct {
+		Ref  string `json:"ref"`
+		Repo *struct {
+			FullName      string `json:"full_name"`
+			DefaultBranch string `json:"default_branch"`
+		} `json:"repo"`
+	} `json:"base"`
+}
+
+// baseProblem says why pr's base is not one the gate merges into, or "".
+// The base must be the repository's default branch and, when want is
+// set, the branch classify saw.
+func baseProblem(pr *ghPull, repo, want string) string {
+	switch {
+	case pr.Base.Repo == nil || !strings.EqualFold(pr.Base.Repo.FullName, repo) || pr.Base.Repo.DefaultBranch == "":
+		return "the pull request's base repository could not be confirmed"
+	case pr.Base.Ref != pr.Base.Repo.DefaultBranch:
+		return "the pull request's base is not the default branch"
+	case want != "" && pr.Base.Ref != want:
+		return "the pull request's base changed after classification"
+	}
+	return ""
 }
 
 type ghComment struct {
@@ -162,10 +192,13 @@ type ghComment struct {
 // Publish acts on the decision for one classified PR.
 func Publish(ctx context.Context, cfg Config, in Inputs) error {
 	cfg.defaults()
+	if cfg.TriggerPath == "" {
+		return errNoTrigger
+	}
 	o := Decide(in)
 	cl := in.Class
 	cfg.Logf("decision=%s state=%s reason=%q", o.Decision, o.State, o.Reason)
-	if o.Decision == model.DecisionIgnore {
+	if o.Decision == model.DecisionIgnore || cl.Kind == model.KindPending {
 		return nil
 	}
 	if !gh.ValidRepo(cl.Repo) || cl.PR <= 0 || !gh.ValidSHA(cl.HeadSHA) {
@@ -181,6 +214,21 @@ func Publish(ctx context.Context, cfg Config, in Inputs) error {
 		cfg.Logf("stale: the pull request is closed or its head moved on; doing nothing")
 		return nil
 	}
+	if o.Decision == model.DecisionMerge {
+		why := baseProblem(&pr, cl.Repo, cl.BaseRef)
+		if cl.BaseRef == "" {
+			why = "the classification has no base branch"
+		}
+		if why != "" {
+			cfg.Logf("not merging: %s", why)
+			o = human(o.Route, why, nil)
+		}
+	}
+	// Both the configured trigger and the one the event matched are excluded.
+	triggers := []string{cfg.TriggerPath}
+	if cl.TriggerPath != "" && cl.TriggerPath != cfg.TriggerPath {
+		triggers = append(triggers, cl.TriggerPath)
+	}
 
 	prev, err := findComment(ctx, cfg, cl.Repo, cl.PR)
 	if err != nil {
@@ -189,6 +237,10 @@ func Publish(ctx context.Context, cfg Config, in Inputs) error {
 	data := commentData{Class: cl, Evidence: in.Evidence, Outcome: o, RunURL: cfg.RunURL}
 	if prev != nil {
 		data.Marker, _ = parseMarker(prev.Body)
+	}
+	data.Marker.Approved = ""
+	if o.Decision == model.DecisionMerge {
+		data.Marker.Approved = cl.HeadSHA
 	}
 	id, err := upsertComment(ctx, cfg, cl.Repo, cl.PR, prev, renderComment(data))
 	if err != nil {
@@ -201,7 +253,7 @@ func Publish(ctx context.Context, cfg Config, in Inputs) error {
 	notify := o.Decision == model.DecisionHuman
 	reason := o.Reason
 	if o.Decision == model.DecisionMerge {
-		res, err := mergeWhenGreen(ctx, cfg, cl.Repo, cl.PR, cl.HeadSHA, cfg.MergeWait)
+		res, err := mergeWhenGreen(ctx, cfg, cl.Repo, cl.PR, cl.HeadSHA, cl.BaseRef, triggers, cfg.MergeWait)
 		if err != nil {
 			return err
 		}
@@ -273,11 +325,11 @@ type mergeResult struct {
 // mergeWhenGreen polls CI on sha until it settles or wait runs out, then
 // merges exactly sha. Running out of time is not a failure: sweep picks
 // it up.
-func mergeWhenGreen(ctx context.Context, cfg Config, repo string, pr int, sha string, wait time.Duration) (mergeResult, error) {
+func mergeWhenGreen(ctx context.Context, cfg Config, repo string, pr int, sha, base string, triggers []string, wait time.Duration) (mergeResult, error) {
 	deadline := cfg.Now().Add(wait)
 	delay := cfg.PollMin
 	for {
-		st, note, err := ciState(ctx, cfg.GitHub, repo, sha)
+		st, note, err := ciState(ctx, cfg, repo, sha, triggers)
 		if err != nil {
 			return mergeResult{}, err
 		}
@@ -285,7 +337,7 @@ func mergeWhenGreen(ctx context.Context, cfg Config, repo string, pr int, sha st
 		case ciRed:
 			return mergeResult{Failed: true, Note: note}, nil
 		case ciGreen:
-			return merge(ctx, cfg, repo, pr, sha)
+			return merge(ctx, cfg, repo, pr, sha, base)
 		}
 		if !cfg.Now().Add(delay).Before(deadline) {
 			return mergeResult{Note: "CI still running; sweep will merge when it finishes"}, nil
@@ -297,7 +349,24 @@ func mergeWhenGreen(ctx context.Context, cfg Config, repo string, pr int, sha st
 	}
 }
 
-func merge(ctx context.Context, cfg Config, repo string, pr int, sha string) (mergeResult, error) {
+// merge merges exactly sha after re-reading the pull request: it must
+// still be open at sha and its base must still be the default branch (and
+// base, when set). The merge API's sha= guards only the head, and CI may
+// have taken many minutes since the last look.
+func merge(ctx context.Context, cfg Config, repo string, pr int, sha, base string) (mergeResult, error) {
+	var cur ghPull
+	if err := cfg.GitHub.Get(ctx, fmt.Sprintf("repos/%s/pulls/%d", repo, pr), &cur); err != nil {
+		return mergeResult{}, err
+	}
+	switch {
+	case cur.State != "open":
+		return mergeResult{Note: "the pull request is no longer open"}, nil
+	case cur.Head.SHA != sha:
+		return mergeResult{Failed: true, Note: "the head moved before the merge"}, nil
+	}
+	if why := baseProblem(&cur, repo, base); why != "" {
+		return mergeResult{Failed: true, Note: why}, nil
+	}
 	var out struct {
 		Merged bool `json:"merged"`
 	}
@@ -334,69 +403,91 @@ const (
 	ciRed
 )
 
-// ciState looks at every check run and commit status on sha except our
-// own `dep-review` status.
-func ciState(ctx context.Context, c *gh.Client, repo, sha string) (ci, string, error) {
-	var runs []struct {
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	}
+// ciState reads every check run and commit status on sha. Anything
+// failing is red and anything unfinished is pending. Green additionally
+// needs at least one successful check run or status that is real CI: not
+// the trigger workflow (a no-op that succeeds on every PR), not the gate's
+// own `dep-review` status and nothing the gate app created. With none, CI
+// is pending, so a repository without CI never auto-merges; sweep retries.
+//
+// A check run from GitHub Actions counts only when its check suite maps to
+// a workflow run on sha whose workflow file is not the trigger; one that
+// cannot be mapped never counts.
+func ciState(ctx context.Context, cfg Config, repo, sha string, triggers []string) (ci, string, error) {
+	c := cfg.GitHub
+	gateSlug := strings.TrimSuffix(cfg.BotLogin, "[bot]")
+	var runs []checkRun
 	err := c.Pages(ctx, fmt.Sprintf("repos/%s/commits/%s/check-runs", repo, sha), func(body []byte) error {
 		var page struct {
-			CheckRuns []struct {
-				Name       string `json:"name"`
-				Status     string `json:"status"`
-				Conclusion string `json:"conclusion"`
-			} `json:"check_runs"`
+			CheckRuns []checkRun `json:"check_runs"`
 		}
 		if err := json.Unmarshal(body, &page); err != nil {
 			return err
 		}
-		for _, r := range page.CheckRuns {
-			runs = append(runs, r)
-		}
+		runs = append(runs, page.CheckRuns...)
 		return nil
 	})
 	if err != nil {
 		return ciPending, "", err
 	}
-	type status struct {
-		Context string `json:"context"`
-		State   string `json:"state"`
-	}
-	var statuses []status
-	err = c.Pages(ctx, fmt.Sprintf("repos/%s/commits/%s/status", repo, sha), func(body []byte) error {
+	// Workflow file of every Actions check suite on sha.
+	suitePath := map[int64]string{}
+	err = c.Pages(ctx, fmt.Sprintf("repos/%s/actions/runs?head_sha=%s", repo, sha), func(body []byte) error {
 		var page struct {
-			Statuses []status `json:"statuses"`
+			WorkflowRuns []struct {
+				Path         string `json:"path"`
+				CheckSuiteID int64  `json:"check_suite_id"`
+			} `json:"workflow_runs"`
 		}
 		if err := json.Unmarshal(body, &page); err != nil {
 			return err
 		}
-		statuses = append(statuses, page.Statuses...)
+		for _, r := range page.WorkflowRuns {
+			if r.CheckSuiteID > 0 {
+				suitePath[r.CheckSuiteID] = r.Path
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return ciPending, "", err
 	}
-	pending, red := 0, 0
+	// Statuses newest first; the newest per context is its current state.
+	statuses, err := gh.List[ghStatus](ctx, c, fmt.Sprintf("repos/%s/commits/%s/statuses", repo, sha))
+	if err != nil {
+		return ciPending, "", err
+	}
+
+	pending, red, real := 0, 0, 0
 	for _, r := range runs {
 		if r.Status != "completed" {
 			pending++
 			continue
 		}
 		switch r.Conclusion {
-		case "success", "neutral", "skipped":
+		case "success":
+			if r.countsAsCI(gateSlug, triggers, suitePath) {
+				real++
+			}
+		case "neutral", "skipped":
 		default:
 			red++
 		}
 	}
+	seen := map[string]bool{}
 	for _, s := range statuses {
+		if seen[s.Context] {
+			continue
+		}
+		seen[s.Context] = true
 		if s.Context == statusContext {
 			continue
 		}
 		switch s.State {
 		case "success":
+			if s.Creator != nil && s.Creator.Login != "" && s.Creator.Login != cfg.BotLogin {
+				real++
+			}
 		case "pending":
 			pending++
 		default:
@@ -408,6 +499,44 @@ func ciState(ctx context.Context, c *gh.Client, repo, sha string) (ci, string, e
 		return ciRed, fmt.Sprintf("CI failed (%d failing checks)", red), nil
 	case pending > 0:
 		return ciPending, fmt.Sprintf("%d checks still running", pending), nil
+	case real == 0:
+		return ciPending, "no CI check besides the gate's own has passed yet", nil
 	}
 	return ciGreen, "CI green", nil
+}
+
+type checkRun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	App        *struct {
+		Slug string `json:"slug"`
+	} `json:"app"`
+	CheckSuite *struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite"`
+}
+
+// countsAsCI reports whether a successful check run is real CI (see
+// ciState). Without a trigger path no Actions run counts.
+func (r checkRun) countsAsCI(gateSlug string, triggers []string, suitePath map[int64]string) bool {
+	if r.Name == statusContext || r.App == nil || r.App.Slug == "" || r.App.Slug == gateSlug {
+		return false
+	}
+	if r.App.Slug != "github-actions" {
+		return true
+	}
+	if r.CheckSuite == nil || len(triggers) == 0 {
+		return false
+	}
+	p, ok := suitePath[r.CheckSuite.ID]
+	if !ok || p == "" {
+		return false
+	}
+	for _, t := range triggers {
+		if t == "" || p == t {
+			return false
+		}
+	}
+	return true
 }
