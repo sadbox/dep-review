@@ -82,9 +82,10 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 // different target, refuses the PR. A different "from" needs a person.
 // Undeclared real updates are expected where a lockfile carries transitive
 // changes (Go, npm, uv) and are simply reviewed. GitHub Actions and Docker
-// have no transitive changes in the repository, so there every real update
-// must be named by a declaration with its target, or a person looks at
-// it. Matched updates inherit the declared security flag and
+// report no transitive updates (the actions fetcher checks transitive
+// actions.lock entries itself and raises findings, not updates), so there
+// every real update must be named by a declaration with its target, or a
+// person looks at it. Matched updates inherit the declared security flag and
 // advisories, which only Dependabot knows. Names match per NormalizeName.
 //
 // Each side is compared on what Dependabot declared for it: the version

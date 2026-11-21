@@ -9,6 +9,13 @@
 // of every changed dist/ byte to a changed first-party file or a changed
 // locked package, with what is left over listed as residual.
 //
+// A step of a workflow onboarded to .github/workflows/actions.lock names
+// an exact tag instead (`uses: owner/repo@vX.Y.Z`), and the commit comes
+// from the lockfile; the same checks then run on the locked commits, which
+// must be the named tag's, in the repository with the locked IDs. The
+// lockfile change must be exactly the bumped entries (see lockDelta in
+// actionslock.go).
+//
 // Upstream code is only read: a blobless, checkout-less clone queried with
 // git cat-file/diff, plus public REST endpoints. Nothing from the caller
 // repository or upstream is executed, and dist/ is not rebuilt (see
@@ -88,6 +95,12 @@ type pair struct {
 	subs        []string // action subpaths used ("" = repository root)
 	changes     []usesChange
 	directory   string
+	// lock: some lines are steps of workflows onboarded to actions.lock,
+	// so oldRef/newRef are the lockfile's commits, the lines name these
+	// tags, and lockEntries are the new lockfile entries.
+	lock                     bool
+	lockOldTags, lockNewTags []string
+	lockEntries              []*lockEntry
 }
 
 func (p *pair) name() string { return p.owner + "/" + p.repo }
@@ -125,14 +138,19 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 	}
 	var fs findings
 	var all []usesChange
+	lockChanged := false
 	for _, fc := range files {
 		kind := fileKind(fc.path)
 		if kind == "" {
-			fs.add(model.RouteRefuse, "actions.unexpected-file", "", "the PR changes a file that is not a workflow or action.yml: %s", safePath(fc.path))
+			fs.add(model.RouteRefuse, "actions.unexpected-file", "", "the PR changes a file that is not a workflow, action.yml or actions.lock: %s", safePath(fc.path))
 			continue
 		}
 		if fc.status != 'M' || fc.oldMode != fc.newMode {
 			fs.add(model.RouteRefuse, "actions.unexpected-file", "", "the PR adds, deletes or changes the mode of %s", safePath(fc.path))
+			continue
+		}
+		if kind == kindLock {
+			lockChanged = true
 			continue
 		}
 		oldText, err := caller.show(ctx, base, fc.path)
@@ -157,10 +175,14 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 		fs.add(model.RouteRefuse, "actions.no-uses-change", "", "the PR changes no uses: line")
 	}
 
-	pairs, order := groupPairs(all, &fs)
-	var updates []model.Update
 	var summary strings.Builder
 	summary.WriteString("# github_actions updates\n\n")
+	if err := checkActionsLock(ctx, caller, env, base, head, lockChanged, all, &fs, &summary); err != nil {
+		return fetch.Result{}, err
+	}
+
+	pairs, order := groupPairs(all, &fs)
+	var updates []model.Update
 	for _, key := range order {
 		p := pairs[key]
 		u, err := f.analyzePair(ctx, env, p, &fs, &summary)
@@ -190,19 +212,36 @@ func groupPairs(all []usesChange, fs *findings) (map[string]*pair, []string) {
 			fs.add(model.RouteRefuse, "actions.non-uses-change", "", "%s:%d: only the comment changed; the pin is the same", safePath(c.file), c.line)
 			continue
 		}
-		key := fetch.NormalizeName(model.GitHubActions, owner+"/"+repo) + "@" + c.old.ref + ".." + c.new.ref
+		oldRef, newRef := c.old.ref, c.new.ref
+		if c.lock != nil {
+			// The commits the runner runs are the lockfile's.
+			oldRef, newRef = c.lock.oldCommit, c.lock.newCommit
+		}
+		key := fetch.NormalizeName(model.GitHubActions, owner+"/"+repo) + "@" + oldRef + ".." + newRef
 		p := pairs[key]
 		if p == nil {
 			dir := "/"
 			if c.kind == kindAction {
 				dir = path.Clean("/" + path.Dir(c.file))
 			}
-			p = &pair{owner: owner, repo: repo, oldRef: c.old.ref, newRef: c.new.ref, directory: dir}
+			p = &pair{owner: owner, repo: repo, oldRef: oldRef, newRef: newRef, directory: dir}
 			pairs[key] = p
 			order = append(order, key)
 		}
 		if !contains(p.subs, sub) {
 			p.subs = append(p.subs, sub)
+		}
+		if c.lock != nil {
+			p.lock = true
+			if _, ok := parseTag(c.new.ref); ok && !contains(p.lockNewTags, c.new.ref) {
+				p.lockNewTags = append(p.lockNewTags, c.new.ref)
+			}
+			if _, ok := parseTag(c.old.ref); ok && !contains(p.lockOldTags, c.old.ref) {
+				p.lockOldTags = append(p.lockOldTags, c.old.ref)
+			}
+			if c.lock.newEntry != nil {
+				p.lockEntries = append(p.lockEntries, c.lock.newEntry)
+			}
 		}
 		p.changes = append(p.changes, c)
 	}
@@ -314,11 +353,19 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		fmt.Fprintf(sum, "- %s:%d\n", safePath(c.file), c.line)
 	}
 	sum.WriteString("\n")
-	if !shaRx.MatchString(p.newRef) {
-		fs.add(model.RouteRefuse, "actions.ref-not-sha", name, "the new ref is not a full 40-hex commit SHA")
-	}
-	if !shaRx.MatchString(p.oldRef) {
-		fs.add(model.RouteRefuse, "actions.old-ref-not-sha", name, "the old ref is not a full 40-hex commit SHA; the gate only reviews SHA-pinned actions")
+	switch {
+	case p.lock:
+		if !shaRx.MatchString(p.newRef) || !shaRx.MatchString(p.oldRef) {
+			// checkActionsLock refused already: an entry is missing.
+			fs.add(model.RouteRefuse, "actions.lock-uses-mismatch", name, "actions.lock has no commit for the old or the new tag")
+		}
+	default:
+		if !shaRx.MatchString(p.newRef) {
+			fs.add(model.RouteRefuse, "actions.ref-not-sha", name, "the new ref is not a full 40-hex commit SHA, and actions.lock does not lock this line")
+		}
+		if !shaRx.MatchString(p.oldRef) {
+			fs.add(model.RouteRefuse, "actions.old-ref-not-sha", name, "the old ref is not a full 40-hex commit SHA, and actions.lock does not lock this line")
+		}
 	}
 	if fs.worst(name) == model.RouteRefuse {
 		u.From, u.To = strings.TrimPrefix(p.oldRef, "v"), strings.TrimPrefix(p.newRef, "v")
@@ -337,6 +384,13 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 	}
 	if !safePathRx.MatchString(info.DefaultBranch) {
 		return u, fmt.Errorf("unexpected default branch name")
+	}
+	for _, e := range p.lockEntries {
+		// The runner checks these IDs; the gate checks them against the
+		// repository it is about to verify.
+		if e.ownerID != info.Owner.ID || e.repoID != info.ID {
+			fs.add(model.RouteRefuse, "actions.lock-identity-mismatch", name, "actions.lock records owner/repo IDs %d/%d, upstream is %d/%d", e.ownerID, e.repoID, info.Owner.ID, info.ID)
+		}
 	}
 
 	// Ancestry: the new pin must be on the default branch (or a release
@@ -380,17 +434,20 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 		return u, err
 	}
 	dFrom, dTo := declaredHints(env.Class, name)
-	oldHits, _, err := up.tagsAt(ctx, tags, p.oldRef, append(commentHints(p.changes, true), dFrom...), nil, f.cfg.MaxTagDerefs)
+	// A locked line names its tag; it outranks a version comment.
+	oldHints := append(append([]string(nil), p.lockOldTags...), commentHints(p.changes, true)...)
+	newHints := append(append([]string(nil), p.lockNewTags...), commentHints(p.changes, false)...)
+	oldHits, _, err := up.tagsAt(ctx, tags, p.oldRef, append(oldHints, dFrom...), nil, f.cfg.MaxTagDerefs)
 	if err != nil {
 		return u, err
 	}
 	var oldTag *tagRef
 	if len(oldHits) > 0 {
-		t := pickTag(oldHits, commentHints(p.changes, true))
+		t := pickTag(oldHits, oldHints)
 		oldTag = &t
 	}
 	accept := func(v semver) bool { return oldTag == nil || v.cmp(oldTag.v) > 0 }
-	newHits, derefs, err := up.tagsAt(ctx, tags, p.newRef, append(commentHints(p.changes, false), dTo...), accept, f.cfg.MaxTagDerefs)
+	newHits, derefs, err := up.tagsAt(ctx, tags, p.newRef, append(newHints, dTo...), accept, f.cfg.MaxTagDerefs)
 	if err != nil {
 		return u, err
 	}
@@ -398,9 +455,22 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 	if len(newHits) == 0 {
 		fs.add(model.RouteRefuse, "actions.no-version-tag", name, "no vX.Y.Z tag dereferences to the new SHA (%d annotated tags dereferenced)", derefs)
 	} else {
-		t := pickTag(newHits, commentHints(p.changes, false))
+		t := pickTag(newHits, newHints)
 		newTag = &t
 		u.To = t.v.String()
+	}
+	// The tag a locked line names must be upstream's tag on the locked
+	// commit, not merely some tag there.
+	for _, tn := range p.lockNewTags {
+		ok, err := up.tagIs(ctx, tags, tn, p.newRef)
+		if err != nil {
+			return u, err
+		}
+		if !ok {
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "upstream tag %s does not dereference to the commit actions.lock records for it (%s)", tn, short(p.newRef))
+		} else if newTag != nil && newTag.name != tn {
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "the workflow names %s, but the version the gate read for the locked commit is %s", tn, newTag.name)
+		}
 	}
 	if oldTag == nil {
 		fs.add(model.RouteHuman, "actions.old-version-unknown", name, "no vX.Y.Z tag dereferences to the old SHA; the update size is unknown")

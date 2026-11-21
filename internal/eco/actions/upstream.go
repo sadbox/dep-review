@@ -34,9 +34,13 @@ func (u *upstream) get(ctx context.Context, p string, v any) error {
 }
 
 type repoInfo struct {
+	ID            int64  `json:"id"`
 	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
 	Archived      bool   `json:"archived"`
+	Owner         struct {
+		ID int64 `json:"id"`
+	} `json:"owner"`
 }
 
 type compareResult struct {
@@ -175,6 +179,25 @@ func (u *upstream) tagsAt(ctx context.Context, tags []tagRef, sha string, hints 
 		}
 	}
 	return nil, derefs, nil
+}
+
+// tagIs reports whether the vX.Y.Z tag name (from tags) dereferences to
+// commit sha.
+func (u *upstream) tagIs(ctx context.Context, tags []tagRef, name, sha string) (bool, error) {
+	for _, t := range tags {
+		if t.name != name {
+			continue
+		}
+		switch t.obj.Type {
+		case "commit":
+			return t.obj.SHA == sha, nil
+		case "tag":
+			c, err := u.derefTag(ctx, t.obj.SHA)
+			return c == sha, err
+		}
+		return false, nil
+	}
+	return false, nil
 }
 
 type release struct {
