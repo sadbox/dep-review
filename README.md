@@ -4,8 +4,9 @@ A merge gate for Dependabot pull requests. It replaces an LLM session that
 held write credentials and merged PRs itself with a split design:
 
 - **Deterministic code decides who a PR belongs to and what changed.** It
-  verifies the PR is Dependabot's alone (Dependabot's signed commits, and a
-  branch activity log in which only Dependabot ever pushed), recomputes the real change set from
+  verifies the PR is Dependabot's alone (Dependabot's signed commits, a
+  branch activity log in which only Dependabot ever pushed, and a ruleset
+  that keeps everyone else off `dependabot/` branches), recomputes the real change set from
   the manifests and lockfiles, downloads both versions of every changed
   dependency and diffs them, and runs hard checks (provenance, hashes,
   install scripts, new packages, …). Nothing from the PR or a dependency is
@@ -83,6 +84,14 @@ one is reviewed by this gate too.
    `PUSHOVER_USER_KEY`.
 4. Install the gate app on the repository (permissions: contents, pull
    requests, workflows, commit statuses: write; checks, actions: read).
+5. Create an active branch ruleset (any name) targeting
+   `refs/heads/dependabot/**` with the rules *Restrict creations*,
+   *Restrict updates* and *Restrict deletions*, and Dependabot as the only
+   bypass actor. classify reads the repository's rulesets with its
+   read-only token and treats every PR as `dependabot-unverified` without
+   one. It cannot see the bypass list (GitHub returns `bypass_actors` only
+   to tokens that may edit the ruleset), so keeping that list to
+   Dependabot alone is the owner's job.
 
 ## Model credential
 

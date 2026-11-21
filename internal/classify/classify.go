@@ -227,6 +227,12 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	if why := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA); why != "" {
 		return unverified(why)
 	}
+	// The log shows who moved the branch; a ruleset makes sure nobody else
+	// could. Its bypass list (Dependabot only) is the owner's to maintain:
+	// a read-only token cannot see it.
+	if why := rulesetProblem(ctx, c, repoName); why != "" {
+		return unverified(why)
+	}
 
 	eco, ok := ecosystemFromBranch(pr.Head.Ref)
 	if !ok {
@@ -332,6 +338,103 @@ func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head 
 		return "the branch's push history does not reach the head commit yet"
 	}
 	return ""
+}
+
+type ruleset struct {
+	ID          int64  `json:"id"`
+	Target      string `json:"target"`
+	Enforcement string `json:"enforcement"`
+	Conditions  *struct {
+		RefName *struct {
+			Include []string `json:"include"`
+			Exclude []string `json:"exclude"`
+		} `json:"ref_name"`
+	} `json:"conditions"`
+	Rules []struct {
+		Type       string `json:"type"`
+		Parameters struct {
+			UpdateAllowsFetchAndMerge bool `json:"update_allows_fetch_and_merge"`
+		} `json:"parameters"`
+	} `json:"rules"`
+}
+
+// rulesetProblem returns "" when the repository (or its owner) has an
+// active branch ruleset that restricts creating, updating and deleting
+// every refs/heads/dependabot/** branch, and otherwise why not. Names are
+// ignored; an unreadable ruleset is not proof.
+func rulesetProblem(ctx context.Context, c *gh.Client, repo string) string {
+	const missing = "no active ruleset restricts creating, updating and deleting dependabot/ branches"
+	list, err := gh.List[ruleset](ctx, c, fmt.Sprintf("repos/%s/rulesets?includes_parents=true", repo))
+	if err != nil {
+		return fmt.Sprintf("the repository's rulesets could not be read (HTTP %d)", gh.StatusCode(err))
+	}
+	for _, s := range list {
+		if s.Target != "branch" || s.Enforcement != "active" || s.ID <= 0 {
+			continue
+		}
+		var full ruleset
+		if err := c.Get(ctx, fmt.Sprintf("repos/%s/rulesets/%d?includes_parents=true", repo, s.ID), &full); err != nil {
+			return fmt.Sprintf("a ruleset could not be read (HTTP %d)", gh.StatusCode(err))
+		}
+		if full.Target == "branch" && full.Enforcement == "active" && full.coversDependabot() && full.restrictsAll() {
+			return ""
+		}
+	}
+	return missing
+}
+
+func (s *ruleset) restrictsAll() bool {
+	have := map[string]bool{}
+	for _, r := range s.Rules {
+		if r.Type == "update" && r.Parameters.UpdateAllowsFetchAndMerge {
+			continue
+		}
+		have[r.Type] = true
+	}
+	return have["creation"] && have["update"] && have["deletion"]
+}
+
+// coversDependabot: some include pattern matches every branch under
+// refs/heads/dependabot/, and no exclude pattern can match one.
+func (s *ruleset) coversDependabot() bool {
+	if s.Conditions == nil || s.Conditions.RefName == nil {
+		return false
+	}
+	covered := false
+	for _, p := range s.Conditions.RefName.Include {
+		covered = covered || coversAllDependabot(p)
+	}
+	for _, p := range s.Conditions.RefName.Exclude {
+		if !excludesNoDependabot(p) {
+			return false
+		}
+	}
+	return covered
+}
+
+const dependabotRefs = "refs/heads/" + branchPrefix
+
+// coversAllDependabot reports whether an fnmatch include pattern matches
+// every ref under refs/heads/dependabot/: ~ALL, or a literal directory
+// prefix of it followed by "**" (refs/heads/dependabot/**, refs/heads/**,
+// **). "*" does not cross "/", so refs/heads/dependabot/* does not.
+func coversAllDependabot(p string) bool {
+	if p == "~ALL" {
+		return true
+	}
+	prefix, ok := strings.CutSuffix(p, "**")
+	return ok && (prefix == "" || strings.HasSuffix(prefix, "/")) &&
+		!strings.ContainsAny(prefix, "*?[]{}\\!~") && strings.HasPrefix(dependabotRefs, prefix)
+}
+
+// excludesNoDependabot reports whether an exclude pattern certainly
+// matches no dependabot/ branch: the default branch, or a literal ref
+// outside refs/heads/dependabot/.
+func excludesNoDependabot(p string) bool {
+	if p == "~DEFAULT_BRANCH" {
+		return true
+	}
+	return !strings.ContainsAny(p, "*?[]{}\\!~") && !strings.HasPrefix(p, dependabotRefs)
 }
 
 func zeroSHA(s string) bool { return len(s) == 40 && strings.Trim(s, "0") == "" }

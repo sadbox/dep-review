@@ -26,7 +26,10 @@ const (
 	// dependabot/, every commit authored by dependabot[bot] with a valid
 	// GitHub signature, AND the branch's activity log shows that only
 	// dependabot[bot] created and pushed the branch since its last
-	// creation, ending at the head. The commits alone cannot prove this:
+	// creation, ending at the head, AND an active ruleset restricts
+	// creating, updating and deleting refs/heads/dependabot/** (its
+	// bypass list, Dependabot only, is the owner's to keep; a read-only
+	// token cannot see it). The commits alone cannot prove this:
 	// Dependabot's own commits and a person's squash-merge of another
 	// Dependabot PR into the branch both read author dependabot[bot],
 	// committer web-flow, signed by GitHub. Only these PRs are ever
