@@ -23,9 +23,14 @@ type Kind string
 
 const (
 	// KindDependabot: authored by dependabot[bot], same-repo branch under
-	// dependabot/, every commit authored and committed by Dependabot (or
-	// GitHub's web-flow committer on a Dependabot rebase) with a verified
-	// signature. Only these PRs are ever reviewed or merged.
+	// dependabot/, every commit authored by dependabot[bot] with a valid
+	// GitHub signature, AND the branch's activity log shows that only
+	// dependabot[bot] created and pushed the branch since its last
+	// creation, ending at the head. The commits alone cannot prove this:
+	// Dependabot's own commits and a person's squash-merge of another
+	// Dependabot PR into the branch both read author dependabot[bot],
+	// committer web-flow, signed by GitHub. Only these PRs are ever
+	// reviewed or merged.
 	KindDependabot Kind = "dependabot"
 	// KindDependabotUnverified: looks like a Dependabot PR (author or
 	// branch) but fails a check above, e.g. someone pushed to the branch.

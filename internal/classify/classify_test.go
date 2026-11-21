@@ -25,6 +25,14 @@ type fixture struct {
 	commits  []map[string]any
 	files    []map[string]any
 	byCommit []map[string]any // GET commits/{sha}/pulls
+	activity []map[string]any // GET activity?ref=<head branch>, oldest first
+	actCode  int              // non-zero: GET activity fails with this status
+}
+
+const zero = "0000000000000000000000000000000000000000"
+
+func act(typ, actor, before, after string) map[string]any {
+	return map[string]any{"activity_type": typ, "actor": map[string]any{"login": actor}, "before": before, "after": after}
 }
 
 func defaultFixture(t *testing.T) *fixture {
@@ -56,9 +64,10 @@ func defaultFixture(t *testing.T) *fixture {
 			"sha":       head,
 			"author":    map[string]any{"login": "dependabot[bot]"},
 			"committer": map[string]any{"login": "web-flow"},
-			"commit":    map[string]any{"message": string(msg), "verification": map[string]any{"verified": true}},
+			"commit":    map[string]any{"message": string(msg), "verification": map[string]any{"verified": true, "reason": "valid"}},
 		}},
-		files: []map[string]any{{"filename": "go.mod"}, {"filename": "go.sum"}},
+		files:    []map[string]any{{"filename": "go.mod"}, {"filename": "go.sum"}},
+		activity: []map[string]any{act("branch_creation", "dependabot[bot]", zero, head)},
 	}
 }
 
@@ -72,6 +81,17 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 	mux.Handle("GET /repos/o/r/pulls/7/commits", js(f.commits))
 	mux.Handle("GET /repos/o/r/pulls/7/files", js(f.files))
 	mux.Handle("GET /repos/o/r/commits/"+head+"/pulls", js(f.byCommit))
+	mux.HandleFunc("GET /repos/o/r/activity", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("ref") != "refs/heads/"+f.pr["head"].(map[string]any)["ref"].(string) || q.Get("direction") != "asc" {
+			t.Errorf("activity query %v", q)
+		}
+		if f.actCode != 0 {
+			w.WriteHeader(f.actCode)
+			return
+		}
+		json.NewEncoder(w).Encode(f.activity)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request %s %s", r.Method, r.URL)
 		http.NotFound(w, r)
@@ -142,6 +162,53 @@ func TestClassify(t *testing.T) {
 		{"no metadata", func(f *fixture) { f.commits[0]["commit"].(map[string]any)["message"] = "Bump x" }, model.KindDependabotUnverified, "metadata"},
 		{"unsafe file", func(f *fixture) { f.files = append(f.files, map[string]any{"filename": "../x"}) }, model.KindDependabotUnverified, "unsafe path"},
 		{"head repo differs on PR", func(f *fixture) { f.pr["head"].(map[string]any)["repo"] = map[string]any{"full_name": "evil/r"} }, model.KindDependabotUnverified, "not in this repository"},
+		{"signature reason not valid", func(f *fixture) {
+			f.commits[0]["commit"].(map[string]any)["verification"] = map[string]any{"verified": true, "reason": "unknown_key"}
+		}, model.KindDependabotUnverified, "verified signature"},
+		// Review finding 1: who moved the branch, from its activity log.
+		{"rebased by dependabot", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("force_push", "dependabot[bot]", mid, head)}
+		}, model.KindDependabot, ""},
+		{"recreated after a person deleted it", func(f *fixture) {
+			old := strings.Repeat("5", 40)
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, old), act("branch_deletion", "someone", old, zero), act("branch_creation", "dependabot[bot]", zero, head)}
+		}, model.KindDependabot, ""},
+		{"another dependabot PR squash-merged into the branch", func(f *fixture) {
+			// What GitHub records for the setup-go#775 pattern: the commit
+			// itself is dependabot[bot] / web-flow / valid.
+			mid := strings.Repeat("5", 40)
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("pr_merge", "someone", mid, head)}
+		}, model.KindDependabotUnverified, "someone other than dependabot"},
+		{"pushed by a person", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("push", "someone", mid, head)}
+		}, model.KindDependabotUnverified, "someone other than dependabot"},
+		{"force-pushed by a person", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("force_push", "someone", mid, head)}
+		}, model.KindDependabotUnverified, "someone other than dependabot"},
+		{"created by a person", func(f *fixture) {
+			f.activity = []map[string]any{act("branch_creation", "someone", zero, head)}
+		}, model.KindDependabotUnverified, "someone other than dependabot"},
+		{"merge queue entry", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("merge_queue_merge", "dependabot[bot]", mid, head)}
+		}, model.KindDependabotUnverified, "merge_queue_merge"},
+		{"history has a gap", func(f *fixture) {
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40)), act("push", "dependabot[bot]", strings.Repeat("6", 40), head)}
+		}, model.KindDependabotUnverified, "gap"},
+		{"history behind the head", func(f *fixture) {
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
+		}, model.KindDependabotUnverified, "does not reach the head"},
+		{"history without the creation", func(f *fixture) {
+			f.activity = []map[string]any{act("push", "dependabot[bot]", strings.Repeat("5", 40), head)}
+		}, model.KindDependabotUnverified, "creation"},
+		{"empty history", func(f *fixture) { f.activity = nil }, model.KindDependabotUnverified, "creation"},
+		{"no actor", func(f *fixture) {
+			f.activity = []map[string]any{{"activity_type": "branch_creation", "before": zero, "after": head}}
+		}, model.KindDependabotUnverified, "someone other than dependabot"},
+		{"history unreadable", func(f *fixture) { f.actCode = http.StatusForbidden }, model.KindDependabotUnverified, "could not be read (HTTP 403)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

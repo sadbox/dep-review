@@ -4,7 +4,8 @@ A merge gate for Dependabot pull requests. It replaces an LLM session that
 held write credentials and merged PRs itself with a split design:
 
 - **Deterministic code decides who a PR belongs to and what changed.** It
-  verifies the PR is Dependabot's alone, recomputes the real change set from
+  verifies the PR is Dependabot's alone (Dependabot's signed commits, and a
+  branch activity log in which only Dependabot ever pushed), recomputes the real change set from
   the manifests and lockfiles, downloads both versions of every changed
   dependency and diffs them, and runs hard checks (provenance, hashes,
   install scripts, new packages, …). Nothing from the PR or a dependency is
@@ -48,7 +49,7 @@ a newer head can never be merged on an old verdict.
 |---|---|---|
 | auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, or, when the caller sets `docker_platforms`, for exactly those platforms) | merge on green CI |
 | review | patch/minor/digest updates whose deterministic checks all passed | model review; merge only on `pass` |
-| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags, truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed to | comment + notification, no merge |
+| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags, truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
 | refuse | the PR is malformed (no updates, tag instead of SHA pin, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |
 
 ## Layout

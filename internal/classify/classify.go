@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"path"
 	"regexp"
 	"strings"
@@ -215,9 +216,16 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 		if cm.Committer == nil || (cm.Committer.Login != dependabotLogin && cm.Committer.Login != webFlowLogin) {
 			return unverified(fmt.Sprintf("commit %s is not committed by dependabot[bot] or web-flow", short))
 		}
-		if !cm.Commit.Verification.Verified {
+		if !cm.Commit.Verification.Verified || cm.Commit.Verification.Reason != "valid" {
 			return unverified(fmt.Sprintf("commit %s does not have a verified signature", short))
 		}
+	}
+	// The commits cannot tell Dependabot's own pushes from a person
+	// squash-merging another Dependabot PR into this branch: both are
+	// authored by dependabot[bot], committed by web-flow and signed by
+	// GitHub. The branch's activity log records who moved the ref.
+	if why := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA); why != "" {
+		return unverified(why)
 	}
 
 	eco, ok := ecosystemFromBranch(pr.Head.Ref)
@@ -273,6 +281,68 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	cl.Reason = "authored, committed and signed by Dependabot only"
 	logf("kind=dependabot: %s #%d %s (%d declared updates)", repoName, num, eco, len(cl.Declared))
 	return cl, nil
+}
+
+type activity struct {
+	Before       string `json:"before"`
+	After        string `json:"after"`
+	ActivityType string `json:"activity_type"`
+	Actor        *user  `json:"actor"`
+}
+
+// branchHistoryProblem reads the head branch's activity log (oldest first)
+// and returns why it does not prove that only Dependabot moved the branch
+// since it was last created, or "". Every entry from the last
+// branch_creation on must be Dependabot's creation, push or force push,
+// each starting where the previous one ended, and the last must end at
+// head. Anything else, including an unreadable or incomplete log, is not
+// proof.
+func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head string) string {
+	q := url.Values{"ref": {"refs/heads/" + branch}, "direction": {"asc"}}
+	acts, err := gh.List[activity](ctx, c, fmt.Sprintf("repos/%s/activity?%s", repo, q.Encode()))
+	if err != nil {
+		return fmt.Sprintf("the branch's push history could not be read (HTTP %d)", gh.StatusCode(err))
+	}
+	start := -1
+	for i, a := range acts {
+		if a.ActivityType == "branch_creation" {
+			start = i
+		}
+	}
+	if start < 0 {
+		return "the branch's push history does not include its creation"
+	}
+	prev := ""
+	for i, a := range acts[start:] {
+		switch {
+		case a.Actor == nil || a.Actor.Login != dependabotLogin:
+			return "someone other than dependabot[bot] changed the branch (" + safeType(a.ActivityType) + ")"
+		case i == 0 && !zeroSHA(a.Before):
+			return "the branch's creation does not start from nothing"
+		case i > 0 && a.ActivityType != "push" && a.ActivityType != "force_push":
+			return "the branch was changed by a " + safeType(a.ActivityType)
+		case i > 0 && a.Before != prev:
+			return "the branch's push history has a gap"
+		case !gh.ValidSHA(a.After):
+			return "the branch's push history has a malformed commit ID"
+		}
+		prev = a.After
+	}
+	if prev != head {
+		return "the branch's push history does not reach the head commit yet"
+	}
+	return ""
+}
+
+func zeroSHA(s string) bool { return len(s) == 40 && strings.Trim(s, "0") == "" }
+
+var typeRe = regexp.MustCompile(`^[a-z_]{1,32}$`)
+
+func safeType(s string) string {
+	if typeRe.MatchString(s) {
+		return s
+	}
+	return "change"
 }
 
 // findPR returns the open same-repository PR whose head is the run's head,
