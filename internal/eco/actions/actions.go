@@ -298,7 +298,7 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 				p.lockOldKeys = append(p.lockOldKeys, t.oldKey)
 			}
 			// This entry's ref and IDs were not checked with p.
-			if err := f.checkMergedEntry(ctx, env, p, t.newEntry, &fs); err != nil {
+			if err := f.checkMergedEntry(ctx, env, p, t.newEntry, t.oldEntry, &fs); err != nil {
 				return fetch.Result{}, err
 			}
 			var missing []string
@@ -597,6 +597,14 @@ func (f *fetcher) analyzePair(ctx context.Context, env fetch.Env, p *pair, fs *f
 	if len(oldHits) > 0 {
 		t := pickTag(oldHits, oldHints)
 		oldTag = &t
+	}
+	if p.transitive {
+		// Nothing declares a transitive pair's old version, so the old ref
+		// must anchor it; the highest tag on the old commit is upstream's
+		// to choose (an extra v3.0.0 there turns a major into a minor).
+		if oldTag, err = f.anchorOldTag(ctx, up, tags, p, oldTag, fs); err != nil {
+			return u, err
+		}
 	}
 	accept := func(v semver) bool { return oldTag == nil || v.cmp(oldTag.v) > 0 }
 	newHits, derefs, err := up.tagsAt(ctx, tags, p.newRef, append(newHints, dTo...), accept, f.cfg.MaxTagDerefs)
@@ -906,18 +914,70 @@ func ranBefore(parent, q *pair, sub string) bool {
 	return false
 }
 
-// checkMergedEntry checks, for an actions.lock entry that resolves to the
-// commit pair p already analyzed, what p did not: its IDs against
-// upstream's and its recorded tag on the commit.
-func (f *fetcher) checkMergedEntry(ctx context.Context, env fetch.Env, p *pair, e *lockEntry, fs *findings) error {
+var floatingTagRx = regexp.MustCompile(`^v(0|[1-9][0-9]{0,8})(\.(0|[1-9][0-9]{0,8}))?$`)
+
+// anchorOldTag returns the old version of a transitive pair as its old ref
+// anchors it. An exact vX.Y.Z ref is the tag (pickTag preferred it; if it
+// no longer names the commit, actions.lock-old-tag-moved reports that). A
+// floating vN or vN.M ref counts only tags under that prefix. Any other
+// ref (a branch, or a SHA key's non-version ref) needs the old commit to
+// carry exactly one vX.Y.Z tag. Otherwise the old version is unknown, and
+// analyzePair sends the pair to a human.
+func (f *fetcher) anchorOldTag(ctx context.Context, up *upstream, tags []tagRef, p *pair, picked *tagRef, fs *findings) (*tagRef, error) {
+	if len(p.lockOldTags) != 1 {
+		return nil, nil
+	}
+	ref := p.lockOldTags[0]
+	if _, exact := parseTag(ref); exact {
+		return picked, nil
+	}
+	all, complete, err := up.allTagsAt(ctx, tags, p.oldRef, f.cfg.MaxTagDerefs)
+	if err != nil {
+		return nil, err
+	}
+	var best *tagRef
+	if floatingTagRx.MatchString(ref) {
+		for i, t := range all {
+			if strings.HasPrefix(t.name, ref+".") && (best == nil || t.v.cmp(best.v) > 0) {
+				best = &all[i]
+			}
+		}
+		if best == nil {
+			fs.add(model.RouteHuman, "actions.lock-old-version-unanchored", p.name(), "no %s.* tag names the old commit %s, so its version is unknown", ref, short(p.oldRef))
+		}
+		return best, nil
+	}
+	if complete && len(all) == 1 {
+		return &all[0], nil
+	}
+	fs.add(model.RouteHuman, "actions.lock-old-version-unanchored", p.name(), "the old ref is not a version and the old commit %s carries %d vX.Y.Z tags (complete list: %t), so its version is unknown", short(p.oldRef), len(all), complete)
+	return nil, nil
+}
+
+// checkMergedEntry checks, for an actions.lock transitive pair that
+// resolves to the commit range p already analyzed, what p did not: the
+// new entry's IDs against upstream's and its recorded tag on the new
+// commit, and the old entry's exact tag on the old commit.
+func (f *fetcher) checkMergedEntry(ctx context.Context, env fetch.Env, p *pair, e, old *lockEntry, fs *findings) error {
+	checkNew := true
 	for _, x := range p.lockEntries {
 		if x == e || (x.ref == e.ref && x.ownerID == e.ownerID && x.repoID == e.repoID) {
-			return nil
+			checkNew = false
 		}
 	}
-	p.lockEntries = append(p.lockEntries, e)
-	if !contains(p.lockNewTags, e.ref) {
-		p.lockNewTags = append(p.lockNewTags, e.ref)
+	_, exactOld := parseTag(old.ref)
+	checkOld := exactOld && !contains(p.lockOldTags, old.ref)
+	if !checkNew && !checkOld {
+		return nil
+	}
+	if checkNew {
+		p.lockEntries = append(p.lockEntries, e)
+		if !contains(p.lockNewTags, e.ref) {
+			p.lockNewTags = append(p.lockNewTags, e.ref)
+		}
+	}
+	if checkOld {
+		p.lockOldTags = append(p.lockOldTags, old.ref)
 	}
 	name := p.name()
 	up := &upstream{gh: env.GitHub, owner: p.owner, repo: p.repo, tagDeref: map[string]string{}}
@@ -929,19 +989,30 @@ func (f *fetcher) checkMergedEntry(ctx context.Context, env fetch.Env, p *pair, 
 		}
 		return err
 	}
-	if e.ownerID != info.Owner.ID || e.repoID != info.ID {
-		fs.add(model.RouteRefuse, "actions.lock-identity-mismatch", name, "actions.lock records owner/repo IDs %d/%d, upstream is %d/%d", e.ownerID, e.repoID, info.Owner.ID, info.ID)
-	}
 	tags, err := up.semverTags(ctx)
 	if err != nil {
 		return err
 	}
-	ok, err := up.tagIs(ctx, tags, e.ref, p.newRef)
-	if err != nil {
-		return err
+	if checkNew {
+		if e.ownerID != info.Owner.ID || e.repoID != info.ID {
+			fs.add(model.RouteRefuse, "actions.lock-identity-mismatch", name, "actions.lock records owner/repo IDs %d/%d, upstream is %d/%d", e.ownerID, e.repoID, info.Owner.ID, info.ID)
+		}
+		ok, err := up.tagIs(ctx, tags, e.ref, p.newRef)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "%s is not an upstream vX.Y.Z tag that dereferences to the commit actions.lock records for it (%s)", safeRef(e.ref), short(p.newRef))
+		}
 	}
-	if !ok {
-		fs.add(model.RouteRefuse, "actions.lock-tag-mismatch", name, "%s is not an upstream vX.Y.Z tag that dereferences to the commit actions.lock records for it (%s)", safeRef(e.ref), short(p.newRef))
+	if checkOld {
+		ok, err := up.tagIs(ctx, tags, old.ref, p.oldRef)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fs.add(model.RouteHuman, "actions.lock-old-tag-moved", name, "%s no longer dereferences to the commit the base actions.lock recorded for it (%s)", old.ref, short(p.oldRef))
+		}
 	}
 	return nil
 }

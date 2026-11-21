@@ -592,6 +592,38 @@ func lockDelta(old, new *lockFile, bumps []lockBump, wk *walkKeys) []lockFinding
 		}
 	}
 
+	// A moved tag under another key: an added or changed entry records an
+	// exact vX.Y.Z ref that the base or head records for the same
+	// repository at another commit (a key ref@v2.0.1 and a SHA key whose
+	// ref is v2.0.1, say).
+	type repoRef struct{ nwo, ref string }
+	commits := map[repoRef]map[string]bool{}
+	for _, lf := range []*lockFile{old, new} {
+		for k, e := range lf.deps {
+			if _, exact := parseTag(e.ref); exact {
+				n, _, _ := splitPin(k)
+				rr := repoRef{n, e.ref}
+				if commits[rr] == nil {
+					commits[rr] = map[string]bool{}
+				}
+				commits[rr][e.commit] = true
+			}
+		}
+	}
+	for _, k := range sortedMapKeys(new.deps) {
+		ne, oe := new.deps[k], old.deps[k]
+		if oe != nil && oe.equal(ne) {
+			continue
+		}
+		if _, exact := parseTag(ne.ref); !exact {
+			continue
+		}
+		n, _, _ := splitPin(k)
+		if len(commits[repoRef{n, ne.ref}]) > 1 {
+			add(model.RouteHuman, "actions.lock-entry-moved", n, "%s records %s at %s, but the base or head lockfile records %s of %s at another commit: the tag moved", k, ne.ref, short(ne.commit), ne.ref, n)
+		}
+	}
+
 	// Dependency entries.
 	for _, k := range sortedMapKeys(new.deps) {
 		ne, oe := new.deps[k], old.deps[k]
@@ -798,29 +830,60 @@ type walkKeys struct {
 	pairNew, pairOld, dropped, kept map[string]bool
 }
 
-// unlockedSteps returns the lockfile keys of the step-level uses: lines of
-// workflow wf that lf does not lock for it (not in its list, or no
-// entry). ok is false when the text is not something the line scanner
-// reads reliably.
+// unlockedSteps returns the lockfile keys of the step uses: of workflow
+// wf that lf does not lock for it (not in its list, or no entry). ok is
+// false when the gate cannot be sure it saw every step uses: GitHub will
+// run: the text fails checkYAMLText, the YAML subset reader (parseYAML)
+// cannot read it or finds a step it cannot read (a flow mapping, an alias),
+// the reader and the line scanner (parseUsesLine, as the uses: diff reads
+// lines) disagree on the step uses: values (a quoted "uses" key, say), or
+// a step's uses: is neither a skipped form nor owner/repo[/path]@ref.
+//
+// Skipped by design, because no lockfile entry covers them: job-level
+// reusable-workflow calls (jobs.<id>.uses, not under steps), docker://
+// images, and same-repository actions (./ and $/), which run from the
+// workflow's own commit.
 func unlockedSteps(wf, text string, lf *lockFile) (missing []string, ok bool) {
 	if checkYAMLText(text) != nil {
 		return nil, false
 	}
+	structural, ok := stepUses(text)
+	if !ok {
+		return nil, false
+	}
+	var scanned []string
 	lines := splitLines(strings.ReplaceAll(text, "\r\n", "\n"))
 	for i, l := range lines {
 		u, isUses := parseUsesLine(l)
 		if !isUses {
 			continue
 		}
-		p := yamlPath(lines, i)
-		if !usesContext(kindWorkflow, p) || len(p) != 5 {
-			continue // job-level reusable workflow: not locked
+		if p := yamlPath(lines, i); usesContext(kindWorkflow, p) && len(p) == 5 {
+			scanned = append(scanned, u.action+"@"+u.ref)
 		}
-		owner, repo, _, err := splitAction(u.action)
-		if err != nil {
-			continue // docker:// or a local action
+	}
+	var kept []string
+	for _, u := range structural {
+		if !skippedUses(u) {
+			kept = append(kept, u)
 		}
-		k := pinKey(owner, repo, u.ref)
+	}
+	var keptScan []string
+	for _, u := range scanned {
+		if !skippedUses(u) {
+			keptScan = append(keptScan, u)
+		}
+	}
+	sort.Strings(kept)
+	sort.Strings(keptScan)
+	if strings.Join(kept, "\n") != strings.Join(keptScan, "\n") {
+		return nil, false
+	}
+	for _, u := range kept {
+		k, _, isKey := nestedKey(u)
+		if !isKey {
+			return nil, false
+		}
 		if lf.deps[k] == nil || !contains(lf.workflows[wf], k) {
 			if !contains(missing, k) {
 				missing = append(missing, k)
@@ -828,6 +891,58 @@ func unlockedSteps(wf, text string, lf *lockFile) (missing []string, ok bool) {
 		}
 	}
 	return missing, true
+}
+
+// skippedUses: the step uses: forms no lockfile entry covers.
+func skippedUses(u string) bool {
+	return strings.HasPrefix(u, "docker://") || strings.HasPrefix(u, "./") || strings.HasPrefix(u, "$/")
+}
+
+// stepUses reads jobs.<id>.steps[].uses with parseYAML. ok is false when
+// the shape is not one the gate can read in full.
+func stepUses(text string) ([]string, bool) {
+	v, err := parseYAML(text)
+	if err != nil {
+		return nil, false
+	}
+	root, isMap := v.(*yMap)
+	if !isMap {
+		return nil, false
+	}
+	var out []string
+	switch jobs := root.get("jobs").(type) {
+	case nil:
+		return nil, true
+	case *yMap:
+		for _, id := range jobs.keys {
+			job, isMap := jobs.get(id).(*yMap)
+			if !isMap {
+				return nil, false
+			}
+			switch steps := job.get("steps").(type) {
+			case nil:
+			case []any:
+				for _, st := range steps {
+					m, isMap := st.(*yMap)
+					if !isMap {
+						return nil, false
+					}
+					switch u := m.get("uses").(type) {
+					case nil:
+					case string:
+						out = append(out, u)
+					default:
+						return nil, false
+					}
+				}
+			default:
+				return nil, false
+			}
+		}
+	default:
+		return nil, false
+	}
+	return out, true
 }
 
 // checkActionsLock reads actions.lock at both commits. Without one on

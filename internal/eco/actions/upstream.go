@@ -181,6 +181,35 @@ func (u *upstream) tagsAt(ctx context.Context, tags []tagRef, sha string, hints 
 	return nil, derefs, nil
 }
 
+// allTagsAt returns every vX.Y.Z tag that dereferences to sha. complete
+// is false when maxDeref annotated tags were not enough to look at all.
+func (u *upstream) allTagsAt(ctx context.Context, tags []tagRef, sha string, maxDeref int) (hits []tagRef, complete bool, err error) {
+	derefs := 0
+	for _, t := range tags {
+		switch t.obj.Type {
+		case "commit":
+			if t.obj.SHA == sha {
+				hits = append(hits, t)
+			}
+		case "tag":
+			if _, cached := u.tagDeref[t.obj.SHA]; !cached {
+				if derefs >= maxDeref {
+					return hits, false, nil
+				}
+				derefs++
+			}
+			c, err := u.derefTag(ctx, t.obj.SHA)
+			if err != nil {
+				return nil, false, err
+			}
+			if c == sha {
+				hits = append(hits, t)
+			}
+		}
+	}
+	return hits, true, nil
+}
+
 // tagIs reports whether the vX.Y.Z tag name (from tags) dereferences to
 // commit sha.
 func (u *upstream) tagIs(ctx context.Context, tags []tagRef, name, sha string) (bool, error) {

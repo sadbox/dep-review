@@ -581,3 +581,69 @@ func TestActionsLockDeltaUnbumpedWorkflowList(t *testing.T) {
 		t.Errorf("b.yml lost acme/helper@v2.0.0 unflagged:\n%s", strings.Join(codes, "\n"))
 	}
 }
+
+// A moved tag under another key: the base locks acme/helper@v2.0.1 at one
+// commit (ci.yml pins it directly), and the head adds a SHA key of
+// acme/helper recorded as v2.0.1 at another commit.
+func TestActionsLockDeltaMovedTagOtherKey(t *testing.T) {
+	const lp = ".github/workflows/actions.lock"
+	const wfp = ".github/workflows/ci.yml"
+	h201 := "    'acme/helper@v2.0.1':\n        ref: 'v2.0.1'\n        commit: 'sha1-9999999999999999999999999999999999999999'\n        owner_id: 1\n        repo_id: 3\n"
+	hsha := "    'acme/helper@8888888888888888888888888888888888888888':\n        ref: 'v2.0.1'\n        commit: 'sha1-8888888888888888888888888888888888888888'\n        owner_id: 1\n        repo_id: 3\n"
+	wf := strings.Replace(synthWF, "      - uses: other/tool@v3.0.0\n", "      - uses: acme/helper@v2.0.1\n      - uses: other/tool@v3.0.0\n", 1)
+	base := strings.Replace(synthLock, "        - 'acme/helper@v2.0.0'\n", "        - 'acme/helper@v2.0.0'\n        - 'acme/helper@v2.0.1'\n", 1)
+	base = strings.Replace(base, "    'other/tool@v3.0.0':\n", h201+"    'other/tool@v3.0.0':\n", 1)
+	head := strings.Replace(synthBumped(), "        - 'acme/helper@v2.0.0'\n", "        - 'acme/helper@v2.0.0'\n        - 'acme/helper@v2.0.1'\n", 1)
+	head = strings.Replace(head, "uses:\n            - 'acme/helper@v2.0.0'\n", "uses:\n            - 'acme/helper@8888888888888888888888888888888888888888'\n", 1)
+	head = strings.Replace(head, "    'acme/helper@v2.0.0':\n", hsha+"    'acme/helper@v2.0.0':\n", 1)
+	head = strings.Replace(head, "    'other/tool@v3.0.0':\n", h201+"    'other/tool@v3.0.0':\n", 1)
+	fs, _, _ := lockRunMax(t, map[string]string{lp: base, wfp: strings.Replace(wf, "%s", "v1.0.0", 1)}, map[string]string{lp: head, wfp: strings.Replace(wf, "%s", "v1.0.1", 1)}, 8)
+	if got, lines := codesOf(fs); got["actions.lock-entry-moved"] != model.RouteHuman {
+		t.Errorf("findings %v: v2.0.1 recorded at two commits was not flagged\n%s", got, lines)
+	}
+}
+
+// unlockedSteps must see every step uses: GitHub runs, or say it cannot.
+func TestUnlockedSteps(t *testing.T) {
+	const wf = ".github/workflows/ci.yml"
+	locked := &lockFile{workflows: map[string][]string{wf: {"acme/helper@v2.0.0"}}, deps: map[string]*lockEntry{"acme/helper@v2.0.0": {}}}
+	empty := &lockFile{workflows: map[string][]string{wf: {}}, deps: map[string]*lockEntry{}}
+	head := "name: ci\non: [push]\njobs:\n  b:\n    runs-on: ubuntu-26.04\n    steps:\n"
+	cases := []struct {
+		name, steps string
+		lf          *lockFile
+		ok          bool
+		missing     int
+	}{
+		{"plain, unlocked", "      - uses: acme/helper@v2.0.0\n", empty, true, 1},
+		{"plain, locked", "      - uses: acme/helper@v2.0.0\n", locked, true, 0},
+		{"name first", "      - name: x\n        uses: acme/helper@v2.0.0\n", empty, true, 1},
+		{"subpath", "      - uses: acme/helper/sub@v2.0.0 # c\n", locked, true, 0},
+		{"flow mapping", "      - {uses: acme/helper@v2.0.0}\n", empty, false, 0},
+		{"quoted key", "      - \"uses\": acme/helper@v2.0.0\n", empty, false, 0},
+		{"alias", "      - *helper\n", empty, false, 0},
+		{"anchor elsewhere", "      - uses: acme/helper@v2.0.0\n", locked, false, 0},
+		{"unreadable ref", "      - uses: acme/../x@v2.0.0\n", empty, false, 0},
+		{"docker, local and same-repo are not locked", "      - uses: docker://alpine@sha256:" + strings.Repeat("0", 64) + "\n      - uses: ./local\n      - uses: $/.github/actions/x\n", empty, true, 0},
+		{"flow steps", "      [{uses: acme/helper@v2.0.0}]\n", empty, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := head + tc.steps
+			if strings.HasPrefix(tc.name, "alias") || strings.HasPrefix(tc.name, "anchor") {
+				text = "x: &helper\n  uses: acme/helper@v2.0.0\n" + text
+			}
+			if tc.name == "flow steps" {
+				text = strings.Replace(text, "    steps:\n      [", "    steps: [", 1)
+			}
+			missing, ok := unlockedSteps(wf, text, tc.lf)
+			if ok != tc.ok || len(missing) != tc.missing {
+				t.Errorf("ok=%v missing=%v, want ok=%v and %d missing", ok, missing, tc.ok, tc.missing)
+			}
+		})
+	}
+	// A job-level reusable workflow is not a step: never locked, never missing.
+	if missing, ok := unlockedSteps(wf, "name: ci\non: [push]\njobs:\n  r:\n    uses: acme/flows/.github/workflows/x.yml@"+strings.Repeat("1", 40)+"\n", empty); !ok || len(missing) != 0 {
+		t.Errorf("job-level: ok=%v missing=%v", ok, missing)
+	}
+}

@@ -42,6 +42,9 @@ type transScenario struct {
 	// actNewStep replaces the uses: value of act 1.0.1's step ("" for a
 	// run: step), given the new helper commit.
 	actNewStep func(h2 string) *string
+	// actOldStep and lockOld do the same for act 1.0.0 and the base lockfile.
+	actOldStep func(h1 string) string
+	lockOld    func(a1, h1 string) string
 	// lockNew replaces the head lockfile, built with lock(actTag, act, helperTag, helper).
 	lockNew  func(lock func(string, string, string, string) string, a2, h1, h2 string) string
 	api      func(r map[string]any, h1, h2 string)
@@ -83,7 +86,11 @@ func runTransitive(t *testing.T, sc transScenario) {
 		return map[string]string{"action.yml": "name: act\ndescription: composite\nruns:\n  using: composite\n  steps:\n    - uses: " + path + "@" + ref + "\n"}
 	}
 	ad := mkUp("acme/act")
-	a1 := commitTree(t, ad, composite("v2.0.0"), "v1.0.0")
+	actOld := composite("v2.0.0")
+	if sc.actOldStep != nil {
+		actOld["action.yml"] = "name: act\ndescription: composite\nruns:\n  using: composite\n  steps:\n    - uses: " + sc.actOldStep(h1) + "\n"
+	}
+	a1 := commitTree(t, ad, actOld, "v1.0.0")
 	actNew := composite("v2.0.1")
 	if sc.actNewStep != nil {
 		switch u := sc.actNewStep(h2); {
@@ -120,7 +127,11 @@ func runTransitive(t *testing.T, sc transScenario) {
 		t.Fatal(err)
 	}
 	gitIn(t, caller, "init", "-q")
-	base := commitTree(t, caller, map[string]string{".github/workflows/ci.yml": wfText("v1.0.0"), ".github/workflows/actions.lock": lock("v1.0.0", a1, "v2.0.0", h1)}, "base")
+	oldLock := lock("v1.0.0", a1, "v2.0.0", h1)
+	if sc.lockOld != nil {
+		oldLock = sc.lockOld(a1, h1)
+	}
+	base := commitTree(t, caller, map[string]string{".github/workflows/ci.yml": wfText("v1.0.0"), ".github/workflows/actions.lock": oldLock}, "base")
 	head := commitTree(t, caller, map[string]string{".github/workflows/ci.yml": wfText("v1.0.1"), ".github/workflows/actions.lock": newLock}, "dependabot")
 
 	api := map[string]any{}
@@ -270,6 +281,18 @@ func TestFetchTransitive(t *testing.T) {
 			codes: []string{"actions.lock-tag-mismatch"}},
 		transScenario{name: "merged pair records another repository", directHelper: true, actNewStep: shaStep, lockNew: shaLock("v2.0.1", "99"), want: model.RouteRefuse,
 			codes: []string{"actions.lock-identity-mismatch"}},
+		// The composite pinned acme/helper by SHA, recorded as v1.9.9, which
+		// is not a tag on that commit: the merged pair's old entry must
+		// have its exact tag checked as the bump's was.
+		transScenario{name: "merged pair's old entry records a moved tag", directHelper: true,
+			actOldStep: func(h1 string) string { return "acme/helper@" + h1 },
+			lockOld: func(a1, h1 string) string {
+				return "version: 'v0.0.3'\nworkflows:\n    '.github/workflows/ci.yml':\n        - 'acme/act@v1.0.0'\n        - 'acme/helper@v2.0.0'\ndependencies:\n" +
+					"    'acme/act@v1.0.0':\n        ref: 'v1.0.0'\n        commit: 'sha1-" + a1 + "'\n        owner_id: 1\n        repo_id: 2\n        uses:\n            - 'acme/helper@" + h1 + "'\n" +
+					"    'acme/helper@" + h1 + "':\n        ref: 'v1.9.9'\n        commit: 'sha1-" + h1 + "'\n        owner_id: 1\n        repo_id: 3\n" +
+					"    'acme/helper@v2.0.0':\n        ref: 'v2.0.0'\n        commit: 'sha1-" + h1 + "'\n        owner_id: 1\n        repo_id: 3\n"
+			},
+			want: model.RouteHuman, codes: []string{"actions.lock-old-tag-moved"}},
 		// act 1.0.1's entry still lists acme/helper, but its action.yml no
 		// longer runs it: the merged pair has no subpath to analyze.
 		transScenario{name: "merged pair the parent does not run", directHelper: true, actNewStep: func(string) *string { return nil }, want: model.RouteHuman,
@@ -294,6 +317,7 @@ type lockedComposite struct {
 	oldHelperKey     string            // helper ref in the base lockfile
 	newHelperKey     string            // helper ref in the head lockfile
 	helperTags       [2]string         // upstream tags on the old, new helper commit
+	api              func(r map[string]any, h1, h2 string)
 }
 
 func runLockedComposite(t *testing.T, sc lockedComposite) (model.Route, map[string]bool) {
@@ -314,6 +338,9 @@ func runLockedComposite(t *testing.T, sc lockedComposite) (model.Route, map[stri
 	comp := func(u string) map[string]string {
 		return map[string]string{"action.yml": "name: act\ndescription: composite\nruns:\n  using: composite\n  steps:\n    - uses: " + u + "\n"}
 	}
+	// "{h1}" in actOld or oldHelperKey stands for the old helper commit.
+	sc.actOld = strings.ReplaceAll(sc.actOld, "{h1}", h1)
+	sc.oldHelperKey = strings.ReplaceAll(sc.oldHelperKey, "{h1}", h1)
 	a1 := commitTree(t, ad, comp(sc.actOld), "v1.0.0")
 	f2 := comp(sc.actNew)
 	for k, v := range sc.actNewExtra {
@@ -339,6 +366,9 @@ func runLockedComposite(t *testing.T, sc lockedComposite) (model.Route, map[stri
 	api := map[string]any{}
 	repoAPI(api, "acme/act", 2, 1, a1, a2, "v1.0.0", "v1.0.1")
 	repoAPI(api, "acme/helper", 3, 1, h1, h2, sc.helperTags[0], sc.helperTags[1])
+	if sc.api != nil {
+		sc.api(api, h1, h2)
+	}
 	res, err := New(Config{CloneBase: "file://" + filepath.Join(root, "upstream") + "/"}).Fetch(context.Background(), fetch.Env{
 		Class:   model.Classification{Repo: "me/caller", BaseSHA: base, HeadSHA: head, Ecosystem: model.GitHubActions},
 		RepoDir: caller, Scratch: filepath.Join(root, "scratch"), Evidence: &memEvidence{}, GitHub: &fakeGH{resp: api},
@@ -390,5 +420,64 @@ func TestFetchTransitiveMovedTag(t *testing.T) {
 	})
 	if model.Worse(got, model.RouteHuman) != got || !codes["actions.lock-entry-moved"] {
 		t.Errorf("route %s, codes %v: a moved transitive tag did not reach a human", got, codes)
+	}
+}
+
+// A transitive pair's floating old ref (acme/helper@v2) anchors its old
+// version: upstream adding v3.0.0 to the old commit must not turn the
+// v2 -> v3.1.0 major bump into a 3.0.0 -> 3.1.0 minor.
+func TestFetchTransitiveFloatingOldRef(t *testing.T) {
+	ref := func(n, sha string) obj {
+		return obj{"ref": "refs/tags/" + n, "object": obj{"sha": sha, "type": "commit"}}
+	}
+	for _, tc := range []struct {
+		name  string
+		extra bool
+	}{{"control", false}, {"extra v3.0.0 on the old commit", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := lockedComposite{
+				helper1: v1Files(), helper2: v2Files(),
+				actOld: "acme/helper@v2", actNew: "acme/helper@v3.1.0",
+				oldHelperKey: "v2", newHelperKey: "v3.1.0", helperTags: [2]string{"v2.5.0", "v3.1.0"},
+			}
+			if tc.extra {
+				sc.api = func(r map[string]any, h1, h2 string) {
+					r["repos/acme/helper/git/matching-refs/tags/v"] = []obj{ref("v2.5.0", h1), ref("v3.0.0", h1), ref("v3.1.0", h2)}
+				}
+			}
+			if got, codes := runLockedComposite(t, sc); got != model.RouteHuman {
+				t.Errorf("route %s (%v): a v2 -> v3.1.0 major transitive bump did not reach a human", got, codes)
+			}
+		})
+	}
+}
+
+// A transitive pair whose old ref is not a version (a SHA key) has an old
+// version only when the old commit carries exactly one vX.Y.Z tag.
+func TestFetchTransitiveUnanchoredOldRef(t *testing.T) {
+	ref := func(n, sha string) obj {
+		return obj{"ref": "refs/tags/" + n, "object": obj{"sha": sha, "type": "commit"}}
+	}
+	for _, tc := range []struct {
+		name string
+		two  bool
+		want model.Route
+	}{{"one tag on the old commit", false, model.RouteReview}, {"two tags on the old commit", true, model.RouteHuman}} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := lockedComposite{
+				helper1: v1Files(), helper2: v2Files(),
+				actOld: "acme/helper@{h1}", actNew: "acme/helper@v2.0.1",
+				oldHelperKey: "{h1}", newHelperKey: "v2.0.1", helperTags: [2]string{"v2.0.0", "v2.0.1"},
+			}
+			if tc.two {
+				sc.api = func(r map[string]any, h1, h2 string) {
+					r["repos/acme/helper/git/matching-refs/tags/v"] = []obj{ref("v1.0.0", h1), ref("v2.0.0", h1), ref("v2.0.1", h2)}
+				}
+			}
+			got, codes := runLockedComposite(t, sc)
+			if got != tc.want || (tc.two && !codes["actions.lock-old-version-unanchored"]) {
+				t.Errorf("route %s, want %s (%v)", got, tc.want, codes)
+			}
+		})
 	}
 }

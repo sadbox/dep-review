@@ -73,12 +73,16 @@ as a bump of its own (`Direct: false`, evidence under
 `actions/transitive/`), with the same identity checks; the old exact tag
 must still name the old commit. A nested `uses:` change that such a pair
 explains no longer forces a human; the PR's route is the worst of all
-pairs. These go to a human: the same key at another commit (a moved tag),
-a subpath the parent did not run before, a transitive action from a
-repository the old version did not use, two pins of one repository under
-one parent, more than 8 transitive pairs, a step of any onboarded
-workflow whose pin the new lockfile does not lock, and any other lockfile
-change. Job-level reusable workflows and workflows not in the lockfile
+pairs. A transitive pair's old version comes from its old ref: an exact
+tag, the highest tag under a floating `vN`/`vN.M` ref, or for any other
+ref the old commit's only vX.Y.Z tag. These go to a human: a moved tag
+(the same key at another commit, or one exact ref recorded at two
+commits), an old version the old ref does not anchor, a subpath the
+parent did not run before, a transitive action from a repository the old
+version did not use, two pins of one repository under one parent, more
+than 8 transitive pairs, a step of any onboarded workflow whose pin the
+new lockfile does not lock (or a workflow whose steps the gate cannot
+read in full), and any other lockfile change. Job-level reusable workflows and workflows not in the lockfile
 keep SHA pins.
 
 ## Layout
