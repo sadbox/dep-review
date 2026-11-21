@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,11 @@ type git struct {
 var errMissing = errors.New("object not found")
 
 func (g git) run(ctx context.Context, args ...string) ([]byte, error) {
+	return g.runStdin(ctx, nil, args...)
+}
+
+// runStdin is run with stdin (nil for none).
+func (g git) runStdin(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
 	full := []string{
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "credential.helper=",
@@ -33,6 +39,9 @@ func (g git) run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, g.bin, full...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GIT_PAGER=cat", "GIT_EXTERNAL_DIFF=")
 	var out, stderr bytes.Buffer
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -65,11 +74,12 @@ type fileChange struct {
 	status           byte // A, M, D, T (renames are disabled)
 	path             string
 	oldMode, newMode string
+	newSHA           string // blob on the new side; all zeros when deleted
 }
 
 // changedFiles lists files that differ between two commits.
 func (g git) changedFiles(ctx context.Context, from, to string) ([]fileChange, error) {
-	out, err := g.run(ctx, "diff", "--raw", "--no-renames", "--no-ext-diff", "--no-textconv", "-z", from, to, "--")
+	out, err := g.run(ctx, "diff", "--raw", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "-z", from, to, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +104,7 @@ func parseRawDiff(out []byte) ([]fileChange, error) {
 			return nil, fmt.Errorf("unexpected git diff --raw header %q", f)
 		}
 		i++
-		res = append(res, fileChange{status: meta[4][0], path: string(fields[i]), oldMode: meta[0], newMode: meta[1]})
+		res = append(res, fileChange{status: meta[4][0], path: string(fields[i]), oldMode: meta[0], newMode: meta[1], newSHA: meta[3]})
 	}
 	return res, nil
 }
@@ -105,4 +115,39 @@ func (g git) diff(ctx context.Context, from, to string, pathspecs ...string) (st
 	args = append(args, pathspecs...)
 	out, err := g.run(ctx, args...)
 	return string(out), err
+}
+
+// blobPrefixes returns up to n leading bytes of each blob, by SHA, in one
+// `git cat-file --batch`. In a blobless clone the blobs must be present
+// first (see lfsPointers).
+func (g git) blobPrefixes(ctx context.Context, shas []string, n int) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	if len(shas) == 0 {
+		return out, nil
+	}
+	raw, err := g.runStdin(ctx, []byte(strings.Join(shas, "\n")+"\n"), "cat-file", "--batch")
+	if err != nil {
+		return nil, err
+	}
+	for len(raw) > 0 {
+		hdr, rest, ok := bytes.Cut(raw, []byte("\n"))
+		if !ok {
+			return nil, fmt.Errorf("truncated cat-file --batch output")
+		}
+		f := strings.Fields(string(hdr))
+		if len(f) == 2 && f[1] == "missing" {
+			raw = rest
+			continue
+		}
+		if len(f) != 3 {
+			return nil, fmt.Errorf("unexpected cat-file --batch header %q", hdr)
+		}
+		size, err := strconv.Atoi(f[2])
+		if err != nil || size < 0 || size+1 > len(rest) {
+			return nil, fmt.Errorf("unexpected cat-file --batch header %q", hdr)
+		}
+		out[f[0]] = rest[:min(size, n)]
+		raw = rest[size+1:]
+	}
+	return out, nil
 }

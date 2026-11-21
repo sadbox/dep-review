@@ -443,6 +443,16 @@ func TestFetchScenarios(t *testing.T) {
 		{name: "export-ignore in nested gitattributes", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
 			v1: func(f map[string]string) { f["dist/.gitattributes"] = "[attr]hide export-ignore\nindex.js hide\n" },
 			v2: func(f map[string]string) { f["dist/.gitattributes"] = "[attr]hide export-ignore\nindex.js hide\n" }},
+		{name: "filter=lfs", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) { f[".gitattributes"] = "dist/*.js filter=lfs diff=lfs merge=lfs -text\n" }},
+		{name: "legacy crlf", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) { f[".gitattributes"] = "dist/index.js crlf=input\n" }},
+		{name: "legacy -crlf", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) { f[".gitattributes"] = "*.js -crlf\n" }},
+		{name: "changed file is an LFS pointer", want: model.RouteHuman, codes: []string{"actions.lfs-pointer"}, notCodes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) {
+				f["dist/index.js"] = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n"
+			}},
 		{name: "ordinary gitattributes", want: model.RouteReview, notCodes: []string{"actions.archive-attributes"},
 			v2: func(f map[string]string) {
 				f[".gitattributes"] = "* text=auto eol=lf\ndist/** -diff linguist-generated\n"

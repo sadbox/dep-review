@@ -654,6 +654,13 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 	if err != nil {
 		return err
 	}
+	lfs, err := lfsPointers(ctx, up, p.oldRef, p.newRef, changed)
+	if err != nil {
+		return err
+	}
+	if len(lfs) > 0 {
+		fs.add(model.RouteHuman, "actions.lfs-pointer", name, "%d changed files are Git LFS pointers; the tarball the runner downloads may hold the LFS object, or the pointer, instead of what the gate read: %s", len(lfs), strings.Join(lfs[:min(len(lfs), 10)], ", "))
+	}
 
 	// action.yml for every subpath used.
 	var entries []string
@@ -987,8 +994,9 @@ func readBundle(ctx context.Context, g git, p *pair, c fileChange) (bundleInput,
 
 // archiveAttributes lists the .gitattributes files at rev that name an
 // attribute git archive applies: export-subst and ident rewrite file
-// content, export-ignore drops files, eol=crlf and working-tree-encoding
-// convert them. The runner downloads the action as GitHub's tarball of
+// content, export-ignore drops files, eol=crlf, the legacy crlf and
+// working-tree-encoding convert them, and a filter (filter=lfs above all)
+// can make the archive serve other bytes than the blob. The runner downloads the action as GitHub's tarball of
 // the pinned commit, which honors them; the gate reads raw blobs. Their
 // effect cannot be replayed deterministically (export-subst expands
 // %d/%cr and friends, which change as refs move and time passes), so
@@ -1017,6 +1025,8 @@ func archiveAttributes(ctx context.Context, g git, rev string) ([]string, error)
 			name, val, _ := strings.Cut(strings.TrimLeft(tok, "-!"), "=")
 			switch {
 			case name == "export-subst", name == "export-ignore", name == "ident", name == "working-tree-encoding",
+				name == "filter", // filter=lfs: the archive may serve the LFS object, or the pointer
+				name == "crlf",   // legacy crlf / -crlf / crlf=input: end-of-line conversion
 				name == "eol" && val == "crlf":
 				found[name] = true
 			}
@@ -1035,4 +1045,32 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(ks)
 	return ks
+}
+
+const lfsPointerPrefix = "version https://git-lfs.github.com/spec/"
+
+// lfsPointers returns the changed files whose new blob is a Git LFS
+// pointer. A `git diff --numstat` first fetches the changed blobs of a
+// blobless clone in one batch.
+func lfsPointers(ctx context.Context, g git, from, to string, changed []fileChange) ([]string, error) {
+	if _, err := g.run(ctx, "diff", "--numstat", "--no-renames", "--no-ext-diff", "--no-textconv", "-z", from, to, "--"); err != nil {
+		return nil, err
+	}
+	var shas []string
+	for _, c := range changed {
+		if c.status != 'D' && shaRx.MatchString(c.newSHA) && c.newMode != "160000" {
+			shas = append(shas, c.newSHA)
+		}
+	}
+	pre, err := g.blobPrefixes(ctx, shas, len(lfsPointerPrefix))
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, c := range changed {
+		if string(pre[c.newSHA]) == lfsPointerPrefix {
+			out = append(out, safePath(c.path))
+		}
+	}
+	return out, nil
 }
