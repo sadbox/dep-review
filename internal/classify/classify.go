@@ -13,6 +13,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/sadbox/dep-review/internal/gh"
@@ -98,6 +99,8 @@ type Options struct {
 	// repository.
 	ExpectRepo string
 	Logf       func(format string, args ...any)
+	// Sleep waits between activity-log reads (tests replace it).
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 // Classify reads the workflow_run event and the API and returns the
@@ -107,6 +110,10 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	logf := opt.Logf
 	if logf == nil {
 		logf = log.Printf
+	}
+	sleep := opt.Sleep
+	if sleep == nil {
+		sleep = sleepCtx
 	}
 	var ev Event
 	if err := json.Unmarshal(eventJSON, &ev); err != nil {
@@ -224,7 +231,21 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	// squash-merging another Dependabot PR into this branch: both are
 	// authored by dependabot[bot], committed by web-flow and signed by
 	// GitHub. The branch's activity log records who moved the ref.
-	if why := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA); why != "" {
+	// The activity log lags the push by a little; give it a moment, and if
+	// it still has not caught up, decide nothing (sweep classifies again).
+	why, lag := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
+	for try := 0; lag && try < historyRetries; try++ {
+		if err := sleep(ctx, historyRetryDelay); err != nil {
+			return model.Classification{}, err
+		}
+		why, lag = branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
+	}
+	switch {
+	case lag:
+		cl.Kind, cl.Reason = model.KindPending, why
+		logf("kind=dependabot-pending: %s", why)
+		return cl, nil
+	case why != "":
 		return unverified(why)
 	}
 	// A PR retargeted to another base after Dependabot opened it is not the
@@ -301,6 +322,12 @@ type activity struct {
 	Actor        *user  `json:"actor"`
 }
 
+// How long classify waits for the activity log to reach the head.
+const (
+	historyRetries    = 3
+	historyRetryDelay = 10 * time.Second
+)
+
 // branchHistoryProblem reads the head branch's activity log (oldest first)
 // and returns why it does not prove that only Dependabot moved the branch
 // since it was last created, or "". Every entry from the last
@@ -308,11 +335,17 @@ type activity struct {
 // each starting where the previous one ended, and the last must end at
 // head. Anything else, including an unreadable or incomplete log, is not
 // proof.
-func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head string) string {
+//
+// lag is set when the only problem is that the log, otherwise clean, does
+// not reach head yet: GitHub records activity shortly after the push.
+func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head string) (why string, lag bool) {
 	q := url.Values{"ref": {"refs/heads/" + branch}, "direction": {"asc"}}
 	acts, err := gh.List[activity](ctx, c, fmt.Sprintf("repos/%s/activity?%s", repo, q.Encode()))
 	if err != nil {
-		return fmt.Sprintf("the branch's push history could not be read (HTTP %d)", gh.StatusCode(err))
+		return fmt.Sprintf("the branch's push history could not be read (HTTP %d)", gh.StatusCode(err)), false
+	}
+	if len(acts) == 0 {
+		return "the branch has no push history yet", true
 	}
 	start := -1
 	for i, a := range acts {
@@ -321,28 +354,28 @@ func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head 
 		}
 	}
 	if start < 0 {
-		return "the branch's push history does not include its creation"
+		return "the branch's push history does not include its creation", false
 	}
 	prev := ""
 	for i, a := range acts[start:] {
 		switch {
 		case a.Actor == nil || a.Actor.Login != dependabotLogin:
-			return "someone other than dependabot[bot] changed the branch (" + safeType(a.ActivityType) + ")"
+			return "someone other than dependabot[bot] changed the branch (" + safeType(a.ActivityType) + ")", false
 		case i == 0 && !zeroSHA(a.Before):
-			return "the branch's creation does not start from nothing"
+			return "the branch's creation does not start from nothing", false
 		case i > 0 && a.ActivityType != "push" && a.ActivityType != "force_push":
-			return "the branch was changed by a " + safeType(a.ActivityType)
+			return "the branch was changed by a " + safeType(a.ActivityType), false
 		case i > 0 && a.Before != prev:
-			return "the branch's push history has a gap"
+			return "the branch's push history has a gap", false
 		case !gh.ValidSHA(a.After):
-			return "the branch's push history has a malformed commit ID"
+			return "the branch's push history has a malformed commit ID", false
 		}
 		prev = a.After
 	}
 	if prev != head {
-		return "the branch's push history does not reach the head commit yet"
+		return "the branch's push history does not reach the head commit yet", true
 	}
-	return ""
+	return "", false
 }
 
 // timelineProblem reads the PR's timeline and returns why it disqualifies
@@ -458,6 +491,17 @@ func excludesNoDependabot(p string) bool {
 		return true
 	}
 	return !strings.ContainsAny(p, "*?[]{}\\!~") && !strings.HasPrefix(p, dependabotRefs)
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 func zeroSHA(s string) bool { return len(s) == 40 && strings.Trim(s, "0") == "" }

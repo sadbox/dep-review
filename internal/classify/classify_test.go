@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
@@ -25,14 +26,17 @@ type fixture struct {
 	pr       map[string]any
 	commits  []map[string]any
 	files    []map[string]any
-	byCommit []map[string]any // GET commits/{sha}/pulls
-	activity []map[string]any // GET activity?ref=<head branch>, oldest first
-	actCode  int              // non-zero: GET activity fails with this status
-	rulesets []map[string]any // full rulesets; the list endpoint serves their summaries
-	rsCode   int              // non-zero: GET rulesets fails with this status
-	rsGet    int              // non-zero: GET rulesets/{id} fails with this status
-	timeline []map[string]any // GET issues/7/timeline
-	tlCode   int              // non-zero: GET timeline fails with this status
+	byCommit []map[string]any   // GET commits/{sha}/pulls
+	activity []map[string]any   // GET activity?ref=<head branch>, oldest first
+	actCode  int                // non-zero: GET activity fails with this status
+	rulesets []map[string]any   // full rulesets; the list endpoint serves their summaries
+	rsCode   int                // non-zero: GET rulesets fails with this status
+	rsGet    int                // non-zero: GET rulesets/{id} fails with this status
+	timeline []map[string]any   // GET issues/7/timeline
+	actSeq   [][]map[string]any // successive activity responses (overrides activity)
+	actCalls int
+	sleeps   int
+	tlCode   int // non-zero: GET timeline fails with this status
 }
 
 // dependabotRuleset is the ruleset the owner created in every repository.
@@ -109,7 +113,15 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 			w.WriteHeader(f.actCode)
 			return
 		}
-		json.NewEncoder(w).Encode(f.activity)
+		acts := f.activity
+		if len(f.actSeq) > 0 {
+			acts = f.actSeq[min(f.actCalls, len(f.actSeq)-1)]
+		}
+		f.actCalls++
+		if acts == nil {
+			acts = []map[string]any{}
+		}
+		json.NewEncoder(w).Encode(acts)
 	})
 	mux.HandleFunc("GET /repos/o/r/issues/7/timeline", func(w http.ResponseWriter, r *http.Request) {
 		if f.tlCode != 0 {
@@ -156,7 +168,10 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 	c.BaseURL = srv.URL + "/"
 	c.HTTP = srv.Client()
 	ev, _ := json.Marshal(f.event)
-	return Classify(context.Background(), c, ev, Options{TriggerPath: trig, Logf: t.Logf})
+	return Classify(context.Background(), c, ev, Options{TriggerPath: trig, Logf: t.Logf, Sleep: func(context.Context, time.Duration) error {
+		f.sleeps++
+		return nil
+	}})
 }
 
 func wr(f *fixture) map[string]any { return f.event["workflow_run"].(map[string]any) }
@@ -252,13 +267,28 @@ func TestClassify(t *testing.T) {
 		{"history has a gap", func(f *fixture) {
 			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40)), act("push", "dependabot[bot]", strings.Repeat("6", 40), head)}
 		}, model.KindDependabotUnverified, "gap"},
+		// Re-review R1b: a log that has not caught up is not a verdict.
 		{"history behind the head", func(f *fixture) {
 			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
-		}, model.KindDependabotUnverified, "does not reach the head"},
+		}, model.KindPending, "does not reach the head"},
+		{"history catches up", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.actSeq = [][]map[string]any{
+				{act("branch_creation", "dependabot[bot]", zero, mid)},
+				{act("branch_creation", "dependabot[bot]", zero, mid), act("force_push", "dependabot[bot]", mid, head)},
+			}
+		}, model.KindDependabot, ""},
+		{"history catches up with a person's push", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.actSeq = [][]map[string]any{
+				{act("branch_creation", "dependabot[bot]", zero, mid)},
+				{act("branch_creation", "dependabot[bot]", zero, mid), act("push", "someone", mid, head)},
+			}
+		}, model.KindDependabotUnverified, "someone other than dependabot"},
 		{"history without the creation", func(f *fixture) {
 			f.activity = []map[string]any{act("push", "dependabot[bot]", strings.Repeat("5", 40), head)}
 		}, model.KindDependabotUnverified, "creation"},
-		{"empty history", func(f *fixture) { f.activity = nil }, model.KindDependabotUnverified, "creation"},
+		{"empty history", func(f *fixture) { f.activity = nil }, model.KindPending, "no push history yet"},
 		{"no actor", func(f *fixture) {
 			f.activity = []map[string]any{{"activity_type": "branch_creation", "before": zero, "after": head}}
 		}, model.KindDependabotUnverified, "someone other than dependabot"},
@@ -323,6 +353,20 @@ func TestClassify(t *testing.T) {
 				t.Errorf("reason = %q, want %q", got.Reason, tt.reason)
 			}
 		})
+	}
+}
+
+// The lag case reads the log 1+historyRetries times, sleeping between.
+func TestClassifyPendingRetries(t *testing.T) {
+	f := defaultFixture(t)
+	f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
+	got, err := f.run(t)
+	if err != nil || got.Kind != model.KindPending || f.actCalls != 1+historyRetries || f.sleeps != historyRetries {
+		t.Errorf("kind %s err %v: %d reads, %d sleeps", got.Kind, err, f.actCalls, f.sleeps)
+	}
+	f = defaultFixture(t)
+	if got, _ := f.run(t); got.Kind != model.KindDependabot || f.actCalls != 1 || f.sleeps != 0 {
+		t.Errorf("clean log: kind %s, %d reads, %d sleeps", got.Kind, f.actCalls, f.sleeps)
 	}
 }
 

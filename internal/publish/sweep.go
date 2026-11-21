@@ -2,11 +2,13 @@ package publish
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/sadbox/dep-review/internal/classify"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
@@ -128,11 +130,104 @@ func sweepOne(ctx context.Context, cfg Config, repo string, pr ghPull) error {
 	}
 	// No decision (no status, or the gate's last attempt errored).
 	old, err := headOlderThan(ctx, cfg, repo, head, cfg.StuckAfter)
-	if err != nil || !old {
+	if err != nil {
 		return err
+	}
+	if !old {
+		return recheck(ctx, cfg, repo, pr)
 	}
 	cfg.Logf("#%d: no decision for head %s", pr.Number, head[:12])
 	return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionPending, "stuck without a decision", true)
+}
+
+// recheck classifies an undecided head again: a dependabot-pending PR
+// (its branch's activity log had not caught up) or a gate run that failed.
+// When it can now be decided it re-runs the head's trigger workflow run,
+// which starts the gate again; a still-pending PR is left for the next
+// sweep, and the stuck report takes over after StuckAfter.
+func recheck(ctx context.Context, cfg Config, repo string, pr ghPull) error {
+	head := pr.Head.SHA
+	if old, err := headOlderThan(ctx, cfg, repo, head, cfg.RecheckAfter); err != nil || !old {
+		return err
+	}
+	run, err := triggerRun(ctx, cfg, repo, head)
+	if err != nil || run == nil {
+		if run == nil && err == nil {
+			cfg.Logf("#%d: no completed trigger run for head %s", pr.Number, head[:12])
+		}
+		return err
+	}
+	var meta struct {
+		Private bool `json:"private"`
+	}
+	if err := cfg.GitHub.Get(ctx, "repos/"+repo, &meta); err != nil {
+		return err
+	}
+	ev, err := json.Marshal(map[string]any{
+		"action": "completed",
+		"workflow_run": map[string]any{
+			"event": run.Event, "path": run.Path, "head_sha": run.HeadSHA, "head_branch": run.HeadBranch,
+			"head_repository": run.HeadRepository, "pull_requests": run.PullRequests,
+		},
+		"repository": map[string]any{"full_name": repo, "private": meta.Private},
+	})
+	if err != nil {
+		return err
+	}
+	cl, err := cfg.Classify(ctx, cfg.GitHub, ev, classify.Options{TriggerPath: cfg.TriggerPath, ExpectRepo: repo, Logf: cfg.Logf, Sleep: cfg.Sleep})
+	if err != nil {
+		return err
+	}
+	switch cl.Kind {
+	case model.KindDependabot, model.KindDependabotUnverified:
+		if err := cfg.GitHub.Post(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/rerun", repo, run.ID), map[string]any{}, nil); err != nil {
+			return fmt.Errorf("re-running the trigger: %w", err)
+		}
+		cfg.Logf("#%d: now %s; re-ran trigger run %d", pr.Number, cl.Kind, run.ID)
+	default:
+		cfg.Logf("#%d: still %s: %s", pr.Number, cl.Kind, Inline(cl.Reason))
+	}
+	return nil
+}
+
+type workflowRun struct {
+	ID             int64  `json:"id"`
+	Event          string `json:"event"`
+	Path           string `json:"path"`
+	Status         string `json:"status"`
+	HeadSHA        string `json:"head_sha"`
+	HeadBranch     string `json:"head_branch"`
+	HeadRepository *struct {
+		FullName string `json:"full_name"`
+	} `json:"head_repository"`
+	PullRequests []struct {
+		Number int `json:"number"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	} `json:"pull_requests"`
+}
+
+// triggerRun is the newest completed pull_request run of the trigger
+// workflow on head, or nil.
+func triggerRun(ctx context.Context, cfg Config, repo, head string) (*workflowRun, error) {
+	var found *workflowRun
+	err := cfg.GitHub.Pages(ctx, fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&event=pull_request", repo, head), func(body []byte) error {
+		var page struct {
+			WorkflowRuns []workflowRun `json:"workflow_runs"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return err
+		}
+		for i := range page.WorkflowRuns {
+			r := page.WorkflowRuns[i]
+			if found == nil && r.ID > 0 && r.Path == cfg.TriggerPath && r.Status == "completed" && r.HeadSHA == head {
+				found = &r
+			}
+		}
+		return nil
+	})
+	return found, err
 }
 
 // headOlderThan reports whether head was committed more than d ago.

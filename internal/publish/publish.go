@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sadbox/dep-review/internal/classify"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
@@ -40,9 +41,15 @@ type Config struct {
 	PollMin    time.Duration
 	PollMax    time.Duration
 	StuckAfter time.Duration // sweep: report heads without a decision older than this
-	Now        func() time.Time
-	Sleep      func(ctx context.Context, d time.Duration) error
-	Logf       func(format string, args ...any)
+	// RecheckAfter: sweep classifies an undecided head again (and re-runs
+	// its trigger when it can now be decided) once it is this old, so it
+	// does not race a gate run still in progress.
+	RecheckAfter time.Duration
+	// Classify is classify.Classify (tests replace it).
+	Classify func(ctx context.Context, c *gh.Client, eventJSON []byte, opt classify.Options) (model.Classification, error)
+	Now      func() time.Time
+	Sleep    func(ctx context.Context, d time.Duration) error
+	Logf     func(format string, args ...any)
 }
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -88,6 +95,12 @@ func (cfg *Config) defaults() {
 	}
 	if cfg.StuckAfter == 0 {
 		cfg.StuckAfter = 2 * time.Hour
+	}
+	if cfg.RecheckAfter == 0 {
+		cfg.RecheckAfter = 10 * time.Minute
+	}
+	if cfg.Classify == nil {
+		cfg.Classify = classify.Classify
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -198,7 +211,7 @@ func Publish(ctx context.Context, cfg Config, in Inputs) error {
 	o := Decide(in)
 	cl := in.Class
 	cfg.Logf("decision=%s state=%s reason=%q", o.Decision, o.State, o.Reason)
-	if o.Decision == model.DecisionIgnore {
+	if o.Decision == model.DecisionIgnore || cl.Kind == model.KindPending {
 		return nil
 	}
 	if !gh.ValidRepo(cl.Repo) || cl.PR <= 0 || !gh.ValidSHA(cl.HeadSHA) {

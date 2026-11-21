@@ -40,6 +40,12 @@ const (
 	// branch) but fails a check above, e.g. someone pushed to the branch.
 	// Always goes to a human; never treated as "not Dependabot".
 	KindDependabotUnverified Kind = "dependabot-unverified"
+	// KindPending: everything checked so far is Dependabot's, but the
+	// branch's activity log has not caught up with the head yet (GitHub
+	// records it shortly after the push). Nothing is decided: publish
+	// sets no status and sends nothing, and sweep classifies the PR
+	// again on its next run, reporting it as stuck after the usual time.
+	KindPending Kind = "dependabot-pending"
 	// KindOther: neither authored by dependabot[bot] nor on a dependabot/
 	// branch. The gate does nothing at all for these.
 	KindOther Kind = "other"
