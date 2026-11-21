@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 // lockSet maps an npm package name to the set of versions locked for it.
@@ -101,10 +103,14 @@ func changedPaths(old, new map[string]string) map[string]bool {
 
 func parseNPMLock(data []byte, s lockSet, paths map[string]string, dir string) error {
 	var lf struct {
-		Packages     map[string]struct{ Version string } `json:"packages"`
-		Dependencies map[string]json.RawMessage          `json:"dependencies"`
+		Packages map[string]struct {
+			Version string `json:"version"`
+		} `json:"packages"`
+		Dependencies map[string]json.RawMessage `json:"dependencies"`
 	}
-	if err := json.Unmarshal(data, &lf); err != nil {
+	// strictjson, not encoding/json: a case-folded duplicate such as
+	// "version"/"Version" would otherwise pick a version npm does not read.
+	if err := strictjson.Unmarshal(data, &lf); err != nil {
 		return err
 	}
 	for k, v := range lf.Packages {
@@ -124,7 +130,7 @@ func parseNPMLock(data []byte, s lockSet, paths map[string]string, dir string) e
 					Version      string                     `json:"version"`
 					Dependencies map[string]json.RawMessage `json:"dependencies"`
 				}
-				if err := json.Unmarshal(raw, &d); err != nil {
+				if err := strictjson.Unmarshal(raw, &d); err != nil {
 					return err
 				}
 				s.add(name, d.Version)

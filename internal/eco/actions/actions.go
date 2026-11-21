@@ -29,6 +29,7 @@ import (
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 // CodeRebuildNotRun is the finding left on every update whose dist/
@@ -748,6 +749,10 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 			continue // deleted
 		}
 		pc, err := comparePackageJSON(od, nd)
+		if errors.Is(err, strictjson.ErrRejected) {
+			fs.add(model.RouteRefuse, "actions.json-ambiguous", name, "%s: duplicate or case-folded keys (or other JSON a consumer may read differently)", safePath(c.path))
+			continue
+		}
 		if err != nil {
 			fs.add(model.RouteHuman, "actions.build-config-changed", name, "%s could not be parsed", safePath(c.path))
 			continue
@@ -789,6 +794,9 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 				return err
 			}
 			s, err := parseLockfile(c.path, data)
+			if errors.Is(err, strictjson.ErrRejected) {
+				fs.add(model.RouteRefuse, "actions.json-ambiguous", name, "%s: duplicate or case-folded keys (or other JSON a consumer may read differently)", safePath(c.path))
+			}
 			if err != nil {
 				lockOK = false
 				fs.add(model.RouteHuman, "actions.lockfile-unparsed", name, "%s could not be parsed", safePath(c.path))

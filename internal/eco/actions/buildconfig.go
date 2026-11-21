@@ -1,11 +1,12 @@
 package actions
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 // buildConfigRx matches files that configure how dist/ is produced:
@@ -47,14 +48,18 @@ type packageJSONChange struct {
 	engines         string
 }
 
+// comparePackageJSON decodes with strictjson: encoding/json would bind
+// "Scripts" to the scripts field and let the last of "scripts"/"Scripts"
+// win, hiding a build-script change from the gate that npm (exact-case)
+// would run. A strictjson.ErrRejected error means the file is ambiguous.
 func comparePackageJSON(oldData, newData []byte) (*packageJSONChange, error) {
 	var o, n packageJSON
 	if len(oldData) > 0 {
-		if err := json.Unmarshal(oldData, &o); err != nil {
+		if err := strictjson.Unmarshal(oldData, &o); err != nil {
 			return nil, fmt.Errorf("old package.json: %w", err)
 		}
 	}
-	if err := json.Unmarshal(newData, &n); err != nil {
+	if err := strictjson.Unmarshal(newData, &n); err != nil {
 		return nil, fmt.Errorf("new package.json: %w", err)
 	}
 	c := &packageJSONChange{}

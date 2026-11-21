@@ -457,6 +457,14 @@ func TestFetchScenarios(t *testing.T) {
 			v2: func(f map[string]string) {
 				f[".gitattributes"] = "* text=auto eol=lf\ndist/** -diff linguist-generated\n"
 			}},
+		{name: "case-folded scripts key", want: model.RouteRefuse, codes: []string{"actions.json-ambiguous"},
+			v2: func(f map[string]string) {
+				f["package.json"] = strings.Replace(f["package.json"], `"scripts":{"build":"ncc build src/main.ts"}`, `"scripts":{"build":"ncc build src/main.ts && node evil.js"},"Scripts":{"build":"ncc build src/main.ts"}`, 1)
+			}},
+		{name: "case-folded lockfile version", want: model.RouteRefuse, codes: []string{"actions.json-ambiguous"},
+			v2: func(f map[string]string) {
+				f["package-lock.json"] = strings.Replace(f["package-lock.json"], `"node_modules/left-pad":{"version":"1.0.1"}`, `"node_modules/left-pad":{"version":"1.0.1","Version":"1.0.0"}`, 1)
+			}},
 		{name: "action.yml in caller repo", want: model.RouteReview,
 			caller: func(old, new string) (map[string]string, map[string]string) {
 				y := "name: local\nruns:\n  using: composite\n  steps:\n    - uses: acme/act@%s # %s\n"
