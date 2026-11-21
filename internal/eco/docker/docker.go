@@ -32,8 +32,10 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/fetch"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
 )
 
@@ -116,7 +118,44 @@ type source interface {
 
 type gitSource struct{ dir string }
 
+// gitArgs checks what reaches a git command line: revisions must be full
+// commit IDs and paths clean repository-relative paths, so nothing can be
+// read as an option or a revision expression.
+func gitArgs(revs []string, paths ...string) error {
+	for _, r := range revs {
+		if !gh.ValidSHA(r) {
+			return fmt.Errorf("git: %.80q is not a full commit ID", r)
+		}
+	}
+	for _, p := range paths {
+		if !safeRepoPath(p) {
+			return fmt.Errorf("git: %.200q is not a safe repository path", p)
+		}
+	}
+	return nil
+}
+
+func safeRepoPath(p string) bool {
+	if p == "" || len(p) > 4096 || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "-") || path.Clean(p) != p || p == "." {
+		return false
+	}
+	for _, el := range strings.Split(p, "/") {
+		if el == ".." || strings.HasPrefix(el, "-") {
+			return false
+		}
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f || r == utf8.RuneError || r == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 func (g gitSource) show(ctx context.Context, rev, p string) (string, bool, error) {
+	if err := gitArgs([]string{rev}, p); err != nil {
+		return "", false, err
+	}
 	cmd := gitCmd(ctx, g.dir, "cat-file", "-e", rev+":"+p)
 	if cmd.Run() != nil {
 		return "", false, nil
@@ -132,7 +171,10 @@ func (g gitSource) show(ctx context.Context, rev, p string) (string, bool, error
 }
 
 func (g gitSource) list(ctx context.Context, rev, dir string) ([]string, error) {
-	out, err := gitCmd(ctx, g.dir, "ls-tree", "--name-only", rev, dir+"/").Output()
+	if err := gitArgs([]string{rev}, dir); err != nil {
+		return nil, err
+	}
+	out, err := gitCmd(ctx, g.dir, "ls-tree", "--name-only", rev, "--", dir+"/").Output()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
 			return nil, nil
@@ -143,7 +185,10 @@ func (g gitSource) list(ctx context.Context, rev, dir string) ([]string, error) 
 }
 
 func (g gitSource) changed(ctx context.Context, base, head string) ([]string, error) {
-	out, err := gitCmd(ctx, g.dir, "diff", "--no-ext-diff", "--name-only", "--no-renames", base, head).Output()
+	if err := gitArgs([]string{base, head}); err != nil {
+		return nil, err
+	}
+	out, err := gitCmd(ctx, g.dir, "diff", "--no-ext-diff", "--name-only", "--no-renames", base, head, "--").Output()
 	if err != nil {
 		return nil, fmt.Errorf("git diff %s %s: %w", base, head, err)
 	}

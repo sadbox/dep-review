@@ -159,3 +159,30 @@ func TestOSVUnknownDistroRoutesHuman(t *testing.T) {
 		t.Errorf("route %s %s, %d OSV calls", r, codes(u.Findings), calls)
 	}
 }
+
+// The real git source refuses anything that could reach git as an option
+// or a revision expression.
+func TestGitSourceArgs(t *testing.T) {
+	g := gitSource{dir: t.TempDir()}
+	ctx := context.Background()
+	sha := strings.Repeat("a", 40)
+	for _, rev := range []string{"HEAD", "--output=/tmp/x", "main", sha[:12], sha + "^"} {
+		if _, _, err := g.show(ctx, rev, "Dockerfile"); err == nil {
+			t.Errorf("show accepted rev %q", rev)
+		}
+		if _, err := g.list(ctx, rev, ".github/workflows"); err == nil {
+			t.Errorf("list accepted rev %q", rev)
+		}
+		if _, err := g.changed(ctx, rev, sha); err == nil {
+			t.Errorf("changed accepted rev %q", rev)
+		}
+	}
+	for _, p := range []string{"", "-x", "a/--output=x", "/etc/passwd", "../x", "a/../b", "a//b", "a\nb", "a\\b", "."} {
+		if _, _, err := g.show(ctx, sha, p); err == nil {
+			t.Errorf("show accepted path %q", p)
+		}
+	}
+	if err := gitArgs([]string{sha, strings.Repeat("b", 64)}, "proxy/Dockerfile", ".github/workflows"); err != nil {
+		t.Errorf("valid arguments refused: %v", err)
+	}
+}
