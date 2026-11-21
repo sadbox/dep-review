@@ -19,17 +19,29 @@ import (
 // Dependabot update may rewrite.
 var depSections = []string{"dependencies", "devDependencies", "optionalDependencies", "peerDependencies"}
 
+// overrideKeys are the top-level tables that pin dependency versions
+// outside the dependency sections; a change there needs a person.
+var overrideKeys = []string{"overrides", "resolutions"}
+
 // manifestChanges compares dir/package.json at base and head. The root
 // package.json is the one file npm runs code from (scripts.preinstall,
-// prepare, ...) and resolves from (overrides, workspaces), so the only
-// change a Dependabot PR may make to it is rewriting the range of a
-// declared update to point at its new version. Everything else refuses.
+// prepare, ...) and resolves from (overrides, workspaces). The expected
+// change is rewriting the range of a declared update to its new version
+// with the same operator. Other dependency changes (another range form,
+// an added or removed dependency, overrides/resolutions) need a person
+// (npm.manifest-range, RouteHuman). Malformed input, a range rewrite to
+// a version Dependabot did not declare, and any change outside the
+// dependency fields refuse (npm.manifest-changed).
 func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir string, declared []model.Update) ([]model.Finding, error) {
 	depDir := path.Clean("/" + dir)
 	p := path.Join(dir, "package.json")
 	var findings []model.Finding
 	refuse := func(name, format string, args ...any) {
 		findings = append(findings, model.Finding{Code: "npm.manifest-changed", Route: model.RouteRefuse, Update: name,
+			Detail: path.Join(depDir, "package.json") + ": " + fmt.Sprintf(format, args...)})
+	}
+	review := func(name, format string, args ...any) {
+		findings = append(findings, model.Finding{Code: "npm.manifest-range", Route: model.RouteHuman, Update: name,
 			Detail: path.Join(depDir, "package.json") + ": " + fmt.Sprintf(format, args...)})
 	}
 	var docs [2]map[string]any
@@ -63,7 +75,11 @@ func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir strin
 	}
 	for _, k := range slices.Sorted(maps.Keys(ecoutil.Union(bm, hm))) {
 		if !slices.Contains(depSections, k) {
-			if !reflect.DeepEqual(bm[k], hm[k]) {
+			switch {
+			case reflect.DeepEqual(bm[k], hm[k]):
+			case slices.Contains(overrideKeys, k):
+				review("", "%q changed", k)
+			default:
 				refuse("", "%q changed; a dependency update changes only dependency versions", k)
 			}
 			continue
@@ -81,12 +97,15 @@ func manifestChanges(ctx context.Context, git ecoutil.Git, base, head, dir strin
 			to, inHead := hs[name]
 			switch {
 			case !inBase:
-				refuse(name, "%s.%s added", k, name)
+				review(name, "%s.%s added", k, name)
 			case !inHead:
-				refuse(name, "%s.%s removed", k, name)
+				review(name, "%s.%s removed", k, name)
 			case from != to:
-				if why := rangeBump(name, from, to, depDir, declared); why != "" {
+				switch route, why := rangeBump(name, from, to, depDir, declared); route {
+				case model.RouteRefuse:
 					refuse(name, "%s.%s %q -> %q: %s", k, name, from, to, why)
+				case model.RouteHuman:
+					review(name, "%s.%s %q -> %q: %s", k, name, from, to, why)
 				}
 			}
 		}
@@ -116,23 +135,25 @@ func asRanges(v any) (map[string]string, bool) {
 // simpleRangeRE is one comparator: an optional operator and a version.
 var simpleRangeRE = regexp.MustCompile(`^(\^|~|>=|=|v)?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$`)
 
-// rangeBump explains why from -> to is not a declared update's range
-// rewrite, or returns "". The only accepted rewrite keeps the operator
-// and puts the declared new version after it ("^4.3.4" -> "^4.3.5").
-func rangeBump(name, from, to, dir string, declared []model.Update) string {
+// rangeBump routes a range rewrite from -> to: "" for a declared update's
+// rewrite that keeps the operator ("^4.3.4" -> "^4.3.5"), RouteHuman with
+// a reason for any other range form or a changed operator (a widened
+// range, a multi-comparator range, a git URL or alias), RouteRefuse when
+// the simple form names a version Dependabot did not declare.
+func rangeBump(name, from, to, dir string, declared []model.Update) (model.Route, string) {
 	fm, tm := simpleRangeRE.FindStringSubmatch(from), simpleRangeRE.FindStringSubmatch(to)
 	if fm == nil || tm == nil {
-		return "only a single \"<operator><version>\" range may be rewritten"
+		return model.RouteHuman, "not a single \"<operator><version>\" range rewrite"
 	}
 	if fm[1] != tm[1] {
-		return "the range operator changed"
+		return model.RouteHuman, "the range operator changed"
 	}
 	for _, d := range declared {
 		if fetch.SameName(model.NPM, d.Name, name) && sameDir(dir, d.Directory) && d.To == tm[2] {
-			return ""
+			return "", ""
 		}
 	}
-	return fmt.Sprintf("Dependabot declares no update of %s to %s in %s", name, tm[2], dir)
+	return model.RouteRefuse, fmt.Sprintf("Dependabot declares no update of %s to %s in %s", name, tm[2], dir)
 }
 
 // sameDir is fetch's rule: a declaration without a directory matches any.

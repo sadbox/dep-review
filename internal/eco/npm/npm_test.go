@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +26,7 @@ import (
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/strictjson"
 )
 
 func TestParsePackageLockFixture(t *testing.T) {
@@ -467,6 +470,19 @@ func codesOf(fs []model.Finding) []string {
 	return out
 }
 
+func wantRoute(t *testing.T, fs []model.Finding, code string, route model.Route) {
+	t.Helper()
+	for _, f := range fs {
+		if f.Code == code {
+			if f.Route != route {
+				t.Errorf("%s route %s, want %s", code, f.Route, route)
+			}
+			return
+		}
+	}
+	t.Errorf("findings %+v lack %s", fs, code)
+}
+
 // wantRefuse fails unless fs has code with RouteRefuse.
 func wantRefuse(t *testing.T, fs []model.Finding, code string) {
 	t.Helper()
@@ -646,11 +662,14 @@ func TestManifestChanges(t *testing.T) {
 		{"declared range bump", string(head), declared, ""},
 		{"undeclared range bump", string(head), []model.Update{{Name: "esbuild", To: "0.28.3"}}, "npm.manifest-changed"},
 		{"bump to another version", strings.Replace(string(head), `"^4.3.5"`, `"^4.3.6"`, 1), declared, "npm.manifest-changed"},
-		{"operator changed", strings.Replace(string(head), `"^4.3.5"`, `">=4.3.5"`, 1), declared, "npm.manifest-changed"},
-		{"range swapped for a git url", strings.Replace(string(head), `"^4.3.5"`, `"github:evil/cli#4.3.5"`, 1), declared, "npm.manifest-changed"},
+		{"operator changed", strings.Replace(string(head), `"^4.3.5"`, `">=4.3.5"`, 1), declared, "npm.manifest-range"},
+		{"range swapped for a git url", strings.Replace(string(head), `"^4.3.5"`, `"github:evil/cli#4.3.5"`, 1), declared, "npm.manifest-range"},
 		{"root install hook", strings.Replace(string(head), `"scripts": {`, `"scripts": {"preinstall": "node evil.js",`, 1), declared, "npm.manifest-changed"},
-		{"overrides added", strings.Replace(string(head), `"private": true,`, `"private": true, "overrides": {"esbuild": "npm:evil@1"},`, 1), declared, "npm.manifest-changed"},
-		{"dependency added", strings.Replace(string(head), `"esbuild"`, `"evil": "1.0.0", "esbuild"`, 1), declared, "npm.manifest-changed"},
+		{"overrides added", strings.Replace(string(head), `"private": true,`, `"private": true, "overrides": {"esbuild": "npm:evil@1"},`, 1), declared, "npm.manifest-range"},
+		{"dependency added", strings.Replace(string(head), `"esbuild"`, `"evil": "1.0.0", "esbuild"`, 1), declared, "npm.manifest-range"},
+		{"multi-comparator range", strings.Replace(string(head), `"^4.3.5"`, `">=4.3.5 <5"`, 1), declared, "npm.manifest-range"},
+		{"dependency section malformed", strings.Replace(string(head), `"@tailwindcss/cli": "^4.3.5"`, `"@tailwindcss/cli": 4`, 1), declared, "npm.manifest-changed"},
+		{"workspaces added", strings.Replace(string(head), `"private": true,`, `"private": true, "workspaces": ["x"],`, 1), declared, "npm.manifest-changed"},
 		{"duplicate key", strings.Replace(string(head), `"private": true,`, `"private": true, "Scripts": {},`, 1), declared, "npm.manifest-ambiguous"},
 	}
 	for _, tt := range tests {
@@ -663,6 +682,13 @@ func TestManifestChanges(t *testing.T) {
 			if tt.want == "" {
 				if len(fs) != 0 {
 					t.Errorf("findings %+v", fs)
+				}
+				return
+			}
+			if tt.want == "npm.manifest-range" {
+				wantRoute(t, fs, tt.want, model.RouteHuman)
+				if slices.Contains(codesOf(fs), "npm.manifest-changed") {
+					t.Errorf("findings %+v also refuse", fs)
 				}
 				return
 			}
@@ -789,5 +815,75 @@ func TestPoCRoute(t *testing.T) {
 			}
 			wantRefuse(t, res.Findings, tt.code)
 		})
+	}
+}
+
+// TestMultipleLockfilesPackageJSONOnly: two lockfiles, neither changed;
+// only package.json changed. A person decides; nothing is refused.
+func TestMultipleLockfilesPackageJSONOnly(t *testing.T) {
+	lock, err := os.ReadFile("testdata/towngear40/base/package-lock.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yarn := []byte("lodash@^4:\n  version \"4.17.21\"\n")
+	base := map[string][]byte{"package-lock.json": lock, "yarn.lock": yarn, "package.json": []byte(`{"name":"x","dependencies":{"a":"^1.0.0"}}`)}
+	head := maps.Clone(base)
+	head["package.json"] = []byte(`{"name":"x","dependencies":{"a":"^1.0.1"}}`)
+	dir, b, h := gittest.Repo(t, base, head)
+	var sum bytes.Buffer
+	_, findings, err := dirChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, h, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoute(t, findings, "npm.multiple-lockfiles", model.RouteHuman)
+	for _, f := range findings {
+		if f.Route == model.RouteRefuse {
+			t.Errorf("refused: %+v", f)
+		}
+	}
+}
+
+// TestBadNameRefused: a lockfile name the gate will not put in a registry
+// URL is a refusal, not a job error.
+func TestBadNameRefused(t *testing.T) {
+	ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ev.Close()
+	env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: http.DefaultClient}
+	for _, u := range []model.Update{{Name: "../evil", To: "1.0.0"}, {Name: "x", To: "1.0.0/../../y"}} {
+		c := change{update: u, lockKind: "npm"}
+		var sum bytes.Buffer
+		fs, err := Fetcher{Registry: "http://127.0.0.1:1"}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(t.TempDir(), "w"), c, &sum)
+		if err != nil {
+			t.Fatalf("%+v: %v", u, err)
+		}
+		wantRefuse(t, fs, "npm.bad-name")
+	}
+}
+
+// TestRegistryDocCaseCollisions: case collisions in registry text the gate
+// never reads pass; one on a field the gate reads refuses.
+func TestRegistryDocCaseCollisions(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+	defer srv.Close()
+	env := fetch.Env{HTTP: srv.Client()}
+	f := Fetcher{Registry: srv.URL}
+	for doc, ok := range map[string]bool{
+		`{"name":"p","version":"1.0.0","Readme":"a","readme":"b","dependencies":{"JSONStream":"1","jsonstream":"1"}}`: true,
+		`{"name":"p","version":"1.0.0","dist":{"tarball":"a","Tarball":"b"}}`:                                         false,
+		`{"name":"p","version":"1.0.0","Version":"6.6.6"}`:                                                            false,
+		`{"name":"p","version":"1.0.0","readme":"a","readme":"b"}`:                                                    false,
+	} {
+		body = doc
+		_, _, err := f.versionDoc(context.Background(), env, "p", "1.0.0")
+		if ok && err != nil {
+			t.Errorf("%s: %v", doc, err)
+		}
+		if !ok && !errors.Is(err, strictjson.ErrRejected) {
+			t.Errorf("%s: err = %v, want ErrRejected", doc, err)
+		}
 	}
 }
