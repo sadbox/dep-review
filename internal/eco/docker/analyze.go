@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,22 +181,27 @@ func (a *analyzer) analyze(ctx context.Context, ch fromChange, platforms []strin
 		plat     string
 		old, new descriptor
 	}
+	// The detected platforms decide only what is analysed and shown as
+	// evidence. Platform detection cannot see every way a repository
+	// builds an image, so the no-op proof never relies on it: every image
+	// manifest in the two indexes must be identical.
 	var pairs []pair
-	noop := true
+	missing := false
 	for _, p := range platforms {
 		od, ok1 := platformDesc(oldIdx, ch.Old.Digest, p)
 		nd, ok2 := platformDesc(newIdx, ch.New.Digest, p)
 		if !ok1 || !ok2 {
 			u.find(model.RouteHuman, codePlatformMissing, "%s: no %s manifest in the %s index", ch.New.Name(), p, map[bool]string{true: "new", false: "old"}[ok1])
-			noop = false
+			missing = true
 			continue
 		}
 		pairs = append(pairs, pair{p, od, nd})
-		if od.Digest != nd.Digest {
-			noop = false
-		}
 	}
-	if len(pairs) == 0 {
+	noop, unbuilt := sameManifests(oldIdx, ch.Old.Digest, newIdx, ch.New.Digest, platforms)
+	if len(unbuilt) > 0 {
+		u.find(model.RouteReview, codeOtherPlatforms, "%s: manifests changed for platforms the gate did not detect a build for, so this is not a proven no-op and they were not analysed: %s", ch.New.Name(), strings.Join(unbuilt, ", "))
+	}
+	if len(pairs) == 0 || missing {
 		noop = false
 	}
 
@@ -207,7 +213,8 @@ func (a *analyzer) analyze(ctx context.Context, ch fromChange, platforms []strin
 	case tagNever:
 		u.find(model.RouteRefuse, codeTagUnattributable, "%s: %s", ch.New, u.Tag.Detail)
 	case tagUnavailable:
-		u.find(model.RouteReview, codeTagHistoryUnavailable, "%s: %s", ch.New, u.Tag.Detail)
+		// Not proven either way, which is not proof: a person checks.
+		u.find(model.RouteHuman, codeTagHistoryUnavailable, "%s: %s", ch.New, u.Tag.Detail)
 	}
 
 	if noop {
@@ -288,6 +295,87 @@ func (u *updateResult) platformFindings(r *platformResult) {
 	if len(r.OSV.Introduced) > 0 {
 		u.find(model.RouteHuman, codeOSVIntroduced, "%s: OSV lists vulnerabilities for the new versions but not the old: %s", p, strings.Join(sortedKeys(r.OSV.Introduced), ", "))
 	}
+	if r.OSV.Err != "" {
+		u.find(model.RouteHuman, codeOSVUnavailable, "%s: the changed packages could not be checked against OSV.dev: %s", p, r.OSV.Err)
+	}
+}
+
+// isAttestation reports whether an index entry is a BuildKit attestation
+// manifest: both the attestation annotation and the unknown/unknown
+// platform. Anything else counts as an image manifest.
+func isAttestation(d descriptor) bool {
+	return d.Annotations["vnd.docker.reference.type"] == "attestation-manifest" &&
+		d.Platform != nil && d.Platform.OS == "unknown" && d.Platform.Architecture == "unknown"
+}
+
+// manifestKey identifies an index entry by its full platform (including
+// os.version, which tells Windows builds apart) and its digest.
+func manifestKey(d descriptor) (plat, key string) {
+	plat = "(no platform)"
+	if p := d.Platform; p != nil {
+		plat = p.String()
+		if p.OSVersion != "" {
+			plat += " " + p.OSVersion
+		}
+	}
+	return plat, plat + " " + d.MediaType + " " + d.Digest
+}
+
+// sameManifests is the no-op proof: two indexes are the same image when
+// every non-attestation manifest in each is in the other (same platforms,
+// same digests); two single manifests when their digests are equal; an
+// index and a single manifest never. unbuilt lists the platforms that
+// differ and are not among the detected ones (evidence only).
+func sameManifests(oldDoc *manifestDoc, oldDigest string, newDoc *manifestDoc, newDigest string, detected []string) (same bool, unbuilt []string) {
+	switch {
+	case !oldDoc.isIndex() && !newDoc.isIndex():
+		return oldDigest == newDigest, nil
+	case oldDoc.isIndex() != newDoc.isIndex():
+		return false, nil
+	}
+	count := func(doc *manifestDoc) (map[string]int, map[string]string) {
+		keys, plats := map[string]int{}, map[string]string{}
+		for _, d := range doc.Manifests {
+			if isAttestation(d) {
+				continue
+			}
+			plat, k := manifestKey(d)
+			keys[k]++
+			plats[k] = plat
+		}
+		return keys, plats
+	}
+	ok, op := count(oldDoc)
+	nk, np := count(newDoc)
+	same = len(ok) > 0
+	differ := map[string]bool{}
+	for k, n := range ok {
+		if nk[k] != n {
+			same = false
+			differ[op[k]] = true
+		}
+	}
+	for k, n := range nk {
+		if ok[k] != n {
+			same = false
+			differ[np[k]] = true
+		}
+	}
+	isDetected := func(plat string) bool {
+		for _, p := range detected {
+			if normPlatform(p) == normPlatform(strings.Fields(plat)[0]) {
+				return true
+			}
+		}
+		return false
+	}
+	for plat := range differ {
+		if !isDetected(plat) {
+			unbuilt = append(unbuilt, plat)
+		}
+	}
+	sort.Strings(unbuilt)
+	return same, unbuilt
 }
 
 func pkgList(cs []pkgChange) string {

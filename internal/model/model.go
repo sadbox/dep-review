@@ -66,8 +66,9 @@ type Update struct {
 	Advisory  []string   `json:"advisories,omitempty"` // GHSA IDs this update is meant to fix
 	// NoOp is set only by a fetcher that has proven, byte for byte, that the
 	// update changes nothing the repo builds or runs (e.g. a Docker digest
-	// refresh whose manifests for every built platform are identical). It is
-	// the only way an update reaches RouteAuto.
+	// refresh whose old and new indexes hold the same image manifest for
+	// every platform, built or not; attestations aside). It is the only way
+	// an update reaches RouteAuto.
 	NoOp bool `json:"no_op,omitempty"`
 }
 
@@ -90,6 +91,9 @@ type Classification struct {
 	// bump declares To = the tag, FromRef/ToRef = the short digests.
 	Declared []Update `json:"declared,omitempty"`
 	Files    []string `json:"files,omitempty"` // paths the PR changes
+	// TriggerPath is the caller's trigger workflow (the gate's own input,
+	// which the event matched). Publish never counts its runs as CI.
+	TriggerPath string `json:"trigger_path,omitempty"`
 }
 
 // Route is where a PR goes. Ordered from most to least automatic; combining

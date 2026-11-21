@@ -24,6 +24,11 @@ const (
 type marker struct {
 	Notified []string // heads a decision/merge-failure notification was sent for
 	Stuck    []string // heads a "stuck without a decision" notification was sent for
+	// Approved is the head publish last approved for merging, or "". Sweep
+	// merges only when it equals the current head AND the gate app's own
+	// `success` status is on that head: write collaborators can edit this
+	// comment, so the marker alone never authorises anything.
+	Approved string
 }
 
 var markerRe = regexp.MustCompile(`^<!-- dep-review:v1((?: [a-z]+=[^ <>]*)*) -->`)
@@ -47,13 +52,21 @@ func parseMarker(body string) (marker, bool) {
 			mk.Notified = shas
 		case "stuck":
 			mk.Stuck = shas
+		case "approved":
+			if len(shas) == 1 {
+				mk.Approved = shas[0]
+			}
 		}
 	}
 	return mk, true
 }
 
 func (m marker) String() string {
-	return fmt.Sprintf("%s notified=%s stuck=%s -->", markerPrefix, strings.Join(m.Notified, ","), strings.Join(m.Stuck, ","))
+	approved := ""
+	if gh.ValidSHA(m.Approved) {
+		approved = " approved=" + m.Approved
+	}
+	return fmt.Sprintf("%s notified=%s stuck=%s%s -->", markerPrefix, strings.Join(m.Notified, ","), strings.Join(m.Stuck, ","), approved)
 }
 
 func has(list []string, s string) bool {

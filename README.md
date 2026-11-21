@@ -46,7 +46,7 @@ a newer head can never be merged on an old verdict.
 
 | Route | When | Result |
 |---|---|---|
-| auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh with identical manifests for every built platform) | merge on green CI |
+| auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, built or not) | merge on green CI |
 | review | patch/minor/digest updates whose deterministic checks all passed | model review; merge only on `pass` |
 | human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags, truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed to | comment + notification, no merge |
 | refuse | the PR is malformed (no updates, tag instead of SHA pin, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |

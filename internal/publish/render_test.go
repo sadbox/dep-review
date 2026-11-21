@@ -151,6 +151,15 @@ func TestMarker(t *testing.T) {
 	if _, ok := parseMarker("hello <!-- dep-review:v1 -->"); ok {
 		t.Error("marker accepted mid-body")
 	}
+	ap := marker{Notified: []string{baseSHA}, Approved: headSHA}
+	if m, ok := parseMarker(ap.String() + "\nbody"); !ok || m.Approved != headSHA || len(m.Notified) != 1 {
+		t.Errorf("approved round trip: %+v %v", m, ok)
+	}
+	for _, s := range []string{"approved=zzz", "approved=" + headSHA + "," + baseSHA} {
+		if m, _ := parseMarker("<!-- dep-review:v1 " + s + " -->"); m.Approved != "" {
+			t.Errorf("%s: approved %q", s, m.Approved)
+		}
+	}
 	var list []string
 	for i := 0; i < 30; i++ {
 		list = add(list, strings.Repeat(string(rune('a'+i%6)), 39)+string(rune('0'+i%10)))

@@ -75,7 +75,13 @@ func TestCompareDeclared(t *testing.T) {
 	}
 	for _, tt := range dockerTests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, findings := fetch.CompareDeclared(model.Docker, []model.Update{tt.declared}, docker)
+			var same []model.Update // only the declared image: anything else is undeclared
+			for _, u := range docker {
+				if u.Name == tt.declared.Name {
+					same = append(same, u)
+				}
+			}
+			_, findings := fetch.CompareDeclared(model.Docker, []model.Update{tt.declared}, same)
 			var codes []string
 			for _, f := range findings {
 				codes = append(codes, f.Code)
@@ -89,6 +95,55 @@ func TestCompareDeclared(t *testing.T) {
 	updates, _ := fetch.CompareDeclared(model.NPM, []model.Update{{Name: "lodash", To: "4.17.21", Security: true, Advisory: []string{"GHSA-xxxx"}}}, real)
 	if !updates[2].Security || !slices.Equal(updates[2].Advisory, []string{"GHSA-xxxx"}) || real[2].Security {
 		t.Errorf("security not carried over (or real mutated): %+v / %+v", updates[2], real[2])
+	}
+}
+
+// Actions and Docker have no transitive updates: anything Dependabot did
+// not declare is a change someone slipped in and needs a person, not a
+// model review. Lockfile ecosystems keep reviewing undeclared updates.
+func TestCompareDeclaredUndeclared(t *testing.T) {
+	const (
+		shaOld  = "1111111111111111111111111111111111111111"
+		shaNew  = "2222222222222222222222222222222222222222"
+		shaEvil = "3333333333333333333333333333333333333333"
+	)
+	checkout := func(dir, to, ref string) model.Update {
+		return model.Update{Name: "actions/checkout", Directory: dir, From: "v7.0.0", To: to, FromRef: shaOld, ToRef: ref, Type: model.Patch, Direct: true}
+	}
+	decl := []model.Update{{Name: "actions/checkout", From: "7.0.0", To: "7.0.1", FromRef: shaOld[:7], ToRef: shaNew[:7]}}
+	tests := []struct {
+		name string
+		eco  model.Ecosystem
+		real []model.Update
+		want []string
+	}{
+		{"declared only", model.GitHubActions, []model.Update{checkout("/", "v7.0.1", shaNew)}, nil},
+		{"same action in two workflows", model.GitHubActions, []model.Update{checkout("/", "v7.0.1", shaNew), checkout("/", "v7.0.1", shaNew)}, nil},
+		{"second copy to another commit", model.GitHubActions, []model.Update{checkout("/", "v7.0.1", shaNew), checkout("/", "v7.0.1", shaEvil)}, []string{"undeclared.update"}},
+		{"another action", model.GitHubActions, []model.Update{checkout("/", "v7.0.1", shaNew), {Name: "evil/action", Directory: "/", From: "v1", To: "v1.0.1", FromRef: shaOld, ToRef: shaEvil, Type: model.Patch, Direct: true}}, []string{"undeclared.update"}},
+		{"docker: another image", model.Docker, []model.Update{
+			{Name: "actions/checkout", Directory: "/", From: "v7.0.0", To: "v7.0.1", FromRef: shaOld, ToRef: shaNew},
+			{Name: "golang", Directory: "/", From: "1.27", To: "1.27", Type: model.Digest, NoOp: true},
+		}, []string{"undeclared.update"}},
+		{"go: transitive updates are reviewed", model.GoModules, []model.Update{
+			{Name: "actions/checkout", Directory: "/", From: "v7.0.0", To: "v7.0.1", FromRef: shaOld, ToRef: shaNew},
+			{Name: "golang.org/x/sys", Directory: "/", From: "v0.1.0", To: "v0.2.0"},
+		}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, findings := fetch.CompareDeclared(tt.eco, decl, tt.real)
+			var codes []string
+			for _, f := range findings {
+				codes = append(codes, f.Code)
+				if f.Code == "undeclared.update" && f.Route != model.RouteHuman {
+					t.Errorf("route %s", f.Route)
+				}
+			}
+			if !slices.Equal(codes, tt.want) {
+				t.Errorf("codes = %q, want %q (%+v)", codes, tt.want, findings)
+			}
+		})
 	}
 }
 

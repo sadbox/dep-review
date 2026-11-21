@@ -80,8 +80,11 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 // CompareDeclared matches Dependabot's declared updates to the real change
 // set. A declared update missing from the real set, or declared with a
 // different target, refuses the PR. A different "from" needs a person.
-// Undeclared real updates are expected (transitive changes) and are simply
-// reviewed. Matched updates inherit the declared security flag and
+// Undeclared real updates are expected where a lockfile carries transitive
+// changes (Go, npm, uv) and are simply reviewed. GitHub Actions and Docker
+// have no transitive changes in the repository, so there every real update
+// must be named by a declaration with its target, or a person looks at
+// it. Matched updates inherit the declared security flag and
 // advisories, which only Dependabot knows. Names match per NormalizeName.
 //
 // Each side is compared on what Dependabot declared for it: the version
@@ -92,6 +95,7 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]model.Update, []model.Finding) {
 	updates := slices.Clone(real)
 	var findings []model.Finding
+	covered := make([]bool, len(updates)) // real updates a declaration names, with its target
 	for _, d := range declared {
 		i := -1
 		var matches []int
@@ -109,13 +113,19 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 			})
 			continue
 		}
-		// Several copies (lockfile duplicates): prefer the one with the declared target.
+		// Several copies (lockfile duplicates, one image in two Dockerfiles,
+		// one action in two workflows): every copy with the declared target
+		// is declared, and the first of them is the one compared below.
+		chosen := false
 		for _, j := range matches {
-			if sideMatches(updates[j].To, updates[j].ToRef, d.To, d.ToRef) {
-				i = j
-				break
+			if (d.To != "" || d.ToRef != "") && sideMatches(updates[j].To, updates[j].ToRef, d.To, d.ToRef) {
+				covered[j] = true
+				if !chosen {
+					i, chosen = j, true
+				}
 			}
 		}
+		covered[i] = true // compared below; a wrong target is its own finding
 		u := &updates[i]
 		if (d.To == "" && d.ToRef == "") || !sideMatches(u.To, u.ToRef, d.To, d.ToRef) {
 			findings = append(findings, model.Finding{
@@ -132,6 +142,16 @@ func CompareDeclared(eco model.Ecosystem, declared, real []model.Update) ([]mode
 		for _, a := range d.Advisory {
 			if !slices.Contains(u.Advisory, a) {
 				u.Advisory = append(u.Advisory, a)
+			}
+		}
+	}
+	if eco == model.GitHubActions || eco == model.Docker {
+		for j, u := range updates {
+			if !covered[j] {
+				findings = append(findings, model.Finding{
+					Code: "undeclared.update", Route: model.RouteHuman, Update: u.Name,
+					Detail: fmt.Sprintf("the change set has %s %s -> %s in %s, which Dependabot's metadata does not declare", u.Name, side(u.From, u.FromRef), side(u.To, u.ToRef), dirOrRoot(u.Directory)),
+				})
 			}
 		}
 	}

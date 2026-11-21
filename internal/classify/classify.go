@@ -149,10 +149,11 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 		return model.Classification{}, err
 	}
 	cl := model.Classification{
-		Repo:    repoName,
-		Private: ev.Repository.Private,
-		PR:      num,
-		HeadSHA: headSHA,
+		Repo:        repoName,
+		Private:     ev.Repository.Private,
+		PR:          num,
+		HeadSHA:     headSHA,
+		TriggerPath: opt.TriggerPath,
 	}
 	if gh.ValidSHA(pr.Base.SHA) {
 		cl.BaseSHA = pr.Base.SHA

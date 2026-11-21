@@ -25,7 +25,8 @@ type ghStatus struct {
 // whose CI has since finished green, and reports heads that have had no
 // decision for too long. It never reviews anything and never decides:
 // it acts only on a `success` status the gate app itself set on that
-// exact head.
+// exact head, and only after re-checking the approval record, the base
+// branch and CI itself.
 func Sweep(ctx context.Context, cfg Config, repo string) error {
 	cfg.defaults()
 	if !gh.ValidRepo(repo) {
@@ -41,7 +42,7 @@ func Sweep(ctx context.Context, cfg Config, repo string) error {
 			!strings.EqualFold(pr.Head.Repo.FullName, repo) || !gh.ValidSHA(pr.Head.SHA) || pr.Number <= 0 {
 			continue
 		}
-		if err := sweepOne(ctx, cfg, repo, pr.Number, pr.Head.SHA); err != nil {
+		if err := sweepOne(ctx, cfg, repo, pr); err != nil {
 			cfg.Logf("#%d: %v", pr.Number, err)
 			errs = append(errs, fmt.Errorf("#%d: %w", pr.Number, err))
 		}
@@ -65,32 +66,52 @@ func gateStatus(ctx context.Context, cfg Config, repo, sha string) (*ghStatus, e
 	return nil, nil
 }
 
-func sweepOne(ctx context.Context, cfg Config, repo string, pr int, head string) error {
+func sweepOne(ctx context.Context, cfg Config, repo string, pr ghPull) error {
+	head := pr.Head.SHA
 	st, err := gateStatus(ctx, cfg, repo, head)
 	if err != nil {
 		return err
 	}
 	switch {
 	case st != nil && st.State == StateSuccess:
-		ci, note, err := ciState(ctx, cfg.GitHub, repo, head)
+		// The status says publish approved this head. Sweep still checks
+		// the rest itself: publish's own approval record names this head,
+		// the base is still the default branch, and CI is green.
+		prev, err := findComment(ctx, cfg, repo, pr.Number)
+		if err != nil {
+			return err
+		}
+		var mk marker
+		if prev != nil {
+			mk, _ = parseMarker(prev.Body)
+		}
+		if mk.Approved != head {
+			cfg.Logf("#%d: approved status but the approval record names another head", pr.Number)
+			return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionHuman, "approved but not merged: the gate's approval record does not match the head", false)
+		}
+		if why := baseProblem(&pr, repo, ""); why != "" {
+			cfg.Logf("#%d: approved but %s", pr.Number, why)
+			return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionHuman, "approved but not merged: "+why, false)
+		}
+		ci, note, err := ciState(ctx, cfg, repo, head, cfg.TriggerPath)
 		if err != nil {
 			return err
 		}
 		switch ci {
 		case ciPending:
-			cfg.Logf("#%d: approved, %s", pr, note)
+			cfg.Logf("#%d: approved, %s", pr.Number, note)
 			return nil
 		case ciRed:
-			cfg.Logf("#%d: approved but %s", pr, note)
-			return notifyOnce(ctx, cfg, repo, pr, head, model.DecisionHuman, "approved but not merged: "+note, false)
+			cfg.Logf("#%d: approved but %s", pr.Number, note)
+			return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionHuman, "approved but not merged: "+note, false)
 		}
-		res, err := merge(ctx, cfg, repo, pr, head)
+		res, err := merge(ctx, cfg, repo, pr.Number, head, "")
 		if err != nil {
 			return err
 		}
-		cfg.Logf("#%d: %s", pr, res.Note)
+		cfg.Logf("#%d: %s", pr.Number, res.Note)
 		if res.Failed {
-			return notifyOnce(ctx, cfg, repo, pr, head, model.DecisionHuman, "approved but not merged: "+res.Note, false)
+			return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionHuman, "approved but not merged: "+res.Note, false)
 		}
 		return nil
 	case st != nil && st.State == StateFailure:
@@ -110,8 +131,8 @@ func sweepOne(ctx context.Context, cfg Config, repo string, pr int, head string)
 	if age := cfg.Now().Sub(commit.Commit.Committer.Date); age < cfg.StuckAfter {
 		return nil
 	}
-	cfg.Logf("#%d: no decision for head %s", pr, head[:12])
-	return notifyOnce(ctx, cfg, repo, pr, head, model.DecisionPending, "stuck without a decision", true)
+	cfg.Logf("#%d: no decision for head %s", pr.Number, head[:12])
+	return notifyOnce(ctx, cfg, repo, pr.Number, head, model.DecisionPending, "stuck without a decision", true)
 }
 
 // notifyOnce records the notification in our comment's marker, so each

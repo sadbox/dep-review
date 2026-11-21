@@ -116,8 +116,10 @@ func TestSelectPlatform(t *testing.T) {
 }
 
 // The five recorded bumps, offline: index, platform manifests and configs
-// as the registries served them. The two digest no-ops are decided from
-// the indexes alone; the others' config diffs are checked from the
+// as the registries served them. The two digest refreshes are identical
+// for every platform the repository builds but changed riscv64 and the
+// Windows images, so they are not proven no-ops (review), decided from the
+// indexes alone; the others' config diffs are checked from the
 // recorded configs (their layers are only fetched by TestLive).
 func TestRecordedCases(t *testing.T) {
 	for _, tc := range []struct {
@@ -126,8 +128,8 @@ func TestRecordedCases(t *testing.T) {
 		noop  bool
 		tag   tagState
 	}{
-		{"golang-digest-noop", model.RouteAuto, true, tagCurrent},
-		{"caddy-digest-noop", model.RouteAuto, true, tagEquivalent},
+		{"golang-digest-noop", model.RouteReview, false, tagCurrent},
+		{"caddy-digest-noop", model.RouteReview, false, tagEquivalent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeRegistry(t)
@@ -140,7 +142,7 @@ func TestRecordedCases(t *testing.T) {
 			if len(res.Updates) != 1 || res.Updates[0].NoOp != tc.noop || res.Updates[0].Type != model.Digest {
 				t.Fatalf("updates %+v", res.Updates)
 			}
-			if r := policy.Combine(res.Updates, res.Findings, false); r != tc.route {
+			if r := policy.Combine(res.Updates, res.Findings, false); r != tc.route || !strings.Contains(codes(res.Findings), codeOtherPlatforms+"=review") {
 				t.Errorf("route %s, want %s (%s)", r, tc.route, codes(res.Findings))
 			}
 			var summary string
@@ -149,7 +151,7 @@ func TestRecordedCases(t *testing.T) {
 					summary = b
 				}
 			}
-			if !strings.Contains(summary, "**"+string(tc.tag)+"**") || !strings.Contains(summary, "no-op proven: true") {
+			if !strings.Contains(summary, "**"+string(tc.tag)+"**") || !strings.Contains(summary, fmt.Sprintf("no-op proven: %v", tc.noop)) {
 				t.Errorf("summary:\n%s", summary)
 			}
 			for _, n := range []string{"docker/01-golang-details.md", "docker/01-caddy-details.md"} {
@@ -170,9 +172,9 @@ func TestRecordedCases(t *testing.T) {
 			code  string
 			route model.Route
 		}{
-			{"superseded", fakeHistory{dgB: true, other: true}, "", model.RouteAuto},
+			{"superseded", fakeHistory{dgB: true, other: true}, "", model.RouteReview},
 			{"never", fakeHistory{other: true}, codeTagUnattributable, model.RouteRefuse},
-			{"no history", nil, codeTagHistoryUnavailable, model.RouteReview},
+			{"no history", nil, codeTagHistoryUnavailable, model.RouteHuman},
 		} {
 			f := newFakeRegistry(t)
 			f.tags["library/golang:1.27"] = other
