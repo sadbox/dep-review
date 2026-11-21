@@ -46,6 +46,17 @@ func checkPackage(old, cur sideTrees) []model.Finding {
 		if len(native) > 0 {
 			add("uv.native-extension", "%s contains native extensions nobody can review as source: %s", t.kind, ecoutil.List(native, 10))
 		}
+		pyc, unchecked, opaque := compiledFiles(t.old, t.cur)
+		if len(pyc) > 0 {
+			detail := ""
+			if len(unchecked) > 0 {
+				detail = fmt.Sprintf("; unchecked-hash .pyc (run without looking at the source): %s", ecoutil.List(unchecked, 10))
+			}
+			add("uv.compiled-bytecode", "%s contains Python bytecode nobody can review as source: %s%s", t.kind, ecoutil.List(pyc, 10), detail)
+		}
+		if len(opaque) > 0 {
+			add("uv.binary-file", "%s has binary files added or changed (not reviewable as text): %s", t.kind, ecoutil.List(opaque, 10))
+		}
 	}
 
 	// Entry points and dependencies, from the wheel's metadata (or the

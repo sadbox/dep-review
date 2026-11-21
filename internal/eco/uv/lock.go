@@ -24,12 +24,19 @@ type Package struct {
 	Deps    []string // names in dependencies, optional-dependencies, dev-dependencies
 }
 
-// IsProject reports whether the package is the workspace itself (never
-// downloaded).
-func (p Package) IsProject() bool {
-	_, v := p.Source["virtual"]
-	_, e := p.Source["editable"]
-	return v || e
+// projectPath returns the path of a workspace package's source: exactly
+// one key, virtual or editable. Whether that path really is the root
+// project or a declared member is the caller's to check (Workspace);
+// { registry = "https://evil...", editable = "." } is not a project.
+func (p Package) projectPath() (string, bool) {
+	if len(p.Source) != 1 {
+		return "", false
+	}
+	if v, ok := p.Source["virtual"]; ok {
+		return v, true
+	}
+	v, ok := p.Source["editable"]
+	return v, ok
 }
 
 // Registry returns the registry URL, or "" for a non-registry source.
@@ -73,7 +80,11 @@ func ParseLock(data string) (*Lock, error) {
 		}
 		if src, ok := t["source"].(map[string]any); ok {
 			for k, v := range src {
-				p.Source[k] = fmt.Sprint(v)
+				s, ok := v.(string)
+				if !ok {
+					return nil, fmt.Errorf("uv.lock: package %q: source %s is not a string", p.Name, k)
+				}
+				p.Source[k] = s
 			}
 		}
 		if sd, ok := t["sdist"].(map[string]any); ok {
