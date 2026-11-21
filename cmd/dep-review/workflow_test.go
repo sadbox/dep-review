@@ -171,3 +171,20 @@ func TestTriggerPathPassed(t *testing.T) {
 		}
 	}
 }
+
+// fetch gets the caller's docker_platforms (the platforms a digest
+// refresh must be proven a no-op for), and the example sets it.
+func TestDockerPlatformsPassed(t *testing.T) {
+	jobs := gateJobs(t)
+	fetch := jobs["fetch"]
+	if !strings.Contains(fetch, "DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}") || !strings.Contains(fetch, `--docker-platforms "$DOCKER_PLATFORMS"`) {
+		t.Error("fetch does not pass --docker-platforms from inputs.docker_platforms")
+	}
+	example, err := os.ReadFile("../../examples/dep-review.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(example), "docker_platforms: linux/amd64,linux/arm64") {
+		t.Error("the example does not set docker_platforms")
+	}
+}

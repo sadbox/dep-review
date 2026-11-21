@@ -28,6 +28,13 @@ on:
         description: Repository-specific review notes, read from the default branch.
         type: string
         default: .github/dep-review.md
+      docker_platforms:
+        description: >-
+          Comma-separated platforms the repository builds its images for
+          (e.g. linux/amd64,linux/arm64). The docker fetcher proves a digest
+          refresh a no-op only for these. Empty: fetch's default.
+        type: string
+        default: ""
       model:
         type: string
         default: claude-opus-5-5
@@ -233,11 +240,13 @@ jobs:
         id: fetch
         env:
           GH_TOKEN: ${{ github.token }}
+          DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}
         run: |
           "$RUNNER_TEMP/bin/dep-review" fetch \
             --classification "$RUNNER_TEMP/in/classification.json" \
             --repo-dir pr \
-            --out "$RUNNER_TEMP/evidence"
+            --out "$RUNNER_TEMP/evidence" \
+            --docker-platforms "$DOCKER_PLATFORMS"
       - name: Checksum the artifact
         id: sums
         run: |

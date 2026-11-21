@@ -37,3 +37,5 @@ jobs:
       anthropic_federation_rule_id: fdrl_REPLACE
       anthropic_organization_id: REPLACE
       anthropic_workspace_id: wrkspc_REPLACE
+      # Must list exactly the platforms this repository builds its images for.
+      docker_platforms: linux/amd64,linux/arm64
