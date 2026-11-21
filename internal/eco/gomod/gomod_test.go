@@ -3,6 +3,7 @@ package gomod
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -213,8 +214,66 @@ func TestCheckTrees(t *testing.T) {
 		{"long prose literal", nil, map[string]string{"b.go": "package p\nvar s = \"" + strings.Repeat("lorem ipsum ", 100) + "\"\n"}, nil},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\nRET\n"}, []string{codeAsm}},
 		{"binary", nil, map[string]string{"x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
-		{"testdata binary ignored", nil, map[string]string{"testdata/x.bin": "\x00\x01"}, nil},
-		{"vendor ignored", nil, map[string]string{"vendor/x/x.go": "package x\nimport \"os/exec\"\n"}, nil},
+		{"testdata binary fixture", nil, map[string]string{"testdata/x.bin": "\x00\x01"}, nil},
+		{"testdata syso", nil, map[string]string{"testdata/p/x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
+		{"vendor checked", nil, map[string]string{"vendor/x/x.go": "package x\nimport \"os/exec\"\n"}, []string{codeImport}},
+		{"c source", map[string]string{"x.c": "int f(void) { return 0; }\n"}, map[string]string{"x.c": "int f(void) { return 1; }\n"}, []string{codeCSource}},
+		{"net subpackage", nil, map[string]string{"h.go": "package p\nimport \"net/http/httputil\"\nvar _ httputil.BufferPool\n"}, []string{codeImport}},
+		{"x/sys subpackage", nil, map[string]string{"h.go": "package p\nimport \"golang.org/x/sys/cpu\"\nvar _ = cpu.X86\n"}, []string{codeImport}},
+		{"net/url is parse-only", nil, map[string]string{"h.go": "package p\nimport \"net/url\"\nvar _ url.URL\n"}, nil},
+		{"os", map[string]string{"a.go": plain}, map[string]string{"a.go": "package p\nimport \"os\"\nfunc F() { os.Remove(\"x\") }\n"}, []string{codeImport}},
+		{"reflect", nil, map[string]string{"a.go": "package p\nimport \"reflect\"\nvar _ reflect.Value\n"}, []string{codeImport}},
+		{"new blank import", map[string]string{"a.go": plain}, map[string]string{"a.go": "package p\nimport _ \"example.com/q\"\n"}, []string{codeBlank}},
+		{"blank embed is fine", nil, map[string]string{"a.go": "package p\nimport _ \"embed\"\n"}, nil},
+		{"var initializer call", map[string]string{"a.go": "package p\nimport \"os\"\nvar x = 1\nvar _ = os.Args\n"},
+			map[string]string{"a.go": "package p\nimport \"os\"\nvar x = 1\nvar _ = os.Remove(\"/tmp/x\")\n"}, []string{codeVarInit}},
+		{"var initializer unchanged", map[string]string{"a.go": "package p\nvar x = setup()\nfunc setup() int { return 1 }\n"},
+			map[string]string{"a.go": "package p\nvar x = setup()\nfunc setup() int { return 2 }\n"}, []string{codeInitCallee}},
+		{"called func literal", nil, map[string]string{"a.go": "package p\nvar _ = func() int { return 1 }()\n"}, []string{codeVarInit}},
+		{"stored func literal", nil, map[string]string{"a.go": "package p\nvar f = func() int { return g() }\nfunc g() int { return 1 }\n"}, nil},
+		{"channel receive", nil, map[string]string{"a.go": "package p\nvar c chan int\nvar x = <-c\n"}, []string{codeInitCallee, codeVarInit}},
+		{"pure initializers", nil, map[string]string{"a.go": "package p\nimport (\"errors\"; \"regexp\")\nvar ErrX = errors.New(\"x\")\nvar re = regexp.MustCompile(\"a+\")\nvar m = make(map[string]int, len(\"ab\"))\nvar b = []byte(\"x\")\nvar n = int64(3)\n"}, nil},
+		{"aliased errors package", nil, map[string]string{"a.go": "package p\nimport errors \"example.com/evil\"\nvar _ = errors.New(\"x\")\n"}, []string{codeVarInit}},
+		{"shadowed builtin", nil, map[string]string{"a.go": "package p\nvar n = len(\"x\")\n", "b.go": "package p\nfunc len(s string) int { return 0 }\n"}, []string{codeInitCallee, codeVarInit}},
+		{"call through pointer", nil, map[string]string{"a.go": "package p\nvar f = g\nvar pf = &f\nvar _ = (*pf)()\nfunc g() int { return 1 }\n"}, []string{codeInitCallee, codeVarInit}},
+		// Extension decides, not content: a binary-looking compilable file is checked.
+		{"binary-looking go in testdata", nil, map[string]string{"testdata/p/x.go": "package p\x00\x01import \"os/exec\"\n"}, []string{codeParse}},
+		{"binary-looking go elsewhere", nil, map[string]string{"x.go": "\x00\x01\x02"}, []string{codeParse}},
+		{"binary-looking asm in testdata", nil, map[string]string{"testdata/p/x.s": "\x00\x01"}, []string{codeAsm}},
+		{"binary-looking c in testdata", nil, map[string]string{"testdata/p/x.c": "\x00\x01"}, []string{codeCSource}},
+		// fmt calls String/Error/Format on its arguments: not pure.
+		{"fmt initializer", nil, map[string]string{"a.go": "package p\nimport \"fmt\"\nvar s = fmt.Sprint(1)\n"}, []string{codeVarInit}},
+		// Unchanged init code reaching a changed local function, transitively.
+		{"init callee changed transitively",
+			map[string]string{"a.go": "package p\nfunc init() { helper() }\n", "b.go": "package p\nfunc helper() { deeper() }\nfunc deeper() {}\n"},
+			map[string]string{"a.go": "package p\nfunc init() { helper() }\n", "b.go": "package p\nfunc helper() { deeper() }\nfunc deeper() { println(1) }\n"},
+			[]string{codeInitCallee}},
+		{"implicit String method",
+			map[string]string{"a.go": "package p\nimport \"fmt\"\ntype T struct{}\nvar s = fmt.Sprint(T{})\n", "b.go": "package p\nfunc (T) String() string { return \"a\" }\n"},
+			map[string]string{"a.go": "package p\nimport \"fmt\"\ntype T struct{}\nvar s = fmt.Sprint(T{})\n", "b.go": "package p\nfunc (T) String() string { return \"b\" }\n"},
+			[]string{codeInitCallee}},
+		{"function not reached from init",
+			map[string]string{"a.go": "package p\nfunc init() { helper() }\nfunc helper() {}\nfunc other() {}\n"},
+			map[string]string{"a.go": "package p\nfunc init() { helper() }\nfunc helper() {}\nfunc other() { println(1) }\n"},
+			nil},
+		{"interface assertion idiom", nil, map[string]string{"a.go": "package p\ntype I interface{ M() }\ntype T struct{}\nfunc (*T) M() {}\nvar _ I = (*T)(nil)\n"}, nil},
+		// "X is a type" evidence only from files compiled into the package everywhere.
+		{"type only in a test file", nil, map[string]string{"a.go": "package p\nvar f = g\nvar _ = (*T)(nil)\nfunc g() {}\n", "a_test.go": "package p\ntype T func()\n"}, []string{codeVarInit}},
+		{"type only in a build-tagged file", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "//go:build linux\n\npackage p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"type only in a GOOS file", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b_windows.go": "package p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"type in another package clause", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "package q\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"type and var under one name", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "package p\ntype T struct{}\n", "c.go": "//go:build ignore\n\npackage p\nvar T *func()\n"}, []string{codeInitCallee, codeVarInit}},
+		{"dot import", nil, map[string]string{"a.go": "package p\nimport . \"example.com/q\"\nvar _ = (*T)(nil)\n", "b.go": "package p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		// The walk compares every other declaration under a root's name.
+		{"method named like a var root",
+			// run is reached only by name: through an interface variable,
+			// T never named on the path from the root.
+			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 1 }\n"},
+			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 2 }\n"},
+			[]string{codeInitCallee}},
+		{"binary-looking test file", nil, map[string]string{"x_test.go": "\x00\x01\x02"}, []string{codeBinary}},
+		{"plus-build without space", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "//+build linux\n\npackage p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
 	}
 	for _, tt := range tests {
@@ -233,6 +292,65 @@ func TestCheckTrees(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("codes = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReproVendorSkip is the security review's PoC (finding 7): the module
+// zip keeps top-level vendor/*.go, and vendor/ or testdata/ packages
+// compile when imported by path. The checks used to skip both and found
+// nothing; a var initializer calling os.StartProcess was also invisible.
+func TestReproVendorSkip(t *testing.T) {
+	gomod := "module example.com/dep\n\ngo 1.24\n"
+	old := writeTree(t, map[string]string{"go.mod": gomod, "a.go": "package dep\nfunc F(){}\n"})
+	evil := "package vendor\nimport \"os/exec\"\nfunc init(){ exec.Command(\"sh\",\"-c\",\"id\").Run() }\n"
+	cur := writeTree(t, map[string]string{"go.mod": gomod,
+		"a.go":                 "package dep\nimport _ \"example.com/dep/vendor\"\nimport _ \"example.com/dep/internal/vendor\"\nimport _ \"example.com/dep/testdata/td\"\nfunc F(){}\n",
+		"vendor/x.go":          evil,
+		"internal/vendor/y.go": evil,
+		"testdata/td/z.go":     "package td\nimport \"os/exec\"\nfunc init(){ exec.Command(\"id\").Run() }\n"})
+	h := CheckTrees(old, cur)
+	for _, want := range []string{"vendor/x.go", "internal/vendor/y.go", "testdata/td/z.go"} {
+		if !slices.Contains(h[codeInit], want) || !slices.Contains(h[codeImport], want+" (os/exec)") {
+			t.Errorf("%s: init/import not flagged: %v", want, h)
+		}
+	}
+	if len(h[codeBlank]) != 3 {
+		t.Errorf("blank imports = %q", h[codeBlank])
+	}
+
+	cur = writeTree(t, map[string]string{"go.mod": gomod,
+		"a.go": "package dep\nimport \"os\"\nvar _, _ = os.StartProcess(\"/bin/sh\", []string{\"sh\",\"-c\",\"id\"}, &os.ProcAttr{})\nfunc F(){}\n"})
+	h = CheckTrees(old, cur)
+	if !slices.Equal(h[codeVarInit], []string{"a.go"}) || !slices.Equal(h[codeImport], []string{"a.go (os)"}) {
+		t.Errorf("StartProcess initializer: %v", h)
+	}
+}
+
+// TestSumHashChanged: a go.sum hash for a version on both sides changed
+// (finding 9). Every such line is refused, module zip and /go.mod alike,
+// whether or not the module is otherwise part of the change set.
+func TestSumHashChanged(t *testing.T) {
+	base := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "base"))
+	head := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "head"))
+	for _, line := range []string{
+		"github.com/1password/onepassword-sdk-go v0.4.1 h1:My/Q2QXemep0I0qHgGrOs7EEzpPh2QZ1/II+S3YqOG0=",
+		"github.com/1password/onepassword-sdk-go v0.4.1/go.mod h1:j/CbzhucTywjlYrd6SE6k0LcQaFZ2l8OLBsAsOYtvD0=",
+	} {
+		t.Run(line[strings.Index(line, " ")+1:strings.LastIndex(line, " ")], func(t *testing.T) {
+			if !strings.Contains(string(head["go.sum"]), line+"\n") {
+				t.Fatalf("fixture lacks %q", line)
+			}
+			sum := strings.Replace(string(head["go.sum"]), line, line[:len(line)-5]+"AAAA=", 1)
+			dir, b, hs := gittest.Repo(t, base, map[string][]byte{"go.mod": head["go.mod"], "go.sum": []byte(sum)})
+			var buf bytes.Buffer
+			_, findings, err := moduleChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, hs, ".", &buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings) != 1 || findings[0].Code != "gomod.sum-changed" || findings[0].Route != model.RouteRefuse {
+				t.Errorf("findings = %+v", findings)
 			}
 		})
 	}
@@ -327,4 +445,44 @@ func runFetch(t *testing.T, repo string, class model.Classification) model.Evide
 		}
 	}
 	return ev
+}
+
+// TestPOCDupRequire is the re-review's N7 PoC: two require lines for one
+// path were last-wins in the gate's map. A repeated require, a replace
+// with the same left-hand side, or a repeated exclude line now refuses.
+func TestPOCDupRequire(t *testing.T) {
+	const head = "module example.com/dup\n\ngo 1.22\n\n"
+	for _, body := range []string{
+		"require golang.org/x/text v0.14.0\nrequire golang.org/x/text v0.3.8\n",
+		"require (\n\tgolang.org/x/text v0.14.0\n\t\"golang.org/x/text\" v0.3.8 // indirect\n)\n",
+		"replace golang.org/x/text => ../a\nreplace golang.org/x/text => ../b\n",
+		"replace golang.org/x/text v0.3.8 => ../a\nreplace (\n\tgolang.org/x/text v0.3.8 => ../b\n)\n",
+		"exclude golang.org/x/text v0.3.8\nexclude golang.org/x/text v0.3.8\n",
+	} {
+		if mf, err := ParseModFile([]byte(head + body)); !errors.Is(err, ErrDuplicate) {
+			t.Errorf("%q: err %v (require %v), want ErrDuplicate", body, err, mf)
+		}
+	}
+	for _, body := range []string{
+		"exclude golang.org/x/text v0.3.7\nexclude golang.org/x/text v0.3.8\n",
+		"replace golang.org/x/text => ../a\nreplace golang.org/x/text v0.3.8 => ../b\n",
+		"require golang.org/x/text v0.14.0\nreplace golang.org/x/text => ../a\nexclude golang.org/x/text v0.3.8\n",
+	} {
+		if _, err := ParseModFile([]byte(head + body)); err != nil {
+			t.Errorf("%q: %v", body, err)
+		}
+	}
+
+	base := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "base"))
+	h := gittest.ReadDir(t, filepath.Join("testdata", "sprobot285", "head"))
+	gm := string(h["go.mod"]) + "\nrequire github.com/aws/aws-sdk-go-v2/credentials v1.21.0\n"
+	dir, b, hs := gittest.Repo(t, base, map[string][]byte{"go.mod": []byte(gm), "go.sum": h["go.sum"]})
+	var sum bytes.Buffer
+	_, findings, err := moduleChanges(context.Background(), ecoutil.Git{Repo: dir, Home: t.TempDir()}, b, hs, ".", &sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].Code != "gomod.duplicate-module" || findings[0].Route != model.RouteRefuse {
+		t.Errorf("findings = %+v", findings)
+	}
 }

@@ -1,6 +1,8 @@
 package actions
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
@@ -13,6 +15,10 @@ const (
 	kindWorkflow = "workflow"
 	kindAction   = "action"
 )
+
+// codeLineBreak is the finding for YAML (a caller workflow or action.yml,
+// or an upstream action.yml) that checkYAMLText refuses.
+const codeLineBreak = "actions.yaml-line-break"
 
 // fileKind classifies a path in the caller repository: a workflow
 // (.github/workflows/*.yml|yaml, top level only, as GitHub reads them) or an
@@ -36,7 +42,9 @@ type usesRef struct {
 	comment string // text after '#', trimmed; "" when absent
 }
 
-var usesLineRx = regexp.MustCompile(`^(\s*(?:-\s+)?uses:\s*)(['"]?)([^@\s'"#]+)@([^\s'"#]+)(['"]?)\s*(?:#\s*(.*?))?\s*$`)
+// A comment needs whitespace before its '#' (YAML reads "@sha#v1" as one
+// scalar), so a '#' straight after the ref does not match at all.
+var usesLineRx = regexp.MustCompile(`^(\s*(?:-\s+)?uses:\s*)(['"]?)([^@\s'"#]+)@([^\s'"#]+)(['"]?)(?:\s+#\s*(.*?))?\s*$`)
 
 // parseUsesLine reads the value as raw text, so it refuses a backslash
 // anywhere in it: inside double quotes GitHub decodes it as an escape
@@ -276,20 +284,31 @@ type usesChange struct {
 }
 
 // fileDiffError is a reason a changed caller file is not a pure `uses:`
-// rewrite.
+// rewrite. code is the finding code; "" means actions.non-uses-change.
 type fileDiffError struct {
-	file, reason string
+	file, reason, code string
 }
 
 // usesChanges diffs one workflow/action file and returns the rewritten
 // `uses:` lines, or the reasons the change is something else.
 func usesChanges(file, kind, oldText, newText string) ([]usesChange, []fileDiffError) {
-	a, b := splitLines(oldText), splitLines(newText)
 	var out []usesChange
 	var errs []fileDiffError
 	bad := func(format string, args ...any) {
-		errs = append(errs, fileDiffError{file, fmt.Sprintf(format, args...)})
+		errs = append(errs, fileDiffError{file: file, reason: fmt.Sprintf(format, args...)})
 	}
+	// The diff below is line-based: refuse line breaks it would not split
+	// on (see checkYAMLText), then read CRLF as LF.
+	for _, side := range []struct{ name, text string }{{"base", oldText}, {"head", newText}} {
+		if err := checkYAMLText(side.text); err != nil {
+			errs = append(errs, fileDiffError{file: file, reason: side.name + ": " + err.Error(), code: codeLineBreak})
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	oldText, newText = strings.ReplaceAll(oldText, "\r\n", "\n"), strings.ReplaceAll(newText, "\r\n", "\n")
+	a, b := splitLines(oldText), splitLines(newText)
 	if strings.HasSuffix(oldText, "\n") != strings.HasSuffix(newText, "\n") {
 		bad("trailing newline changed")
 	}
@@ -317,7 +336,7 @@ func usesChanges(file, kind, oldText, newText string) ([]usesChange, []fileDiffE
 			}
 			pa, pb := yamlPath(a, h.del[k]), yamlPath(b, h.ins[k])
 			if !usesContext(kind, pa) || !usesContext(kind, pb) || strings.Join(pa, ".") != strings.Join(pb, ".") {
-				bad("line %d: uses: line is not a step or job reference (path %s)", ln, strings.Join(pb, "."))
+				bad("line %d: uses: line is not a step or job reference (path %s)", ln, safeYAMLPath(pb))
 				continue
 			}
 			out = append(out, usesChange{file: file, kind: kind, line: ln, old: o, new: n})
@@ -334,4 +353,23 @@ func lineNo(ins, del []int) int {
 		return del[0] + 1
 	}
 	return 0
+}
+
+var yamlKeySafeRx = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
+
+// safeYAMLPath renders a yamlPath for a finding's Detail, which is trusted
+// text: each key from the PR's file that is not a plain identifier-like
+// word (letters, digits, '_', '-'; at most 200 bytes) is replaced by a
+// placeholder with a hash prefix for correlation.
+func safeYAMLPath(p []string) string {
+	out := make([]string, len(p))
+	for i, k := range p {
+		if yamlKeySafeRx.MatchString(k) {
+			out[i] = k
+			continue
+		}
+		sum := sha256.Sum256([]byte(k))
+		out[i] = "<invalid-key:" + hex.EncodeToString(sum[:4]) + ">"
+	}
+	return strings.Join(out, ".")
 }

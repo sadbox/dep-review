@@ -1,6 +1,7 @@
 package gomod
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -18,7 +19,16 @@ type ModFile struct {
 	// per line ("replace a => b v1", "exclude m v1", "godebug k=v", "tool p",
 	// "ignore d"); compared as sets between base and head.
 	Directives []string
+
+	seen map[string]bool // "verb key" of require/replace/exclude lines, for ErrDuplicate
 }
+
+// ErrDuplicate is returned for a go.mod that names the same module twice
+// where one reading must win: two require lines for one path (the gate's
+// map would keep the last), two replace lines with the same left-hand side
+// ("path" or "path version"), or one exclude line repeated. Excluding or
+// replacing several versions of one path is ordinary and allowed.
+var ErrDuplicate = errors.New("duplicate module in go.mod")
 
 type Require struct {
 	Version  string
@@ -27,7 +37,7 @@ type Require struct {
 
 // ParseModFile parses go.mod text.
 func ParseModFile(data []byte) (*ModFile, error) {
-	mf := &ModFile{Require: map[string]Require{}}
+	mf := &ModFile{Require: map[string]Require{}, seen: map[string]bool{}}
 	block := ""
 	for i, raw := range strings.Split(string(data), "\n") {
 		line, comment := splitComment(raw)
@@ -87,11 +97,25 @@ func (mf *ModFile) directive(verb string, args []string, comment string) error {
 		if len(args) != 2 {
 			return fmt.Errorf("require: want path and version, got %q", args)
 		}
+		if err := mf.once("require", args[0]); err != nil {
+			return err
+		}
 		indirect := slices.Contains(strings.Fields(strings.ReplaceAll(comment, ";", " ")), "indirect")
 		mf.Require[args[0]] = Require{Version: args[1], Indirect: indirect}
 	case "retract":
 		// Retractions only matter to the module's own consumers.
 	case "replace", "exclude", "godebug", "tool", "ignore":
+		switch verb {
+		case "replace":
+			lhs, _, _ := strings.Cut(strings.Join(args, " "), " =>")
+			if err := mf.once(verb, strings.TrimSpace(lhs)); err != nil {
+				return err
+			}
+		case "exclude":
+			if err := mf.once(verb, strings.Join(args, " ")); err != nil {
+				return err
+			}
+		}
 		mf.Directives = append(mf.Directives, verb+" "+strings.Join(args, " "))
 	default:
 		mf.Directives = append(mf.Directives, "unknown-directive "+verb+" "+strings.Join(args, " "))
@@ -204,4 +228,12 @@ func (s SumFile) ZipVersions() map[string][]string {
 		slices.Sort(v)
 	}
 	return out
+}
+
+func (mf *ModFile) once(verb, key string) error {
+	if mf.seen[verb+" "+key] {
+		return fmt.Errorf("%w: %s %s appears twice", ErrDuplicate, verb, key)
+	}
+	mf.seen[verb+" "+key] = true
+	return nil
 }

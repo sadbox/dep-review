@@ -1,6 +1,7 @@
 package actions
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -44,7 +45,41 @@ type yParser struct {
 	i     int
 }
 
+// errLineBreak marks YAML the gate refuses to read at all because its
+// line structure is ambiguous to a line-based reader.
+var errLineBreak = errors.New("YAML contains a line break other than LF or CRLF, or a control character")
+
+// checkYAMLText rejects text whose lines a YAML parser would split
+// differently from the gate: a CR not followed by LF, NEL (U+0085), LS
+// (U+2028) and PS (U+2029) are line breaks to YAML 1.1 parsers such as
+// GitHub's, but splitting on "\n" keeps them inside one line, so a
+// "# comment<CR>  post: evil.js" hides a key. Every other C0 control
+// (tab, LF and the CR of a CRLF excepted), DEL, the C1 range, a BOM after
+// the first character and invalid UTF-8 are refused too: YAML does not
+// allow them and the gate does not guess how a parser recovers. Only
+// after this check may CRLF be normalized to LF.
+func checkYAMLText(text string) error {
+	if !utf8.ValidString(text) {
+		return fmt.Errorf("%w: invalid UTF-8", errLineBreak)
+	}
+	for i, r := range text {
+		switch {
+		case r == '\t' || r == '\n':
+		case r == '\r':
+			if !strings.HasPrefix(text[i+1:], "\n") {
+				return fmt.Errorf("%w: CR without LF at byte %d", errLineBreak, i)
+			}
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == 0x2028 || r == 0x2029 || (r == 0xfeff && i > 0):
+			return fmt.Errorf("%w: U+%04X at byte %d", errLineBreak, r, i)
+		}
+	}
+	return nil
+}
+
 func parseYAML(text string) (any, error) {
+	if err := checkYAMLText(text); err != nil {
+		return nil, err
+	}
 	p := &yParser{lines: splitLines(strings.ReplaceAll(text, "\r\n", "\n"))}
 	for _, l := range p.lines {
 		if strings.HasPrefix(strings.TrimLeft(l, " "), "\t") && !blankOrComment(l) {
@@ -66,6 +101,16 @@ func parseYAML(text string) (any, error) {
 	p.skipBlank()
 	if p.i < len(p.lines) && strings.TrimSpace(p.lines[p.i]) != "..." {
 		return nil, fmt.Errorf("line %d: unexpected content", p.i+1)
+	}
+	// After a document end marker only blank and comment lines may follow:
+	// a second document ("...\n---\nruns: ...") is something another
+	// parser may read instead of the first.
+	if p.i < len(p.lines) {
+		p.i++
+		p.skipBlank()
+		if p.i < len(p.lines) {
+			return nil, fmt.Errorf("line %d: content after the document end marker", p.i+1)
+		}
 	}
 	return v, nil
 }
