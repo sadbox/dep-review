@@ -213,9 +213,10 @@ func TestCheckTrees(t *testing.T) {
 		{"blob", nil, map[string]string{"b.go": "package p\nvar s = " + blob + "\n"}, []string{codeBlob}},
 		{"long prose literal", nil, map[string]string{"b.go": "package p\nvar s = \"" + strings.Repeat("lorem ipsum ", 100) + "\"\n"}, nil},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\nRET\n"}, []string{codeAsm}},
-		{"binary", nil, map[string]string{"x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
+		// A linked .syso whose ELF structure cannot be read goes to a person.
+		{"binary", nil, map[string]string{"x.syso": "\x7fELF\x00\x00"}, []string{codeBinary, codeOpaque}},
 		{"testdata binary fixture", nil, map[string]string{"testdata/x.bin": "\x00\x01"}, nil},
-		{"testdata syso", nil, map[string]string{"testdata/p/x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
+		{"testdata syso", nil, map[string]string{"testdata/p/x.syso": "\x7fELF\x00\x00"}, []string{codeBinary, codeOpaque}},
 		{"vendor checked", nil, map[string]string{"vendor/x/x.go": "package x\nimport \"os/exec\"\n"}, []string{codeImport}},
 		{"c source", map[string]string{"x.c": "int f(void) { return 0; }\n"}, map[string]string{"x.c": "int f(void) { return 1; }\n"}, []string{codeCSource}},
 		{"net subpackage", nil, map[string]string{"h.go": "package p\nimport \"net/http/httputil\"\nvar _ httputil.BufferPool\n"}, []string{codeImport}},
@@ -287,8 +288,8 @@ func TestCheckTrees(t *testing.T) {
 			for _, f := range h.findings("m") {
 				got = append(got, f.Code)
 				want := model.RouteReview
-				if f.Code == codeParse {
-					want = model.RouteHuman
+				if r, ok := checkRoute[f.Code]; ok {
+					want = r
 				}
 				if f.Route != want || f.Update != "m" {
 					t.Errorf("finding %+v, want route %s", f, want)

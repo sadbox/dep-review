@@ -332,6 +332,7 @@ func majorPrefix(mod string) (string, bool) {
 func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, error) {
 	var findings []model.Finding
 	var flagged []model.FlaggedItem
+	checked := map[string]bool{} // flaggedUpdate keys already checked
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
 	var args []string
 	for _, c := range work {
@@ -398,18 +399,25 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 		if bad || trees[1] == nil {
 			continue
 		}
-		h := CheckTrees(trees[0], trees[1])
-		name := safeImport(u.Name)
-		findings = append(findings, h.findings(name)...)
-		flagged = append(flagged, h.flagged(name)...)
+		su := safeUpdate(u)
+		key := flaggedUpdate(su)
 		if err := writeDiff(ctx, env, home, u, dirs); err != nil {
 			return nil, nil, err
 		}
-		if len(h.hits) > 0 {
-			su := safeUpdate(u)
-			desc := fmt.Sprintf("every item the gate's checks flagged in %s %s -> %s, with exactly what changed (third-party code quoted under the gate's headings); assess each one", su.Name, ecoutil.OrNew(su.From), su.To)
-			if err := env.Evidence.AddUntrusted(evName(u, "flagged.md"), desc, h.render(su.Name, su.From, su.To)); err != nil {
-				return nil, nil, err
+		// The same module change in several directories (a grouped bump)
+		// is the same two trees: checked, flagged and rendered once.
+		if checked[key] {
+			fmt.Fprintf(summary, "- %s: same change as in another directory; its flagged items are listed once\n", key)
+		} else {
+			checked[key] = true
+			h := CheckTrees(trees[0], trees[1])
+			findings = append(findings, h.findings(su.Name)...)
+			flagged = append(flagged, h.flagged(key)...)
+			if len(h.hits) > 0 {
+				desc := fmt.Sprintf("every item the gate's checks flagged in %s, with exactly what changed (third-party code quoted under the gate's headings); assess each one", key)
+				if err := env.Evidence.AddUntrusted(evName(u, "flagged.md"), desc, h.render(key)); err != nil {
+					return nil, nil, err
+				}
 			}
 		}
 		if ex := changelogExcerpt(trees[0], trees[1]); ex != nil {
@@ -420,6 +428,14 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 	}
 	summary.WriteString("\n")
 	return findings, flagged, nil
+}
+
+// flaggedUpdate is the update a flagged item belongs to, as the verdict
+// must name it: the module path and both versions, so the same module
+// changing differently in two directories gives two distinct keys. Its
+// parts are sanitized (at most maxDetailValue bytes each).
+func flaggedUpdate(su model.Update) string {
+	return su.Name + " " + ecoutil.OrNew(su.From) + " -> " + su.To
 }
 
 func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, dirs [2]string) error {

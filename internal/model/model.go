@@ -176,6 +176,12 @@ type Evidence struct {
 // refuses to merge even if it somehow did not).
 const MaxFlagged = 200
 
+// MaxItemField bounds a FlaggedItem's (and an ItemAssessment's) update,
+// code and item. It is above the longest the gate builds (a module path
+// and two versions of at most 200 bytes each; a file and an import path
+// of 200 each): a gomod test keeps it so.
+const MaxItemField = 640
+
 // FlaggedItem is one item of Evidence.Flagged: a check (Code) that
 // flagged a construct (Item, e.g. "http2/transportConfig" or
 // "x/x.syso") in one update (Update, the Update.Name). All three are the

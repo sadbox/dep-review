@@ -66,7 +66,9 @@ binaries and long encoded literals. These route to the model review, not to
 a person: `evidence.json` lists every flagged item (`flagged`, capped at
 200, past which a person decides), and a `.flagged.md` evidence file per
 module shows exactly what changed for each one. For binaries and decoded
-blobs the gate renders, with Go's own parsers only, the type, structure
+blobs the gate renders, with Go's own parsers only (run in a child
+process of the gate with an address-space limit and a timeout, under a
+per-module budget of bytes parsed and decompressed), the type, structure
 (ELF/Mach-O/PE sections, imported libraries and symbols, Go build info;
 zip/tar/gzip entries), a hexdump, printable strings, a comparison with the
 previous version, and where the module refers to the file (linked `.syso`,
@@ -74,7 +76,11 @@ previous version, and where the module refers to the file (linked `.syso`,
 item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
 list with the evidence's, and merges only when every flagged item, and
 nothing else, is `benign`. A Go file the gate cannot parse still goes to a
-person, as does truncated evidence.
+person, as do truncated evidence, a module with more flagged items than a
+review can take, and a binary linked or embedded into the program whose
+structure the gate could not render. Module diffs do not detect renames,
+and the full new text of every C, assembly, cgo and risky-import file is
+in the focused evidence too.
 
 ### GitHub workflow lockfiles
 
@@ -258,7 +264,7 @@ manager), in a container run under gVisor (`runsc`, pinned and sha512-checked by
 - **Only data we already publish**: the evidence and the default branch.
 
 Its answer comes back only on stdout: one `claude -p --output-format json`
-result, at most 1 MB, whose `structured_output` must pass the verdict
+result, at most 2 MB, whose `structured_output` must pass the verdict
 schema before `verdict.json` is written. Anything else is no verdict, which
 sends the PR to a human. The Read/Grep/Glob-only tool set and the
 permission settings from `review-prep` still apply inside, as a second

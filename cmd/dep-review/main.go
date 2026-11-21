@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 )
 
 // commands are the gate's subcommands.
@@ -23,8 +25,19 @@ var commands = map[string]func([]string) error{
 	"sweep":       runSweep,
 }
 
-// extraCommands holds the sandboxtest build's test-only commands.
-var extraCommands = map[string]func([]string) error{}
+// extraCommands holds the sandboxtest build's test-only commands and the
+// hidden describe-binary, the child process fetch starts to parse
+// binaries under a memory limit (ecoutil.Isolate).
+var extraCommands = map[string]func([]string) error{
+	describeBinaryCommand: func(args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("%s takes no arguments", describeBinaryCommand)
+		}
+		return ecoutil.ChildMain(os.Stdin, os.Stdout)
+	},
+}
+
+const describeBinaryCommand = "describe-binary"
 
 func main() {
 	// Errors and log lines can carry text from a dependency, a registry or

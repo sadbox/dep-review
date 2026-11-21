@@ -26,6 +26,10 @@ type FileDiff struct {
 // git configuration, so no diff driver or textconv can run. Either side may
 // be "" for an absent tree (a new or removed dependency): an empty
 // directory is used. Binary files appear as "Binary files ... differ".
+// Renames are not detected (--no-renames): a file moved with identical
+// bytes, say an inert testdata/x.txt that becomes a compiled evil.c, must
+// show as the removal and the full addition it is, not as a one-line
+// rename.
 func DiffTrees(ctx context.Context, home, parent, oldRel, newRel string) ([]FileDiff, bool, error) {
 	empty := ""
 	for _, side := range []*string{&oldRel, &newRel} {
@@ -43,7 +47,7 @@ func DiffTrees(ctx context.Context, home, parent, oldRel, newRel string) ([]File
 	}
 	cmd := exec.CommandContext(ctx, "git", "-c", "core.quotePath=false",
 		"diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv",
-		"-M", "--src-prefix=", "--dst-prefix=", "--", oldRel, newRel)
+		"--no-renames", "--src-prefix=", "--dst-prefix=", "--", oldRel, newRel)
 	cmd.Dir = parent
 	cmd.Env = append(gitEnv(home), "GIT_CEILING_DIRECTORIES="+parent)
 	var stderr bytes.Buffer

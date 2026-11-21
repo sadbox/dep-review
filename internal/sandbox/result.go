@@ -15,7 +15,7 @@ import (
 // json` result with a 3000-character summary is a few kilobytes; one that
 // assesses model.MaxFlagged items is a few hundred (and the CLI may echo
 // the structured output in "result" too).
-const MaxStdout = 1 << 20
+const MaxStdout = 2 << 20
 
 // ReadVerdict is the sandbox's only output channel: it reads the
 // container's stdout (all of it, so the writer never blocks, keeping at

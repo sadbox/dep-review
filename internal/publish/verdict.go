@@ -36,9 +36,9 @@ const (
 	// itemFieldMax bounds an item's update, code and item strings (the
 	// gate's own, so a longer one cannot match anything); itemNoteMax its
 	// note. maxVerdictSize leaves room for model.MaxFlagged full items.
-	itemFieldMax   = 300
+	itemFieldMax   = model.MaxItemField
 	itemNoteMax    = 400
-	maxVerdictSize = 384 << 10
+	maxVerdictSize = 640 << 10
 )
 
 // ParseVerdict decodes and validates the review job's structured output

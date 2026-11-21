@@ -27,6 +27,9 @@ func TestParseVerdictItems(t *testing.T) {
 		{"empty", `[]`, true},
 		{"one", `[` + item("") + `]`, true},
 		{"max", `[` + strings.Join(many[:model.MaxFlagged], ",") + `]`, true},
+		// The gate's longest ids (module path and two versions) fit.
+		{"longest item", `[` + strings.Replace(item(""), `"a.go"`, `"`+strings.Repeat("a", model.MaxItemField)+`"`, 1) + `]`, true},
+		{"longest update", `[` + strings.Replace(item(""), `"github.com/x/y"`, `"`+strings.Repeat("u", 605)+`"`, 1) + `]`, true},
 		{"suspicious is valid", `[` + strings.Replace(item(""), "benign", "suspicious", 1) + `]`, true},
 		{"unclear is valid", `[` + strings.Replace(item(""), "benign", "unclear", 1) + `]`, true},
 		{"unknown assessment", `[` + strings.Replace(item(""), "benign", "fine", 1) + `]`, false},

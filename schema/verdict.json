@@ -46,9 +46,9 @@
         "additionalProperties": false,
         "required": ["update", "code", "item", "assessment", "note"],
         "properties": {
-          "update": {"type": "string", "maxLength": 300},
-          "code": {"type": "string", "maxLength": 300},
-          "item": {"type": "string", "maxLength": 300},
+          "update": {"type": "string", "maxLength": 640},
+          "code": {"type": "string", "maxLength": 640},
+          "item": {"type": "string", "maxLength": 640},
           "assessment": {
             "type": "string",
             "enum": ["benign", "suspicious", "unclear"],

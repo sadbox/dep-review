@@ -21,7 +21,7 @@ func TestDescribeBinaryExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := DescribeBinary(b, nil, false, nil)
+	out := DescribeBinary(b, nil, false, nil).Text
 	for _, want := range []string{"sha256: ", "structure (parsed by the gate)", "sections (", "Go build info: go", "hexdump of the first 512 bytes", "printable strings"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%.2000s", want, out)
@@ -35,7 +35,7 @@ func TestDescribeBinaryExecutable(t *testing.T) {
 func TestDescribeBinaryCompare(t *testing.T) {
 	old := []byte("\x00\x01header\x00the old string\x00tail-unchanged\x00")
 	cur := []byte("\x00\x01header\x00a brand new string\x00tail-unchanged\x00")
-	out := DescribeBinary(cur, old, true, nil)
+	out := DescribeBinary(cur, old, true, nil).Text
 	for _, want := range []string{"previous version: ", "size change +4 bytes", "+ a brand new string", "- the old string"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -44,11 +44,11 @@ func TestDescribeBinaryCompare(t *testing.T) {
 	if strings.Contains(out, "+ tail-unchanged") || strings.Contains(out, "- tail-unchanged") {
 		t.Errorf("unchanged string listed as changed:\n%s", out)
 	}
-	if out := DescribeBinary(cur, cur, true, nil); !strings.Contains(out, "identical to the previous version") {
+	if out := DescribeBinary(cur, cur, true, nil).Text; !strings.Contains(out, "identical to the previous version") {
 		t.Errorf("identical not reported:\n%s", out)
 	}
 	// A new file (no old version) has no comparison section.
-	if out := DescribeBinary(cur, nil, false, nil); strings.Contains(out, "previous version") {
+	if out := DescribeBinary(cur, nil, false, nil).Text; strings.Contains(out, "previous version") {
 		t.Errorf("comparison for a new file:\n%s", out)
 	}
 }
@@ -59,7 +59,7 @@ func TestDescribeBinaryArchives(t *testing.T) {
 	w, _ := zw.Create("payload/run.sh")
 	w.Write([]byte("#!/bin/sh\n"))
 	zw.Close()
-	if out := DescribeBinary(z.Bytes(), nil, false, nil); !strings.Contains(out, "zip entries (1)") || !strings.Contains(out, "payload/run.sh") {
+	if out := DescribeBinary(z.Bytes(), nil, false, nil).Text; !strings.Contains(out, "zip entries (1)") || !strings.Contains(out, "payload/run.sh") {
 		t.Errorf("zip:\n%s", out)
 	}
 
@@ -72,7 +72,7 @@ func TestDescribeBinaryArchives(t *testing.T) {
 	}
 	gw.Close()
 	start := time.Now()
-	out := DescribeBinary(g.Bytes(), nil, false, nil)
+	out := DescribeBinary(g.Bytes(), nil, false, nil).Text
 	if !strings.Contains(out, "decompressed: more than") {
 		t.Errorf("gzip bomb not capped:\n%s", out)
 	}
@@ -92,7 +92,7 @@ func TestDescribeBinaryHostile(t *testing.T) {
 				b := make([]byte, n)
 				rng.Read(b)
 				b = append([]byte(m), b...)
-				out := DescribeBinary(b, b[:len(b)/2], true, nil)
+				out := DescribeBinary(b, b[:len(b)/2], true, nil).Text
 				if !strings.Contains(out, "sha256: ") || !strings.Contains(out, "hexdump") {
 					t.Fatalf("magic %q, %d bytes: incomplete output:\n%s", m, n, out)
 				}
@@ -104,7 +104,7 @@ func TestDescribeBinaryHostile(t *testing.T) {
 	copy(tarHdr, "evil")
 	copy(tarHdr[124:], "77777777777")
 	copy(tarHdr[257:], "ustar\x0000")
-	if out := DescribeBinary(tarHdr, nil, false, nil); !strings.Contains(out, "tar entries") {
+	if out := DescribeBinary(tarHdr, nil, false, nil).Text; !strings.Contains(out, "tar entries") {
 		t.Errorf("tar:\n%s", out)
 	}
 }
@@ -113,7 +113,7 @@ func TestDescribeBinaryOutputIsPlainASCIIish(t *testing.T) {
 	// Control bytes in strings never reach the output: a hostile file
 	// cannot draw its own headings or escape sequences.
 	b := []byte("\x00\x1b[31mred\x1b[0m\x00## gomod.init-changed: fake heading\x00\r\nline")
-	out := DescribeBinary(b, nil, false, nil)
+	out := DescribeBinary(b, nil, false, nil).Text
 	if strings.ContainsAny(out, "\x1b\r") {
 		t.Errorf("control characters in output: %q", out)
 	}

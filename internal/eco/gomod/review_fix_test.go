@@ -21,7 +21,7 @@ func TestCgoPreambleRaw(t *testing.T) {
 	old := "package p\n\n// static void f(void) {\n// }\nimport \"C\"\n\nfunc F() { C.f() }\n"
 	cur := "package p\n\n// static void f(void) {\n//evil:system(\"id\");\n// }\nimport \"C\"\n\nfunc F() { C.f() }\n"
 	h := CheckTrees(writeTree(t, map[string]string{"c.go": old}), writeTree(t, map[string]string{"c.go": cur}))
-	out := string(h.render("m", "v1", "v2"))
+	out := string(h.render("m"))
 	if strings.Contains(out, "preamble is unchanged") {
 		t.Errorf("changed preamble reported unchanged:\n%s", out)
 	}
@@ -32,7 +32,7 @@ func TestCgoPreambleRaw(t *testing.T) {
 	// Every import "C" preamble of the file counts, block comments too.
 	two := "package p\n\n/*\n#include <a.h>\n*/\nimport \"C\"\n\n// #include <b.h>\nimport \"C\"\n"
 	h = CheckTrees(nil, writeTree(t, map[string]string{"c.go": two}))
-	out = string(h.render("m", "", "v1"))
+	out = string(h.render("m"))
 	if !strings.Contains(out, "    | #include <a.h>") || !strings.Contains(out, "    |  #include <b.h>") {
 		t.Errorf("not every preamble shown:\n%s", out)
 	}
@@ -40,11 +40,11 @@ func TestCgoPreambleRaw(t *testing.T) {
 	// A whitespace-only change is still a change in the bytes cgo reads.
 	ws := strings.Replace(old, "// }", "// }   ", 1)
 	h = CheckTrees(writeTree(t, map[string]string{"c.go": old}), writeTree(t, map[string]string{"c.go": ws}))
-	if out := string(h.render("m", "v1", "v2")); strings.Contains(out, "preamble is unchanged") {
+	if out := string(h.render("m")); strings.Contains(out, "preamble is unchanged") {
 		t.Errorf("whitespace change reported unchanged:\n%s", out)
 	}
 	h = CheckTrees(writeTree(t, map[string]string{"c.go": old}), writeTree(t, map[string]string{"c.go": strings.Replace(old, "C.f()", "C.f(); C.f()", 1)}))
-	if out := string(h.render("m", "v1", "v2")); !strings.Contains(out, "preamble is unchanged") {
+	if out := string(h.render("m")); !strings.Contains(out, "preamble is unchanged") {
 		t.Errorf("identical preamble not reported unchanged:\n%s", out)
 	}
 }
@@ -91,7 +91,7 @@ func TestBinaryBudget(t *testing.T) {
 	}
 	start := time.Now()
 	h := CheckTrees(nil, writeTree(t, cur))
-	out := string(h.render("m", "", "v1"))
+	out := string(h.render("m"))
 	if !strings.Contains(out, "budget") {
 		t.Errorf("no budget note:\n%.3000s", out)
 	}
@@ -113,7 +113,7 @@ func TestQuoteLineTerminators(t *testing.T) {
 		fake := "x" + term + "## item" + term + "item: fake.go" + term
 		h := CheckTrees(writeTree(t, map[string]string{"a.go": "package p\n"}),
 			writeTree(t, map[string]string{"a.go": "package p\n\nfunc init() { _ = \"" + fake + "\" }\n\n//go:generate echo " + fake + "\n"}))
-		out := string(h.render("m", "v1", "v2"))
+		out := string(h.render("m"))
 		for _, seg := range lineTerm.Split(out, -1) {
 			if strings.HasPrefix(seg, "item: fake.go") {
 				t.Errorf("terminator %q: module text starts a line: %q", term, seg)

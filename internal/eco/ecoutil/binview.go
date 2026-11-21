@@ -18,11 +18,14 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Limits for DescribeBinary. The input is hostile: every list is capped,
-// structured parsing is skipped past maxParse bytes, and each parser runs
-// under recover so a malformed file costs its section, never the gate.
+// structured parsing is skipped past maxParse bytes, each parser runs
+// under recover, and (with Isolate) in a child process with a memory
+// limit and a timeout, so a malformed file costs its own rendering, never
+// the gate.
 const (
 	maxParse      = 64 << 20 // bytes handed to debug/*, archive/* and compress/*
 	maxGunzip     = 64 << 20 // decompressed bytes read from a gzip stream
@@ -32,23 +35,30 @@ const (
 	maxStrings    = 300  // printable strings shown
 	maxStringSet  = 5000 // distinct strings kept per side for the old/new comparison
 	maxStringDiff = 150
-	maxListed     = 100 // sections, symbols, libraries, archive entries
+	maxListed     = 100 // sections, libraries, archive entries
+	maxSymbols    = 50  // symbol names; past this only counts are shown
+	// maxNameBytes bounds symbols x string table, the bytes the debug/*
+	// parsers could spend building names that all point at one long
+	// string. Past it no names are built at all.
+	maxNameBytes = 16 << 20
 )
 
-// Budget bounds the bytes DescribeBinary hands to the structured parsers
-// and decompresses, across every call that shares it (one module's
-// binaries). nil means no shared bound, only the per-file caps.
+// Budget bounds the work DescribeBinary does across every call that
+// shares it (one module's binaries): bytes handed to the structured
+// parsers plus bytes decompressed (Left), and wall time (Deadline, zero
+// for none). nil means no shared bound, only the per-file caps.
 type Budget struct {
-	Left int64
+	Left     int64
+	Deadline time.Time
 }
 
-// take reserves n bytes; it reports false, reserving nothing, when fewer
-// are left.
-func (b *Budget) take(n int64) bool {
+// Take reserves n bytes; it reports false, reserving nothing, when fewer
+// are left or the deadline has passed.
+func (b *Budget) Take(n int64) bool {
 	if b == nil {
 		return true
 	}
-	if b.Left < n {
+	if b.Left < n || (!b.Deadline.IsZero() && time.Now().After(b.Deadline)) {
 		return false
 	}
 	b.Left -= n
@@ -66,6 +76,27 @@ func (b *Budget) left(n int64) int64 {
 // budgetNote is printed in place of what a spent budget skipped.
 const budgetNote = "the gate's parse budget for this module is spent"
 
+// Status says whether DescribeBinary rendered a file's structure.
+type Status int
+
+const (
+	// NoParser: the file's type has no structured parser (an image, a
+	// database, unknown bytes); only the generic facts are shown.
+	NoParser Status = iota
+	// Structured: the structure was rendered.
+	Structured
+	// NotStructured: the type has a parser but the structure was not
+	// rendered (budget spent, too large, the parser failed, or the
+	// isolated parser crashed or timed out).
+	NotStructured
+)
+
+// Description is DescribeBinary's result.
+type Description struct {
+	Text      string
+	Structure Status
+}
+
 // DescribeBinary renders bytes a reviewer cannot read as text: size,
 // SHA-256, the type its magic number names, the structure the standard
 // library's parsers find (ELF, Mach-O and PE/COFF headers, sections,
@@ -73,13 +104,15 @@ const budgetNote = "the gate's parse budget for this module is spent"
 // entries), a hexdump of the start and its printable strings. With an old
 // version (hadOld) it also compares the two. Everything it prints from the
 // file (names, strings) is third-party data; the caller writes the result
-// as untrusted evidence.
-func DescribeBinary(cur, old []byte, hadOld bool, budget *Budget) string {
+// as untrusted evidence. Only the structure step parses the file; the rest
+// is linear scanning, done in this process.
+func DescribeBinary(cur, old []byte, hadOld bool, budget *Budget) Description {
 	var b strings.Builder
 	fmt.Fprintf(&b, "size: %d bytes\nsha256: %x\ntype: %s\n", len(cur), sha256.Sum256(cur), magicType(cur))
-	if s := structure(cur, budget); s != "" {
+	text, st := structure(cur, budget)
+	if text != "" {
 		b.WriteString("\nstructure (parsed by the gate):\n")
-		b.WriteString(s)
+		b.WriteString(text)
 	}
 	if hadOld {
 		b.WriteString("\n")
@@ -96,7 +129,7 @@ func DescribeBinary(cur, old []byte, hadOld bool, budget *Budget) string {
 	for _, s := range strs {
 		b.WriteString("    | " + s + "\n")
 	}
-	return b.String()
+	return Description{Text: b.String(), Structure: st}
 }
 
 // magicType names a file by its leading bytes. http.DetectContentType is
@@ -167,56 +200,110 @@ func coffMachine(b []byte) string {
 	return ""
 }
 
+// parsed reports whether the structure step parses files of type t.
+func parsed(t string) bool {
+	return t == "ELF" || strings.HasPrefix(t, "PE") || strings.HasPrefix(t, "COFF") || strings.HasPrefix(t, "Mach-O") ||
+		t == "zip archive" || t == "tar archive" || t == "gzip"
+}
+
+// structure renders the file's structure: here, or in the isolated child
+// process when Isolate was called. The bytes parsed are charged first;
+// what the parsers decompress is charged after.
+func structure(b []byte, budget *Budget) (string, Status) {
+	if !parsed(magicType(b)) {
+		return "", NoParser
+	}
+	if len(b) > maxParse {
+		return fmt.Sprintf("  not parsed: larger than %d bytes\n", maxParse), NotStructured
+	}
+	if !budget.Take(int64(len(b))) {
+		return "  not parsed: " + budgetNote + "\n", NotStructured
+	}
+	limit := budget.left(maxGunzip)
+	var res childResult
+	if iso := isolation; iso != nil {
+		res = iso.run(b, limit)
+	} else {
+		res = structureLocal(b, limit)
+	}
+	budget.Take(min(res.Used, limit))
+	return res.Text, res.Status
+}
+
+// childResult is the structure step's output (and the child's reply).
+type childResult struct {
+	Text   string `json:"text"`
+	Status Status `json:"status"`
+	Used   int64  `json:"used"` // bytes decompressed
+}
+
+// renderer is one structure rendering: it records a failure in any parser.
+type renderer struct {
+	limit  int64 // bytes that may be decompressed
+	used   int64
+	failed bool
+}
+
 // guard runs one parser and turns a panic into a line of text.
-func guard(what string, f func() string) (s string) {
+func (rd *renderer) guard(what string, f func() string) (s string) {
 	defer func() {
 		if r := recover(); r != nil {
+			rd.failed = true
 			s = "  " + what + ": the parser failed on this input\n"
 		}
 	}()
 	return f()
 }
 
-func structure(b []byte, budget *Budget) string {
-	t := magicType(b)
-	switch {
-	case t == "ELF", strings.HasPrefix(t, "PE"), strings.HasPrefix(t, "COFF"), strings.HasPrefix(t, "Mach-O"),
-		t == "zip archive", t == "tar archive", t == "gzip":
-	default:
-		return ""
-	}
-	if len(b) > maxParse {
-		return fmt.Sprintf("  not parsed: larger than %d bytes\n", maxParse)
-	}
-	if !budget.take(int64(len(b))) {
-		return "  not parsed: " + budgetNote + "\n"
-	}
+// fail records a parser error and returns its line.
+func (rd *renderer) fail(what string, err error) string {
+	rd.failed = true
+	return "  " + what + ": not parsed: " + clip(err.Error()) + "\n"
+}
+
+func structureLocal(b []byte, limit int64) childResult {
+	rd := &renderer{limit: limit}
 	var out strings.Builder
 	r := bytes.NewReader(b)
-	switch {
+	compressed := false
+	switch t := magicType(b); {
 	case t == "ELF":
-		out.WriteString(guard("ELF", func() string { return describeELF(r) }))
+		var s string
+		s, compressed = rd.describeELFGuarded(r)
+		out.WriteString(s)
 	case strings.HasPrefix(t, "PE"), strings.HasPrefix(t, "COFF"):
-		out.WriteString(guard("PE/COFF", func() string { return describePE(r) }))
+		out.WriteString(rd.guard("PE/COFF", func() string { return rd.describePE(b, r) }))
 	case strings.HasPrefix(t, "Mach-O"):
-		out.WriteString(guard("Mach-O", func() string { return describeMachO(r) }))
+		out.WriteString(rd.guard("Mach-O", func() string { return rd.describeMachO(r) }))
 	case t == "zip archive":
-		out.WriteString(guard("zip", func() string { return describeZip(r) }))
+		out.WriteString(rd.guard("zip", func() string { return rd.describeZip(r) }))
 	case t == "tar archive":
-		out.WriteString(guard("tar", func() string { return describeTar(r) }))
+		out.WriteString(rd.guard("tar", func() string { return describeTar(r) }))
 	case t == "gzip":
-		out.WriteString(guard("gzip", func() string { return describeGzip(r, budget) }))
+		out.WriteString(rd.guard("gzip", func() string { return rd.describeGzip(r) }))
 	}
-	out.WriteString(guard("Go build info", func() string { return describeBuildInfo(r) }))
-	return out.String()
+	if !compressed {
+		// buildinfo reads section data, which for a compressed ELF
+		// section would inflate it.
+		out.WriteString(rd.guard("Go build info", func() string { return describeBuildInfo(r) }))
+	}
+	st := Structured
+	if rd.failed {
+		st = NotStructured
+	}
+	return childResult{Text: out.String(), Status: st, Used: rd.used}
 }
 
 // list writes up to maxListed items, one per line, marking the rest.
 func list(b *strings.Builder, title string, items []string) {
+	listN(b, title, items, maxListed)
+}
+
+func listN(b *strings.Builder, title string, items []string, n int) {
 	fmt.Fprintf(b, "  %s (%d):\n", title, len(items))
 	for i, it := range items {
-		if i == maxListed {
-			fmt.Fprintf(b, "    ... %d more\n", len(items)-maxListed)
+		if i == n {
+			fmt.Fprintf(b, "    ... %d more (names not shown)\n", len(items)-n)
 			break
 		}
 		b.WriteString("    | " + clip(it) + "\n")
@@ -224,6 +311,9 @@ func list(b *strings.Builder, title string, items []string) {
 }
 
 func clip(s string) string {
+	if len(s) > 4*maxStringLen {
+		s = s[:4*maxStringLen]
+	}
 	s = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return '.'
@@ -236,40 +326,107 @@ func clip(s string) string {
 	return s
 }
 
-func describeELF(r io.ReaderAt) string {
+func (rd *renderer) describeELFGuarded(r *bytes.Reader) (s string, compressed bool) {
+	s = rd.guard("ELF", func() string {
+		var out string
+		out, compressed = rd.describeELF(r)
+		return out
+	})
+	return s, compressed
+}
+
+// describeELF renders headers and sections, and imported libraries and
+// symbols only when building their names is cheap (maxNameBytes) and no
+// section is compressed (reading one would inflate it).
+func (rd *renderer) describeELF(r io.ReaderAt) (string, bool) {
 	f, err := elf.NewFile(r)
 	if err != nil {
-		return "  ELF: not parsed: " + clip(err.Error()) + "\n"
+		return rd.fail("ELF", err), false
 	}
 	defer f.Close()
 	var b strings.Builder
 	fmt.Fprintf(&b, "  ELF %s %s %s, OS ABI %s, entry 0x%x\n", f.Class, f.Data, f.Type, f.OSABI, f.Entry)
 	fmt.Fprintf(&b, "  machine: %s\n", f.Machine)
 	var secs []string
+	compressed := false
+	symbols := map[elf.SectionType]uint64{}
+	nameCost := uint64(0)
 	for _, s := range f.Sections {
-		secs = append(secs, fmt.Sprintf("%s %s size %d", s.Name, s.Type, s.Size))
+		flag := ""
+		if s.Flags&elf.SHF_COMPRESSED != 0 {
+			compressed = true
+			flag = " (compressed; not inflated)"
+		}
+		secs = append(secs, fmt.Sprintf("%s %s size %d%s", s.Name, s.Type, s.Size, flag))
+		if (s.Type == elf.SHT_SYMTAB || s.Type == elf.SHT_DYNSYM) && s.Entsize > 0 {
+			n := s.Size / s.Entsize
+			symbols[s.Type] += n
+			if int(s.Link) < len(f.Sections) {
+				nameCost += n * f.Sections[s.Link].Size
+			}
+		}
+		if s.Type == elf.SHT_DYNAMIC && s.Entsize > 0 && int(s.Link) < len(f.Sections) {
+			nameCost += s.Size / s.Entsize * f.Sections[s.Link].Size
+		}
 	}
 	list(&b, "sections", secs)
-	if libs, err := f.ImportedLibraries(); err == nil {
-		list(&b, "imported libraries", libs)
-	}
-	if syms, err := f.ImportedSymbols(); err == nil {
-		var names []string
-		for _, s := range syms {
-			names = append(names, s.Name+" "+s.Library)
+	fmt.Fprintf(&b, "  symbol tables: %d symbols, %d dynamic symbols\n", symbols[elf.SHT_SYMTAB], symbols[elf.SHT_DYNSYM])
+	switch {
+	case compressed:
+		b.WriteString("  imported libraries and symbols: not read (a section is compressed)\n")
+	case nameCost > maxNameBytes:
+		b.WriteString("  imported libraries and symbols: not read (their names could cost too much to build); counts above\n")
+	default:
+		if libs, err := f.ImportedLibraries(); err == nil {
+			list(&b, "imported libraries", libs)
 		}
-		list(&b, "imported symbols", names)
+		if syms, err := f.ImportedSymbols(); err == nil {
+			var names []string
+			for _, s := range syms {
+				names = append(names, s.Name+" "+s.Library)
+			}
+			listN(&b, "imported symbols", names, maxSymbols)
+		}
 	}
-	if syms, err := f.Symbols(); err == nil {
-		fmt.Fprintf(&b, "  symbol table: %d symbols\n", len(syms))
-	}
-	return b.String()
+	return b.String(), compressed
 }
 
-func describePE(r io.ReaderAt) string {
+// peNameCost reads, from the raw headers, the symbol count and string
+// table size of a PE image or COFF object: pe.NewFile builds every
+// symbol name up front.
+func peNameCost(b []byte) (syms uint32, cost uint64, ok bool) {
+	off := 0
+	if len(b) >= 0x40 && b[0] == 'M' && b[1] == 'Z' {
+		off = int(binary.LittleEndian.Uint32(b[0x3c:]))
+		if off < 0 || off+4 > len(b) || string(b[off:off+4]) != "PE\x00\x00" {
+			return 0, 0, false
+		}
+		off += 4
+	}
+	if off+20 > len(b) {
+		return 0, 0, false
+	}
+	ptr := uint64(binary.LittleEndian.Uint32(b[off+8:]))
+	syms = binary.LittleEndian.Uint32(b[off+12:])
+	strOff := ptr + 18*uint64(syms)
+	var strSize uint64
+	if ptr != 0 && strOff+4 <= uint64(len(b)) {
+		strSize = uint64(binary.LittleEndian.Uint32(b[strOff:]))
+	}
+	return syms, uint64(syms) * max(strSize, 1), true
+}
+
+func (rd *renderer) describePE(raw []byte, r io.ReaderAt) string {
+	syms, cost, ok := peNameCost(raw)
+	if !ok {
+		return rd.fail("PE/COFF", errors.New("unreadable headers"))
+	}
+	if cost > maxNameBytes {
+		return fmt.Sprintf("  PE/COFF: %d symbols; not parsed further (building their names could cost too much)\n", syms)
+	}
 	f, err := pe.NewFile(r)
 	if err != nil {
-		return "  PE/COFF: not parsed: " + clip(err.Error()) + "\n"
+		return rd.fail("PE/COFF", err)
 	}
 	defer f.Close()
 	var b strings.Builder
@@ -283,15 +440,22 @@ func describePE(r io.ReaderAt) string {
 		list(&b, "imported libraries", libs)
 	}
 	if syms, err := f.ImportedSymbols(); err == nil {
-		list(&b, "imported symbols", syms)
+		listN(&b, "imported symbols", syms, maxSymbols)
 	}
 	return b.String()
 }
 
-func describeMachO(r io.ReaderAt) string {
+// describeMachO: macho.NewFile builds the symbol table's names as it
+// parses, so a file built to amplify them is stopped by the isolated
+// child's memory limit, not here.
+func (rd *renderer) describeMachO(r io.ReaderAt) string {
 	var b strings.Builder
 	one := func(f *macho.File) {
-		fmt.Fprintf(&b, "  Mach-O %s %s, %d load commands\n", f.Cpu, f.Type, len(f.Loads))
+		nsyms := 0
+		if f.Symtab != nil {
+			nsyms = len(f.Symtab.Syms)
+		}
+		fmt.Fprintf(&b, "  Mach-O %s %s, %d load commands, %d symbols\n", f.Cpu, f.Type, len(f.Loads), nsyms)
 		var secs []string
 		for _, s := range f.Sections {
 			secs = append(secs, fmt.Sprintf("%s,%s size %d", s.Seg, s.Name, s.Size))
@@ -301,7 +465,7 @@ func describeMachO(r io.ReaderAt) string {
 			list(&b, "imported libraries", libs)
 		}
 		if syms, err := f.ImportedSymbols(); err == nil {
-			list(&b, "imported symbols", syms)
+			listN(&b, "imported symbols", syms, maxSymbols)
 		}
 	}
 	if fat, err := macho.NewFatFile(r); err == nil {
@@ -316,21 +480,21 @@ func describeMachO(r io.ReaderAt) string {
 		}
 		return b.String()
 	} else if !errors.Is(err, macho.ErrNotFat) {
-		return "  Mach-O universal: not parsed (a Java class file shares this magic): " + clip(err.Error()) + "\n"
+		return rd.fail("Mach-O universal (a Java class file shares this magic)", err)
 	}
 	f, err := macho.NewFile(r)
 	if err != nil {
-		return "  Mach-O: not parsed: " + clip(err.Error()) + "\n"
+		return rd.fail("Mach-O", err)
 	}
 	defer f.Close()
 	one(f)
 	return b.String()
 }
 
-func describeZip(r *bytes.Reader) string {
+func (rd *renderer) describeZip(r *bytes.Reader) string {
 	z, err := zip.NewReader(r, r.Size())
 	if err != nil {
-		return "  zip: not parsed: " + clip(err.Error()) + "\n"
+		return rd.fail("zip", err)
 	}
 	var b strings.Builder
 	var names []string
@@ -363,30 +527,31 @@ func describeTar(r io.Reader) string {
 	return b.String()
 }
 
-func describeGzip(r io.Reader, budget *Budget) string {
+func (rd *renderer) describeGzip(r io.Reader) string {
 	z, err := gzip.NewReader(r)
 	if err != nil {
-		return "  gzip: not parsed: " + clip(err.Error()) + "\n"
+		return rd.fail("gzip", err)
 	}
 	defer z.Close()
 	var b strings.Builder
 	if z.Name != "" {
 		fmt.Fprintf(&b, "  gzip header name: %s\n", clip(z.Name))
 	}
-	limit := budget.left(maxGunzip)
-	if limit == 0 {
+	limit := min(rd.limit, maxGunzip)
+	if limit <= 0 {
+		rd.failed = true
 		b.WriteString("  not decompressed: " + budgetNote + "\n")
 		return b.String()
 	}
 	data, err := io.ReadAll(io.LimitReader(z, limit+1))
-	budget.take(min(int64(len(data)), limit))
+	rd.used += min(int64(len(data)), limit)
 	switch {
 	case int64(len(data)) > limit && limit < maxGunzip:
 		fmt.Fprintf(&b, "  decompressed: stopped after %d bytes: %s\n", limit, budgetNote)
 		data = data[:limit]
-	case len(data) > maxGunzip:
+	case int64(len(data)) > limit:
 		fmt.Fprintf(&b, "  decompressed: more than %d bytes (stopped)\n", maxGunzip)
-		data = data[:maxGunzip]
+		data = data[:limit]
 	case err != nil:
 		fmt.Fprintf(&b, "  decompressed: %d bytes, then an error: %s\n", len(data), clip(err.Error()))
 	default:
@@ -485,13 +650,15 @@ func printableStrings(b []byte, limit int) ([]string, int) {
 	flush := func(end int) {
 		if start >= 0 && end-start >= minString {
 			total++
-			s := string(b[start:end])
-			if len(s) > maxStringLen {
-				s = s[:maxStringLen] + "..."
-			}
-			if len(out) < limit && !seen[s] {
-				seen[s] = true
-				out = append(out, s)
+			if len(out) < limit {
+				s := string(b[start:min(end, start+maxStringLen)])
+				if end-start > maxStringLen {
+					s += "..."
+				}
+				if !seen[s] {
+					seen[s] = true
+					out = append(out, s)
+				}
 			}
 		}
 		start = -1
