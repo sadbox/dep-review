@@ -80,7 +80,10 @@ on:
         type: string
         default: ""
       max_model_requests:
-        description: Messages API requests the credential proxy allows per review.
+        description: >-
+          Messages API requests the credential proxy allows per reviewer
+          run. A review too large for one run is split into up to six
+          reading passes and a final pass, each a run with this limit.
         type: number
         default: 200
     # Declared so callers pass these and nothing else (no `secrets: inherit`).
@@ -401,7 +404,8 @@ jobs:
             --service-account-id "$SERVICE_ACCOUNT_ID" \
             --max-requests "$MAX_REQUESTS" \
             --max-turns 80 \
-            --timeout 20m
+            --timeout 20m \
+            --total-timeout 140m
       - name: Checksum the artifact
         id: sums
         run: |

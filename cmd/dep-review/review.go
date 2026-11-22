@@ -50,7 +50,8 @@ func runReview(args []string) error {
 	maxReq := fs.Int("max-requests", proxy.DefaultMaxRequests, "Messages requests the proxy allows")
 	maxTokens := fs.Int("max-tokens", proxy.DefaultMaxTokens, "largest max_tokens the proxy allows per request")
 	maxTurns := fs.Int("max-turns", 80, "claude --max-turns")
-	timeout := fs.Duration("timeout", 15*time.Minute, "reviewer wall clock")
+	timeout := fs.Duration("timeout", 15*time.Minute, "reviewer wall clock (per pass of a split review)")
+	total := fs.Duration("total-timeout", 140*time.Minute, "wall clock for every pass of a split review together")
 	subnet := fs.String("subnet", "10.213.7.0/24", "internal network")
 	applyTest := reviewTestFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -111,8 +112,16 @@ func runReview(args []string) error {
 		if err != nil {
 			return fmt.Errorf("review: %w", err)
 		}
-		if plan := passes.Plan(ev); len(plan) > 1 {
-			return runPasses(c, plan, *out)
+		plan, err := passes.Plan(ev)
+		if err != nil {
+			return fmt.Errorf("review: %w", err) // no verdict: a person decides
+		}
+		if len(plan) > 1 {
+			paths := map[string]string{}
+			for _, d := range ev.Diffs {
+				paths[d.ID] = d.Path
+			}
+			return runPasses(c, plan, paths, *out, time.Now().Add(*total))
 		}
 	}
 	res, err := sandbox.Run(context.Background(), c)
@@ -153,7 +162,9 @@ func readEvidence(dir string) (model.Evidence, error) {
 // with their reports, each a full sandboxed run with its own prompt (the
 // base prompt and its scope), and writes the merged verdict. Any pass
 // without a verdict leaves no verdict at all.
-func runPasses(base sandbox.Config, plan []passes.Pass, out string) error {
+//
+// deadline bounds every pass together: each gets at most the time left.
+func runPasses(base sandbox.Config, plan []passes.Pass, paths map[string]string, out string, deadline time.Time) error {
 	prompt, err := os.ReadFile(base.PromptFile)
 	if err != nil {
 		return err
@@ -172,9 +183,14 @@ func runPasses(base sandbox.Config, plan []passes.Pass, out string) error {
 		rand.Read(rnd[:])
 		c.Name = base.Name + "-" + hex.EncodeToString(rnd[:])
 		c.PromptFile = filepath.Join(dir, fmt.Sprintf("prompt-%d.md", p.N))
-		if err := os.WriteFile(c.PromptFile, append(append([]byte(nil), prompt...), passes.Scope(p, reports)...), 0o644); err != nil {
+		if err := os.WriteFile(c.PromptFile, append(append([]byte(nil), prompt...), passes.Scope(p, reports, paths)...), 0o644); err != nil {
 			return err
 		}
+		left := time.Until(deadline)
+		if left < 2*time.Minute {
+			return errors.New("review: the split review ran out of time") // no verdict
+		}
+		c.Timeout = min(base.Timeout, left)
 		what := fmt.Sprintf("pass %d of %d", p.N, p.Of)
 		if p.Final {
 			what = "the final pass"
@@ -192,7 +208,7 @@ func runPasses(base sandbox.Config, plan []passes.Pass, out string) error {
 			return fmt.Errorf("review: %s: %w", what, err)
 		}
 		vs = append(vs, v)
-		reports = append(reports, passes.Report{N: p.N, Verdict: v.Verdict, Flags: v.Flags, Summary: v.Summary})
+		reports = append(reports, passes.Report{N: p.N, Diffs: p.Diffs, Verdict: v.Verdict, Flags: v.Flags, Summary: v.Summary})
 	}
 	merged, err := passes.Merge(plan, vs)
 	if err != nil {
