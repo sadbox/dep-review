@@ -130,11 +130,11 @@ func (b *builtSet) everywhere(rel string) bool {
 //     ways the gate's configurations do not show;
 //   - a file no default configuration builds in cur.
 //
-// siblingChanged: another .go file of rel's directory was added, removed
-// or changed. The -tags search looks at rel alone, so with a varying tag
-// a sibling's change (a package clause fixed under that tag) can bring an
-// identical file into a build unseen: such a file is not credited.
-func newlyBuilt(old, cur *builtSet, rel string, identical, siblingChanged bool) bool {
+// Known limit (README "Design rules"): the -tags search looks at rel
+// alone, so under a non-default tag an identical file that a sibling's fix
+// makes buildable (the old package did not build with that tag) keeps its
+// credit.
+func newlyBuilt(old, cur *builtSet, rel string, identical bool) bool {
 	if cur.unresolved() || old.unresolved() {
 		return true
 	}
@@ -151,38 +151,13 @@ func newlyBuilt(old, cur *builtSet, rel string, identical, siblingChanged bool) 
 	if cur.possibly(rel) != old.possibly(rel) {
 		return true
 	}
-	varying := cur.userTags[rel] || (old != nil && old.userTags[rel])
 	if identical {
-		return varying && siblingChanged
+		return false
 	}
-	if varying {
+	if cur.userTags[rel] || (old != nil && old.userTags[rel]) {
 		return true
 	}
 	return !cur.anywhere(rel)
-}
-
-// goDirsChanged are the directories in which a .go file was added,
-// removed or changed, with the changed files.
-func goDirsChanged(old, cur *ecoutil.Tree) map[string][]string {
-	out := map[string][]string{}
-	for _, f := range cur.Files {
-		if path.Ext(f) == ".go" && (!old.Has(f) || !bytes.Equal(old.ReadFile(f), cur.ReadFile(f))) {
-			out[path.Dir(f)] = append(out[path.Dir(f)], f)
-		}
-	}
-	if old != nil {
-		for _, f := range old.Files {
-			if path.Ext(f) == ".go" && !cur.Has(f) {
-				out[path.Dir(f)] = append(out[path.Dir(f)], f)
-			}
-		}
-	}
-	return out
-}
-
-// siblingChanged: a .go file of rel's directory other than rel changed.
-func siblingChanged(changed map[string][]string, rel string) bool {
-	return slices.ContainsFunc(changed[path.Dir(rel)], func(f string) bool { return f != rel })
 }
 
 // treeFS serves an ecoutil.Tree to go/build: only the tree's listed

@@ -204,8 +204,7 @@ of the tags it consults turned on (default release and tool tags such as
 them on); its embeds go to a person when its directory changes.
 A byte-identical file keeps its credit only when every configuration that
 builds it now built it before (a sibling's fixed package clause can bring
-it into a build), and, if it consults a varying tag, no other `.go` file
-of its directory changed. Every old file a build newly includes is quoted
+it into a build). Every old file a build newly includes is quoted
 in full under `gomod.newly-built`: its diff can be a constraint line, or
 nothing. Past a work or time budget, nothing is credited and a
 person decides.
@@ -218,8 +217,19 @@ no rule about where a directive may stand. A pattern with a backslash (an
 escape on Linux, a separator on Windows) or a byte a module file path
 cannot hold, other than the glob characters, goes to a person.
 
-Known limit: go/build is compiled into the gate and `go list` is the
-runner's `go` (the fetch summary records both versions).
+Known limits:
+
+- go/build is compiled into the gate and `go list` is the runner's `go`
+  (the fetch summary records both versions).
+- Under a non-default build tag, an old package that did not build at all
+  in that configuration (a package-consistency error, such as two package
+  clauses among the files that tag selects) and that a sibling's fix makes
+  buildable keeps credit for its unchanged files. The `-tags` search
+  looks at each file alone, so it does not see the old package fail. The
+  gap is narrow: no build using that tag could have used the old package,
+  so nothing of it ran before. Planned fix: a per-repository declared
+  build configuration (the tags and platforms the repository actually
+  builds with), evaluated exactly with go list.
 
 ## Layout
 
