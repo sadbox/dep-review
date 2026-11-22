@@ -187,16 +187,24 @@ embed pattern matching, directive placement). Each port was close, and
 each gap was a way to bring old or unseen text into the build.
 
 Tags a consumer sets with `-tags` (`purego`, `netgo`, even `ignore`) have
-no authoritative answer, so a file no default configuration builds counts
-as possibly built when go/build builds it, alone in its directory, with
-some set of the tags it consults; its embeds go to a person when its
-directory changes.
+no authoritative answer. A changed file whose constraint consults such a
+tag in either tree (go/build's `AllTags` for the file; GOOS/GOARCH
+values, `go1.N`, `cgo`, `unix`, `gc` and `gccgo` do not count) gets no old
+text credited, and nothing its `//go:embed` patterns match is credited. A
+file no default configuration builds counts as possibly built when
+go/build builds it, alone in its directory, with some set of the tags it
+consults; its embeds go to a person when its directory changes. A
+byte-identical file keeps its credit. Past a work or time budget for
+go/build over a tree, nothing is credited and a person decides.
 
-Known limits: go/build is compiled into the gate and `go list` is the
-runner's `go` (the fetch summary records both versions); and go list
-reports an old `//go:embed` the compiler would reject (a trailing comment,
-one not on a `var`), which the gate credits like any old `EmbedFiles`
-answer.
+An old `EmbedFiles` answer is credited only where every file the package
+takes `//go:embed` patterns from (go/build's `EmbedPatternPos`, per
+configuration) is byte-identical and built as before: go list also
+reports patterns the compiler rejects, and this needs no rule about where
+a directive may stand.
+
+Known limit: go/build is compiled into the gate and `go list` is the
+runner's `go` (the fetch summary records both versions).
 
 ## Layout
 

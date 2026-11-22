@@ -11,6 +11,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
@@ -28,13 +29,12 @@ import (
 // credited.
 //
 // Tags a consumer sets with -tags (purego, netgo, http2legacy, even
-// ignore) are over-approximated: a file no default configuration builds
-// counts as possibly built when go/build builds it, alone in its
-// directory, with some set of the non-platform tags its constraint
-// consults (go/build reports them in AllTags, also for a file it
-// excludes), in some configuration. Past maxTagSearch such tags it counts
-// as possibly built without searching. The gate never parses a
-// constraint itself.
+// ignore) are over-approximated from go/build's AllTags for each file
+// alone in its directory (reported also for a file it excludes): a
+// changed file whose constraint consults such a tag in either tree is
+// checked as new (newlyBuilt), and a file no default configuration builds
+// counts as possibly built when go/build builds it with some subset of
+// those tags in some configuration. The gate never parses a constraint.
 
 //go:embed distlist.txt
 var distList string
@@ -55,22 +55,37 @@ var configs = func() []config {
 	return out
 }()
 
-// maxTagSearch bounds the non-platform tags whose subsets are searched
-// for one file; maxTagWork bounds the ImportDir calls of the search over
-// one tree. Past either, a file counts as possibly built.
-const (
+// Bounds on the go/build work over one tree. Past maxBuildWork ImportDir
+// calls or maxBuildTime, the tree is unresolved (builtSet.over): every
+// file counts as newly built and every embed goes to a person. Within
+// them, a file whose -tags search passes maxTagSearch tags or the tree's
+// maxTagWork search calls counts as possibly built. Variables for tests.
+var (
 	maxTagSearch = 10
 	maxTagWork   = 200_000
+	maxBuildWork = 2_000_000
+	maxBuildTime = 2 * time.Minute
 )
 
 // builtSet is, per non-test .go file, the configurations that build it
-// with default tags, and whether some -tags set can build it.
+// with default tags, whether some -tags set can build it, and whether
+// its constraint consults a tag a consumer can set.
 type builtSet struct {
 	in       map[string][]bool // rel -> per configs index
 	possible map[string]bool   // rel -> built by no default configuration, but by some -tags set
-	errs     map[string]string // package dir -> first ImportDir error over-approximated
-	took     time.Duration
+	// userTags: go/build's AllTags for the file, alone in its directory,
+	// hold a tag that is not a platform tag (platformTag).
+	userTags map[string]bool
+	// embedders are, per package directory, the files go/build reports
+	// //go:embed patterns from (EmbedPatternPos), per configuration.
+	embedders map[string]map[string][]bool
+	errs      map[string]string // package dir -> first ImportDir error over-approximated
+	over      bool              // the work or time budget was spent: nothing is resolved
+	took      time.Duration
 }
+
+// unresolved: the budget was spent on this tree.
+func (b *builtSet) unresolved() bool { return b != nil && b.over }
 
 // possibly: some configuration builds rel with default tags or with some
 // -tags set.
@@ -88,15 +103,30 @@ func (b *builtSet) everywhere(rel string) bool {
 	return b != nil && len(b.in[rel]) == len(configs) && !slices.Contains(b.in[rel], false)
 }
 
-// newlyBuilt: some default configuration builds rel in cur but did not
-// in old (old nil or without rel: every configuration that builds it), or
-// some -tags set can build it in cur and none could in old. Such a file
-// enters that build with whatever text it has, so it is checked as new:
-// none of its old text is credited. (Possibly built in both does not
-// credit by itself: an old //go:build ignore file is possibly built, and
-// its text newly enters the default build when the line goes.)
-func newlyBuilt(old, cur *builtSet, rel string) bool {
-	if cur.possibly(rel) && !old.possibly(rel) {
+// newlyBuilt reports that none of rel's old text may be credited: it is
+// checked as new. In order:
+//   - either tree past its budget: nothing is credited, not even an
+//     identical file;
+//   - a byte-identical file (identical) keeps its credit;
+//   - a file whose constraint, in either tree, consults a tag a consumer
+//     can set (-tags purego, netgo, ignore...): which builds include it
+//     can change with that tag in ways the default configurations do not
+//     show (linux -> linux || purego newly builds on darwin with purego),
+//     and per-tag-set state is not tracked;
+//   - a file no default configuration builds in cur;
+//   - otherwise, a file some default configuration builds in cur that did
+//     not build it in old.
+func newlyBuilt(old, cur *builtSet, rel string, identical bool) bool {
+	if cur.unresolved() || old.unresolved() {
+		return true
+	}
+	if identical {
+		return false
+	}
+	if cur.userTags[rel] || (old != nil && old.userTags[rel]) {
+		return true
+	}
+	if !cur.anywhere(rel) {
 		return true
 	}
 	n := cur.in[rel]
@@ -117,6 +147,7 @@ func newlyBuilt(old, cur *builtSet, rel string) bool {
 type treeFS struct {
 	t    *ecoutil.Tree
 	dirs map[string][]fs.FileInfo
+	info map[string]fs.FileInfo // rel -> its entry
 	data map[string][]byte
 }
 
@@ -139,7 +170,7 @@ func (f fileInfo) IsDir() bool        { return f.dir }
 func (f fileInfo) Sys() any           { return nil }
 
 func newTreeFS(t *ecoutil.Tree) *treeFS {
-	tf := &treeFS{t: t, dirs: map[string][]fs.FileInfo{".": nil}, data: map[string][]byte{}}
+	tf := &treeFS{t: t, dirs: map[string][]fs.FileInfo{".": nil}, info: map[string]fs.FileInfo{}, data: map[string][]byte{}}
 	seen := map[string]bool{}
 	add := func(dir string, fi fileInfo) {
 		if k := dir + "\x00" + fi.name; !seen[k] {
@@ -148,6 +179,7 @@ func newTreeFS(t *ecoutil.Tree) *treeFS {
 		}
 	}
 	for _, f := range t.Files {
+		tf.info[f] = fileInfo{name: path.Base(f)}
 		add(path.Dir(f), fileInfo{name: path.Base(f)})
 		for d := path.Dir(f); d != "."; d = path.Dir(d) {
 			add(path.Dir(d), fileInfo{name: path.Base(d), dir: true})
@@ -202,16 +234,20 @@ func (tf *treeFS) context(c config) *build.Context {
 }
 
 // analyzeBuild runs go/build over every package directory of t (a
-// directory with a .go file) in every configuration. old selects the
-// old tree's over-approximation (built nowhere) for what go/build cannot
-// answer.
+// directory with a .go file) in every configuration, then over each
+// non-test .go file alone for the tags its constraint consults. old
+// selects the old tree's over-approximation (built nowhere) for what
+// go/build cannot answer.
 func analyzeBuild(t *ecoutil.Tree, old bool) *builtSet {
 	if t == nil {
 		return nil
 	}
 	start := time.Now()
-	b := &builtSet{in: map[string][]bool{}, possible: map[string]bool{}, errs: map[string]string{}}
+	b := &builtSet{in: map[string][]bool{}, possible: map[string]bool{}, userTags: map[string]bool{},
+		embedders: map[string]map[string][]bool{}, errs: map[string]string{}}
+	defer func() { b.took = time.Since(start) }()
 	tf := newTreeFS(t)
+	w := &work{deadline: start.Add(maxBuildTime)}
 	goFiles := map[string][]string{} // dir -> its non-test .go files
 	for _, f := range t.Files {
 		if path.Ext(f) == ".go" && !strings.HasSuffix(f, "_test.go") {
@@ -219,9 +255,15 @@ func analyzeBuild(t *ecoutil.Tree, old bool) *builtSet {
 			b.in[f] = make([]bool, len(configs))
 		}
 	}
+	dirs := slices.Sorted(maps.Keys(goFiles))
 	for i, c := range configs {
 		ctxt := tf.context(c)
-		for dir, files := range goFiles {
+		for _, dir := range dirs {
+			if w.spent() {
+				b.over = true
+				return b
+			}
+			files := goFiles[dir]
 			p, err := ctxt.ImportDir(dir, 0)
 			var noGo *build.NoGoError
 			switch {
@@ -243,6 +285,18 @@ func analyzeBuild(t *ecoutil.Tree, old bool) *builtSet {
 			if !old {
 				lists = append(lists, p.InvalidGoFiles)
 			}
+			for _, poss := range p.EmbedPatternPos {
+				for _, pos := range poss {
+					rel := path.Join(dir, path.Base(pos.Filename))
+					if b.embedders[dir] == nil {
+						b.embedders[dir] = map[string][]bool{}
+					}
+					if b.embedders[dir][rel] == nil {
+						b.embedders[dir][rel] = make([]bool, len(configs))
+					}
+					b.embedders[dir][rel][i] = true
+				}
+			}
 			for _, names := range lists {
 				for _, n := range names {
 					if rel := path.Join(dir, n); b.in[rel] != nil {
@@ -252,24 +306,94 @@ func analyzeBuild(t *ecoutil.Tree, old bool) *builtSet {
 			}
 		}
 	}
-	work := 0
-	for dir, files := range goFiles {
-		if old && b.errs[dir] != "" {
-			continue // the old tree's failed directory: built nowhere
-		}
-		for _, f := range files {
-			if !b.anywhere(f) && tf.possiblyBuilt(f, old, &work) {
+	for _, dir := range dirs {
+		for _, f := range goFiles[dir] {
+			tags := tf.fileTags(f, w)
+			if w.spent() {
+				b.over = true
+				return b
+			}
+			b.userTags[f] = slices.ContainsFunc(tags, func(tag string) bool { return !platformTag(tag) })
+			if old && b.errs[dir] != "" {
+				continue // the old tree's failed directory: built nowhere
+			}
+			if !b.anywhere(f) && tf.possiblyBuilt(f, tags, old, w) {
 				b.possible[f] = true
+			}
+			if w.spent() {
+				b.over = true
+				return b
 			}
 		}
 	}
-	b.took = time.Since(start)
 	return b
 }
 
-// platformTags are tags -tags cannot meaningfully set: the GOOS and GOARCH
-// values (one configuration fixes them), unix and cgo (implied by it).
+// work counts go/build calls over one tree against the budgets.
+type work struct {
+	calls, tagCalls int
+	deadline        time.Time
+}
+
+func (w *work) spent() bool {
+	return w.calls > maxBuildWork || time.Now().After(w.deadline)
+}
+
+// platformTag: a tag one configuration fixes or the toolchain sets, which
+// -tags does not meaningfully change: a GOOS or GOARCH value go/build
+// knows (also one without a dist port, such as zos), go1.N, cgo, unix,
+// gc, gccgo. Every other tag (purego, netgo, ignore, goexperiment.*,
+// amd64.v3, ...) a consumer can set.
+func platformTag(tag string) bool {
+	if platformTags[tag] || knownGOOSOrGOARCH(tag) {
+		return true
+	}
+	if v, ok := strings.CutPrefix(tag, "go1."); ok && v != "" && strings.Trim(v, "0123456789") == "" {
+		return true
+	}
+	return false
+}
+
 var platformTags = func() map[string]bool {
+	m := map[string]bool{"unix": true, "cgo": true, "gc": true, "gccgo": true}
+	for k := range fixedTags {
+		m[k] = true
+	}
+	return m
+}()
+
+// knownGOOSOrGOARCH asks go/build whether it knows tag as a GOOS or
+// GOARCH value: it then treats a _tag.go file name suffix as a
+// constraint, and excludes x_tag.go from a build for another platform.
+func knownGOOSOrGOARCH(tag string) bool {
+	knownMu.Lock()
+	defer knownMu.Unlock()
+	if v, ok := known[tag]; ok {
+		return v
+	}
+	ctxt := build.Default
+	ctxt.BuildTags, ctxt.CgoEnabled = nil, false
+	ctxt.GOOS, ctxt.GOARCH = "linux", "amd64"
+	if tag == "linux" || tag == "amd64" {
+		ctxt.GOOS, ctxt.GOARCH = "windows", "arm64"
+	}
+	ctxt.OpenFile = func(string) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("package p\n")), nil
+	}
+	ok, err := ctxt.MatchFile("d", "x_"+tag+".go")
+	v := err == nil && !ok
+	known[tag] = v
+	return v
+}
+
+var (
+	knownMu sync.Mutex
+	known   = map[string]bool{}
+)
+
+// fixedTags are the tags a configuration fixes, which a tag search does
+// not set: the GOOS and GOARCH values, unix and cgo.
+var fixedTags = func() map[string]bool {
 	m := map[string]bool{"unix": true, "cgo": true}
 	for _, c := range configs {
 		m[c.goos], m[c.goarch] = true, true
@@ -277,9 +401,37 @@ var platformTags = func() map[string]bool {
 	return m
 }()
 
+// fileTags are the tags go/build consults for rel alone in its
+// directory, but for fixedTags (a search may set go1.99: a later
+// toolchain does), over every GOOS/GOARCH (a file name suffix can stop
+// go/build before it reads the constraint; cgo does not, and constraint
+// evaluation observes every tag).
+func (tf *treeFS) fileTags(rel string, w *work) []string {
+	dir := path.Dir(rel)
+	set := map[string]bool{}
+	for _, c := range configs {
+		if c.cgo {
+			continue
+		}
+		if w.calls++; w.spent() {
+			return nil
+		}
+		p, _ := tf.alone(c, rel, nil).ImportDir(dir, 0)
+		if p == nil {
+			continue
+		}
+		for _, tag := range p.AllTags {
+			if !fixedTags[tag] {
+				set[tag] = true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
 // possiblyBuilt: go/build builds rel, alone in its directory, in some
-// configuration with some set of the non-platform tags it consults.
-func (tf *treeFS) possiblyBuilt(rel string, old bool, work *int) bool {
+// configuration with some subset of tags (fileTags) set.
+func (tf *treeFS) possiblyBuilt(rel string, tags []string, old bool, w *work) bool {
 	dir, name := path.Dir(rel), path.Base(rel)
 	built := func(p *build.Package) bool {
 		lists := [][]string{p.GoFiles, p.CgoFiles}
@@ -293,20 +445,6 @@ func (tf *treeFS) possiblyBuilt(rel string, old bool, work *int) bool {
 		}
 		return false
 	}
-	tagSet := map[string]bool{}
-	for _, c := range configs {
-		p, _ := tf.alone(c, rel, nil).ImportDir(dir, 0)
-		*work++
-		if p == nil {
-			continue
-		}
-		for _, tag := range p.AllTags {
-			if !platformTags[tag] {
-				tagSet[tag] = true
-			}
-		}
-	}
-	tags := slices.Sorted(maps.Keys(tagSet))
 	if len(tags) > maxTagSearch {
 		return true
 	}
@@ -318,7 +456,8 @@ func (tf *treeFS) possiblyBuilt(rel string, old bool, work *int) bool {
 			}
 		}
 		for _, c := range configs {
-			if *work++; *work > maxTagWork {
+			w.calls++
+			if w.tagCalls++; w.tagCalls > maxTagWork || w.spent() {
 				return true
 			}
 			if p, _ := tf.alone(c, rel, set).ImportDir(dir, 0); p != nil && built(p) {
@@ -335,12 +474,7 @@ func (tf *treeFS) alone(c config, rel string, set []string) *build.Context {
 	ctxt := tf.context(c)
 	ctxt.BuildTags = set
 	dir := path.Dir(rel)
-	var only []fs.FileInfo
-	for _, fi := range tf.dirs[dir] {
-		if fi.Name() == path.Base(rel) {
-			only = append(only, fi)
-		}
-	}
+	only := []fs.FileInfo{tf.info[rel]}
 	read := ctxt.ReadDir
 	ctxt.ReadDir = func(d string) ([]fs.FileInfo, error) {
 		if path.Clean(d) == dir {

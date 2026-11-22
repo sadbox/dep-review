@@ -16,7 +16,16 @@ import (
 // trees (golist.go), compared per package directory and configuration: a
 // file the new tree embeds in some configuration in which the old one did
 // not is newly embedded, changed or not (a dropped //go:build windows
-// newly embeds on linux what the old tree embedded on windows only). A text file newly embedded is quoted in full; anything else goes
+// newly embeds on linux what the old tree embedded on windows only).
+//
+// An old answer is credited for a configuration only when every file the
+// new package takes //go:embed patterns from there (go/build's
+// EmbedPatternPos for that configuration) is byte-identical to its old
+// version and built in the same configurations. Otherwise every file the
+// package embeds there counts as newly embedded. go list reports patterns
+// the compiler would reject (a trailing //go:embed, one not on a var);
+// with this rule such an old pattern is never credited for a changed
+// file, and the gate needs no rule about where a directive may stand. A text file newly embedded is quoted in full; anything else goes
 // to binaries, for a person. The gate resolves no pattern itself.
 //
 // Unresolved, for a person (every binary under the package counts as
@@ -113,6 +122,13 @@ func (r *report) embeds(old, cur *ecoutil.Tree, ob, nb *builtSet) embedResult {
 	}
 	dirs := packageDirs(curFiles)
 	item := func(d string) string { return safeFile(d) }
+	if nb.unresolved() || ob.unresolved() {
+		for _, d := range dirs {
+			r.add(codeEmbed, item(d), false, "not resolved: the gate's go/build budget for the module was spent; a person decides\n")
+			res.unresolved = append(res.unresolved, unresolvedEmbed{".", "the //go:embed comments of package " + item(d), true})
+		}
+		return res
+	}
 	if nonASCIIPath(cur) || nonASCIIPath(old) {
 		for _, d := range dirs {
 			label := "the //go:embed comments of package " + item(d)
@@ -153,9 +169,10 @@ func (r *report) embeds(old, cur *ecoutil.Tree, ob, nb *builtSet) embedResult {
 		if before.failed[d] == "" {
 			was = before.files[d]
 		}
+		credit := creditable(old, cur, ob, nb, d)
 		for _, e := range now.embedded(d) {
 			res.embedded[e] = true
-			if !newIn(now.files[d][e], was[e]) {
+			if !newIn(now.files[d][e], creditedIn(was[e], credit)) {
 				continue
 			}
 			label := "package " + item(d) + " (go list EmbedFiles)"
@@ -189,6 +206,41 @@ func subtreeChanged(old, cur *ecoutil.Tree, dir string) bool {
 		}
 	}
 	return false
+}
+
+// creditable is, per configuration, whether the old tree's EmbedFiles for
+// package dir may be credited: every file the new package takes patterns
+// from in that configuration is byte-identical to its old version and
+// built in the same configurations. A changed embedding file whose
+// constraint consults a tag a consumer can set uncredits every
+// configuration: a -tags build can take its patterns anywhere.
+func creditable(old, cur *ecoutil.Tree, ob, nb *builtSet, dir string) []bool {
+	ok := make([]bool, len(configs))
+	for i := range ok {
+		ok[i] = old != nil
+	}
+	for f, in := range nb.embedders[dir] {
+		same := old.Has(f) && bytes.Equal(old.ReadFile(f), cur.ReadFile(f)) && ob != nil && slices.Equal(ob.in[f], nb.in[f])
+		tagged := nb.userTags[f] || (ob != nil && ob.userTags[f])
+		for i, b := range in {
+			if !same && (b || tagged) {
+				ok[i] = false
+			}
+		}
+	}
+	return ok
+}
+
+// creditedIn is was restricted to the creditable configurations.
+func creditedIn(was, credit []bool) []bool {
+	if was == nil {
+		return nil
+	}
+	out := make([]bool, len(was))
+	for i := range was {
+		out[i] = was[i] && credit[i]
+	}
+	return out
 }
 
 // newIn: some configuration in cur is not in old (nil: none).

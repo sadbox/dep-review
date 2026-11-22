@@ -19,8 +19,11 @@ func TestNewlyReachable(t *testing.T) {
 	}{
 		{"new embed reaches unchanged files", map[string]string{"p.go": "package p\n", "lib/data.bin": bin, "testdata/fix.bin": bin},
 			map[string]string{"p.go": "package p\n", "e.go": embed, "lib/data.bin": bin, "testdata/fix.bin": bin}, []string{"lib/data.bin", "testdata/fix.bin"}},
-		{"already reachable, unchanged", map[string]string{"e.go": embed, "lib/data.bin": bin, "testdata/fix.bin": bin},
-			map[string]string{"e.go": embed + "// edit\n", "lib/data.bin": bin, "testdata/fix.bin": bin}, nil},
+		// Round 14: the embedding file changed, so nothing it embeds is credited.
+		{"already reachable, embedding file edited", map[string]string{"e.go": embed, "lib/data.bin": bin, "testdata/fix.bin": bin},
+			map[string]string{"e.go": embed + "// edit\n", "lib/data.bin": bin, "testdata/fix.bin": bin}, []string{"lib/data.bin", "testdata/fix.bin"}},
+		{"already reachable, embedding file unchanged", map[string]string{"e.go": embed, "q.go": "package p\n", "lib/data.bin": bin, "testdata/fix.bin": bin},
+			map[string]string{"e.go": embed, "q.go": "package p\n// edit\n", "lib/data.bin": bin, "testdata/fix.bin": bin}, nil},
 		{"unreachable testdata fixture, unchanged", map[string]string{"p.go": "package p\n", "testdata/fix.bin": bin},
 			map[string]string{"p.go": "package p\n// edit\n", "testdata/fix.bin": bin}, nil},
 		{"changed testdata fixture nothing reaches", map[string]string{"p.go": "package p\n", "testdata/fix.bin": bin},

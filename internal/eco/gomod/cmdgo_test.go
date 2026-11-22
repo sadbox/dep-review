@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
+	"github.com/sadbox/dep-review/internal/model"
 )
 
 // Differential tests: the gate's reading of what is built and what is
@@ -362,9 +363,104 @@ func TestPossiblyBuiltNewlyIsNew(t *testing.T) {
 	}
 }
 
+// TestIgnoreToPuregoIsNew (round 14 scan MEDIUM): an old //go:build
+// ignore file becomes //go:build purego with the same exec init: both are
+// possibly built, but real purego builds never set ignore, so the init is
+// new. An unchanged -tags-only file (x/net's defs_*.go) stays credited.
+func TestIgnoreToPuregoIsNew(t *testing.T) {
+	body := "package p\n\nimport \"os/exec\"\n\nfunc helper() { exec.Command(\"id\").Run() }\n\nfunc init() { helper() }\n"
+	h := CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build ignore\n\n" + body}),
+		writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build purego\n\n" + body}))
+	if !slices.Contains(h.items(codeInit), "e.go") || !slices.Contains(h.items(codeImport), "e.go (os/exec)") {
+		t.Errorf("ignore -> purego credited old text: codes %q", h.codes())
+	}
+	defs := "//go:build ignore\n\npackage p\n\ntype cmsghdr struct{ n int }\n\nfunc init() { _ = cmsghdr{} }\n"
+	h = CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "defs_linux.go": defs}),
+		writeTree(t, map[string]string{"q.go": "package p\n\nvar Y = 2\n", "defs_linux.go": defs}))
+	if got := append(h.items(codeInit), h.items(codeInitCallee)...); len(got) != 0 {
+		t.Errorf("an unchanged ignore file is not credited: %q", got)
+	}
+}
+
+// TestUserTagWidensBuild (round 14 scan HIGH): //go:build linux becomes
+// //go:build linux || purego with the same exec init: linux is unchanged,
+// but darwin with -tags purego newly builds it. A changed file whose
+// constraint consults a user tag gets no old text credited.
+func TestUserTagWidensBuild(t *testing.T) {
+	body := "package p\n\nimport \"os/exec\"\n\nfunc init() { exec.Command(\"id\").Run() }\n"
+	h := CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build linux\n\n" + body}),
+		writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build linux || purego\n\n" + body}))
+	if !slices.Contains(h.items(codeInit), "e.go") {
+		t.Errorf("linux -> linux || purego credited the old init: codes %q", h.codes())
+	}
+	// Platform tags alone keep the per-configuration rule.
+	h = CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build linux && go1.21\n\n" + body}),
+		writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build go1.21 && linux\n\n" + body}))
+	if slices.Contains(h.items(codeInit), "e.go") {
+		t.Errorf("a reordered platform-only constraint is not credited: codes %q", h.codes())
+	}
+}
+
+// TestPlatformTagsFromGoBuild: GOOS and GOARCH values are go/build's own,
+// also ones without a dist port; user tags are not.
+func TestPlatformTagsFromGoBuild(t *testing.T) {
+	for _, tag := range []string{"linux", "amd64", "zos", "hurd", "nacl", "riscv", "go1.21", "unix", "gc"} {
+		if !platformTag(tag) {
+			t.Errorf("%s is not a platform tag", tag)
+		}
+	}
+	for _, tag := range []string{"purego", "ignore", "netgo", "http2legacy", "goexperiment.rangefunc", "amd64.v3", "go1", "go1.x"} {
+		if platformTag(tag) {
+			t.Errorf("%s is a platform tag", tag)
+		}
+	}
+}
+
+// TestUserTagEmbedder (round 14 scan MEDIUM): an embedding file goes from
+// //go:build linux to //go:build linux || purego: what it embeds is
+// newly embedded, the unchanged tool.bin goes to a person.
+func TestUserTagEmbedder(t *testing.T) {
+	bin := "\x7fELF\x02\x01\x01 x"
+	body := "package p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nvar T []byte\n"
+	h := CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build linux\n\n" + body, "tool.bin": bin}),
+		writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build linux || purego\n\n" + body, "tool.bin": bin}))
+	wantPerson(t, h, "tool.bin")
+}
+
+// TestBuildBudget (round 14 scan MEDIUM): past the go/build budget the
+// tree is unresolved: even an identical file is checked as new, every
+// embed goes to a person, and the module goes to a person. A tag search
+// past its own budget counts the file as possibly built.
+func TestBuildBudget(t *testing.T) {
+	bin := "\x7fELF\x02\x01\x01 x"
+	init := "package p\n\nimport \"os/exec\"\n\nfunc init() { exec.Command(\"id\").Run() }\n"
+	embed := "package p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nvar T []byte\n"
+	files := map[string]string{"i.go": init, "e.go": embed, "tool.bin": bin}
+	prev := maxBuildWork
+	maxBuildWork = 1
+	t.Cleanup(func() { maxBuildWork = prev })
+	h := CheckTrees(writeTree(t, files), writeTree(t, files))
+	if !slices.Contains(h.items(codeInit), "i.go") {
+		t.Errorf("identical init credited past the budget: codes %q", h.codes())
+	}
+	if !slices.Contains(h.items(codeParse), "(go/build budget)") || routeOf(codeParse) != model.RouteHuman {
+		t.Errorf("the module is not for a person: codes %q", h.codes())
+	}
+	wantPerson(t, h, "tool.bin")
+	maxBuildWork = prev
+
+	prevTag := maxTagWork
+	maxTagWork = 1
+	t.Cleanup(func() { maxTagWork = prevTag })
+	b := analyzeBuild(writeTree(t, map[string]string{"p.go": "//go:build linux && windows && foo\n\npackage p\n", "q.go": "package p\n"}), false)
+	if !b.possibly("p.go") || b.unresolved() {
+		t.Errorf("past the tag-search budget: possibly %v, unresolved %v", b.possibly("p.go"), b.unresolved())
+	}
+}
+
 // TestUnchangedFileNewlyEmbedded (round 10): an unchanged file a new
-// pattern reaches is newly embedded; one the old tree already embedded
-// is not.
+// pattern reaches is newly embedded. Since round 14 so is one the old tree
+// already embedded, because the embedding file changed.
 func TestUnchangedFileNewlyEmbedded(t *testing.T) {
 	needGo(t)
 	bin := "\x7fELF\x02\x01\x01 x"
@@ -372,8 +468,8 @@ func TestUnchangedFileNewlyEmbedded(t *testing.T) {
 	old := writeTree(t, map[string]string{"p.go": hdr + "//go:embed a.bin\nvar F embed.FS\n", "a.bin": bin, "b.bin": bin})
 	cur := writeTree(t, map[string]string{"p.go": hdr + "//go:embed a.bin b.bin\nvar F embed.FS\n", "a.bin": bin, "b.bin": bin})
 	h := CheckTrees(old, cur)
-	if got := h.items(codeBinary); !slices.Equal(got, []string{"b.bin"}) {
-		t.Errorf("binaries %q, want b.bin only", got)
+	if got := h.items(codeBinary); !slices.Equal(got, []string{"a.bin", "b.bin"}) {
+		t.Errorf("binaries %q, want a.bin and b.bin", got)
 	}
 }
 
@@ -458,14 +554,54 @@ func TestEveryDirectiveFlagged(t *testing.T) {
 	}
 }
 
-// TestOldMisplacedEmbedCredited documents a residual: go list reports an
-// old //go:embed the compiler rejects (trailing, or not on a var), and
-// the gate credits it, as it credits every old EmbedFiles answer.
-func TestOldMisplacedEmbedCredited(t *testing.T) {
-	needGo(t)
+// TestOldMisplacedEmbedNotCredited (round 12 scan HIGH, closed in round
+// 14): go list reports an old //go:embed the compiler rejects (trailing,
+// or not on a var), but its file changed, so nothing it matched is
+// credited: the real new //go:embed of the unchanged tool.bin goes to a
+// person.
+func TestOldMisplacedEmbedNotCredited(t *testing.T) {
 	bin := "\x7fELF\x02\x01\x01 x"
-	oldSrc := "package p\n\nimport _ \"embed\"\n\nvar X = 1 //go:embed tool.bin\n\nvar T []byte\n"
-	if p := goList(t, map[string]string{"p.go": oldSrc, "tool.bin": bin}); !slices.Contains(p.EmbedFiles, "tool.bin") {
-		t.Skipf("go list no longer reports a trailing //go:embed: %+v; the residual is gone", p)
+	hdr := "package p\n\nimport _ \"embed\"\n\n"
+	newSrc := hdr + "var X = 1\n\n//go:embed tool.bin\nvar T []byte\n"
+	for name, oldSrc := range map[string]string{
+		"trailing":   hdr + "var X = 1 //go:embed tool.bin\n\nvar T []byte\n",
+		"not on var": hdr + "//go:embed tool.bin\nfunc f() {}\n\nvar X = 1\n\nvar T []byte\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !testing.Short() {
+				if p := goList(t, map[string]string{"p.go": oldSrc, "tool.bin": bin}); !slices.Contains(p.EmbedFiles, "tool.bin") {
+					t.Fatalf("precondition: go list reports the old misplaced //go:embed: %+v", p)
+				}
+			}
+			h := CheckTrees(writeTree(t, map[string]string{"p.go": oldSrc, "tool.bin": bin}), writeTree(t, map[string]string{"p.go": newSrc, "tool.bin": bin}))
+			wantPerson(t, h, "tool.bin")
+		})
+	}
+}
+
+// TestUnchangedEmbedderCredited (round 14): when the file holding the
+// //go:embed is unchanged and built as before, what the old tree embedded
+// is credited although another file of the package changed.
+func TestUnchangedEmbedderCredited(t *testing.T) {
+	bin := "\x7fELF\x02\x01\x01 x"
+	e := "package p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nvar T []byte\n"
+	h := CheckTrees(writeTree(t, map[string]string{"e.go": e, "q.go": "package p\n", "tool.bin": bin}),
+		writeTree(t, map[string]string{"e.go": e, "q.go": "package p\n\nvar Y = 2\n", "tool.bin": bin}))
+	if got := h.items(codeBinary); len(got) != 0 {
+		t.Errorf("an unchanged embed credited nothing: binaries %q", got)
+	}
+}
+
+// TestEmbedPatternPosPerConfiguration (round 14): the embedding files are
+// go/build's per configuration: e_windows.go's pattern counts on windows
+// only.
+func TestEmbedPatternPosPerConfiguration(t *testing.T) {
+	tree := writeTree(t, map[string]string{"e_windows.go": "package p\n\nimport _ \"embed\"\n\n//go:embed a.txt\nvar A string\n", "q.go": "package p\n", "a.txt": "a\n"})
+	b := analyzeBuild(tree, false)
+	in := b.embedders["."]["e_windows.go"]
+	for i, c := range configs {
+		if in[i] != (c.goos == "windows") {
+			t.Errorf("%v: embedder %v", c, in[i])
+		}
 	}
 }

@@ -479,6 +479,11 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	h.lister = lister
 	// Which files each configuration builds, by go/build (build.go).
 	ob, nb := analyzeBuild(old, true), analyzeBuild(cur, false)
+	if ob.unresolved() || nb.unresolved() {
+		// Nothing about the build is known: every file is checked as new
+		// (newlyBuilt), and a person decides.
+		h.add(codeParse, "(go/build budget)", false, "the gate's go/build work or time budget for the module was spent; every Go file is checked as new and a person decides\n")
+	}
 	isGo := func(rel string) bool { return path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") }
 	shadow := map[string]*pkgScope{} // package directory -> scope
 	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
@@ -494,7 +499,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			// before (a dropped //go:build ignore, a moved constraint, a
 			// package clause no longer "documentation") enters that build
 			// with its whole text: check it as new, changed or not.
-			switch nbuilt := isGo(rel) && newlyBuilt(ob, nb, rel); {
+			switch nbuilt := isGo(rel) && newlyBuilt(ob, nb, rel, bytes.Equal(prev, data)); {
 			case nbuilt:
 				prev, hadOld = nil, false
 			case bytes.Equal(prev, data):
@@ -890,7 +895,9 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope, ob
 	// way: a renamed or newly unconstrained file's declarations are new.
 	// An old declaration is credited only from a file every configuration
 	// that builds the new file also built (go/build, newlyBuilt).
-	keep := func(rel string) bool { return cur.Has(rel) && !newlyBuilt(ob, nb, rel) }
+	keep := func(rel string) bool {
+		return cur.Has(rel) && !newlyBuilt(ob, nb, rel, bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)))
+	}
 	o, n := indexPackage(old, dir, shadow, keep), indexPackage(cur, dir, shadow, nil)
 	type step struct {
 		name string
