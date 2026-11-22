@@ -93,8 +93,17 @@ func runFetch(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "dep-review fetch: %d updates, %d findings, route %s\n", len(out.Updates), len(out.Findings), out.Route)
-	return stepOutput("route", string(out.Route))
+	fmt.Fprintf(os.Stderr, "dep-review fetch: %d updates, %d findings, route %s, triage %v\n", len(out.Updates), len(out.Findings), out.Route, out.Triage)
+	if err := stepOutput("route", string(out.Route)); err != nil {
+		return err
+	}
+	// The review job runs for the review route, and as triage only for
+	// a person (it can never merge).
+	review := "false"
+	if out.Route == model.RouteReview || out.Triage {
+		review = "true"
+	}
+	return stepOutput("review", review)
 }
 
 // removeScratch deletes the scratch tree, first making any read-only

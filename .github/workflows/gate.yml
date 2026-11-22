@@ -203,6 +203,9 @@ jobs:
       pull-requests: read
     outputs:
       route: ${{ steps.fetch.outputs.route }}
+      # true for the review route, and for triage of a person-routed PR
+      # (policy.Triage): publish never merges from triage.
+      review: ${{ steps.fetch.outputs.review }}
       evidence_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@v8.0.2
@@ -276,7 +279,7 @@ jobs:
 
   review:
     needs: [build, classify, fetch]
-    if: needs.fetch.outputs.route == 'review'
+    if: needs.fetch.outputs.review == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     outputs:

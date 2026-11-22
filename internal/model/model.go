@@ -147,6 +147,10 @@ type Finding struct {
 	Route  Route  `json:"route"` // the route this finding forces at least
 	Detail string `json:"detail"`
 	Update string `json:"update,omitempty"` // Update.Name it concerns
+	// Triage marks a person-routed finding the model may still review,
+	// as triage for the person deciding (policy.Triage): it never lets a
+	// PR merge.
+	Triage bool `json:"triage,omitempty"`
 }
 
 // Evidence is fetch's output: the real change set, findings, and the files
@@ -169,6 +173,10 @@ type Evidence struct {
 	// only when every item here, and nothing else, was assessed benign.
 	// This list, not the model's, is the reference.
 	Flagged []FlaggedItem `json:"flagged"`
+	// Triage: the route is human only because of findings marked Triage,
+	// so the review still runs, and its answer is shown to the person
+	// deciding. It never merges.
+	Triage bool `json:"triage"`
 }
 
 // MaxFlagged bounds Flagged: past it a reviewer cannot be expected to

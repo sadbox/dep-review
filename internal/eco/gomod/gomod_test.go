@@ -209,7 +209,8 @@ func TestCheckTrees(t *testing.T) {
 		{"exec in test file", nil, map[string]string{"a_test.go": "package p\nimport \"os/exec\"\nvar _ = exec.Command\n"}, nil},
 		{"net/http", nil, map[string]string{"h.go": "package p\nimport \"net/http\"\nvar _ = http.Get\n"}, []string{codeImport}},
 		{"go:generate", nil, map[string]string{"g.go": "package p\n//go:generate sh -c evil\n"}, []string{codeGenerate}},
-		{"go:embed", nil, map[string]string{"e.go": "package p\nimport _ \"embed\"\n//go:embed testdata/x\nvar s string\n"}, []string{codeEmbed}},
+		// testdata/x does not exist: cmd/go fails, the gate cannot resolve it.
+		{"go:embed", nil, map[string]string{"e.go": "package p\nimport _ \"embed\"\n//go:embed testdata/x\nvar s string\n"}, []string{codeEmbed, codeIncomplete}},
 		// "ABC"... decodes to text that is itself base64: decoded again,
 		// to bytes nothing parses.
 		{"blob", nil, map[string]string{"b.go": "package p\nvar s = " + blob + "\n"}, []string{codeBlob, codeIncomplete}},

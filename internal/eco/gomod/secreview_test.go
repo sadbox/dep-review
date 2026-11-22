@@ -140,7 +140,7 @@ func TestLinkedUnrendered(t *testing.T) {
 	h := newReport()
 	h.budget.Left = 0
 	tr := writeTree(t, map[string]string{"x.syso": broken, "p.go": "package p\n"})
-	h.binaries(nil, tr, []string{"x.syso"}, nil)
+	h.binaries(nil, tr, []string{"x.syso"}, nil, embedResult{})
 	if len(h.items(codeIncomplete)) == 0 {
 		t.Errorf("a linked binary whose parse budget was spent did not go to a person")
 	}

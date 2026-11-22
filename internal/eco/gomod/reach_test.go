@@ -6,38 +6,51 @@ import (
 	"testing"
 )
 
-// TestReachability (round 9): what newReach counts as reaching a file.
-func TestReachability(t *testing.T) {
+// TestResolveEmbed (round 10): //go:embed patterns resolve as cmd/go
+// resolves them.
+func TestResolveEmbed(t *testing.T) {
+	tree := writeTree(t, map[string]string{
+		"p.go": "package p\n", "data.bin": "x", "a.css": "x", "b.css": "x",
+		"assets/x/y.bin": "x", "assets/.hidden": "x", "assets/_skip/z": "x", "assets/ok.txt": "x",
+		"static/A.css": "x",
+	})
+	td := indexDirs(tree)
 	tests := []struct {
-		name  string
-		files map[string]string
-		rel   string
-		want  bool
+		pat  string
+		want []string
+		err  bool
 	}{
-		{"plain embed", map[string]string{"p.go": "package p\n//go:embed data.bin\nvar b []byte\n"}, "data.bin", true},
-		{"embed of a directory", map[string]string{"p.go": "package p\n//go:embed assets\nvar b []byte\n"}, "assets/x/y.bin", true},
-		{"literal segments fold", map[string]string{"p.go": "package p\n//go:embed DATA.BIN\nvar b []byte\n"}, "data.bin", true},
-		{"glob segment, case-sensitive", map[string]string{"p.go": "package p\n//go:embed *.bin\nvar b []byte\n"}, "x.bin", true},
-		{"character class is any file", map[string]string{"p.go": "package p\n//go:embed [^A-Z]ayload.bin\nvar b []byte\n"}, "anything/else.dat", true},
-		{"escape is any file", map[string]string{"p.go": "package p\n//go:embed \\x.bin\nvar b []byte\n"}, "y.bin", true},
-		{"non-ASCII pattern is any file", map[string]string{"p.go": "package p\n//go:embed ſecret.bin\nvar b []byte\n"}, "secret.bin", true},
-		{"non-ASCII binary path under an embed", map[string]string{"p.go": "package p\n//go:embed x.txt\nvar b []byte\n"}, "con\ufb01g/payload.bin", true},
-		{"unparseable list is any file", map[string]string{"p.go": "package p\n//go:embed \"unterminated\nvar b []byte\n"}, "z.bin", true},
-		{"test-only embed", map[string]string{"p_test.go": "package p\n//go:embed data.bin\nvar b []byte\n"}, "data.bin", false},
-		{"other name", map[string]string{"p.go": "package p\n//go:embed other.bin\nvar b []byte\n"}, "data.bin", false},
-		{"embed in a sibling directory", map[string]string{"a/p.go": "package a\n//go:embed *.bin\nvar b []byte\n"}, "b/x.bin", false},
-		{"testdata under cgo", map[string]string{"p.go": "package p\nimport \"C\"\n"}, "testdata/x.bin", true},
-		{"library anywhere under cgo", map[string]string{"p.go": "package p\nimport \"C\"\n"}, "lib/libfoo.a", true},
-		{"testdata without cgo", map[string]string{"p.go": "package p\n"}, "testdata/x.bin", false},
-		{".syso", map[string]string{"p.go": "package p\n"}, "x.syso", true},
-		{"embed in a binary-looking Go file", map[string]string{"p.go": "package p\n// " + strings.Repeat("\x01", 400) + "\n//go:embed *.bin\nvar b []byte\n"}, "x.bin", true},
+		{"data.bin", []string{"data.bin"}, false},
+		{"DATA.BIN", []string{"data.bin"}, false}, // literal segments fold (macOS, Windows)
+		{"*.css", []string{"a.css", "b.css"}, false},
+		{"static/*.CSS", nil, true}, // glob segments are case-sensitive
+		{"assets", []string{"assets/ok.txt", "assets/x/y.bin"}, false},
+		{"all:assets", []string{"assets/.hidden", "assets/_skip/z", "assets/ok.txt", "assets/x/y.bin"}, false},
+		{"assets/*", []string{"assets/.hidden", "assets/_skip/z", "assets/ok.txt", "assets/x/y.bin"}, false},
+		{"nothing.bin", nil, true},
+		{"../x", nil, true},
+		{".", nil, true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := newReach(writeTree(t, tt.files)).reachable(tt.rel) != ""; got != tt.want {
-				t.Errorf("reachable(%s) = %v, want %v", tt.rel, got, tt.want)
-			}
-		})
+		got, err := td.resolve(".", tt.pat)
+		if (err != nil) != tt.err || !slices.Equal(got, tt.want) {
+			t.Errorf("resolve(%q) = %q, %v; want %q (error %v)", tt.pat, got, err, tt.want, tt.err)
+		}
+	}
+	if why := modelled(".", "t[o]ol.bin"); why == "" {
+		t.Errorf("a character class is modelled")
+	}
+	if why := modelled("con\ufb01g", "*.bin"); why == "" {
+		t.Errorf("a non-ASCII embedding directory is modelled")
+	}
+}
+
+// TestEmbedBudget (round 10, 6): resolution past its work budget goes to
+// a person.
+func TestEmbedBudget(t *testing.T) {
+	td := &treeDirs{entries: map[string][]dirEntry{".": {{"a", false}}}, work: maxEmbedWork}
+	if _, err := td.resolve(".", "*"); err != errEmbedBudget {
+		t.Errorf("err = %v, want the budget error", err)
 	}
 }
 

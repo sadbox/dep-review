@@ -130,13 +130,13 @@ func TestInvariantShownInFull(t *testing.T) {
 			map[string]string{"a.go": "package p\n\nfunc init() { helper() }\n\nfunc helper() { println(2) }\n"}, codeInitCallee, "helper", true},
 		{"blank import", nil, map[string]string{"a.go": "package p\n\nimport _ \"example.com/q\"\n"}, codeBlank, "a.go (example.com/q)", true},
 		{"risky import", nil, map[string]string{"a.go": "package p\n\nimport \"os/exec\"\n\nvar _ = exec.Command\n"}, codeImport, "a.go (os/exec)", true},
-		{"cgo", nil, map[string]string{"c.go": "package p\n\n// int f(void);\nimport \"C\"\n\nfunc G() { C.f() }\n"}, codeCgo, "c.go", true},
+		{"cgo", nil, map[string]string{"c.go": "package p\n\n// int f(void);\nimport \"C\"\n\nfunc G() { C.f() }\n"}, codeCgo, "c.go", false},
 		{"linkname", nil, map[string]string{"l.go": "package p\n\nimport _ \"unsafe\"\n\n//go:linkname now runtime.nanotime\nfunc now() int64\n"}, codeLinkname, "l.go", true},
 		{"go:generate", nil, map[string]string{"g.go": gen}, codeGenerate, "g.go", true},
 		{"go:embed", nil, map[string]string{"e.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.txt\nvar s string\n", "x.txt": "x\n"}, codeEmbed, "e.go", true},
-		{"C source", nil, map[string]string{"x.c": "int f(void) { return 1; }\n", "p.go": "package p\n"}, codeCSource, "x.c", true},
-		{"C source with a NUL", nil, map[string]string{"x.c": "\x00int f(void) { system(\"id\"); }\n", "p.go": "package p\n"}, codeCSource, "x.c", true},
-		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\n\tRET\n", "p.go": "package p\n"}, codeAsm, "x_amd64.s", true},
+		{"C source", nil, map[string]string{"x.c": "int f(void) { return 1; }\n", "p.go": "package p\n"}, codeCSource, "x.c", false},
+		{"C source with a NUL", nil, map[string]string{"x.c": "\x00int f(void) { system(\"id\"); }\n", "p.go": "package p\n"}, codeCSource, "x.c", false},
+		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\n\tRET\n", "p.go": "package p\n"}, codeAsm, "x_amd64.s", false},
 		{"wrapped base64 of an ELF", nil, map[string]string{"b.go": "package p\n\nvar blob = `" + wrapped(minimalELF()) + "`\n"}, codeBlob, "b.go", false},
 		{"blob of text", nil, map[string]string{"b.go": "package p\n\nvar s = \"" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("plain words, nothing encoded here.\n", 40))) + "\"\n"}, codeBlob, "b.go", true},
 		// "ABC..." is itself valid base64: decoded again, to bytes nothing parses.
@@ -196,9 +196,22 @@ func TestInvariantShownInFull(t *testing.T) {
 			if !slices.Contains(h.items(tc.code), tc.item) {
 				t.Fatalf("%s %s not flagged (codes %q)", tc.code, tc.item, h.codes())
 			}
-			eligible := !slices.Contains(h.items(codeIncomplete), tc.code+" "+tc.item)
+			// Review-eligible: a review-routed code (not cgo, C, assembly)
+			// and the item shown in full.
+			eligible := routeOf(tc.code) == model.RouteReview && !slices.Contains(h.items(codeIncomplete), tc.code+" "+tc.item)
 			if eligible != tc.review {
 				t.Fatalf("review-eligible = %v, want %v; context:\n%.3000s", eligible, tc.review, strings.Join(h.ctx[tc.code][tc.item], ""))
+			}
+			// cgo, C and assembly go to a person, with their full text in
+			// the evidence for the review's triage.
+			if triageCodes[tc.code] {
+				f := fileOf(tc.item)
+				if out := string(h.render("m")); !strings.Contains(out, quote("full text of the new version of "+f, tc.cur[f])) {
+					t.Errorf("triage item %s without its full text:\n%.2000s", f, out)
+				}
+				if !slices.ContainsFunc(h.flagged("m"), func(fi model.FlaggedItem) bool { return fi.Code == tc.code && fi.Item == tc.item }) {
+					t.Errorf("triage item %s %s not in the flagged list for the reviewer", tc.code, tc.item)
+				}
 			}
 			if !eligible {
 				return

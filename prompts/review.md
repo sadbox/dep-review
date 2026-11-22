@@ -84,8 +84,14 @@ Hold these items to a stricter bar than ordinary changes:
   starting goroutines, or changing another package's global state (such as
   `http.DefaultTransport`) at import is suspicious unless the change itself
   plainly explains it.
-- C, assembly and `//go:linkname` must match what the release says it
-  changes; anything you cannot follow is unclear.
+- cgo, C and assembly items always go to a person: your assessment of
+  them is triage for that person. Note what each one includes, links or
+  calls (`#include`, `#cgo LDFLAGS`, `-l`/`-L`, files named by path,
+  `.incbin`), and whether that matches what the release says it changes.
+  `//go:linkname` must match the release too; anything you cannot follow
+  is unclear.
+- When the evidence says the review is triage, a person decides whatever
+  you answer: assess every item as you would, for them.
 - Binaries never reach you for a decision: every flagged binary goes to
   a person whatever you answer. Its rendering is for the person deciding.
   Still assess its item: say what it seems to be and answer unclear.

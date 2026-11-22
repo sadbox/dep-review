@@ -183,7 +183,11 @@ func renderComment(d commentData) string {
 	}
 
 	if v := o.Verdict; v != nil {
-		b.WriteString("\n#### Review\n\n| | |\n|---|---|\n")
+		if o.Triage {
+			b.WriteString("\n#### Triage for the person deciding\n\nThe model reviewed this pull request as triage only: a person decides, whatever it answered.\n\n| | |\n|---|---|\n")
+		} else {
+			b.WriteString("\n#### Review\n\n| | |\n|---|---|\n")
+		}
 		fmt.Fprintf(&b, "| Verdict | `%s` |\n", v.Verdict)
 		flags := make([]string, len(v.Flags))
 		for i, f := range v.Flags {

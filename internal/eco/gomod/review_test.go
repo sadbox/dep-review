@@ -154,11 +154,11 @@ func TestBinaryContext(t *testing.T) {
 	}
 	out := string(h.render("m"))
 	for _, want := range []string{
-		"how it can reach the build (found by the gate): //go:embed assets/*.bin at embed.go:5 can match it",
+		"how it can reach the build (found by the gate):\n    | newly embedded by //go:embed assets/*.bin at embed.go:5\n",
 		"+ new-logo-bytes-and-more",
 		"- old-logo-bytes",
-		"how it can reach the build (found by the gate): added or changed outside testdata/",
-		"how it can reach the build (found by the gate): a .syso is linked into its package",
+		"how it can reach the build (found by the gate):\n    | the module has a .syso, which can link or include any file without naming it\n",
+		"how it can reach the build (found by the gate):\n    | a .syso is linked into its package\n",
 		"type: COFF object (amd64)",
 	} {
 		if !strings.Contains(out, want) {

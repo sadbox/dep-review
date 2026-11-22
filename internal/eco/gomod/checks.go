@@ -71,10 +71,13 @@ const blobMin = 512
 
 // checkCodes are the Go checks' finding codes. Each flags constructs the
 // version policy alone cannot clear (code run on import, compiled C,
-// assembly, binaries...). They route to the model review, which must
+// assembly, binaries...). Most route to the model review, which must
 // assess every flagged item one by one (see flagged and the focused
-// evidence render writes), except codeParse: a file the gate cannot parse
-// is one it cannot show the reviewer either, so a person decides.
+// evidence render writes). cgo, C and assembly route to a person, as on
+// main, and the review assesses them only as triage for that person
+// (triageCodes); so does every item not shown in full (codeIncomplete:
+// binaries, decoded bytes that are not text). codeParse goes to a person
+// with no triage: a file the gate cannot parse it cannot show either.
 const (
 	codeInit       = "gomod.init-changed"
 	codeVarInit    = "gomod.var-initializer-call"
@@ -98,7 +101,19 @@ const (
 
 // checkRoute is the route each code forces; anything not listed is
 // RouteReview.
-var checkRoute = map[string]model.Route{codeParse: model.RouteHuman, codeIncomplete: model.RouteHuman}
+var checkRoute = map[string]model.Route{
+	codeParse: model.RouteHuman, codeIncomplete: model.RouteHuman,
+	// cgo, C and assembly go to a person as on main: what they compile,
+	// include or link is beyond what the gate shows. The reviewer still
+	// assesses them, as triage for that person.
+	codeCgo: model.RouteHuman, codeCSource: model.RouteHuman, codeAsm: model.RouteHuman,
+}
+
+// triageCodes are the person-routed codes the review may still assess as
+// triage (policy.Triage): their items are in the flagged list and their
+// findings are marked Triage. codeIncomplete covers binaries and decoded
+// bytes that are not text.
+var triageCodes = map[string]bool{codeCgo: true, codeCSource: true, codeAsm: true, codeIncomplete: true}
 
 func routeOf(code string) model.Route {
 	if r, ok := checkRoute[code]; ok {
@@ -267,6 +282,7 @@ func (r *report) findings(update string) []model.Finding {
 			Route:  routeOf(c),
 			Detail: checkText[c] + ": " + strings.Join(list, ", ") + more,
 			Update: update,
+			Triage: triageCodes[c],
 		})
 	}
 	return out
@@ -277,7 +293,7 @@ func (r *report) findings(update string) []model.Finding {
 func (r *report) flagged(update string) []model.FlaggedItem {
 	var out []model.FlaggedItem
 	for _, c := range r.codes() {
-		if routeOf(c) != model.RouteReview {
+		if routeOf(c) != model.RouteReview && !(triageCodes[c] && c != codeIncomplete) {
 			continue
 		}
 		for _, it := range r.items(c) {
@@ -370,7 +386,7 @@ func visible(s string) string {
 			b.WriteRune(r)
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
 			fmt.Fprintf(&b, "<0x%02X>", r)
-		case r == 0x2028 || r == 0x2029 || unicode.Is(unicode.Cf, r) || invisibleLetter(r):
+		case r == 0x2028 || r == 0x2029 || invisible(r):
 			fmt.Fprintf(&b, "<U+%04X>", r)
 		default:
 			b.WriteRune(r)
@@ -379,16 +395,22 @@ func visible(s string) string {
 	return b.String()
 }
 
-// invisibleLetter: letters and marks that render as nothing (Hangul
-// fillers, the braille blank, the combining grapheme joiner, a
-// Khmer inherent vowel, a variation selector, the no-break space) and
-// the tag characters, shown as escapes so text cannot hide in them.
-func invisibleLetter(r rune) bool {
-	switch r {
-	case 0x3164, 0x115F, 0x1160, 0xFFA0, 0x2800, 0x034F, 0x17B4, 0xFE0F, 0x00A0:
+// invisible reports a rune that renders as nothing, so text can hide in
+// it: format characters, variation selectors, the other default-ignorable
+// code points (Hangul fillers, the combining grapheme joiner, Khmer
+// inherent vowels...), the unassigned default-ignorable ranges, and the
+// braille blank and no-break space.
+func invisible(r rune) bool {
+	switch {
+	case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Variation_Selector, r), unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r):
+		return true
+	case r == 0x2800 || r == 0x00A0 || r == 0x17B4 || r == 0x17B5:
+		return true
+	case r >= 0x180B && r <= 0x180F, r >= 0xFE00 && r <= 0xFE0F, r >= 0x2060 && r <= 0x206F,
+		r >= 0xFFF0 && r <= 0xFFF8, r >= 0xE0000 && r <= 0xE0FFF:
 		return true
 	}
-	return r >= 0xE0000 && r <= 0xE007F
+	return false
 }
 
 // excerpt is lines [line-around, line+around] of src, numbered as the Go
@@ -408,15 +430,15 @@ var checkText = map[string]string{
 	codeVarInit:    "new or changed package-level var initializer that calls a function (runs on import)",
 	codeInitCallee: "package-local declaration reached from a func init or a calling var initializer changed (runs on import)",
 	codeBlank:      `new blank import (import _ "...", imported only for its init side effects)`,
-	codeCSource:    "C/C++/Objective-C/Fortran/SWIG source added or changed (compiled by cgo)",
-	codeCgo:        `cgo (import "C" or //go:cgo_ directives) in a new or changed file`,
+	codeCSource:    "C/C++/Objective-C/Fortran/SWIG source added or changed (compiled by cgo); a person decides (the review is triage)",
+	codeCgo:        `cgo (import "C" or //go:cgo_ directives) in a new or changed file; a person decides (the review is triage)`,
 	codeLinkname:   "new //go:linkname (reaches into another package's internals)",
 	codeImport:     "non-test file newly imports a package that can run processes, make system calls, use the network, write files, break memory safety or call through reflection",
 	codeGenerate:   "new //go:generate directive",
 	codeEmbed:      "new //go:embed directive",
 	codeBlob:       fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
 	codeBinary:     "binary file added or changed, or newly reachable (testdata/ fixtures excepted unless the module can reach them); it goes to a person, and renderings are " + ecoutil.ForThePerson,
-	codeAsm:        "assembly (.s) file added or changed",
+	codeAsm:        "assembly (.s) file added or changed; a person decides (the review is triage)",
 	codeParse:      "Go file the gate could not parse (checked as text only)",
 	codeIncomplete: "flagged item the gate did not show in full as text (every binary, decoded bytes that are not text, anything past a cap or limit)",
 }
@@ -530,7 +552,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), true, c.context())
 		}
 	}
-	h.binaries(old, cur, bins, tdBins)
+	h.binaries(old, cur, bins, tdBins, h.embeds(old, cur))
 	return h
 }
 
@@ -569,19 +591,38 @@ func moduleLinks(t *ecoutil.Tree) string {
 }
 
 // binaries builds each flagged binary's context and sends every one to a
-// person: the gate does not clear binaries, by content or otherwise. The
-// reachability check over the whole new tree only decides what is
-// flagged: a changed testdata binary when the new tree can reach it, and
-// any binary, changed or not, the new tree can reach but the old one
-// could not ("newly reachable").
-func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
-	nr, or := newReach(cur), newReach(old)
+// person: the gate does not clear binaries, by content or otherwise. What
+// is flagged (reach.go): a binary added or changed outside testdata/; a
+// changed testdata binary the new tree embeds, or any changed binary
+// under the module's links; an unchanged binary the new tree newly
+// embeds, or every unchanged binary when the module newly has links.
+func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string, emb embedResult) {
+	links, oldLinks := moduleLinks(cur), ""
+	if old != nil {
+		oldLinks = moduleLinks(old)
+	}
+	linksChanged := len(r.hits[codeCgo])+len(r.hits[codeCSource])+len(r.hits[codeAsm]) > 0
+	for _, rel := range bins {
+		linksChanged = linksChanged || path.Ext(rel) == ".syso" || linkExts[path.Ext(rel)]
+	}
 	why := map[string]string{}
 	for _, rel := range bins {
-		why[rel] = nr.reachable(rel)
+		w, _ := emb.embeddedBy(rel)
+		switch {
+		case w != "":
+			why[rel] = w
+		case path.Ext(rel) == ".syso":
+			why[rel] = "a .syso is linked into its package"
+		case links != "":
+			why[rel] = linkReason(links)
+		}
 	}
 	for _, rel := range tdBins {
-		if w := nr.reachable(rel); w != "" {
+		w, _ := emb.embeddedBy(rel)
+		if w == "" && links != "" {
+			w = linkReason(links)
+		}
+		if w != "" {
 			r.reserve(codeBinary, safeFile(rel))
 			bins = append(bins, rel)
 			why[rel] = w
@@ -595,8 +636,17 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 		if changed[rel] || !isBinaryFile(rel, cur.ReadFile(rel)) {
 			continue
 		}
-		w := nr.reachable(rel)
-		if w == "" || (old.Has(rel) && or.reachable(rel) != "") {
+		w, isNew := emb.embeddedBy(rel)
+		if !isNew {
+			w = ""
+		}
+		// Over-approximate: when what can link or include files changes
+		// (the module newly has links, or a cgo, C or assembly item is
+		// flagged), every binary can be newly pulled in.
+		if w == "" && links != "" && (oldLinks == "" || linksChanged) {
+			w = linkReason(links) + ", and those changed"
+		}
+		if w == "" {
 			continue
 		}
 		r.reserve(codeBinary, safeFile(rel))
@@ -628,8 +678,9 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 		if reason == "" {
 			reason = "added or changed outside testdata/; the gate found no //go:embed, cgo or link line that reaches it, but code can read it by a constructed name"
 		}
+		// The reason can hold module text (a pattern): always quoted.
 		r.add(codeBinary, item, false,
-			"how it can reach the build (found by the gate): "+reason+"\n",
+			quote("how it can reach the build (found by the gate)", reason),
 			quote("the gate's rendering of "+item+" ("+ecoutil.ForThePerson+")", d.Text))
 	}
 }

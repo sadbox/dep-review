@@ -40,6 +40,9 @@ type Outcome struct {
 	Reason   string         // one line in the gate's own words: safe for notifications
 	Codes    []string       // finding codes that forced the route
 	Verdict  *model.Verdict // set when a verdict parsed and validated
+	// Triage: Verdict is the review's answer for a person-routed PR,
+	// shown to the person deciding. The decision stays human.
+	Triage bool
 }
 
 var (
@@ -169,7 +172,16 @@ func Decide(in Inputs) Outcome {
 		} else if len(codes) == 0 {
 			why = "the version policy needs a person (major or 0.x update)"
 		}
-		return human(route, why+codeList(codes), codes)
+		o := human(route, why+codeList(codes), codes)
+		// Triage: the review ran for the person deciding. Recomputed from
+		// the evidence, never taken from it; whatever the answer, a person
+		// decides.
+		if policy.Triage(ev.Updates, ev.Findings, ev.Truncated) && jobResult(in.ReviewResult) == "success" && in.Verdict != nil {
+			if v, err := ParseVerdict(in.Verdict); err == nil {
+				o.Verdict, o.Triage = &v, true
+			}
+		}
+		return o
 	}
 	return human(model.RouteRefuse, "the gate refused this pull request"+codeList(codes), codes)
 }
