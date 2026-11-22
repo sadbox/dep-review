@@ -157,6 +157,11 @@ type report struct {
 	lister   goLister
 	listRuns int
 	listTook time.Duration
+	// lenient: the update is a well-known module whose upstream history
+	// was verified (lenient.go); eligible are the binary items leniency
+	// may put on review.
+	lenient  bool
+	eligible map[[2]string]bool
 }
 
 type quotedFile struct {
@@ -178,6 +183,7 @@ func newReportWith(clock *ecoutil.Clock) *report {
 		hits: hits{}, ctx: map[string]map[string][]string{}, keys: map[[2]string]bool{},
 		budget: &ecoutil.Budget{Left: moduleParseBudget, Clock: clock},
 		shown:  map[[2]string]bool{}, files: map[string]*quotedFile{},
+		eligible: map[[2]string]bool{},
 	}
 }
 
@@ -286,13 +292,18 @@ func (r *report) findings(update string) []model.Finding {
 			more = fmt.Sprintf(" and %d more", len(list)-10)
 			list = list[:10]
 		}
-		out = append(out, model.Finding{
+		f := model.Finding{
 			Code:   c,
 			Route:  routeOf(c),
 			Detail: checkText[c] + ": " + strings.Join(list, ", ") + more,
 			Update: update,
 			Triage: triageCodes[c],
-		})
+		}
+		if r.lenientCode(c) {
+			f.Route, f.Triage = model.RouteReview, false
+			f.Detail = lenientNote + f.Detail
+		}
+		out = append(out, f)
 	}
 	return out
 }
@@ -738,6 +749,12 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string, emb emb
 		}
 		d := ecoutil.DescribeAs(data, prev, hadOld, r.budget, sn)
 		item := safeFile(rel)
+		// A testdata binary that only the module's link lines can reach,
+		// and that the linker cannot take by name: leniency may put it on
+		// review (lenient.go).
+		if w, _ := emb.embeddedBy(rel); inTestdata(rel) && w == "" && emb.newly[rel] == "" && sn == ecoutil.Generic {
+			r.eligible[[2]string{codeBinary, item}] = true
+		}
 		reason := why[rel]
 		if reason == "" {
 			reason = "added or changed outside testdata/; the gate found no //go:embed, cgo or link line that reaches it, but code can read it by a constructed name"

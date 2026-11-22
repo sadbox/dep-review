@@ -405,8 +405,10 @@ func TestFetchNetwork(t *testing.T) {
 		{"sprobot285", []model.Update{{Name: "github.com/aws/aws-sdk-go-v2/credentials", From: "1.21.0", To: "1.21.1"}}, model.RouteReview},
 		// x/image has assembly sources, so its changed testdata binary
 		// (lzw-hi-overflow.tiff.bz2, which nothing parses) is flagged and
-		// cannot be shown in full: a person decides.
-		{"towngear49", []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}, model.RouteHuman},
+		// cannot be shown in full; x/sys changes assembly. Both are
+		// well-known modules whose upstream history verifies: reviewed
+		// (lenient.go). Without that it would be a person's.
+		{"towngear49", []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}, model.RouteReview},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {

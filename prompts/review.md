@@ -100,6 +100,13 @@ Hold these items to a stricter bar than ordinary changes:
 - Binaries never reach you for a decision: every flagged binary goes to
   a person whatever you answer. Its rendering is for the person deciding.
   Still assess its item: say what it seems to be and answer unclear.
+- Exception: when `gomod-summary.md` says an update is a well-known module
+  with verified upstream history, its cgo, C and assembly items, its
+  testdata binaries that only link lines could reach, and its unresolved
+  embeds are yours to decide, under the same bar and with the same
+  citations. Clear a testdata binary only if its rendering plainly shows a
+  test fixture of the kind its name and the citing commit say, and nothing
+  outside tests reads it. Otherwise it is unclear.
 - An encoded literal reaches you only when it decodes to text, quoted in
   full; read that text like code.
 

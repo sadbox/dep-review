@@ -171,6 +171,22 @@ config, no credential helper or hooks, and objects are fsck'd on fetch.
 It makes a blob-less shallow fetch and a sparse checkout of the module's
 directory.
 
+#### Well-known modules
+
+For `golang.org/x/*`, `google.golang.org/*` and `cloud.google.com/go` (and
+below it), and only when the update's upstream history is verified, some
+person-routed items are reviewed instead:
+- cgo, C and assembly source;
+- binaries under testdata/ that nothing embeds and that only link lines
+  could reach, other than files the linker takes by name (.syso and
+  libraries);
+- embeds the gate could not resolve.
+
+The per-item accounting and the commit citations still apply. Every
+other binary, a decoded blob that is not text, an unparseable file and an
+unanalyzable module still go to a person. The list is the gate's, with no
+per-repository input. `github.com/google/*` is not on it.
+
 ### GitHub workflow lockfiles
 
 In a workflow onboarded to `.github/workflows/actions.lock`, a step names
