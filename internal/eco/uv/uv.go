@@ -124,12 +124,14 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		res.Findings = append(res.Findings, fs...)
 	}
 	for i, c := range work {
-		fs, err := f.verifyAndDiff(ctx, env, home, filepath.Join(env.Scratch, "uv", fmt.Sprint(i)), c, &summary)
+		fs, ds, err := f.verifyAndDiff(ctx, env, home, filepath.Join(env.Scratch, "uv", fmt.Sprint(i)), c, &summary, len(res.Diffs))
 		if err != nil {
 			return fetch.Result{}, err
 		}
 		res.Findings = append(res.Findings, fs...)
+		res.Diffs = append(res.Diffs, ds...)
 	}
+	res.Findings = append(res.Findings, ecoutil.ReadingLimits("uv", res.Diffs, 0)...)
 	if err := env.Evidence.Add("uv-summary.md", "uv change set, hash verification and checks run by the gate", summary.Bytes()); err != nil {
 		return fetch.Result{}, err
 	}
@@ -457,19 +459,19 @@ type sideTrees struct {
 	wheel, sdist *ecoutil.Tree
 }
 
-func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir string, c change, summary *bytes.Buffer) ([]model.Finding, error) {
+func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir string, c change, summary *bytes.Buffer, n int) ([]model.Finding, []model.DiffFile, error) {
 	u := c.update
 	var findings []model.Finding
 	add := func(route model.Route, code, detail string) {
 		findings = append(findings, model.Finding{Code: code, Route: route, Update: u.Name, Detail: u.Name + ": " + detail})
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	newWheel, newSdist := pick(c.head, "")
 	if newWheel == nil && newSdist == nil {
 		add(model.RouteHuman, "uv.no-artifacts", u.To+": the lock lists no wheel or sdist")
-		return findings, nil
+		return findings, nil, nil
 	}
 	like := ""
 	if newWheel != nil {
@@ -499,13 +501,13 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 			}
 			t, bad, err := f.fetchArtifact(ctx, env, filepath.Join(dir, s.label+"-"+a.kind), *a.art)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if bad != nil {
 				bad.Update = u.Name
 				bad.Detail = u.Name + "==" + s.ver + ": " + bad.Detail
 				findings = append(findings, *bad)
-				return findings, nil
+				return findings, nil, nil
 			}
 			if i == 1 && len(t.Rejected) > 0 {
 				add(model.RouteHuman, "uv.unsafe-archive-entry", fmt.Sprintf("%s %s has entries the gate does not extract: %s", s.ver, a.kind, ecoutil.List(t.Rejected, 10)))
@@ -529,7 +531,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 	// hard checks, not only the one diffed above.
 	extra, err := f.checkOtherArtifacts(ctx, env, home, dir, c, newWheel, newSdist, sides, summary)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, fd := range extra {
 		add(fd.Route, fd.Code, fd.Detail)
@@ -548,20 +550,24 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 	}
 	diffs, cut, err := ecoutil.DiffTrees(ctx, home, dir, rel(oldT), rel(newT))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	text, _ := ecoutil.JoinDiffs(diffs, nil)
-	if cut {
-		text = append(text, "\n[dep-review: diff exceeded the gate's read limit]\n"...)
+	// Every file is required: whatever is installed can be imported or
+	// read at run time.
+	key := u.Name + " " + ecoutil.OrNew(u.From) + " -> " + u.To
+	nd := ecoutil.NavDiffs{
+		Eco: "uv", Key: key, Update: u.Name, What: kind,
+		Name: func(suffix string) string {
+			return "uv" + u.Directory + "/" + u.Name + "@" + ecoutil.OrNew(u.From) + "..." + u.To + "." + kind + "." + suffix
+		},
+		Desc:  fmt.Sprintf("index of the per-file diffs of Python package %s %s -> %s (%s): read every required one and list its ID in examined", u.Name, ecoutil.OrNew(u.From), u.To, kind),
+		Diffs: diffs, Cut: cut, Old: oldT, Cur: newT,
 	}
-	if len(text) == 0 {
-		text = []byte("(the trees are identical)\n")
+	ds, fs, err := nd.Write(env, n)
+	if err != nil {
+		return nil, nil, err
 	}
-	name := "uv" + u.Directory + "/" + u.Name + "@" + ecoutil.OrNew(u.From) + "..." + u.To + "." + kind + ".diff"
-	if err := env.Evidence.AddUntrusted(name, fmt.Sprintf("diff of Python package %s %s -> %s (%s; third-party code)", u.Name, ecoutil.OrNew(u.From), u.To, kind), text); err != nil {
-		return nil, err
-	}
-	return findings, nil
+	return append(findings, fs...), ds, nil
 }
 
 // fetchArtifact downloads, verifies and extracts one artifact into dst

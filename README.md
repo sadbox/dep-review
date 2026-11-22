@@ -141,8 +141,8 @@ detect renames.
 
 #### Navigable diffs
 
-A Go module's diff is split per file, and each file's diff is its own
-evidence file. The parts have caps of their own: 2 MB each, 50 MB
+A Go module's, npm package's or Python package's diff is split per file,
+and each file's diff is its own evidence file. The parts have caps of their own: 2 MB each, 50 MB
 together. A gate-written `diffs.md` index lists every changed file with an
 ID. Every file is required reading unless the go command's own rules say
 no consumer build reads it: a `_test.go` file that nothing embeds, in a
@@ -160,8 +160,9 @@ required ID, or a person decides. A person also decides when:
 Parts are named by ID. The fetch job ships the evidence's checksums as a
 `SHA256SUMS` manifest inside the artifact and outputs only that file's
 sum, which review and publish verify first.
-The flagged-items file uses the same caps. Other ecosystems keep the
-single-file limits (400 KB a file, 4 MB in all).
+The flagged-items file uses the same caps. For npm and Python packages every file is required, since whatever is
+installed can be loaded. Actions and Docker evidence keep the single-file
+limits (400 KB a file, 4 MB in all).
 
 #### Upstream commits
 

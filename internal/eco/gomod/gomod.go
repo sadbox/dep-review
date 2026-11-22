@@ -527,81 +527,23 @@ func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, 
 	if err != nil {
 		return nil, nil, err
 	}
-	var findings []model.Finding
 	su := safeUpdate(u)
-	if cut {
-		findings = append(findings, model.Finding{Code: "gomod.diff-cut", Route: model.RouteHuman, Update: su.Name,
-			Detail: fmt.Sprintf("the diff of %s exceeded the gate's read limit, so some changes were never shown", key)})
-	}
-	// git's "diff --git a/x b/y" header is ambiguous for a path with a
-	// space, so a file's path is believed only when the diffs' paths are
-	// exactly the files that changed between the trees, each once.
-	// Otherwise nothing is optional, and a person decides.
-	trusted := true
-	if trees[1] != nil {
-		want := map[string]bool{}
-		for _, f := range changedFiles(trees[0], trees[1]) {
-			want[f] = true
-		}
-		got := map[string]bool{}
-		for _, d := range diffs {
-			if got[d.Path] || !want[d.Path] {
-				trusted = false
+	nd := ecoutil.NavDiffs{
+		Eco: "gomod", Key: key, Update: su.Name, What: "module",
+		Name:  func(suffix string) string { return evName(u, suffix) },
+		Desc:  fmt.Sprintf("index of the per-file diffs of %s %s -> %s: read every required one and list its ID in examined", su.Name, ecoutil.OrNew(su.From), su.To),
+		Diffs: diffs, Cut: cut, Old: trees[0], Cur: trees[1], SafePath: safeFile,
+		Optional: func(p string) string {
+			switch {
+			case h != nil && h.testOnly(p):
+				return "a _test.go file nothing embeds or includes: only the module's own tests compile it"
+			case h != nil && h.unbuilt[p]:
+				return "no declared build (go_platforms, go_tags) compiles it"
 			}
-			got[d.Path] = true
-		}
-		trusted = trusted && len(got) == len(want)
+			return ""
+		},
 	}
-	if !trusted {
-		findings = append(findings, model.Finding{Code: "gomod.diff-paths", Route: model.RouteHuman, Update: su.Name,
-			Detail: fmt.Sprintf("the per-file diffs of %s do not match the files that changed (a path git cannot write unambiguously); every diff is required", key)})
-	}
-	var out []model.DiffFile
-	var idx strings.Builder
-	fmt.Fprintf(&idx, "# Changed files: %s\n\n", key)
-	idx.WriteString("Written by the gate. Each row is one changed file of the module, its diff in the evidence file named in the last column.\n")
-	idx.WriteString("Read the diff of every row marked required and list its ID in the verdict's \"examined\"; the gate merges only when all of them are listed.\n")
-	idx.WriteString("A row marked optional is a file no consumer build reads (the reason says why): read it when it helps.\n\n")
-	idx.WriteString("| ID | File | Bytes | Reading | Diff |\n|---|---|---|---|---|\n")
-	if len(diffs) == 0 {
-		idx.WriteString("(the module trees are identical)\n")
-	}
-	for _, d := range diffs {
-		why := ""
-		switch {
-		case !trusted:
-		case h != nil && h.testOnly(d.Path):
-			why = "a _test.go file nothing embeds or includes: only the module's own tests compile it"
-		case h != nil && h.unbuilt[d.Path]:
-			why = "no declared build (go_platforms, go_tags) compiles it"
-		}
-		n++
-		id := fmt.Sprintf("D%05d", n)
-		// Named by ID: no module path can collide with another's part.
-		file, written, err := env.Evidence.AddPart(evName(u, "diff/"+id+".diff"), d.Body)
-		if err != nil {
-			return nil, nil, err
-		}
-		// Bytes is what the reviewer reads: the written, normalized text.
-		df := model.DiffFile{ID: id, Update: key, Path: safeFile(d.Path), File: file,
-			Bytes: int64(written), Required: why == "", Why: why}
-		if df.File == "" {
-			// Binary or past the caps: the writer recorded why (a person
-			// decides); the row stays, with nothing to read.
-			df.File = "(not written)"
-		}
-		out = append(out, df)
-		reading := "required"
-		if !df.Required {
-			reading = "optional: " + why
-		}
-		fmt.Fprintf(&idx, "| %s | %s | %d | %s | %s |\n", df.ID, df.Path, df.Bytes, reading, df.File)
-	}
-	desc := fmt.Sprintf("index of the per-file diffs of %s %s -> %s: read every required one and list its ID in examined", su.Name, ecoutil.OrNew(su.From), su.To)
-	if err := env.Evidence.Add(evName(u, "diffs.md"), desc, []byte(idx.String())); err != nil {
-		return nil, nil, err
-	}
-	return out, findings, nil
+	return nd.Write(env, n)
 }
 
 func evName(u model.Update, suffix string) string {
@@ -645,48 +587,13 @@ func orEmpty(v string, f func(string) string) string {
 }
 
 // changedFiles is every file added, removed or edited between two trees.
-func changedFiles(old, cur *ecoutil.Tree) []string {
-	var out []string
-	for _, rel := range cur.Files {
-		if old == nil || !old.Has(rel) || !bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)) {
-			out = append(out, rel)
-		}
-	}
-	if old != nil {
-		for _, rel := range old.Files {
-			if !cur.Has(rel) {
-				out = append(out, rel)
-			}
-		}
-	}
-	return out
-}
+func changedFiles(old, cur *ecoutil.Tree) []string { return ecoutil.ChangedFiles(old, cur) }
 
-// maxMustRead bounds what a review must read in full: every required diff
-// and every flagged-items file of the fetch (the single-file evidence's
-// total, evidence.DefaultTotalCap). Past it, a person decides.
-const maxMustRead = 4 << 20
+// maxMustRead is ecoutil.MaxMustRead.
+const maxMustRead = ecoutil.MaxMustRead
 
 // readingLimits are the person-routed findings for more required reading
-// than a review can take: more than model.MaxRequiredDiffs required
-// diffs, or more than maxMustRead bytes of required diffs and flagged
-// items together.
+// than a review can take (ecoutil.ReadingLimits).
 func readingLimits(diffs []model.DiffFile, flaggedBytes int) []model.Finding {
-	var out []model.Finding
-	required, bytes := 0, flaggedBytes
-	for _, d := range diffs {
-		if d.Required {
-			required++
-			bytes += int(d.Bytes)
-		}
-	}
-	if required > model.MaxRequiredDiffs {
-		out = append(out, model.Finding{Code: "gomod.too-many-diffs", Route: model.RouteHuman,
-			Detail: fmt.Sprintf("%d changed files a consumer build can read; more than %d is too many to review", required, model.MaxRequiredDiffs)})
-	}
-	if bytes > maxMustRead {
-		out = append(out, model.Finding{Code: "gomod.too-much-to-read", Route: model.RouteHuman,
-			Detail: fmt.Sprintf("the required diffs and flagged items come to %d bytes; more than %d is more than a review can read", bytes, maxMustRead)})
-	}
-	return out
+	return ecoutil.ReadingLimits("gomod", diffs, flaggedBytes)
 }

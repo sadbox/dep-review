@@ -343,7 +343,7 @@ func TestVerifyAndDiffFakeRegistry(t *testing.T) {
 				lockKind: "npm",
 			}
 			var sum bytes.Buffer
-			fs, err := Fetcher{Registry: srv.URL}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+			fs, ds, err := Fetcher{Registry: srv.URL}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -355,9 +355,14 @@ func TestVerifyAndDiffFakeRegistry(t *testing.T) {
 				if len(fs) != 0 {
 					t.Errorf("findings %+v", fs)
 				}
+				// The diff is navigable: one required part per changed
+				// file, listed in the gate's index.
 				files := ev.Files()
-				if len(files) != 1 || !files[0].Untrusted {
+				if len(files) != 1 || files[0].Untrusted || !strings.HasSuffix(files[0].Path, ".diffs.md") {
 					t.Fatalf("files = %+v", files)
+				}
+				if len(ds) == 0 || slices.ContainsFunc(ds, func(d model.DiffFile) bool { return !d.Required || d.File == "" }) {
+					t.Fatalf("diffs = %+v", ds)
 				}
 				return
 			}
@@ -855,7 +860,7 @@ func TestBadNameRefused(t *testing.T) {
 	for _, u := range []model.Update{{Name: "../evil", To: "1.0.0"}, {Name: "x", To: "1.0.0/../../y"}} {
 		c := change{update: u, lockKind: "npm"}
 		var sum bytes.Buffer
-		fs, err := Fetcher{Registry: "http://127.0.0.1:1"}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(t.TempDir(), "w"), c, &sum)
+		fs, _, err := Fetcher{Registry: "http://127.0.0.1:1"}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(t.TempDir(), "w"), c, &sum, 0)
 		if err != nil {
 			t.Fatalf("%+v: %v", u, err)
 		}
