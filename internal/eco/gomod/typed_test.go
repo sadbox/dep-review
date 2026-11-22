@@ -111,7 +111,7 @@ func TestTypedWalk(t *testing.T) {
 // The types child imports only well-formed standard-library paths.
 func TestTypedImportPaths(t *testing.T) {
 	c := &checker{req: typesRequest{Module: "example.com/m", GOROOT: t.TempDir()}}
-	for _, p := range []string{"x/../cmd/compile/internal/ssagen", "cmd/compile", "C", "example.org/x", "./x", "a//b"} {
+	for _, p := range []string{"x/../cmd/compile/internal/ssagen", "cmd/compile", "CMD/compile", "Cmd/go", "C", "example.org/x", "./x", "a//b"} {
 		if _, err := c.importPath(p, 0); err == nil {
 			t.Errorf("%q imported", p)
 		}

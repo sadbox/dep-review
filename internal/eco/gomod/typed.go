@@ -354,7 +354,9 @@ func (c *checker) importPath(p string, ci int) (*types.Package, error) {
 	if module.CheckImportPath(p) != nil {
 		return nil, errors.New("not a valid import path")
 	}
-	if first, _, _ := strings.Cut(p, "/"); strings.Contains(first, ".") || first == "cmd" || p == "C" {
+	// Standard-library paths are lower case; anything else could reach
+	// cmd/ or a module on a case-insensitive file system.
+	if first, _, _ := strings.Cut(p, "/"); strings.ToLower(p) != p || strings.Contains(first, ".") || first == "cmd" || p == "C" {
 		return nil, errors.New("outside the module and the standard library")
 	}
 	if fi, err := os.Stat(filepath.Join(c.req.GOROOT, "src", filepath.FromSlash(p))); err != nil || !fi.IsDir() {
