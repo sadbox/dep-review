@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
@@ -144,6 +145,8 @@ type findings struct {
 	// pair, so Fetch can mark it explained when actions.lock locks that
 	// nested action and its transitive pair passes.
 	nested []nestedNote
+	// diffs are the navigable per-file source diffs (model.Evidence.Diffs).
+	diffs []model.DiffFile
 }
 
 type nestedNote struct {
@@ -327,7 +330,9 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 	if err := env.Evidence.Add("actions/summary.md", "github_actions fetcher summary: pins, versions, upstream checks, provenance and bundle attribution numbers", []byte(summary.String())); err != nil {
 		return fetch.Result{}, err
 	}
-	return fetch.Result{Updates: updates, Findings: fs.list}, nil
+	// Required reading past what a reviewer reads goes to a person.
+	fs.list = append(fs.list, ecoutil.ReadingLimits("actions", fs.diffs, 0)...)
+	return fetch.Result{Updates: updates, Findings: fs.list, Diffs: fs.diffs}, nil
 }
 
 // groupPairs validates each rewritten line and groups them by action
@@ -1358,24 +1363,31 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 	fmt.Fprintf(sum, "- upstream files changed: %d (first-party %d, bundles %d, lockfiles %d); npm packages changed: %d (new %d, downgraded %d)\n",
 		len(changed), len(firstParty), len(bundles), len(locks), len(pkgChanges), added, downgraded)
 
-	// First-party source diff.
+	// First-party source diff: one part per file (navigable evidence),
+	// every one required. Each diff is git's for exactly that path, so the
+	// index's paths are the changed files'.
 	if len(firstParty) > 0 {
-		specs := []string{".", ":(exclude,glob)**/dist/**"}
-		for b := range lockBasenames {
-			specs = append(specs, ":(exclude,glob)**/"+b)
-		}
-		for _, e := range entries {
-			if !isDistPath(e) {
-				specs = append(specs, ":(exclude,literal)"+e)
+		var diffs []ecoutil.FileDiff
+		for _, c := range firstParty {
+			d, err := up.diff(ctx, p.oldRef, p.newRef, ":(literal)"+c.path)
+			if err != nil {
+				return err
 			}
+			diffs = append(diffs, ecoutil.FileDiff{Path: c.path, Body: []byte(d)})
 		}
-		d, err := up.diff(ctx, p.oldRef, p.newRef, specs...)
+		nd := ecoutil.NavDiffs{
+			Eco: "actions", Key: p.label(), Update: name, What: "action",
+			Name:     func(suffix string) string { return evName(p, "source."+suffix) },
+			Desc:     "index of the per-file first-party source diffs of " + p.label() + " (dist/ and lockfiles excluded): read every one and list its ID in examined",
+			Diffs:    diffs,
+			SafePath: safePath,
+		}
+		ds, nf, err := nd.Write(env, len(fs.diffs))
 		if err != nil {
 			return err
 		}
-		if err := env.Evidence.AddUntrusted(evName(p, "source.diff"), "first-party source diff of "+p.label()+" (dist/ and lockfiles excluded)", []byte(d)); err != nil {
-			return err
-		}
+		fs.diffs = append(fs.diffs, ds...)
+		fs.list = append(fs.list, nf...)
 	}
 
 	// Bundles.

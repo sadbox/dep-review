@@ -30,7 +30,8 @@ For every update in `evidence.json`:
 
 1. Read its diff in full. Note every change to behaviour, not just the
    headline of the release notes. A Go module's, npm package's or Python
-   package's diff is split per file: its `diffs.md` index (under
+   package's diff, and a GitHub Action's first-party source diff, is
+   split per file: its `diffs.md` index (under
    `./evidence/gate/`) lists every changed file with an ID and the
    evidence file holding its diff. Read the diff of every row
    marked required, and put each ID you read in your answer's `examined`.
