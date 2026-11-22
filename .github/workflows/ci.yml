@@ -137,7 +137,7 @@ jobs:
   # uv.locks) whose pinned dependencies are the point of the fixture, and
   # an advisory on one would fail npm audit or osv-scanner for no change.
   lint:
-    uses: sadbox/ci/.github/workflows/lint.yml@f3098bcadaa3401017253eebe9e9f6bb19febd5b # v0.1.2
+    uses: sadbox/ci/.github/workflows/lint.yml@359d60377cc875e8370724de433e72493c6d33b1 # v0.2.0
     permissions:
       contents: read
     with:
