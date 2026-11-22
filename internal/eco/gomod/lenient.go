@@ -1,7 +1,11 @@
 package gomod
 
 import (
+	"bytes"
+	"path"
 	"strings"
+
+	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 
 	"golang.org/x/mod/module"
 )
@@ -13,8 +17,10 @@ import (
 // reviewed instead, with the same per-item accounting and citations:
 //   - cgo, C and assembly source (text, quoted in full);
 //   - binaries under testdata/ that nothing embeds and only the module's
-//     link lines could reach, and that the linker cannot take by name
-//     (not a .syso, .a, .o, .so, .dylib, .lib or .dll);
+//     link lines could reach, that the linker cannot take by name (not a
+//     .syso, .a, .o, .so, .dylib, .lib or .dll), whose bytes are a known
+//     data format (an image, a document, a compressed stream: never a
+//     linker input), and whose name no text file of the module holds;
 //   - embeds the gate could not resolve.
 //
 // Leniency never skips the review or the accounting, and nothing else
@@ -61,4 +67,24 @@ func (r *report) lenientCode(code string) bool {
 		}
 	}
 	return true
+}
+
+// textNames reports that some text file of the module may name rel: its
+// base name, or without its extension when that is 3 bytes or more, in
+// any non-binary file, compared case-folded. Over-approximated: any occurrence counts, so no
+// cgo line, include, linker script or response file can name it unseen.
+func textNames(t *ecoutil.Tree, rel string) bool {
+	base := fold(path.Base(rel))
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	for _, f := range t.Files {
+		text := t.ReadFile(f)
+		if f == rel || isBinaryFile(f, text) {
+			continue
+		}
+		low := []byte(fold(string(text)))
+		if bytes.Contains(low, []byte(base)) || len(stem) >= 3 && bytes.Contains(low, []byte(stem)) {
+			return true
+		}
+	}
+	return false
 }

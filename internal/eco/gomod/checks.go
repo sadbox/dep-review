@@ -755,7 +755,8 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string, emb emb
 		// A testdata binary that only the module's link lines can reach,
 		// and that the linker cannot take by name: leniency may put it on
 		// review (lenient.go).
-		if w, _ := emb.embeddedBy(rel); inTestdata(rel) && w == "" && emb.newly[rel] == "" && sn == ecoutil.Generic {
+		if w, _ := emb.embeddedBy(rel); inTestdata(rel) && w == "" && emb.newly[rel] == "" && sn == ecoutil.Generic &&
+			ecoutil.KnownData(data) && !textNames(cur, rel) {
 			r.eligible[[2]string{codeBinary, item}] = true
 		}
 		reason := why[rel]
