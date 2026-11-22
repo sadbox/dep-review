@@ -432,7 +432,6 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			if h.listRuns > 0 {
 				fmt.Fprintf(summary, "- %s: go list ran %d times for //go:embed (%s)\n", key, h.listRuns, h.listTook.Round(time.Millisecond))
 			}
-			findings = append(findings, h.findings(su.Name)...)
 			items := h.flagged(key)
 			flagged = append(flagged, items...)
 			if len(h.hits) > 0 {
@@ -448,6 +447,10 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 				if up.Status == model.UpstreamMismatch {
 					findings = append(findings, model.Finding{Code: codeUpstreamMismatch, Route: model.RouteHuman, Update: safeImport(u.Name), Detail: up.Detail})
 				}
+				if wellKnownModule(u.Name) && up.Status == model.UpstreamVerified {
+					h.lenient = true
+					fmt.Fprintf(summary, "- %s: well-known module with verified upstream history: cgo, C and assembly source, link-reachable testdata binaries and unresolved embeds are reviewed\n", key)
+				}
 				if md != nil {
 					desc := fmt.Sprintf("upstream commits between the two versions of %s and which flagged items each touched (third-party text); cite the explaining commits per item", key)
 					if err := env.Evidence.AddUntrusted(evName(u, "upstream.md"), desc, md); err != nil {
@@ -455,6 +458,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 					}
 				}
 			}
+			findings = append(findings, h.findings(su.Name)...)
 		}
 		if ex := changelogExcerpt(trees[0], trees[1]); ex != nil {
 			if err := env.Evidence.AddUntrusted(evName(u, "changelog.md"), "changelog excerpt for "+safeImport(u.Name)+" "+safeVersion(u.To)+" (from the module, third-party text)", ex); err != nil {

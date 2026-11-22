@@ -1251,3 +1251,25 @@ func Hexdump(b []byte) string {
 	}
 	return s.String()
 }
+
+// KnownData reports that b's leading bytes match only formats that are
+// data, never linker input (an image, a document, a compressed stream or
+// an archive the Go and C toolchains do not link): at least one such
+// match, and no match of any other type. Anything unmatched is not known.
+func KnownData(b []byte) bool {
+	ts := magicTypes(b)
+	if len(ts) == 0 {
+		return false
+	}
+	for _, t := range ts {
+		if !slices.ContainsFunc(dataTypes, func(p string) bool { return strings.HasPrefix(t, p) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// dataTypes are the magics table's data formats (KnownData).
+// Each is matched at offset 0 (tar's magic, at 257, leaves the leading
+// bytes free for anything, so it is not one).
+var dataTypes = []string{"PNG image", "JPEG image", "GIF image", "PDF document", "gzip", "bzip2", "xz", "zstd", "zip archive", "7-zip archive", "SQLite database"}
