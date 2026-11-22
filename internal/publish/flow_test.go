@@ -457,16 +457,16 @@ func TestSweep(t *testing.T) {
 		{"approved, no CI after the stuck threshold", func(f *fakeGH) {
 			approve(f, headSHA)
 			f.checkRuns = nil
-		}, 3 * time.Hour, false, 1, "stuck=" + headSHA + " approved=" + headSHA + " -->\n### dep-review: approved"},
+		}, 5 * time.Hour, false, 1, "stuck=" + headSHA + " approved=" + headSHA + " -->\n### dep-review: approved"},
 		{"approved, CI still running after the threshold", func(f *fakeGH) {
 			approve(f, headSHA)
 			f.checkRuns = []map[string]any{ghaRun("test", "queued", "", ciSuite)}
-		}, 3 * time.Hour, false, 1, "stuck=" + headSHA},
+		}, 5 * time.Hour, false, 1, "stuck=" + headSHA},
 		{"approved and stuck already reported", func(f *fakeGH) {
 			approve(f, headSHA)
 			f.comments[7][0].Body = marker{Stuck: []string{headSHA}, Approved: headSHA}.String() + "\n### dep-review: approved\n"
 			f.checkRuns = nil
-		}, 3 * time.Hour, false, 0, "approved=" + headSHA},
+		}, 5 * time.Hour, false, 0, "approved=" + headSHA},
 		{"status without an approval record", func(f *fakeGH) { approve(f, "") }, time.Hour, false, 1, "notified=" + headSHA},
 		{"approval record for another head", func(f *fakeGH) { approve(f, other) }, time.Hour, false, 1, "notified=" + headSHA},
 		{"approval record in someone else's comment", func(f *fakeGH) {
@@ -487,19 +487,19 @@ func TestSweep(t *testing.T) {
 			f.statuses[headSHA] = []map[string]any{{"context": "dep-review", "state": "failure", "creator": map[string]any{"login": bot}}}
 		}, 5 * time.Hour, false, 0, ""},
 		{"young head without decision", nil, time.Hour, false, 0, ""},
-		{"stuck head", nil, 3 * time.Hour, false, 1, "stuck=" + headSHA},
+		{"stuck head", nil, 5 * time.Hour, false, 1, "stuck=" + headSHA},
 		{"stuck after gate error", func(f *fakeGH) {
 			f.statuses[headSHA] = []map[string]any{{"context": "dep-review", "state": "error", "creator": map[string]any{"login": bot}}}
-		}, 3 * time.Hour, false, 1, "stuck=" + headSHA},
+		}, 5 * time.Hour, false, 1, "stuck=" + headSHA},
 		{"stuck already reported", func(f *fakeGH) {
 			c := &fakeComment{ID: 5, Body: marker{Stuck: []string{headSHA}}.String()}
 			c.User.Login = bot
 			f.comments[7] = []*fakeComment{c}
-		}, 3 * time.Hour, false, 0, "stuck=" + headSHA},
-		{"not dependabot's", func(f *fakeGH) { f.prs[7] = openPR(7, headSHA, "someone") }, 3 * time.Hour, false, 0, ""},
+		}, 5 * time.Hour, false, 0, "stuck=" + headSHA},
+		{"not dependabot's", func(f *fakeGH) { f.prs[7] = openPR(7, headSHA, "someone") }, 5 * time.Hour, false, 0, ""},
 		{"fork head", func(f *fakeGH) {
 			f.prs[7]["head"].(map[string]any)["repo"] = map[string]any{"full_name": "evil/r"}
-		}, 3 * time.Hour, false, 0, ""},
+		}, 5 * time.Hour, false, 0, ""},
 		{"approval for an older head does not count", func(f *fakeGH) {
 			f.statuses[other] = []map[string]any{{"context": "dep-review", "state": "success", "creator": map[string]any{"login": bot}}}
 		}, time.Hour, false, 0, ""},
@@ -644,7 +644,7 @@ func TestSweepPendingHead(t *testing.T) {
 	for _, tc := range []struct {
 		age      time.Duration
 		notified int
-	}{{time.Hour, 0}, {3 * time.Hour, 1}} {
+	}{{3 * time.Hour, 0}, {5 * time.Hour, 1}} {
 		f := newFake(t)
 		cfg, n, ck := setup(t, f)
 		f.commitDate = ck.Now().Add(-tc.age)
