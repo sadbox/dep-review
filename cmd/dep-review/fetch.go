@@ -53,13 +53,14 @@ func runFetch(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Binaries in a dependency are parsed in a child process with a
-	// memory limit and a timeout (ecoutil.Isolate).
+	// Binaries in a dependency are parsed, and go list runs over its
+	// tree, in a child process with a memory limit and a timeout
+	// (ecoutil.Isolate).
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	ecoutil.Isolate(&ecoutil.Isolation{Command: []string{self, describeBinaryCommand}})
+	ecoutil.Isolate(&ecoutil.Isolation{Command: []string{self, describeBinaryCommand}, GoCommand: []string{self, goChildCommand}})
 
 	// The fetch job's own read-only token (contents/pull-requests: read):
 	// REST reads of the caller repository and public upstreams.

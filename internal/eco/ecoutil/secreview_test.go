@@ -25,6 +25,11 @@ func TestMain(m *testing.M) {
 		if err := ChildMain(os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)
 		}
+	case "go":
+		if err := GoChildMain(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprint(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "hang":
 		time.Sleep(time.Hour)
 	case "crash":

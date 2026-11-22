@@ -32,7 +32,7 @@ func TestSharedClock(t *testing.T) {
 	broken := "\x7fELF\x02\x01\x01 truncated header"
 	blob := `"` + strings.Repeat("QUJD", 300) + `"`
 	tr := writeTree(t, map[string]string{"x.syso": broken, "p.go": "package p\n\nvar b = " + blob + "\n"})
-	h := checkTrees(nil, tr, clock)
+	h := checkTrees(nil, tr, clock, defaultLister())
 	if len(h.items(codeIncomplete)) == 0 || len(h.items(codeIncomplete)) == 0 {
 		t.Errorf("after the clock ran out: opaque %q, undecoded %q", h.items(codeIncomplete), h.items(codeIncomplete))
 	}

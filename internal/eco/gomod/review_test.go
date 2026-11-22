@@ -154,7 +154,7 @@ func TestBinaryContext(t *testing.T) {
 	}
 	out := string(h.render("m"))
 	for _, want := range []string{
-		"how it can reach the build (found by the gate):\n    | newly embedded by //go:embed assets/*.bin at embed.go:5\n",
+		"how it can reach the build (found by the gate):\n    | newly embedded by package . (go list EmbedFiles)\n",
 		"+ new-logo-bytes-and-more",
 		"- old-logo-bytes",
 		"how it can reach the build (found by the gate):\n    | the module has a .syso, which can link or include any file without naming it\n",

@@ -6,54 +6,6 @@ import (
 	"testing"
 )
 
-// TestResolveEmbed (round 10): //go:embed patterns resolve as cmd/go
-// resolves them.
-func TestResolveEmbed(t *testing.T) {
-	tree := writeTree(t, map[string]string{
-		"p.go": "package p\n", "data.bin": "x", "a.css": "x", "b.css": "x",
-		"assets/x/y.bin": "x", "assets/.hidden": "x", "assets/_skip/z": "x", "assets/ok.txt": "x",
-		"static/A.css": "x",
-	})
-	td := indexDirs(tree)
-	tests := []struct {
-		pat  string
-		want []string
-		err  bool
-	}{
-		{"data.bin", []string{"data.bin"}, false},
-		{"DATA.BIN", []string{"data.bin"}, false}, // literal segments fold (macOS, Windows)
-		{"*.css", []string{"a.css", "b.css"}, false},
-		{"static/*.CSS", nil, true}, // glob segments are case-sensitive
-		{"assets", []string{"assets/ok.txt", "assets/x/y.bin"}, false},
-		{"all:assets", []string{"assets/.hidden", "assets/_skip/z", "assets/ok.txt", "assets/x/y.bin"}, false},
-		{"assets/*", []string{"assets/.hidden", "assets/_skip/z", "assets/ok.txt", "assets/x/y.bin"}, false},
-		{"nothing.bin", nil, true},
-		{"../x", nil, true},
-		{".", nil, true},
-	}
-	for _, tt := range tests {
-		got, err := td.resolve(".", tt.pat)
-		if (err != nil) != tt.err || !slices.Equal(got, tt.want) {
-			t.Errorf("resolve(%q) = %q, %v; want %q (error %v)", tt.pat, got, err, tt.want, tt.err)
-		}
-	}
-	if why := modelled(".", "t[o]ol.bin"); why == "" {
-		t.Errorf("a character class is modelled")
-	}
-	if why := modelled("con\ufb01g", "*.bin"); why == "" {
-		t.Errorf("a non-ASCII embedding directory is modelled")
-	}
-}
-
-// TestEmbedBudget (round 10, 6): resolution past its work budget goes to
-// a person.
-func TestEmbedBudget(t *testing.T) {
-	td := &treeDirs{entries: map[string][]dirEntry{".": {{"a", false}}}, work: maxEmbedWork}
-	if _, err := td.resolve(".", "*"); err != errEmbedBudget {
-		t.Errorf("err = %v, want the budget error", err)
-	}
-}
-
 // TestNewlyReachable (round 9, B2): unchanged binaries are flagged when
 // the new tree reaches them and the old one did not, and only then.
 func TestNewlyReachable(t *testing.T) {

@@ -5,6 +5,12 @@
 // checking on, verifies the hashes against the PR's go.sum, diffs the
 // module trees and runs the Go checks (see checks.go), writing every item
 // they flag into the focused evidence the reviewer must assess.
+//
+// Design rule (README "Design rules"): never re-implement the go
+// command. Which files are built is go/build's answer (build.go), what a
+// package embeds is go list's (golist.go, embed.go); where the toolchain
+// gives no answer, over-approximate toward flagging more, and never credit
+// the old tree with a hand-ported rule.
 package gomod
 
 import (
@@ -17,9 +23,11 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/fetch"
@@ -335,6 +343,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 	checked := map[string]bool{}          // flaggedUpdate keys already checked
 	clock := ecoutil.NewClock(renderTime) // one for every module of this fetch
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
+	lister, version := f.lister(ctx)
 	var args []string
 	for _, c := range work {
 		if c.update.From != "" {
@@ -347,6 +356,11 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 		return nil, nil, err
 	}
 	summary.WriteString("## Downloads (proxy.golang.org, checked against sum.golang.org)\n\n")
+	// go/build is compiled into the gate; go list is the runner's go.
+	fmt.Fprintf(summary, "- go/build: %s (compiled into the gate); go list: %s\n", runtime.Version(), version)
+	if version != runtime.Version() {
+		summary.WriteString("- the two toolchains differ: build constraints and embeds may be read differently\n")
+	}
 	for _, c := range work {
 		u := c.update
 		bad := false
@@ -411,7 +425,10 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			fmt.Fprintf(summary, "- %s: same change as in another directory; its flagged items are listed once\n", key)
 		} else {
 			checked[key] = true
-			h := checkTrees(trees[0], trees[1], clock)
+			h := checkTrees(trees[0], trees[1], clock, lister)
+			if h.listRuns > 0 {
+				fmt.Fprintf(summary, "- %s: go list ran %d times for //go:embed (%s)\n", key, h.listRuns, h.listTook.Round(time.Millisecond))
+			}
 			findings = append(findings, h.findings(su.Name)...)
 			flagged = append(flagged, h.flagged(key)...)
 			if len(h.hits) > 0 {

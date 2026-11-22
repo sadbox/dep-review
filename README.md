@@ -61,7 +61,8 @@ The Go checks flag code that runs on import (a new or changed `func init`,
 a package-level initializer that calls code, any changed declaration that
 init code reaches by name within its package), code the compiler does not
 check (cgo and its preamble, C/C++/assembly sources, `//go:linkname`), new
-risky or blank imports, new `//go:generate`/`//go:embed` directives,
+risky or blank imports, every `//go:linkname`, `//go:cgo_*` and
+`//go:generate` directive in a changed file, newly embedded files,
 binaries and long encoded literals. These route to the model review, not to
 a person: `evidence.json` lists every flagged item (`flagged`, capped at
 200, past which a person decides), and a `.flagged.md` evidence file per
@@ -106,25 +107,20 @@ What is flagged:
 - a changed binary under `testdata/` (never built by itself) when the new
   tree embeds it, or when the module has cgo, C or assembly sources or a
   `.syso` (which can link or include any file without naming it);
-- a file the new tree newly embeds, changed or not. Every non-test
-  `//go:embed` pattern is resolved in both trees as cmd/go resolves it
-  (`path.Match` per segment, directories recursively without `.` and `_`
-  names unless `all:`, literal segments case-folded as on macOS and
-  Windows), and the matched sets are compared per embedding file and
-  pattern: an unchanged file newly embedded is quoted in full under the
+- a file the new tree newly embeds, changed or not: what each package
+  embeds is `go list`'s `EmbedFiles` in both trees (the union over every
+  `go tool dist list` platform, cgo on and off), compared per package. An
+  unchanged file newly embedded is quoted in full under the package's
   embed item if it is not binary (escapes show any control bytes), and
-  goes to a person otherwise. The old side is under-approximated: its
-  patterns come only from real `//go:embed` line comments of a file that
-  imports `embed` and parses, and count only if the file's build
-  constraints and GOOS/GOARCH suffix are unchanged and it was not
-  excluded (`//go:build ignore`). A Go file whose constraints change is
-  checked as a new file throughout (directives, init code, the
-  declarations init reaches). Any non-ASCII path element in either tree
-  makes every embed unresolved, for a person. A pattern with `[`, `\` or a
-  non-ASCII byte, an embedding file in a directory with a non-ASCII name,
-  a pattern the gate cannot split or resolve, or resolution past its work
-  budget puts the embed item in front of a person (and counts every
-  binary it could reach as embedded);
+  goes to a person otherwise. A package `go list` gives no answer for, a
+  file with `//go:embed` that only a `-tags` build builds (when anything
+  under its directory changed), or any
+  non-ASCII path element in either tree puts the embed item in front of a
+  person (and counts every binary it could reach as embedded). A `.go`
+  file that some configuration builds in the new tree and did not in the
+  old (go/build's answer, compared per configuration and for `-tags`
+  builds) is checked as a new file throughout (init code,
+  imports, the declarations init reaches);
 - every binary, when the module's link sources change (new cgo, C or
   assembly, or a new `.syso` or library).
 
@@ -167,6 +163,40 @@ than 8 transitive pairs, a step of any onboarded workflow whose pin the
 new lockfile does not lock (or a workflow whose steps the gate cannot
 read in full), and any other lockfile change. Job-level reusable workflows and workflows not in the lockfile
 keep SHA pins.
+
+## Design rules
+
+**Don't re-implement Go toolchain behaviour.** Where Go's own tooling
+(`go/build`, `go list`, `go/parser`, `go/scanner`, `go/build/constraint`)
+gives an authoritative answer, the gate uses it: which files are built is
+`build.Context.ImportDir` over the module tree for every platform of `go
+tool dist list` with cgo on and off; what a package embeds is `go list -e
+-json` (`EmbedFiles`), run offline in an isolated child with a clean
+environment. Where the tooling gives no answer, the gate over-approximates
+in the direction that flags more (for the new tree, a directory go/build
+fails on counts as built everywhere; for the old tree, nowhere), and it
+never credits the old side with a hand-ported rule: directives go/build
+does not report (`//go:linkname`, `//go:cgo_*`, `//go:generate`) are
+flagged in every changed or newly built file whether or not they were
+there before.
+
+Why: every differential review rounds 8 to 10 (and the later scans) found
+came from cmd/go logic re-implemented in the gate (constraint headers,
+block comments, a BOM, `package documentation`, default release tags,
+embed pattern matching, directive placement). Each port was close, and
+each gap was a way to bring old or unseen text into the build.
+
+Tags a consumer sets with `-tags` (`purego`, `netgo`, even `ignore`) have
+no authoritative answer, so a file no default configuration builds counts
+as possibly built when go/build builds it, alone in its directory, with
+some set of the tags it consults; its embeds go to a person when its
+directory changes.
+
+Known limits: go/build is compiled into the gate and `go list` is the
+runner's `go` (the fetch summary records both versions); and go list
+reports an old `//go:embed` the compiler would reject (a trailing comment,
+one not on a `var`), which the gate credits like any old `EmbedFiles`
+answer.
 
 ## Layout
 

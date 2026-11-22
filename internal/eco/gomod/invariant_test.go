@@ -133,7 +133,7 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"cgo", nil, map[string]string{"c.go": "package p\n\n// int f(void);\nimport \"C\"\n\nfunc G() { C.f() }\n"}, codeCgo, "c.go", false},
 		{"linkname", nil, map[string]string{"l.go": "package p\n\nimport _ \"unsafe\"\n\n//go:linkname now runtime.nanotime\nfunc now() int64\n"}, codeLinkname, "l.go", true},
 		{"go:generate", nil, map[string]string{"g.go": gen}, codeGenerate, "g.go", true},
-		{"go:embed", nil, map[string]string{"e.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.txt\nvar s string\n", "x.txt": "x\n"}, codeEmbed, "e.go", true},
+		{"go:embed", nil, map[string]string{"e.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.txt\nvar s string\n", "x.txt": "x\n"}, codeEmbed, ".", true},
 		{"C source", nil, map[string]string{"x.c": "int f(void) { return 1; }\n", "p.go": "package p\n"}, codeCSource, "x.c", false},
 		{"C source with a NUL", nil, map[string]string{"x.c": "\x00int f(void) { system(\"id\"); }\n", "p.go": "package p\n"}, codeCSource, "x.c", false},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\n\tRET\n", "p.go": "package p\n"}, codeAsm, "x_amd64.s", false},
@@ -223,6 +223,11 @@ func TestInvariantShownInFull(t *testing.T) {
 			case codeInitCallee:
 				if !strings.Contains(ctx, "new declaration (a.go:5):\n    | func helper() { println(2) }\n") {
 					t.Errorf("declaration not shown whole:\n%s", ctx)
+				}
+			case codeEmbed:
+				// The item is the package; what it newly embeds is quoted.
+				if !strings.Contains(out, quote("full text of the new version of x.txt", tc.cur["x.txt"])) {
+					t.Errorf("the newly embedded x.txt is not in the focused evidence:\n%.3000s", out)
 				}
 			case codeBinary:
 				// Round 9: binaries are never review-eligible.

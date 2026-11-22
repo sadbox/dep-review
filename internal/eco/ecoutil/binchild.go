@@ -39,9 +39,10 @@ const (
 // Isolation is how to start the child: Command is its argv (the gate
 // binary and its hidden describe-binary subcommand).
 type Isolation struct {
-	Command []string
-	Timeout time.Duration // childTimeout if zero
-	Env     []string      // the child's environment beyond GOTRACEBACK (tests)
+	Command   []string
+	GoCommand []string      // argv of the go-command child (RunGo); none: RunGo runs go directly
+	Timeout   time.Duration // childTimeout if zero
+	Env       []string      // the child's environment beyond GOTRACEBACK (tests)
 }
 
 // isolation, when set, is used by every structure rendering.

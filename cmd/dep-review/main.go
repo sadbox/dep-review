@@ -26,8 +26,8 @@ var commands = map[string]func([]string) error{
 }
 
 // extraCommands holds the sandboxtest build's test-only commands and the
-// hidden describe-binary, the child process fetch starts to parse
-// binaries under a memory limit (ecoutil.Isolate).
+// hidden describe-binary and go-child, the child processes fetch starts to
+// parse binaries and run go list under a memory limit (ecoutil.Isolate).
 var extraCommands = map[string]func([]string) error{
 	describeBinaryCommand: func(args []string) error {
 		if len(args) > 0 {
@@ -35,9 +35,20 @@ var extraCommands = map[string]func([]string) error{
 		}
 		return ecoutil.ChildMain(os.Stdin, os.Stdout)
 	},
+	goChildCommand: func(args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("%s takes no arguments", goChildCommand)
+		}
+		return ecoutil.GoChildMain(os.Stdin, os.Stdout)
+	},
 }
 
-const describeBinaryCommand = "describe-binary"
+const (
+	describeBinaryCommand = "describe-binary"
+	// goChildCommand runs one go command (go list over a dependency's
+	// tree) under the same memory limit (ecoutil.RunGo).
+	goChildCommand = "go-child"
+)
 
 func main() {
 	// Errors and log lines can carry text from a dependency, a registry or

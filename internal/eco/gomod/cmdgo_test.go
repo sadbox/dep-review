@@ -2,32 +2,45 @@ package gomod
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 )
 
-// goList runs `go list -json .` for linux/amd64 in a fresh module holding
-// files, offline. It is the reference the gate's reading of directives and
-// build constraints is checked against.
+// Differential tests: the gate's reading of what is built and what is
+// embedded agrees with the go command's (README "Design rules"), on the
+// shapes of the round 8-12 PoCs and scan findings.
+
 type goListPkg struct {
-	GoFiles, IgnoredGoFiles, EmbedPatterns []string
-	Error                                  *struct{ Err string }
+	GoFiles, IgnoredGoFiles, EmbedPatterns, EmbedFiles []string
+	Error                                              *struct{ Err string }
 }
 
+// goList runs `go list -e -json .` for linux/amd64 without cgo in a fresh
+// module holding files, offline: the reference.
 func goList(t *testing.T, files map[string]string) goListPkg {
 	t.Helper()
+	return goListArgs(t, files)
+}
+
+// goListArgs is goList with extra go list flags.
+func goListArgs(t *testing.T, files map[string]string, flags ...string) goListPkg {
+	t.Helper()
 	dir := t.TempDir()
+	files = maps.Clone(files)
 	files["go.mod"] = "module example.com/m\n\ngo 1.24\n"
 	for name, data := range files {
 		p := filepath.Join(dir, filepath.FromSlash(name))
 		os.MkdirAll(filepath.Dir(p), 0o755)
 		os.WriteFile(p, []byte(data), 0o644)
 	}
-	cmd := exec.Command("go", "list", "-e", "-json", ".")
+	cmd := exec.Command("go", append(append([]string{"list", "-e", "-json"}, flags...), ".")...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off")
 	out, err := cmd.Output()
@@ -41,23 +54,6 @@ func goList(t *testing.T, files map[string]string) goListPkg {
 	return p
 }
 
-// goBuild reports go build's error output for a module holding files.
-func goBuild(t *testing.T, files map[string]string) string {
-	t.Helper()
-	dir := t.TempDir()
-	files["go.mod"] = "module example.com/m\n\ngo 1.24\n"
-	for name, data := range files {
-		p := filepath.Join(dir, filepath.FromSlash(name))
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		os.WriteFile(p, []byte(data), 0o644)
-	}
-	cmd := exec.Command("go", "build", "-o", os.DevNull, ".")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off")
-	out, _ := cmd.CombinedOutput()
-	return string(out)
-}
-
 func needGo(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
@@ -68,91 +64,107 @@ func needGo(t *testing.T) {
 	}
 }
 
-// newEmbedPatterns is what the gate reads from a new file.
-func newEmbedPatterns(src string) []string {
-	var out []string
-	for _, l := range embedLinesOf([]byte(src)) {
-		out = append(out, l.pats...)
+// linuxAmd64 is the configs index of linux/amd64 without cgo.
+func linuxAmd64(t *testing.T) int {
+	i := slices.Index(configs, config{"linux", "amd64", false})
+	if i < 0 {
+		t.Fatal("linux/amd64 is not in the dist list")
 	}
-	slices.Sort(out)
-	return out
+	return i
 }
 
-// TestEmbedExtractionMatchesCmdGo (round 12): the new side finds
-// //go:embed as cmd/go does. Raw strings and block comments hold none;
-// a trailing comment is one to go list (the compiler then rejects the
-// file), and the gate counts it too.
-func TestEmbedExtractionMatchesCmdGo(t *testing.T) {
+// TestDistListCurrent: the embedded dist list is the toolchain's.
+func TestDistListCurrent(t *testing.T) {
 	needGo(t)
-	for name, tc := range map[string]struct {
-		src   string
-		exact bool
-	}{
-		"raw string":    {"package p\n\nimport _ \"embed\"\n\nvar tmpl = `\n//go:embed b.txt\n`\n\n//go:embed a.txt\nvar A string\n", true},
-		"block comment": {"package p\n\nimport _ \"embed\"\n\n/*\n//go:embed b.txt\n*/\n\n//go:embed a.txt\nvar A string\n", true},
-		"gen.go style":  {"//go:build ignore\n\npackage main\n\nimport \"fmt\"\n\nconst tmpl = `package p\n\nimport _ \"embed\"\n\n//go:embed b.txt\nvar B string\n`\n\nfunc main() { fmt.Print(tmpl) }\n", false},
-		"trailing":      {"package p\n\nimport _ \"embed\"\n\nvar X = 1 //go:embed b.txt\n\n//go:embed a.txt\nvar A string\n", true},
-	} {
+	out, err := exec.Command("go", "tool", "dist", "list").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(strings.Fields(string(out)), strings.Fields(distList)) {
+		t.Errorf("distlist.txt is stale: run `go tool dist list > internal/eco/gomod/distlist.txt`")
+	}
+}
+
+// buildShapes are files whose build constraint, header or package clause
+// decides whether the go command builds them.
+var buildShapes = map[string]string{
+	"ignore":                    "//go:build ignore\n\npackage p\n",
+	"ignore, no blank line":     "//go:build ignore\npackage p\n",
+	"after a one-line block":    "/* doc */\n//go:build ignore\n\npackage p\n",
+	"inside a block comment":    "/*\n//go:build ignore\n*/\n\npackage p\n",
+	"package line in a block":   "/*\npackage doc\n*/\n//go:build ignore\n\npackage p\n",
+	"after the package clause":  "package p\n\n//go:build ignore\n",
+	"linux && windows":          "//go:build linux && windows\n\npackage p\n",
+	"windows":                   "//go:build windows\n\npackage p\n",
+	"+build ignore":             "// +build ignore\n\npackage p\n",
+	"+build without blank line": "// +build ignore\npackage p\n",
+	"BOM, ignore":               "\ufeff//go:build ignore\n\npackage p\n",
+	"BOM, windows":              "\ufeff//go:build windows\n\npackage p\n",
+	"package documentation":     "package documentation\n",
+	"go1.1":                     "//go:build go1.1\n\npackage p\n",
+	"go1.99":                    "//go:build go1.99\n\npackage p\n",
+	"!go1.1":                    "//go:build !go1.1\n\npackage p\n",
+	"user tag":                  "//go:build purego\n\npackage p\n",
+	"none":                      "package p\n",
+}
+
+// TestBuiltMatchesGoList (rounds 12-13): for linux/amd64, go/build's
+// answer the gate uses is go list's.
+func TestBuiltMatchesGoList(t *testing.T) {
+	needGo(t)
+	i := linuxAmd64(t)
+	for name, src := range buildShapes {
 		t.Run(name, func(t *testing.T) {
-			p := goList(t, map[string]string{"p.go": tc.src, "a.txt": "a\n", "b.txt": "b\n", "q.go": "package p\n"})
-			got := newEmbedPatterns(tc.src)
-			want := p.EmbedPatterns
-			if !tc.exact {
-				want = nil // an ignored file: go list reads nothing; neither raw-string line counts
-			}
-			if !slices.Equal(got, want) && !(len(got) == 0 && len(want) == 0) {
-				t.Errorf("gate %q, go list %q", got, want)
+			files := map[string]string{"p.go": src, "q.go": "package p\n"}
+			p := goList(t, files)
+			want := slices.Contains(p.GoFiles, "p.go")
+			for _, old := range []bool{false, true} {
+				b := analyzeBuild(writeTree(t, files), old)
+				if got := b.in["p.go"][i]; got != want {
+					t.Errorf("old=%v: gate built=%v, go list %v (GoFiles %q, Ignored %q)", old, got, want, p.GoFiles, p.IgnoredGoFiles)
+				}
 			}
 		})
 	}
 }
 
-// TestHonoredMatchesCmdGo (round 12): the build constraint the gate
-// reads is the one the go command honors.
-func TestHonoredMatchesCmdGo(t *testing.T) {
+// TestMismatchedPackageOverApproximated: two package clauses in one
+// directory (go list: an error) count as built everywhere in the new
+// tree and nowhere in the old one.
+func TestMismatchedPackageOverApproximated(t *testing.T) {
 	needGo(t)
-	for name, src := range map[string]string{
-		"ignore":                    "//go:build ignore\n\npackage p\n",
-		"ignore, no blank line":     "//go:build ignore\npackage p\n",
-		"after a one-line block":    "/* doc */\n//go:build ignore\n\npackage p\n",
-		"inside a block comment":    "/*\n//go:build ignore\n*/\n\npackage p\n",
-		"after the package clause":  "package p\n\n//go:build ignore\n",
-		"linux && windows":          "//go:build linux && windows\n\npackage p\n",
-		"+build ignore":             "// +build ignore\n\npackage p\n",
-		"+build without blank line": "// +build ignore\npackage p\n",
-		"none":                      "package p\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			p := goList(t, map[string]string{"p.go": src, "q.go": "package p\n"})
-			ignored := slices.Contains(p.IgnoredGoFiles, "p.go")
-			x, err := honored([]byte(src))
-			gate := err != nil || (x != nil && !x.Eval(func(tag string) bool { return tag == "linux" || tag == "amd64" || tag == "unix" || tag == "gc" }))
-			if gate != ignored {
-				t.Errorf("gate says ignored=%v, go list %v (expr %v, err %v)", gate, ignored, x, err)
-			}
-		})
+	files := map[string]string{"p.go": "package p\n", "q.go": "package q\n"}
+	if p := goList(t, files); p.Error == nil {
+		t.Fatalf("precondition: go list reports no error: %+v", p)
+	}
+	tree := writeTree(t, files)
+	if nb := analyzeBuild(tree, false); !nb.everywhere("p.go") || !nb.everywhere("q.go") {
+		t.Errorf("new tree: not built everywhere")
+	}
+	if ob := analyzeBuild(tree, true); ob.anywhere("p.go") || ob.anywhere("q.go") {
+		t.Errorf("old tree: credited as built")
 	}
 }
 
-// TestMovedConstraintIsNew (round 12, scan HIGHs): the old file's
-// constraint is honored (built on windows only); the new one keeps the
-// same constraint text where go/build does not honor it, so it is built
-// on linux. Its init code newly enters the build. Each layout is checked
-// with go list for linux: old ignored, new built.
-func TestMovedConstraintIsNew(t *testing.T) {
-	body := "package p\n\nimport \"os/exec\"\n\nfunc init() { exec.Command(\"sh\", \"-c\", \"id\").Run() }\n"
+// TestNewlyBuiltIsNew (rounds 12-13, scan HIGHs): an old file the go
+// command does not build on linux, and its new version that it does,
+// with the same init: the init newly enters the build and is flagged.
+// Each pair is checked with go list.
+func TestNewlyBuiltIsNew(t *testing.T) {
+	body := "import \"os/exec\"\n\nfunc init() { exec.Command(\"sh\", \"-c\", \"id\").Run() }\n"
 	for name, tc := range map[string]struct{ old, new string }{
-		// the same //go:build line, moved into a /* */ comment
-		"into a block comment": {"//go:build windows\n\n" + body, "/*\n//go:build windows\n*/\n\n" + body},
-		// the old header scan stopped at a "package" line inside /* */
-		"after package in a block comment": {"/*\npackage doc\n*/\n//go:build windows\n\n" + body, body},
-		// // +build is honored only before a blank line
-		"+build without the blank line": {"// +build windows\n\n" + body, "// +build windows\n" + body},
+		"into a block comment":             {"//go:build windows\n\npackage p\n\n" + body, "/*\n//go:build windows\n*/\n\npackage p\n\n" + body},
+		"after package in a block comment": {"/*\npackage doc\n*/\n//go:build windows\n\npackage p\n\n" + body, "package p\n\n" + body},
+		"+build without the blank line":    {"// +build windows\n\npackage p\n\n" + body, "// +build windows\npackage p\n\n" + body},
+		"BOM before the constraint":        {"\ufeff//go:build windows\n\npackage p\n\n" + body, "package p\n\n" + body},
+		"package documentation":            {"package documentation\n\n" + body, "package p\n\n" + body},
+		"mismatched package name":          {"package q\n\n" + body, "package p\n\n" + body},
+		"go1.99":                           {"//go:build go1.99\n\npackage p\n\n" + body, "package p\n\n" + body},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !testing.Short() {
-				if p := goList(t, map[string]string{"e.go": tc.old, "q.go": "package p\n"}); !slices.Contains(p.IgnoredGoFiles, "e.go") {
-					t.Fatalf("precondition: go list should ignore the old e.go on linux: %+v", p)
+				if p := goList(t, map[string]string{"e.go": tc.old, "q.go": "package p\n"}); slices.Contains(p.GoFiles, "e.go") && p.Error == nil {
+					t.Fatalf("precondition: go list should not build the old e.go on linux: %+v", p)
 				}
 				if p := goList(t, map[string]string{"e.go": tc.new, "q.go": "package p\n"}); !slices.Contains(p.GoFiles, "e.go") {
 					t.Fatalf("precondition: go list should build the new e.go on linux: %+v", p)
@@ -166,43 +178,248 @@ func TestMovedConstraintIsNew(t *testing.T) {
 	}
 }
 
-// TestOldEmbedNotOnAVarDoesNotMask (round 12, scan HIGH): an old
-// //go:embed at column 1 that does not directly precede a var
-// declaration is rejected by the compiler, so it is no old embed.
-func TestOldEmbedNotOnAVarDoesNotMask(t *testing.T) {
-	oldSrc := "package p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nfunc f() {}\n\nvar T []byte\n"
-	newSrc := "package p\n\nimport _ \"embed\"\n\nfunc f() {}\n\n//go:embed tool.bin\nvar T []byte\n"
-	if !testing.Short() {
-		if out := goBuild(t, map[string]string{"p.go": oldSrc, "tool.bin": "x"}); !strings.Contains(out, "misplaced go:embed directive") {
-			t.Fatalf("precondition: the compiler should reject a //go:embed on a func: %q", out)
-		}
+// TestDefaultTagsNotNoise (round 12 x/net over-count): a file built only
+// with the toolchain's release tags (go1.21 && !http2legacy, like x/net's
+// go1.27 && !http2legacy) is built in
+// both trees: its unchanged init callees are credited.
+func TestDefaultTagsNotNoise(t *testing.T) {
+	head := "//go:build go1.21 && !http2legacy\n\npackage p\n\n"
+	decls := "func helper() int { return 1 }\n\nvar v = helper()\n"
+	old := writeTree(t, map[string]string{"w.go": head + decls, "x.go": "package p\n\nfunc other() {}\n"})
+	cur := writeTree(t, map[string]string{"w.go": head + decls, "x.go": "package p\n\nfunc other() { _ = 1 }\n"})
+	h := CheckTrees(old, cur)
+	if got := h.items(codeInitCallee); len(got) != 0 {
+		t.Errorf("unchanged callees in a release-tag file flagged: %q", got)
 	}
-	bin := "\x7fELF\x02\x01\x01 x"
-	h := CheckTrees(writeTree(t, map[string]string{"p.go": oldSrc, "tool.bin": bin}), writeTree(t, map[string]string{"p.go": newSrc, "tool.bin": bin}))
-	wantPerson(t, h, "tool.bin")
+	if b := analyzeBuild(cur, false); !b.anywhere("w.go") {
+		t.Errorf("w.go built nowhere")
+	}
 }
 
-// TestUnsatisfiableConstraintExcluded (round 12): a constraint no
-// GOOS/GOARCH satisfies counts as not built on the old side, as go list
-// agrees.
-func TestUnsatisfiableConstraintExcluded(t *testing.T) {
-	src := "//go:build linux && windows\n\npackage p\n"
-	if !excluded([]byte(src)) {
-		t.Errorf("linux && windows is not excluded")
+// gateNewlyEmbedded is what the gate finds newly embedded by cur's
+// packages when old embeds nothing, and whether anything was unresolved.
+func gateNewlyEmbedded(t *testing.T, old, cur *ecoutil.Tree) ([]string, bool) {
+	t.Helper()
+	r := newReport()
+	r.lister = defaultLister()
+	res := r.embeds(old, cur, analyzeBuild(old, true), analyzeBuild(cur, false))
+	got := slices.Collect(maps.Keys(res.newly))
+	got = append(got, slices.Collect(maps.Keys(r.files))...)
+	slices.Sort(got)
+	return got, len(res.unresolved) > 0
+}
+
+// TestEmbedMatchesGoList (rounds 8-12): what the gate finds a package
+// newly embeds is go list's EmbedFiles.
+func TestEmbedMatchesGoList(t *testing.T) {
+	needGo(t)
+	data := map[string]string{
+		"a.txt": "a\n", "b.txt": "b\n", "tool.bin": "\x7fELF\x02\x01\x01 x",
+		"assets/ok.txt": "ok\n", "assets/.hidden": "h\n", "assets/_skip/z.txt": "z\n", "assets/x/y.bin": "\x00\x01",
+		"go.mod": "module example.com/m\n\ngo 1.24\n", "go.sum": "example.com/x v1.0.0/go.mod h1:AAAA=\n",
 	}
-	if excluded([]byte("//go:build linux || windows\n\npackage p\n")) {
-		t.Errorf("linux || windows is excluded")
+	hdr := "package p\n\nimport _ \"embed\"\n\n"
+	for name, src := range map[string]string{
+		"raw string":       hdr + "var tmpl = `\n//go:embed b.txt\n`\n\n//go:embed a.txt\nvar A string\n",
+		"block comment":    hdr + "/*\n//go:embed b.txt\n*/\n\n//go:embed a.txt\nvar A string\n",
+		"tab separated":    hdr + "//go:embed\ta.txt\ttool.bin\nvar F embed.FS\n",
+		"quoted":           hdr + "//go:embed \"a.txt\" `b.txt`\nvar F embed.FS\n",
+		"directory":        hdr + "//go:embed assets\nvar F embed.FS\n",
+		"all: directory":   hdr + "//go:embed all:assets\nvar F embed.FS\n",
+		"glob with hidden": hdr + "//go:embed assets/*\nvar F embed.FS\n",
+		"glob":             hdr + "//go:embed *.txt\nvar F embed.FS\n",
+		"root star":        hdr + "//go:embed *\nvar F embed.FS\n", // go.mod and go.sum too
+	} {
+		t.Run(name, func(t *testing.T) {
+			src = strings.Replace(src, "import _ \"embed\"", "import \"embed\"", 1)
+			if !strings.Contains(src, "embed.FS") {
+				src = strings.Replace(src, "import \"embed\"", "import _ \"embed\"", 1)
+			}
+			files := maps.Clone(data)
+			files["p.go"] = src
+			p := goList(t, files)
+			want := slices.Clone(p.EmbedFiles)
+			slices.Sort(want)
+			oldFiles := maps.Clone(data)
+			oldFiles["p.go"] = "package p\n"
+			got, unresolved := gateNewlyEmbedded(t, writeTree(t, oldFiles), writeTree(t, files))
+			if unresolved || !slices.Equal(got, want) {
+				t.Errorf("gate %q (unresolved %v), go list %q (error %+v)", got, unresolved, want, p.Error)
+			}
+		})
 	}
+}
+
+// TestMovedEmbedConstraint (round 13 review): the old e.go embeds
+// tool.bin on windows only; the new one drops the constraint, so linux
+// newly embeds the unchanged tool.bin. Embeds are compared per
+// configuration, not as unions.
+func TestMovedEmbedConstraint(t *testing.T) {
+	bin := "\x7fELF\x02\x01\x01 x"
+	body := "package p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nvar T []byte\n"
+	oldFiles := map[string]string{"e.go": "//go:build windows\n\n" + body, "q.go": "package p\n", "tool.bin": bin}
+	newFiles := map[string]string{"e.go": body, "q.go": "package p\n", "tool.bin": bin}
 	if !testing.Short() {
-		if p := goList(t, map[string]string{"p.go": src, "q.go": "package p\n"}); !slices.Contains(p.IgnoredGoFiles, "p.go") {
-			t.Errorf("go list builds it: %+v", p)
+		if p := goList(t, oldFiles); len(p.EmbedFiles) != 0 {
+			t.Fatalf("precondition: the old tree embeds on linux: %q", p.EmbedFiles)
+		}
+		if p := goList(t, newFiles); !slices.Contains(p.EmbedFiles, "tool.bin") {
+			t.Fatalf("precondition: the new tree does not embed tool.bin on linux: %+v", p)
 		}
 	}
+	wantPerson(t, CheckTrees(writeTree(t, oldFiles), writeTree(t, newFiles)), "tool.bin")
+}
+
+// TestRenamedConstrainedFile (round 11, C; was in buildkey_test.go): a
+// helper that moves from h_windows.go to h.go (now built everywhere) with
+// the same text is a new declaration reached from init.
+func TestRenamedConstrainedFile(t *testing.T) {
+	initFile := "package p\n\nfunc init() { helper() }\n"
+	helper := "package p\n\nfunc helper() { println(\"x\") }\n"
+	h := CheckTrees(writeTree(t, map[string]string{"p.go": initFile, "h_windows.go": helper}), writeTree(t, map[string]string{"p.go": initFile, "h.go": helper}))
+	if !slices.Contains(h.items(codeInitCallee), "helper") {
+		t.Errorf("helper newly built for every platform, not flagged: codes %q", h.codes())
+	}
+}
+
+// TestOldRawStringLinkname (round 11, A; was in buildkey_test.go): a
+// directive-looking line in an old raw string cannot mask a new
+// directive. (Its other half, "an unchanged directive is not flagged", no
+// longer holds by design: every directive of a changed file is flagged.)
+func TestOldRawStringLinkname(t *testing.T) {
+	old := "package p\n\nimport _ \"unsafe\"\n\nvar doc = `\n//go:linkname now runtime.nanotime\n`\n\nfunc now() int64\n"
+	cur := "package p\n\nimport _ \"unsafe\"\n\n//go:linkname now runtime.nanotime\nfunc now() int64\n"
+	h := CheckTrees(writeTree(t, map[string]string{"l.go": old}), writeTree(t, map[string]string{"l.go": cur}))
+	if !slices.Contains(h.items(codeLinkname), "l.go") {
+		t.Errorf("a new //go:linkname masked by an old raw string: codes %q", h.codes())
+	}
+}
+
+// TestPossiblyBuiltMatchesGoList (round 13 scan HIGH): a file no default
+// configuration builds is possibly built when some -tags set builds it;
+// each verdict is checked with go list -tags.
+func TestPossiblyBuiltMatchesGoList(t *testing.T) {
+	needGo(t)
+	for name, tc := range map[string]struct {
+		src  string
+		tags string // a -tags set that builds it ("" when none should)
+	}{
+		"ignore":                {"//go:build ignore\n\npackage p\n", "ignore"},
+		"purego":                {"//go:build purego\n\npackage p\n", "purego"},
+		"two user tags":         {"//go:build netgo && !osusergo && http2legacy\n\npackage p\n", "netgo,http2legacy"},
+		"go1.99":                {"//go:build go1.99\n\npackage p\n", "go1.99"},
+		"linux && windows":      {"//go:build linux && windows\n\npackage p\n", ""},
+		"package documentation": {"package documentation\n", ""},
+		"!go1.1":                {"//go:build !go1.1\n\npackage p\n", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := map[string]string{"p.go": tc.src, "q.go": "package p\n"}
+			tree := writeTree(t, files)
+			nb := analyzeBuild(tree, false)
+			if nb.anywhere("p.go") {
+				t.Fatalf("built with default tags")
+			}
+			if got := nb.possibly("p.go"); got != (tc.tags != "") {
+				t.Errorf("possibly built = %v, want %v", got, tc.tags != "")
+			}
+			if tc.tags != "" {
+				if p := goListArgs(t, files, "-tags="+tc.tags); !slices.Contains(p.GoFiles, "p.go") {
+					t.Errorf("go list -tags=%s does not build it: %+v", tc.tags, p)
+				}
+			}
+		})
+	}
+}
+
+// TestPuregoEmbedUnresolved (round 13 scan HIGH): an unchanged
+// //go:build purego file embeds assets; a text file newly added under
+// assets is embedded by a purego build, which go list never resolves: a
+// person decides. A purego file's new init is flagged.
+func TestPuregoEmbedUnresolved(t *testing.T) {
+	embedFile := "//go:build purego\n\npackage p\n\nimport \"embed\"\n\n//go:embed assets\nvar F embed.FS\n"
+	old := writeTree(t, map[string]string{"q.go": "package p\n", "e.go": embedFile, "assets/a.txt": "a\n",
+		"i.go": "//go:build purego\n\npackage p\n"})
+	cur := writeTree(t, map[string]string{"q.go": "package p\n", "e.go": embedFile, "assets/a.txt": "a\n", "assets/new.txt": "new\n",
+		"i.go": "//go:build purego\n\npackage p\n\nimport \"os/exec\"\n\nfunc init() { exec.Command(\"id\").Run() }\n"})
+	h := CheckTrees(old, cur)
+	if !slices.Contains(h.incomplete(), codeEmbed+" .") {
+		t.Errorf("the purego embed is not for a person: incomplete %q, codes %q", h.incomplete(), h.codes())
+	}
+	if !slices.Contains(h.items(codeInit), "i.go") {
+		t.Errorf("a purego file's new init not flagged: codes %q", h.codes())
+	}
+}
+
+// TestPossiblyBuiltNewlyIsNew (round 13 scan HIGH): an old file no -tags
+// set builds (package documentation) becomes a //go:build purego file
+// with the same init: a purego build newly runs it.
+func TestPossiblyBuiltNewlyIsNew(t *testing.T) {
+	body := "\n\nimport \"os/exec\"\n\nfunc init() { exec.Command(\"id\").Run() }\n"
+	old := writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "package documentation" + body})
+	cur := writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build purego\n\npackage p" + body})
+	if h := CheckTrees(old, cur); !slices.Contains(h.items(codeInit), "e.go") {
+		t.Errorf("init newly possibly built not flagged: codes %q", h.codes())
+	}
+}
+
+// TestUnchangedFileNewlyEmbedded (round 10): an unchanged file a new
+// pattern reaches is newly embedded; one the old tree already embedded
+// is not.
+func TestUnchangedFileNewlyEmbedded(t *testing.T) {
+	needGo(t)
+	bin := "\x7fELF\x02\x01\x01 x"
+	hdr := "package p\n\nimport \"embed\"\n\n"
+	old := writeTree(t, map[string]string{"p.go": hdr + "//go:embed a.bin\nvar F embed.FS\n", "a.bin": bin, "b.bin": bin})
+	cur := writeTree(t, map[string]string{"p.go": hdr + "//go:embed a.bin b.bin\nvar F embed.FS\n", "a.bin": bin, "b.bin": bin})
+	h := CheckTrees(old, cur)
+	if got := h.items(codeBinary); !slices.Equal(got, []string{"b.bin"}) {
+		t.Errorf("binaries %q, want b.bin only", got)
+	}
+}
+
+// TestGoListRunsNoCompiler: go list with the gate's environment and
+// CGO_ENABLED=1 runs no C compiler or pkg-config over a cgo package, even
+// with ones on PATH.
+func TestGoListRunsNoCompiler(t *testing.T) {
+	needGo(t)
+	bin, _ := exec.LookPath("go")
+	bin, _ = filepath.Abs(bin)
+	fake := t.TempDir()
+	marker := filepath.Join(fake, "RAN")
+	for _, n := range []string{"cc", "gcc", "clang", "pkg-config"} {
+		os.WriteFile(filepath.Join(fake, n), []byte("#!/bin/sh\ntouch "+marker+"\nexit 1\n"), 0o755)
+	}
+	tree := writeTree(t, map[string]string{"c/c.go": "package c\n\n// #cgo pkg-config: libfoo\n// #include <stdio.h>\nimport \"C\"\n\nimport _ \"embed\"\n\n//go:embed c.go\nvar S string\n"})
+	root := t.TempDir()
+	mod := filepath.Join(root, "mod")
+	if err := copyTree(tree, mod); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ecoutil.RunGo(ecoutil.GoRun{Go: bin, Dir: mod, Args: []string{"list", "-e", "-json=Dir,CgoFiles,EmbedFiles,Error", "./c"},
+		Env: append(listEnv(root), "PATH="+fake, "CC="+filepath.Join(fake, "cc"), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"c.go"`) {
+		t.Errorf("go list gave no CgoFiles/EmbedFiles: %s", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Errorf("go list ran a compiler or pkg-config")
+	}
+}
+
+// TestEmbedWithoutGoCommand: with no go command every embed is for a
+// person.
+func TestEmbedWithoutGoCommand(t *testing.T) {
+	bin := "\x7fELF\x02\x01\x01 x"
+	src := "package p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nvar T []byte\n"
+	h := checkTrees(writeTree(t, map[string]string{"p.go": "package p\n", "tool.bin": bin}), writeTree(t, map[string]string{"p.go": src, "tool.bin": bin}), nil, goLister{})
+	wantPerson(t, h, "tool.bin")
 }
 
 // TestGenGoNothingNewlyEmbedded (round 12): an x/net-style generator
 // (//go:build ignore, a raw-string template holding //go:embed lines)
-// embeds nothing on either side.
+// embeds nothing.
 func TestGenGoNothingNewlyEmbedded(t *testing.T) {
 	gen := "//go:build ignore\n\npackage main\n\nconst tmpl = `package p\n\nimport _ \"embed\"\n\n//go:embed data/children\nvar children []byte\n`\n\nfunc main() {}\n"
 	h := CheckTrees(writeTree(t, map[string]string{"gen.go": "//go:build ignore\n\npackage main\n\nfunc main() {}\n", "data/children": "\x00\x01bin", "p.go": "package p\n"}),
@@ -213,34 +430,42 @@ func TestGenGoNothingNewlyEmbedded(t *testing.T) {
 }
 
 // TestRealEmbedInIgnoredFileCounts (round 12): a real //go:embed comment
-// in a //go:build ignore file still counts on the new side
-// (over-approximating: the gate does not decide what is built).
+// in a changed file go/build builds nowhere goes to a person (a -tags
+// build can embed what go list never resolves).
 func TestRealEmbedInIgnoredFileCounts(t *testing.T) {
 	src := "//go:build ignore\n\npackage p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nvar T []byte\n"
 	h := CheckTrees(writeTree(t, map[string]string{"p.go": "package p\n", "tool.bin": "\x7fELF\x02\x01\x01 x"}), writeTree(t, map[string]string{"p.go": "package p\n", "e.go": src, "tool.bin": "\x7fELF\x02\x01\x01 x"}))
 	wantPerson(t, h, "tool.bin")
 }
 
-// TestOldTrailingDirectivesDoNotMask (round 12, scan HIGH): an old
-// trailing "//go:embed" or "//go:linkname" comment is no directive (the
-// compiler rejects the embed: go build fails), so it cannot make a real
-// new one look unchanged.
-func TestOldTrailingDirectivesDoNotMask(t *testing.T) {
-	oldEmbed := "package p\n\nimport _ \"embed\"\n\nvar X = 1 //go:embed tool.bin\n\nvar T []byte\n"
-	newEmbed := "package p\n\nimport _ \"embed\"\n\nvar X = 1\n\n//go:embed tool.bin\nvar T []byte\n"
-	if !testing.Short() {
-		if out := goBuild(t, map[string]string{"p.go": oldEmbed, "tool.bin": "x"}); !strings.Contains(out, "misplaced compiler directive") {
-			t.Fatalf("precondition: the compiler should reject a trailing //go:embed: %q", out)
-		}
+// TestEveryDirectiveFlagged (rounds 12-13): //go:linkname and the like
+// are flagged in a changed file whether or not the old version had them;
+// the old side is never credited (an old trailing comment or a file that
+// does not parse cannot mask one).
+func TestEveryDirectiveFlagged(t *testing.T) {
+	for name, old := range map[string]string{
+		"unchanged directive":     "package p\n\nimport _ \"unsafe\"\n\n//go:linkname now runtime.nanotime\nvar now int\n",
+		"old trailing comment":    "package p\n\nimport _ \"unsafe\"\n\nvar now int //go:linkname now runtime.nanotime\n",
+		"old file does not parse": "package p\n\nimport _ \"unsafe\"\n\n//go:linkname now runtime.nanotime\nvar now int\nfunc {\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cur := "package p\n\nimport _ \"unsafe\"\n\n//go:linkname now runtime.nanotime\nvar now int\n\nvar changed = 1\n"
+			h := CheckTrees(writeTree(t, map[string]string{"l.go": old}), writeTree(t, map[string]string{"l.go": cur}))
+			if !slices.Contains(h.items(codeLinkname), "l.go") {
+				t.Errorf("//go:linkname in a changed file not flagged: codes %q", h.codes())
+			}
+		})
 	}
-	bin := "\x7fELF\x02\x01\x01 x"
-	h := CheckTrees(writeTree(t, map[string]string{"p.go": oldEmbed, "tool.bin": bin}), writeTree(t, map[string]string{"p.go": newEmbed, "tool.bin": bin}))
-	wantPerson(t, h, "tool.bin")
+}
 
-	oldLink := "package p\n\nimport _ \"unsafe\"\n\nvar now int //go:linkname now runtime.nanotime\n"
-	newLink := "package p\n\nimport _ \"unsafe\"\n\n//go:linkname now runtime.nanotime\nvar now int\n"
-	h = CheckTrees(writeTree(t, map[string]string{"l.go": oldLink}), writeTree(t, map[string]string{"l.go": newLink}))
-	if !slices.Contains(h.items(codeLinkname), "l.go") {
-		t.Errorf("a new //go:linkname masked by an old trailing comment: codes %q", h.codes())
+// TestOldMisplacedEmbedCredited documents a residual: go list reports an
+// old //go:embed the compiler rejects (trailing, or not on a var), and
+// the gate credits it, as it credits every old EmbedFiles answer.
+func TestOldMisplacedEmbedCredited(t *testing.T) {
+	needGo(t)
+	bin := "\x7fELF\x02\x01\x01 x"
+	oldSrc := "package p\n\nimport _ \"embed\"\n\nvar X = 1 //go:embed tool.bin\n\nvar T []byte\n"
+	if p := goList(t, map[string]string{"p.go": oldSrc, "tool.bin": bin}); !slices.Contains(p.EmbedFiles, "tool.bin") {
+		t.Skipf("go list no longer reports a trailing //go:embed: %+v; the residual is gone", p)
 	}
 }

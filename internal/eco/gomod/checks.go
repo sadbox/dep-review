@@ -148,6 +148,11 @@ type report struct {
 	// refer to, and its gate-assigned number: quoted once per focused
 	// evidence file, after the items (fileRef).
 	files map[string]*quotedFile
+	// lister runs go list for the embed analysis; listRuns and listTook
+	// are its cost over this module.
+	lister   goLister
+	listRuns int
+	listTook time.Duration
 }
 
 type quotedFile struct {
@@ -432,10 +437,10 @@ var checkText = map[string]string{
 	codeBlank:      `new blank import (import _ "...", imported only for its init side effects)`,
 	codeCSource:    "C/C++/Objective-C/Fortran/SWIG source added or changed (compiled by cgo); a person decides (the review is triage)",
 	codeCgo:        `cgo (import "C" or //go:cgo_ directives) in a new or changed file; a person decides (the review is triage)`,
-	codeLinkname:   "new //go:linkname (reaches into another package's internals)",
+	codeLinkname:   "//go:linkname in a changed or newly built file, old or new (reaches into another package's internals)",
 	codeImport:     "non-test file newly imports a package that can run processes, make system calls, use the network, write files, break memory safety or call through reflection",
-	codeGenerate:   "new //go:generate directive",
-	codeEmbed:      "new //go:embed directive",
+	codeGenerate:   "//go:generate directive in a changed or newly built file, old or new",
+	codeEmbed:      "package that newly embeds a file (go list EmbedFiles; the item is the package directory), or whose embeds the gate could not resolve",
 	codeBlob:       fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
 	codeBinary:     "binary file added or changed, or newly reachable (testdata/ fixtures excepted unless the module can reach them); it goes to a person, and renderings are " + ecoutil.ForThePerson,
 	codeAsm:        "assembly (.s) file added or changed; a person decides (the review is triage)",
@@ -462,15 +467,19 @@ var cgoSourceExts = map[string]bool{
 // Dispatch is on the extension first: a file the toolchain would compile
 // or link gets its check whatever its content looks like (a .go file that
 // looks binary is still parsed, and fails as unparseable).
-func CheckTrees(old, cur *ecoutil.Tree) *report { return checkTrees(old, cur, nil) }
+func CheckTrees(old, cur *ecoutil.Tree) *report { return checkTrees(old, cur, nil, defaultLister()) }
 
 // checkTrees is CheckTrees with the fetch's rendering clock (nil: one of
-// its own).
-func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
+// its own) and go command.
+func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *report {
 	h := newReport()
 	if clock != nil {
 		h = newReportWith(clock)
 	}
+	h.lister = lister
+	// Which files each configuration builds, by go/build (build.go).
+	ob, nb := analyzeBuild(old, true), analyzeBuild(cur, false)
+	isGo := func(rel string) bool { return path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") }
 	shadow := map[string]*pkgScope{} // package directory -> scope
 	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
 	var bins []string                // flagged binaries; their context is built last
@@ -481,13 +490,15 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 		hadOld := old.Has(rel)
 		if hadOld {
 			prev = old.ReadFile(rel)
-			if bytes.Equal(prev, data) {
-				continue
-			}
-			// A Go file whose constraints changed (a dropped //go:build
-			// ignore) enters the build with old text: check it as new.
-			if path.Ext(rel) == ".go" && !sameBuild(rel, prev, data) {
+			// A Go file some configuration builds that it did not build
+			// before (a dropped //go:build ignore, a moved constraint, a
+			// package clause no longer "documentation") enters that build
+			// with its whole text: check it as new, changed or not.
+			switch nbuilt := isGo(rel) && newlyBuilt(ob, nb, rel); {
+			case nbuilt:
 				prev, hadOld = nil, false
+			case bytes.Equal(prev, data):
+				continue
 			}
 		}
 		testdata := slices.Contains(strings.Split(path.Dir(rel), "/"), "testdata")
@@ -514,7 +525,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 			}
 			dir := path.Dir(rel)
 			if _, ok := shadow[dir]; !ok {
-				shadow[dir] = packageScope(cur, dir)
+				shadow[dir] = packageScope(cur, dir, nb)
 			}
 			goDirs[dir] = true
 			checkGoFile(h, rel, prev, data, shadow[dir])
@@ -550,14 +561,14 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 	}
 	for _, dir := range slices.Sorted(maps.Keys(goDirs)) {
 		if shadow[dir] == nil {
-			shadow[dir] = packageScope(cur, dir)
+			shadow[dir] = packageScope(cur, dir, nb)
 		}
-		for _, c := range initCalleesChanged(old, cur, dir, shadow[dir]) {
+		for _, c := range initCalleesChanged(old, cur, dir, shadow[dir], ob, nb) {
 			// The declarations' texts, old and new, are shown whole.
 			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), true, c.context())
 		}
 	}
-	h.binaries(old, cur, bins, tdBins, h.embeds(old, cur))
+	h.binaries(old, cur, bins, tdBins, h.embeds(old, cur, ob, nb))
 	return h
 }
 
@@ -874,10 +885,12 @@ func recvTypeName(e ast.Expr) string {
 // Each result carries the first path the walk found from a root to it
 // (breadth first, so a shortest one) and the declarations under its name
 // on both sides, which is what the reviewer is shown.
-func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope) []calleeHit {
+func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope, ob, nb *builtSet) []calleeHit {
 	// The old side holds only files the new tree has and builds the same
 	// way: a renamed or newly unconstrained file's declarations are new.
-	keep := func(rel string) bool { return cur.Has(rel) && sameBuild(rel, old.ReadFile(rel), cur.ReadFile(rel)) }
+	// An old declaration is credited only from a file every configuration
+	// that builds the new file also built (go/build, newlyBuilt).
+	keep := func(rel string) bool { return cur.Has(rel) && !newlyBuilt(ob, nb, rel) }
 	o, n := indexPackage(old, dir, shadow, keep), indexPackage(cur, dir, shadow, nil)
 	type step struct {
 		name string
@@ -1005,8 +1018,9 @@ type pkgScope struct {
 }
 
 // packageScope builds the pkgScope of directory dir. A file that does not
-// parse declares every builtin name and makes no name a type.
-func packageScope(t *ecoutil.Tree, dir string) *pkgScope {
+// parse declares every builtin name and makes no name a type; a type
+// counts only when go/build builds its file in every configuration.
+func packageScope(t *ecoutil.Tree, dir string, b *builtSet) *pkgScope {
 	sc := &pkgScope{declared: map[string]bool{}, types: map[string]map[string]bool{}}
 	nonType := map[string]bool{}
 	typeIn := map[string]map[string]bool{} // name -> package clauses with an unconstrained type decl
@@ -1021,7 +1035,7 @@ func packageScope(t *ecoutil.Tree, dir string) *pkgScope {
 			}
 			continue
 		}
-		compiled := !strings.HasSuffix(rel, "_test.go") && !buildConstrained(rel, file)
+		compiled := b.everywhere(rel)
 		for _, d := range file.Decls {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
@@ -1064,32 +1078,6 @@ func packageScope(t *ecoutil.Tree, dir string) *pkgScope {
 	return sc
 }
 
-// knownOS and knownArch are the GOOS and GOARCH values the go command
-// recognizes in file name suffixes (go/build's syslist).
-var knownOS = strings.Fields("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris wasip1 windows zos")
-var knownArch = strings.Fields("386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm")
-
-// buildConstrained reports a file that is not compiled on every platform:
-// a //go:build or // +build line before the package clause, or a
-// _GOOS, _GOARCH or _GOOS_GOARCH file name suffix.
-func buildConstrained(rel string, file *ast.File) bool {
-	for _, cg := range file.Comments {
-		if cg.Pos() >= file.Package {
-			break
-		}
-		for _, c := range cg.List {
-			// Prefix match, not constraint.IsGoBuild/IsPlusBuild: any
-			// spelling the go command might accept counts as constrained.
-			if t := strings.TrimSpace(strings.TrimPrefix(c.Text, "//")); strings.HasPrefix(t, "go:build") || strings.HasPrefix(t, "+build") {
-				return true
-			}
-		}
-	}
-	parts := strings.Split(strings.TrimSuffix(strings.TrimSuffix(path.Base(rel), ".go"), "_test"), "_")
-	n := len(parts)
-	return n >= 2 && (slices.Contains(knownOS, parts[n-1]) || slices.Contains(knownArch, parts[n-1]))
-}
-
 // fileScope is one file's view for the initializer check.
 type fileScope struct {
 	pkg     *pkgScope
@@ -1124,29 +1112,22 @@ func hasText(ss []snippet, text string) bool {
 	return slices.ContainsFunc(ss, func(s snippet) bool { return s.text == text })
 }
 
-// directivePrefixes are the directives checkGoFile compares.
-var directivePrefixes = []string{"//go:linkname", "//go:generate", "//go:embed", "//go:cgo_"}
+// directivePrefixes are the directives checkGoFile flags: ones go/build
+// does not report (//go:embed is go list's, embed.go).
+var directivePrefixes = []string{"//go:linkname", "//go:generate", "//go:cgo_"}
 
-// facts reads one version of a file. Directives come from the Go
-// scanner's comment tokens, as the go command finds them (directives.go),
-// the same way on both sides: a directive-like line inside a string or a
-// /* */ comment is not one in either version. A new version the scanner
-// rejects is unparseable (checkGoFile sends it to a person); an old one
-// then has no directives (under-approximating).
+// facts reads one version of a file. Directives are read from the new
+// version only (directives.go) and every one is flagged: the old side is
+// never credited with a directive.
 func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
 	f := goFacts{imports: map[string]int{}, blank: map[string]int{}, directives: map[string][]int{}, blobs: map[string]int{}}
 	if src == nil {
 		f.parsed = true
 		return f
 	}
-	if dirs, scanErr := scanDirectives(name, src); !(old && scanErr) {
+	if !old {
+		dirs, _ := scanDirectives(name, src)
 		for _, d := range dirs {
-			// The old side counts only directives the compiler acts on:
-			// comments at column 1 (a trailing "x := 1 //go:embed f" is
-			// none). The new side counts them all.
-			if old && d.col != 1 {
-				continue
-			}
 			for _, p := range directivePrefixes {
 				if strings.HasPrefix(d.text, p) {
 					f.directives[d.text] = append(f.directives[d.text], d.line)
@@ -1338,10 +1319,8 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 	if slices.ContainsFunc(n.varInits, func(s snippet) bool { return !hasText(o.varInits, s.text) }) {
 		h.add(codeVarInit, f, true, append(initCtx("package-level var initializer", o.varInits, n.varInits), fullText())...)
 	}
+	// Every directive of a changed or newly built file, old or not.
 	for _, d := range slices.Sorted(maps.Keys(n.directives)) {
-		if _, had := o.directives[d]; had {
-			continue
-		}
 		var ctx []string
 		for _, line := range n.directives[d] {
 			ctx = append(ctx, quote("directive at "+at(line), excerpt(cur, line, 3)))
@@ -1351,8 +1330,6 @@ func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
 			h.add(codeLinkname, f, true, append(ctx, fullText())...)
 		case strings.HasPrefix(d, "//go:generate"):
 			h.add(codeGenerate, f, true, append(ctx, fullText())...)
-		case strings.HasPrefix(d, "//go:embed"):
-			h.add(codeEmbed, f, true, append(ctx, fullText())...)
 		case strings.HasPrefix(d, "//go:cgo_"):
 			h.add(codeCgo, f, true, append(ctx, fullText())...)
 		}

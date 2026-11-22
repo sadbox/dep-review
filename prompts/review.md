@@ -55,7 +55,9 @@ checks singled out because a dependency update can hide an attack there:
   assembly sources, `//go:linkname`;
 - new imports that can run processes, use the network, write files, break
   memory safety or call through reflection; new blank imports (`import _`);
-  new `//go:generate` and `//go:embed` directives;
+  every `//go:generate` directive in a changed file, and files a package
+  newly embeds (the `gomod.go-embed` item is the package directory; the
+  embedded file's text is quoted);
 - binary files and long encoded string literals.
 
 For each update with flagged items there is an evidence file ending in
