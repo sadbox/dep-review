@@ -15,7 +15,11 @@ func TestParseBuildPlan(t *testing.T) {
 	}{
 		{"", "", 0, true},
 		{"linux/amd64", "", 2, false},
-		{"linux/amd64, linux/arm64 darwin/arm64", "race,purego", 6, false},
+		// Each platform, cgo off and on, with no tags and each tag set.
+		{"linux/amd64, linux/arm64 darwin/arm64", "race,purego", 12, false},
+		{"linux/amd64", "race purego,netgo", 6, false},
+		{"linux/amd64", "race;purego", 6, false},
+		{"linux/amd64", "a b c d e", -1, false},
 		{"linux/amd64,linux/amd64", "", 2, false},
 		{"", "race", -1, false},
 		{"linux/amd99", "", -1, false},
@@ -82,7 +86,22 @@ func TestDeclaredBuilds(t *testing.T) {
 		// Files no declared build compiles are skipped...
 		{"windows init, linux build", "linux/amd64", "", base(nil), base(map[string]string{"w_windows.go": "package m\n\nfunc init() { println(1) }\n"}), nil},
 		{"windows init, every platform", "", "", base(nil), base(map[string]string{"w_windows.go": "package m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
-		{"plan9 assembly, linux build", "linux/amd64", "", base(map[string]string{"f_plan9_amd64.s": asm}), base(map[string]string{"f_plan9_amd64.s": asm + "RET\n"}), nil},
+		// Assembly is never skipped: a built .s can include any other.
+		{"plan9 assembly, linux build", "linux/amd64", "", base(map[string]string{"f_plan9_amd64.s": asm}), base(map[string]string{"f_plan9_amd64.s": asm + "RET\n"}), []string{codeAsm}},
+		{"header beside assembly, no cgo", "linux/amd64", "", base(map[string]string{"f_linux_amd64.s": "#include \"mid.h\"\n" + asm, "mid.h": "#include \"evil.h\"\n", "evil.h": "#define X 1\n"}),
+			base(map[string]string{"f_linux_amd64.s": "#include \"mid.h\"\n" + asm, "mid.h": "#include \"evil.h\"\n", "evil.h": "#define X 2\n"}), []string{codeCSource}},
+		// SWIG compiles the package's C as cgo does.
+		{"C beside a SWIG file", "linux/amd64", "", base(nil), base(map[string]string{"m.swig": "%module m\n", "evil.c": "int f(void){return 1;}\n"}), []string{codeCSource}},
+		// Anything go list embeds is checked, built or not.
+		{"embedded unbuilt syso", "darwin/arm64", "",
+			base(map[string]string{"e.go": "package m\n\nimport _ \"embed\"\n\n//go:embed *.syso\nvar B []byte\n", "blob_windows_amd64.syso": "\x00\x01\x02v1"}),
+			base(map[string]string{"e.go": "package m\n\nimport _ \"embed\"\n\n//go:embed *.syso\nvar B []byte\n", "blob_windows_amd64.syso": "\x7fELF\x00\x01v2"}),
+			[]string{codeBinary, codeIncomplete}},
+		// Another Go version or GOAMD64 can build what the gate's does not.
+		{"newer toolchain file", "linux/amd64", "", base(nil), base(map[string]string{"n.go": "//go:build go1.99\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
+		{"older toolchain file", "linux/amd64", "", base(nil), base(map[string]string{"n.go": "//go:build !go1.20\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
+		{"feature level file", "linux/amd64", "", base(nil), base(map[string]string{"n.go": "//go:build amd64.v3\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
+		{"experiment file", "linux/amd64", "", base(nil), base(map[string]string{"n.go": "//go:build !goexperiment.greenteagc\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
 		{"linux assembly, linux build", "linux/amd64", "", base(map[string]string{"f_linux_amd64.s": asm}), base(map[string]string{"f_linux_amd64.s": asm + "RET\n"}), []string{codeAsm}},
 		// (go build refuses a package with .c files and no cgo, so nothing
 		// compiles them either.)
@@ -93,6 +112,8 @@ func TestDeclaredBuilds(t *testing.T) {
 		// ... and tags are exact.
 		{"race file, race declared", "linux/amd64", "race", base(nil), base(map[string]string{"r.go": "//go:build race\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
 		{"race file, race not declared", "linux/amd64", "", base(nil), base(map[string]string{"r.go": "//go:build race\n\npackage m\n\nfunc init() { println(1) }\n"}), nil},
+		// A tag set adds builds: the no-tag build is still checked.
+		{"!race file, race declared", "linux/amd64", "race", base(nil), base(map[string]string{"r.go": "//go:build !race\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
 		// The documented sibling limit: under the declared tag the old
 		// package had two package clauses (it did not build); a sibling's
 		// fix makes it build, so the unchanged init file newly enters it.

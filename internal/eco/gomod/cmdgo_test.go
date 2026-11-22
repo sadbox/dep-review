@@ -67,7 +67,7 @@ func needGo(t *testing.T) {
 
 // linuxAmd64 is the configs index of linux/amd64 without cgo.
 func linuxAmd64(t *testing.T) int {
-	i := slices.Index(configs, config{"linux", "amd64", false})
+	i := slices.IndexFunc(configs, func(c config) bool { return c.goos == "linux" && c.goarch == "amd64" && !c.cgo })
 	if i < 0 {
 		t.Fatal("linux/amd64 is not in the dist list")
 	}

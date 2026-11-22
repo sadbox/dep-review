@@ -46,6 +46,7 @@ var distList string
 type config struct {
 	goos, goarch string
 	cgo          bool
+	tags         []string // -tags (a declared tag set; none by default)
 }
 
 // configs is every dist-list platform with cgo off and on.
@@ -53,7 +54,7 @@ var configs = func() []config {
 	var out []config
 	for _, p := range strings.Fields(distList) {
 		goos, goarch, _ := strings.Cut(p, "/")
-		out = append(out, config{goos, goarch, false}, config{goos, goarch, true})
+		out = append(out, config{goos: goos, goarch: goarch}, config{goos: goos, goarch: goarch, cgo: true})
 	}
 	return out
 }()
@@ -79,10 +80,9 @@ var (
 // Go files a configuration excludes still lists its .s files.
 type builtSet struct {
 	// cfgs are the configurations evaluated (configs, or a repository's
-	// declared ones), tags the -tags they all set; declared: the
-	// repository declared them, so nothing varies between consumers.
+	// declared ones, each with its tag set); declared: the repository
+	// declared them, so -tags do not vary between consumers.
 	cfgs     []config
-	tags     []string
 	declared bool
 	// cgoDirs: package directories some configuration builds cgo files of
 	// (only true entries).
@@ -185,7 +185,6 @@ type treeFS struct {
 	info map[string]fs.FileInfo // rel -> its entry
 	data map[string][]byte
 	tt   map[string][]string // GOOS/GOARCH -> the toolchain's tool tags
-	tags []string            // -tags of every configuration (declared builds)
 	mu   sync.Mutex
 }
 
@@ -247,7 +246,7 @@ func (tf *treeFS) context(c config) *build.Context {
 	ctxt := build.Default
 	ctxt.GOOS, ctxt.GOARCH, ctxt.CgoEnabled = c.goos, c.goarch, c.cgo
 	ctxt.GOROOT, ctxt.GOPATH, ctxt.Dir = "", "", ""
-	ctxt.BuildTags = slices.Clone(tf.tags)
+	ctxt.BuildTags = slices.Clone(c.tags)
 	ctxt.ReleaseTags = slices.Clone(build.Default.ReleaseTags)
 	ctxt.ToolTags = slices.Clone(tf.tt[c.goos+"/"+c.goarch])
 	ctxt.UseAllFiles = false
@@ -287,11 +286,8 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 		embedders: map[string]map[string][]bool{}, embedFiles: map[string]map[string][]bool{}, embedFailed: map[string]string{},
 		errs: map[string]string{}, linkFiles: map[string][]string{}}
 	defer func() { b.took = time.Since(start) }()
-	if l.plan != nil {
-		b.tags, b.declared = l.plan.tags, true
-	}
+	b.declared = l.plan != nil
 	tf := newTreeFS(t)
-	tf.tags = b.tags
 	b.tf = tf
 	tt, err := l.toolTags()
 	if err != nil {
@@ -343,7 +339,9 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 				continue
 			}
 			b.recordLinked(dir, i, len(p.GoFiles)+len(p.CgoFiles) > 0, p.SFiles, p.SysoFiles)
-			if len(p.CgoFiles) > 0 {
+			// cgo files, or SWIG files (cmd/go then compiles the
+			// package's C as for cgo).
+			if len(p.CgoFiles)+len(p.SwigFiles)+len(p.SwigCXXFiles) > 0 {
 				b.cgoDirs[dir] = true
 			}
 			lists := [][]string{p.GoFiles, p.CgoFiles}
@@ -370,11 +368,6 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 	if len(embedDirs) > 0 {
 		l.listDirs(t, b, embedDirs, old, goFiles)
 	}
-	if b.declared {
-		// The repository's own builds: no tag varies, nothing else can
-		// build a file (README "Design rules").
-		return b
-	}
 	for _, dir := range dirs {
 		for _, f := range goFiles[dir] {
 			tags := tf.fileTags(f, w)
@@ -382,7 +375,16 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 				b.over, b.overWhy = true, "the go/build work or time budget is spent"
 				return b
 			}
-			b.userTags[f] = slices.ContainsFunc(tags, func(tag string) bool { return !platformTag(tag) })
+			varies := func(tag string) bool { return !platformTag(tag) }
+			if b.declared {
+				// Declared builds fix -tags, not the toolchain: go1.N,
+				// GOARCH feature levels, gccgo and GOEXPERIMENT still vary.
+				varies = toolchainTag
+			}
+			b.userTags[f] = slices.ContainsFunc(tags, varies)
+			if b.declared {
+				continue
+			}
 			if old && b.errs[dir] != "" {
 				continue // the old tree's failed directory: built nowhere
 			}
@@ -617,35 +619,51 @@ func (tf *treeFS) alone(c config, rel string, set []string) *build.Context {
 }
 
 // BuildPlan is a repository's declared builds (gate inputs go_platforms
-// and go_tags): exactly these configurations, cgo off and on, each with
-// these tags.
+// and go_tags): each platform, cgo off and on, with no tags and with each
+// declared tag set.
 type BuildPlan struct {
 	cfgs []config
-	tags []string
 }
 
 // Bounds on a declared plan.
 const (
 	maxPlanPlatforms = 20
-	maxPlanTags      = 10
+	maxPlanTagSets   = 4
+	maxPlanTags      = 10 // per set
 )
 
 // ParseBuildPlan validates the declared platforms (GOOS/GOARCH pairs of
-// the gate toolchain's dist list, comma or space separated) and tags
-// (letters, digits, "_" and "."). Both empty: no plan (nil).
-func ParseBuildPlan(platforms, tags string) (*BuildPlan, error) {
-	split := func(s string) []string {
-		return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' })
-	}
-	ps, ts := split(platforms), split(tags)
+// the gate toolchain's dist list, separated by commas or spaces) and tag
+// sets (separated by spaces or ";", the tags of one set by commas; each
+// tag letters, digits, "_" and "."). Every platform is evaluated with no
+// tags as well. Both empty: no plan (nil).
+func ParseBuildPlan(platforms, tagSets string) (*BuildPlan, error) {
+	ps := strings.FieldsFunc(platforms, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' })
+	sets := strings.FieldsFunc(tagSets, func(r rune) bool { return r == ';' || r == ' ' || r == '\n' || r == '\t' })
 	if len(ps) == 0 {
-		if len(ts) > 0 {
+		if len(sets) > 0 {
 			return nil, errors.New("go_tags needs go_platforms")
 		}
 		return nil, nil
 	}
-	if len(ps) > maxPlanPlatforms || len(ts) > maxPlanTags {
-		return nil, fmt.Errorf("at most %d platforms and %d tags", maxPlanPlatforms, maxPlanTags)
+	if len(ps) > maxPlanPlatforms || len(sets) > maxPlanTagSets {
+		return nil, fmt.Errorf("at most %d platforms and %d tag sets", maxPlanPlatforms, maxPlanTagSets)
+	}
+	variants := [][]string{nil}
+	for _, set := range sets {
+		var tags []string
+		for _, t := range strings.Split(set, ",") {
+			if t == "" || strings.Trim(t, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.") != "" {
+				return nil, fmt.Errorf("%q is not a build tag", t)
+			}
+			if !slices.Contains(tags, t) {
+				tags = append(tags, t)
+			}
+		}
+		if len(tags) > maxPlanTags {
+			return nil, fmt.Errorf("at most %d tags in a set", maxPlanTags)
+		}
+		variants = append(variants, tags)
 	}
 	plan := &BuildPlan{}
 	seen := map[string]bool{}
@@ -656,21 +674,18 @@ func ParseBuildPlan(platforms, tags string) (*BuildPlan, error) {
 		seen[p] = true
 		var found bool
 		for _, c := range configs {
-			if c.goos+"/"+c.goarch == p {
-				plan.cfgs = append(plan.cfgs, c)
-				found = true
+			if c.goos+"/"+c.goarch != p {
+				continue
+			}
+			found = true
+			for _, tags := range variants {
+				v := c
+				v.tags = tags
+				plan.cfgs = append(plan.cfgs, v)
 			}
 		}
 		if !found {
 			return nil, fmt.Errorf("%q is not a GOOS/GOARCH of the gate's toolchain", p)
-		}
-	}
-	for _, t := range ts {
-		if t == "" || strings.Trim(t, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.") != "" {
-			return nil, fmt.Errorf("%q is not a build tag", t)
-		}
-		if !slices.Contains(plan.tags, t) {
-			plan.tags = append(plan.tags, t)
 		}
 	}
 	return plan, nil
@@ -678,41 +693,64 @@ func ParseBuildPlan(platforms, tags string) (*BuildPlan, error) {
 
 // declaredUnbuilt is, under declared builds, every file of cur no
 // declared configuration compiles, so the checks skip it:
-//   - a non-test .go, assembly or .syso file go/build or go list builds
-//     in none of them;
-//   - C, C++ and other cgo sources, when no package of the module builds
-//     cgo files in any of them.
+//   - a non-test .go or a .syso file go/build or go list builds in none of
+//     them: Go source and linker objects are never included by name;
+//   - C, C++ and other cgo sources, when no package builds cgo or SWIG
+//     files in any of them and the module has no assembly (which can
+//     #include them).
 //
-// A file whose base name some compiled file's text holds (an assembly or
-// C #include, a cgo line naming it) is kept. Nothing is skipped without a
-// plan, or when the tree is unresolved.
+// Assembly is never skipped: a built .s can include another under any
+// spelling. Nor is a file whose constraint consults a tag the toolchain
+// sets (userTags: another Go version or GOAMD64 builds it), anything go
+// list embeds in some configuration, or anything in a package whose
+// embeds go list did not resolve. Nothing is skipped without a plan, or
+// when the tree is unresolved.
 func declaredUnbuilt(cur *ecoutil.Tree, nb *builtSet) map[string]bool {
 	out := map[string]bool{}
 	if nb == nil || !nb.declared || nb.unresolved() {
 		return out
 	}
-	cgo := len(nb.cgoDirs) > 0
-	var cand, built []string
-	for _, rel := range cur.Files {
-		ext := path.Ext(rel)
-		switch {
-		case nb.in[rel] != nil:
-			if nb.anywhere(rel) {
-				built = append(built, rel)
-			} else {
-				cand = append(cand, rel)
-			}
-		case cgoSourceExts[ext] && !cgo:
-			cand = append(cand, rel)
-		case cgoSourceExts[ext]:
-			built = append(built, rel)
+	embedded := map[string]bool{}
+	for _, files := range nb.embedFiles {
+		for f := range files {
+			embedded[f] = true
 		}
 	}
-	for _, rel := range cand {
-		base := []byte(path.Base(rel))
-		if !slices.ContainsFunc(built, func(f string) bool { return bytes.Contains(cur.ReadFile(f), base) }) {
-			out[rel] = true
+	unresolvedEmbed := func(rel string) bool {
+		for d := range nb.embedFailed {
+			if d == "." || rel == d || strings.HasPrefix(rel, d+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	asm := slices.ContainsFunc(cur.Files, func(f string) bool {
+		ext := path.Ext(f)
+		return ext == ".s" || ext == ".S" || ext == ".sx"
+	})
+	cSkippable := len(nb.cgoDirs) == 0 && !asm
+	for _, rel := range cur.Files {
+		if embedded[rel] || unresolvedEmbed(rel) || nb.userTags[rel] {
+			continue
+		}
+		ext := path.Ext(rel)
+		switch {
+		case nb.in[rel] != nil && (ext == ".go" || ext == ".syso"):
+			out[rel] = !nb.anywhere(rel)
+		case cgoSourceExts[ext]:
+			out[rel] = cSkippable
 		}
 	}
 	return out
+}
+
+// toolchainTag: a build tag the toolchain, not -tags, sets: a release
+// tag (go1.N), a GOARCH feature level (amd64.v3, arm.7), gccgo, a
+// GOEXPERIMENT. These vary between consumers whatever they declare.
+func toolchainTag(tag string) bool {
+	if strings.HasPrefix(tag, "go1.") || strings.HasPrefix(tag, "goexperiment.") || tag == "gccgo" {
+		return true
+	}
+	arch, _, ok := strings.Cut(tag, ".")
+	return ok && knownGOOSOrGOARCH(arch)
 }

@@ -222,9 +222,6 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 		err error
 	}
 	cfgs := b.cfgs
-	if len(b.tags) > 0 {
-		args = append(args[:1:1], append([]string{"-tags=" + strings.Join(b.tags, ",")}, args[1:]...)...)
-	}
 	results := make([]result, len(cfgs))
 	idx := make([]int, len(cfgs))
 	for i := range idx {
@@ -239,6 +236,10 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 		cgo := "0"
 		if c.cgo {
 			cgo = "1"
+		}
+		args := args
+		if len(c.tags) > 0 {
+			args = append([]string{"list", "-tags=" + strings.Join(c.tags, ",")}, args[1:]...)
 		}
 		out, err := ecoutil.RunGo(ecoutil.GoRun{Go: l.goBin, Dir: mod, Timeout: listTimeout, Args: args,
 			Env: append(slices.Clone(env), "GOOS="+c.goos, "GOARCH="+c.goarch, "CGO_ENABLED="+cgo)})

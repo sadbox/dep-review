@@ -40,15 +40,18 @@ on:
         description: >-
           Comma-separated GOOS/GOARCH pairs the repository builds for
           (e.g. linux/amd64,linux/arm64,darwin/arm64). When set, Go module
-          checks evaluate exactly these builds (cgo off and on) with
-          go_tags, and skip files they never compile. Empty: every
-          platform, with build tags over-approximated.
+          checks evaluate exactly these builds (cgo off and on, with no
+          tags and with each go_tags set) and skip Go and .syso files
+          they never compile. Empty: every platform, with build tags
+          over-approximated.
         type: string
         default: ""
       go_tags:
         description: >-
-          Comma-separated build tags every declared Go build sets (e.g.
-          race). Only with go_platforms.
+          Extra tag sets the repository's Go builds use, separated by
+          spaces, the tags of one set by commas (e.g. "race" for go test
+          -race). Builds without tags are always checked. Only with
+          go_platforms.
         type: string
         default: ""
       ignore_ecosystems:

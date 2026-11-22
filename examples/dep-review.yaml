@@ -40,11 +40,12 @@ jobs:
       # Must list exactly the platforms this repository builds its images for.
       docker_platforms: linux/amd64,linux/arm64
       # Every GOOS/GOARCH the repository builds Go for (CI, release and
-      # developer machines), and the tags those builds set. Go module checks
-      # then skip files none of them compiles; a build missing here is not
-      # checked. Omit both to check every platform.
+      # developer machines), and the extra tag sets its builds use (race for
+      # go test -race). Go module checks then skip Go files none of them
+      # compiles; a build missing here is not checked. Omit both to check
+      # every platform.
       go_platforms: linux/amd64,linux/arm64,darwin/arm64
-      go_tags: ""
+      go_tags: race
       # Only when another trusted process owns these ecosystems' Dependabot
       # PRs (e.g. a routine that supersedes every submodule bump with its
       # own PR): verified Dependabot PRs entirely in them get no status,

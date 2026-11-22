@@ -300,19 +300,24 @@ Known limits:
 ### Declared Go builds
 
 A caller can set `go_platforms`, the GOOS/GOARCH pairs it builds Go for,
-and `go_tags`, the tags every such build sets. Go module checks then
-evaluate exactly those builds, cgo off and on, with go/build and go list,
-instead of every platform with tags over-approximated. Nothing varies
-between consumers, so a file's credit depends only on whether those
-builds compile it.
+and `go_tags`, tag sets its builds also use: sets separated by spaces,
+tags within a set by commas, such as `race` for `go test -race`. Go module
+checks then evaluate each platform, cgo off and on, with no tags and with
+each tag set, using go/build and go list. That replaces every platform
+with `-tags` over-approximated. Tags the toolchain sets still vary between
+consumers whatever they declare: `go1.N`, GOARCH feature levels such as
+`amd64.v3`, `gccgo` and GOEXPERIMENT. A file whose constraint consults one
+is still treated as possibly built, and checked as new when it changes.
 
-Files none of those builds compile are skipped by the checks and by the
-init walk:
-- `.go`, assembly and `.syso` files they don't build;
-- C and other cgo sources, when no package builds cgo files in them.
+The checks then skip:
+- `.go` and `.syso` files that none of those builds compile;
+- C and other cgo sources, when no package builds cgo or SWIG files in
+  them and the module has no assembly.
 
-A skipped file is kept when the text of a compiled file names it, as an
-`#include` or a cgo line would.
+Nothing else is skipped:
+- assembly, since a built `.s` can include another under any spelling;
+- anything go list embeds;
+- anything in a package whose embeds go list could not resolve.
 
 The list must cover every build the repository uses: CI, releases and
 developer machines. A build missing from it is not checked.
