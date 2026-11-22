@@ -101,14 +101,14 @@ jobs:
       gate_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - name: Check out the gate (this workflow's own commit)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: gate
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: gate/go.mod
           cache: false
@@ -131,7 +131,7 @@ jobs:
             find . -type f -print0 | sort -z | xargs -0 sha256sum
             echo 'DEP_REVIEW_SUMS'
           } >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
@@ -149,7 +149,7 @@ jobs:
       kind: ${{ steps.classify.outputs.kind }}
       classification_sums: ${{ steps.sums.outputs.sums }}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
@@ -187,7 +187,7 @@ jobs:
             find . -type f -print0 | sort -z | xargs -0 sha256sum
             echo 'DEP_REVIEW_SUMS'
           } >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: classification
           path: ${{ runner.temp }}/out/classification.json
@@ -205,7 +205,7 @@ jobs:
       route: ${{ steps.fetch.outputs.route }}
       evidence_sums: ${{ steps.sums.outputs.sums }}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
@@ -220,7 +220,7 @@ jobs:
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
           diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: classification
           path: ${{ runner.temp }}/in
@@ -237,12 +237,12 @@ jobs:
       # from the gate's go.mod, never the PR's; no cache, since a cache
       # restored into a job that handles untrusted code can be poisoned.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: ${{ runner.temp }}/bin/go.mod
           cache: false
       - name: Check out the PR (data only; nothing from it is executed)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           path: pr
@@ -268,7 +268,7 @@ jobs:
             find . -type f -print0 | sort -z | xargs -0 sha256sum
             echo 'DEP_REVIEW_SUMS'
           } >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: evidence
           path: ${{ runner.temp }}/evidence
@@ -289,7 +289,7 @@ jobs:
       # over a unix socket, and the reviewer gets nothing.
       id-token: write
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
@@ -304,7 +304,7 @@ jobs:
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
           diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: evidence
           path: evidence
@@ -317,7 +317,7 @@ jobs:
           # ...and nothing else is there.
           diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       - name: Check out the default branch (for usage search and the review notes)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           path: repo
           persist-credentials: false
@@ -377,7 +377,7 @@ jobs:
             find . -type f -print0 | sort -z | xargs -0 sha256sum
             echo 'DEP_REVIEW_SUMS'
           } >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: verdict
           path: ${{ runner.temp }}/verdict/verdict.json
@@ -393,7 +393,7 @@ jobs:
     environment: dep-review
     permissions: {}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           path: ${{ runner.temp }}/in
           pattern: "{gate-bin,classification,evidence,verdict}"
@@ -440,7 +440,7 @@ jobs:
           diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       - name: Gate app token (this repository only)
         id: app
-        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        uses: actions/create-github-app-token@v3.4.0
         with:
           app-id: ${{ vars.DEP_REVIEW_APP_ID }}
           private-key: ${{ secrets.DEP_REVIEW_APP_KEY }}
@@ -476,7 +476,7 @@ jobs:
     environment: dep-review
     permissions: {}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
@@ -493,7 +493,7 @@ jobs:
           chmod +x dep-review
       - name: Gate app token (this repository only)
         id: app
-        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        uses: actions/create-github-app-token@v3.4.0
         with:
           app-id: ${{ vars.DEP_REVIEW_APP_ID }}
           private-key: ${{ secrets.DEP_REVIEW_APP_KEY }}
