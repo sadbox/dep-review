@@ -18,6 +18,10 @@ var (
 	anyIncludeRe  = regexp.MustCompile(`(?m)#[ \t]*(?:include|include_next|import)\b|\.(?:include|incbin)\b`)
 	flagIncludeRe = regexp.MustCompile(`(?m)^[ \t]*(?://[ \t]*)?#cgo\b.*(?:-include|-imacros)`)
 	goSumLineRe   = regexp.MustCompile(`^[^\s]+ [^\s]+ h1:[A-Za-z0-9+/]{43}=$`)
+	// Spellings of a directive the regexes above do not read: digraphs
+	// (%:), trigraphs (??=), a line continuation or a comment after the
+	// #, and #embed (C23). Any of them makes the includes "computed".
+	oddDirectiveRe = regexp.MustCompile(`%:|\?\?=|#[ \t]*\\\r?\n|#[ \t]*/[*/]|#[ \t]*embed\b`)
 )
 
 // includes is what the module's C, assembly and cgo text includes by
@@ -47,7 +51,7 @@ func moduleIncludes(t *ecoutil.Tree) includes {
 			}
 			inc.names[path.Base(strings.TrimSpace(string(name)))] = true
 		}
-		if len(anyIncludeRe.FindAll(src, -1)) > len(lit) || flagIncludeRe.Match(src) {
+		if len(anyIncludeRe.FindAll(src, -1)) > len(lit) || flagIncludeRe.Match(src) || oddDirectiveRe.Match(src) {
 			inc.computed = true
 		}
 	}
