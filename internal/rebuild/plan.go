@@ -5,10 +5,13 @@
 // under gVisor, and nothing it produces is executed or trusted on the
 // host:
 //
-//   - install: package.json and package-lock.json only, `npm ci
-//     --ignore-scripts` from the public registry. No package code runs;
-//     the lockfile was checked first (every package from the registry,
-//     with sha512 integrity), and npm verifies each tarball against it.
+//   - install: package.json, package-lock.json and every tarball the
+//     lockfile pins, which the gate downloads from registry.npmjs.org
+//     and checks against its sha512 first; `npm ci --offline
+//     --ignore-scripts` with no network. Every dependency spec, in
+//     package.json and the lockfile, must be a registry version (no git,
+//     URL, file or link), and anything the lockfile does not pin fails
+//     for want of a network.
 //   - build: the commit's tree without its bundle directories, plus the
 //     installed node_modules, `npm run <script>` with no network. Its
 //     only output is a tar of the bundle directories on stdout, read
@@ -149,12 +152,20 @@ func Scripts(pkgJSON, lock []byte) ([]string, error) {
 	var pj struct {
 		Scripts    map[string]string `json:"scripts"`
 		Workspaces json.RawMessage   `json:"workspaces"`
+		Overrides  json.RawMessage   `json:"overrides"`
+		deps
 	}
 	if err := strictjson.Unmarshal(pkgJSON, &pj); err != nil {
 		return nil, notRebuildable("package.json could not be read strictly")
 	}
 	if len(pj.Workspaces) > 0 && !bytes.Equal(bytes.TrimSpace(pj.Workspaces), []byte("null")) {
 		return nil, notRebuildable("package.json declares workspaces")
+	}
+	if len(pj.Overrides) > 0 && !bytes.Equal(bytes.TrimSpace(pj.Overrides), []byte("null")) {
+		return nil, notRebuildable("package.json declares overrides")
+	}
+	if !pj.registryOnly() {
+		return nil, notRebuildable("package.json names a dependency that is not a registry version (git, URL, file or link)")
 	}
 	var lf struct {
 		LockfileVersion int `json:"lockfileVersion"`
@@ -163,6 +174,7 @@ func Scripts(pkgJSON, lock []byte) ([]string, error) {
 			Integrity string `json:"integrity"`
 			Link      bool   `json:"link"`
 			InBundle  bool   `json:"inBundle"`
+			deps
 		} `json:"packages"`
 	}
 	if err := strictjson.Unmarshal(lock, &lf); err != nil {
@@ -175,6 +187,9 @@ func Scripts(pkgJSON, lock []byte) ([]string, error) {
 		return nil, notRebuildable("package-lock.json has no root package")
 	}
 	for k, e := range lf.Packages {
+		if !e.registryOnly() {
+			return nil, notRebuildable("package-lock.json names a dependency that is not a registry version")
+		}
 		switch {
 		case k == "":
 		case !strings.HasPrefix(k, "node_modules/") && !strings.Contains(k, "/node_modules/"):
@@ -198,4 +213,43 @@ func Scripts(pkgJSON, lock []byte) ([]string, error) {
 		return nil, notRebuildable("package.json has none of the scripts %s", strings.Join(CandidateScripts, ", "))
 	}
 	return out, nil
+}
+
+// deps are the dependency maps of package.json and of a lockfile entry.
+type deps struct {
+	Dependencies         map[string]string `json:"dependencies"`
+	DevDependencies      map[string]string `json:"devDependencies"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
+	PeerDependencies     map[string]string `json:"peerDependencies"`
+}
+
+var (
+	// A semver range or a dist-tag: no ":", "/", "#" or "@", so no git,
+	// URL, file, link or GitHub shorthand.
+	rangeRe = regexp.MustCompile(`^[0-9A-Za-z.*^~<>=|_+ -]*$`)
+	nameRe  = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9._~-]+$`)
+)
+
+// registrySpec reports whether a dependency spec can only be resolved
+// from the registry: a range or tag, or an npm: alias of one.
+func registrySpec(s string) bool {
+	if rest, ok := strings.CutPrefix(s, "npm:"); ok {
+		i := strings.LastIndex(rest, "@")
+		if i <= 0 {
+			return nameRe.MatchString(rest)
+		}
+		return nameRe.MatchString(rest[:i]) && rangeRe.MatchString(rest[i+1:])
+	}
+	return rangeRe.MatchString(s)
+}
+
+func (d deps) registryOnly() bool {
+	for _, m := range []map[string]string{d.Dependencies, d.DevDependencies, d.OptionalDependencies, d.PeerDependencies} {
+		for _, spec := range m {
+			if !registrySpec(spec) {
+				return false
+			}
+		}
+	}
+	return true
 }

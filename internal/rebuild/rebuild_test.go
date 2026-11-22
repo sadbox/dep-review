@@ -6,9 +6,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
+	"maps"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +32,9 @@ const okLock = `{"name":"a","lockfileVersion":3,"packages":{"":{"name":"a"},
 const okPkg = `{"name":"a","scripts":{"test":"jest","package":"ncc build","build":"tsc"}}`
 
 func TestScripts(t *testing.T) {
+	if _, err := Scripts([]byte(`{"scripts":{"build":"x"},"dependencies":{"a":"^1.2.3","b":">=1 <2 || 3.x","c":"npm:@s/y@~2.0.0","d":"latest"}}`), []byte(okLock)); err != nil {
+		t.Errorf("registry specs: %v", err)
+	}
 	got, err := Scripts([]byte(okPkg), []byte(okLock))
 	if err != nil || !slices.Equal(got, []string{"build", "package"}) {
 		t.Fatalf("Scripts = %v, %v", got, err)
@@ -42,6 +50,13 @@ func TestScripts(t *testing.T) {
 		"no build script":    {`{"scripts":{"test":"jest"}}`, okLock},
 		"duplicate key":      {`{"scripts":{"build":"tsc"},"scripts":{"build":"evil"}}`, okLock},
 		"traversal":          {okPkg, strings.Replace(okLock, "x/-/x-1.0.0.tgz", "x/-/../../evil.tgz", 1)},
+		"http dependency":    {`{"scripts":{"build":"x"},"dependencies":{"a":"http://evil.example/a.tgz"}}`, okLock},
+		"github dependency":  {`{"scripts":{"build":"x"},"devDependencies":{"a":"github:o/r#0123"}}`, okLock},
+		"shorthand":          {`{"scripts":{"build":"x"},"dependencies":{"a":"o/r"}}`, okLock},
+		"file dependency":    {`{"scripts":{"build":"x"},"optionalDependencies":{"a":"file:../a"}}`, okLock},
+		"overrides":          {`{"scripts":{"build":"x"},"overrides":{"a":"1.0.0"}}`, okLock},
+		"alias to a URL":     {`{"scripts":{"build":"x"},"dependencies":{"a":"npm:b@http://x/b.tgz"}}`, okLock},
+		"lock entry dep URL": {okPkg, strings.Replace(okLock, `"node_modules/x":{`, `"node_modules/x":{"dependencies":{"q":"https://evil.example/q.tgz"},`, 1)},
 		"top-level inBundle": {okPkg, strings.Replace(okLock, `"node_modules/x":{"version":"1.0.0","resolved":"https://registry.npmjs.org/x/-/x-1.0.0.tgz","integrity":"sha512-AAAA"}`, `"node_modules/x":{"version":"1.0.0","inBundle":true}`, 1)},
 		"inBundle resolved":  {okPkg, strings.Replace(okLock, `"inBundle":true}`, `"inBundle":true,"resolved":"https://evil.example/z.tgz"}`, 1)},
 	} {
@@ -203,11 +218,35 @@ func (f *fake) run(ctx context.Context, name string, args []string, stdin io.Rea
 	return err
 }
 
+// registry serves fixed tarballs for registry.npmjs.org URLs.
+type registry map[string][]byte
+
+func (r registry) RoundTrip(req *http.Request) (*http.Response, error) {
+	data, ok := r[req.URL.String()]
+	if !ok {
+		return &http.Response{StatusCode: 404, Status: "404 Not Found", Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+	}
+	return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(bytes.NewReader(data)), Request: req}, nil
+}
+
+func integrity(data []byte) string {
+	s := sha512.Sum512(data)
+	return "sha512-" + base64.StdEncoding.EncodeToString(s[:])
+}
+
+// realLock is okLock with the registry's real digests.
+func realLock(reg registry) string {
+	l := okLock
+	l = strings.Replace(l, "sha512-AAAA", integrity(reg["https://registry.npmjs.org/x/-/x-1.0.0.tgz"]), 1)
+	return strings.Replace(l, "sha512-BBBB", integrity(reg["https://registry.npmjs.org/@s/y/-/y-2.0.0.tgz"]), 1)
+}
+
 func setup(t *testing.T) (Config, model.RebuildPlan, *fake) {
 	base := t.TempDir()
+	reg := registry{"https://registry.npmjs.org/x/-/x-1.0.0.tgz": []byte("tarball x"), "https://registry.npmjs.org/@s/y/-/y-2.0.0.tgz": []byte("tarball y")}
 	head := upstream(t, base, map[string]string{
 		"package.json":         okPkg,
-		"package-lock.json":    okLock,
+		"package-lock.json":    realLock(reg),
 		"src/index.ts":         "export const a = 1",
 		".npmrc":               "registry=https://evil.example/",
 		"dist/a/index.js":      "built a",
@@ -216,7 +255,7 @@ func setup(t *testing.T) (Config, model.RebuildPlan, *fake) {
 		"dist/other/notes.txt": "not a bundle dir",
 	})
 	f := &fake{t: t}
-	cfg := Config{CloneBase: "file://" + base + "/", Work: t.TempDir(), Runtime: "runsc", Images: map[int]string{24: "img24"}, container: f.run}
+	cfg := Config{CloneBase: "file://" + base + "/", Work: t.TempDir(), Runtime: "runsc", Images: map[int]string{24: "img24"}, container: f.run, HTTP: &http.Client{Transport: reg}}
 	p := model.RebuildPlan{Update: "o/r", Repo: "o/r", Commit: head, Node: 24, Scripts: []string{"build", "package"}, Dirs: []string{"dist/a", "dist/b"},
 		Files: []model.RebuildFile{file("dist/a/index.js", "built a"), file("dist/a/package.json", "{}"), file("dist/b/index.js", "built b")}}
 	return cfg, p, f
@@ -232,7 +271,7 @@ func TestRunVerified(t *testing.T) {
 	// The install sees only the two npm files; the build sees the tree
 	// without the bundle directories (but with other dist/ files), and
 	// the installed modules.
-	if len(f.installIn) != 2 || f.installIn["package-lock.json"] != okLock {
+	if len(f.installIn) != 4 || f.installIn["package.json"] != okPkg || !slices.Contains(slices.Collect(maps.Values(f.installIn)), "tarball x") {
 		t.Errorf("install input %v", slices.Sorted(mapKeys(f.installIn)))
 	}
 	for _, want := range []string{"package.json", "src/index.ts", ".npmrc", "dist/other/notes.txt", "node_modules/x/index.js"} {
@@ -251,7 +290,7 @@ func TestRunVerified(t *testing.T) {
 			t.Errorf("a container lacks %q", a)
 		}
 	}
-	if !strings.Contains(install, "--network bridge") || !strings.Contains(install, "--ignore-scripts") || !strings.Contains(build, "--network none") {
+	if !strings.Contains(install, "--network none") || !strings.Contains(install, "--ignore-scripts") || !strings.Contains(install, "--offline") || !strings.Contains(build, "--network none") {
 		t.Errorf("networks or scripts: install %q build %q", install, build)
 	}
 	if !strings.HasSuffix(build, "sh build dist/a dist/b") {
@@ -323,21 +362,28 @@ func TestRunFailures(t *testing.T) {
 	}
 }
 
+func TestRunTarballChecks(t *testing.T) {
+	cfg, p, f := setup(t)
+	reg := cfg.HTTP.Transport.(registry)
+	reg["https://registry.npmjs.org/x/-/x-1.0.0.tgz"] = []byte("tampered")
+	if r := Run(context.Background(), cfg, []model.RebuildPlan{p})[0]; r.Outcome != model.RebuildFailed || len(f.args) != 0 || !strings.Contains(r.Detail, "sha512") {
+		t.Errorf("tampered tarball: %+v", r)
+	}
+	cfg, p, f = setup(t)
+	delete(cfg.HTTP.Transport.(registry), "https://registry.npmjs.org/@s/y/-/y-2.0.0.tgz")
+	if r := Run(context.Background(), cfg, []model.RebuildPlan{p})[0]; r.Outcome != model.RebuildFailed || len(f.args) != 0 {
+		t.Errorf("missing tarball: %+v", r)
+	}
+	if c := registryClient(); c.CheckRedirect(&http.Request{URL: &url.URL{Scheme: "https", Host: "evil.example"}}, nil) == nil {
+		t.Error("the registry client follows a redirect off the registry")
+	}
+}
+
 func TestReadBundleCaps(t *testing.T) {
 	var b bytes.Buffer
 	tw := tar.NewWriter(&b)
 	_ = tw.WriteHeader(&tar.Header{Name: "dist/a/big", Typeflag: tar.TypeReg, Size: MaxOutput + 1})
 	if _, err := readBundle(&b, []string{"dist/a"}); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Errorf("oversized: %v", err)
-	}
-}
-
-func mapKeys(m map[string]string) func(func(string) bool) {
-	return func(yield func(string) bool) {
-		for k := range m {
-			if !yield(k) {
-				return
-			}
-		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +36,9 @@ type Config struct {
 	Git, CloneBase string
 	// Work is a scratch directory.
 	Work string
+	// HTTP downloads the locked tarballs (default: registry.npmjs.org
+	// only, no redirect off it).
+	HTTP *http.Client
 	// Logf logs one line (default: discard).
 	Logf func(format string, args ...any)
 	// InstallTimeout and BuildTimeout bound each container (defaults 10
@@ -64,6 +68,9 @@ func (c *Config) defaults() {
 	if c.CloneBase == "" {
 		c.CloneBase = "https://github.com/"
 	}
+	if c.HTTP == nil {
+		c.HTTP = registryClient()
+	}
 	if c.Logf == nil {
 		c.Logf = func(string, ...any) {}
 	}
@@ -83,7 +90,14 @@ func Run(ctx context.Context, cfg Config, plans []model.RebuildPlan) []model.Reb
 	cfg.defaults()
 	out := make([]model.RebuildResult, 0, len(plans))
 	for i, p := range plans {
-		r := one(ctx, cfg, p, i)
+		// Each plan gets an equal share of the time left, so one cannot
+		// starve the rest.
+		pctx, cancel := ctx, context.CancelFunc(func() {})
+		if dl, ok := ctx.Deadline(); ok {
+			pctx, cancel = context.WithTimeout(ctx, time.Until(dl)/time.Duration(len(plans)-i))
+		}
+		r := one(pctx, cfg, p, i)
+		cancel()
 		cfg.Logf("rebuild %s %s@%s: %s %s %s", p.Update, p.Repo, short(p.Commit), r.Outcome, r.Script, r.Detail)
 		out = append(out, r)
 	}
@@ -153,8 +167,20 @@ func one(ctx context.Context, cfg Config, p model.RebuildPlan, n int) model.Rebu
 		return fail("%v", err)
 	}
 
-	// install: the two files, npm ci without scripts, node_modules out.
-	installIn, err := tarOf(map[string][]byte{"package.json": pkg, "package-lock.json": lock})
+	// install: the gate downloads every locked tarball from the registry
+	// and checks its sha512; the container gets the two npm files and the
+	// tarballs, and installs from them with no network. Anything not in
+	// the lockfile (a package.json spec it does not pin) fails.
+	tbs, err := lockedTarballs(lock)
+	if err != nil {
+		return fail("%v", err)
+	}
+	files, err := fetchTarballs(ctx, cfg.HTTP, tbs)
+	if err != nil {
+		return fail("downloading the locked packages: %v", err)
+	}
+	files["package.json"], files["package-lock.json"] = pkg, lock
+	installIn, err := tarOf(files)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -292,7 +318,8 @@ func common(cfg Config, name, network string) []string {
 
 const installScript = `set -eu
 mkdir -p /tmp/w && cd /tmp/w && tar -xf -
-npm ci --ignore-scripts --registry=https://registry.npmjs.org/ >&2
+if [ -d tgz ]; then npm cache add ./tgz/*.tgz >&2; fi
+npm ci --offline --ignore-scripts --registry=https://registry.npmjs.org/ >&2
 mkdir -p node_modules && tar -cf - node_modules`
 
 const buildScript = `set -eu
@@ -303,7 +330,7 @@ npm run "$s" >&2
 tar -cf - -- "$@"`
 
 func installArgs(cfg Config, name, image string) []string {
-	return append(common(cfg, name, "bridge"), image, "-c", installScript)
+	return append(common(cfg, name, "none"), image, "-c", installScript)
 }
 
 func buildArgs(cfg Config, name, image, script string, dirs []string) []string {

@@ -256,12 +256,19 @@ with sha512 integrity. The first of the scripts `build`, `package`,
 actions/setup-go 7.1.0, `npm run build` reproduces all four files.
 
 The build runs the action's own code, so the job has no permissions, no
-secrets and no OIDC token, and runs two containers under gVisor. Both are
+secrets and no OIDC token, and runs two containers under gVisor, neither
+with a network. Both are
 the official Node image pinned in `sandbox/rebuild/Dockerfile`, with no
 capabilities, a read-only root and an unprivileged user.
 
-1. **Install.** Only `package.json` and `package-lock.json` go in, and
-   `npm ci --ignore-scripts` runs against the public registry.
+1. **Install.** The gate downloads every tarball the lockfile pins from
+   `registry.npmjs.org` and checks its sha512. Only those,
+   `package.json` and `package-lock.json` go in, and `npm ci --offline
+   --ignore-scripts` runs with no network. Every dependency spec, in
+   `package.json` and in the lockfile, must be a registry version (no
+   git, URL, `file:` or `link:`, no `overrides`). npm installs a
+   `package.json` spec over the lockfile's, so without this a spec could
+   fetch, or run, code the lockfile does not pin.
 2. **Build.** The tree goes in without its bundle directories, plus the
    installed `node_modules`, and the script runs with no network. The
    input is written by the gate from the git tree, so no `.gitattributes`
