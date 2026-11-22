@@ -308,7 +308,9 @@ jobs:
     needs: [build, classify, fetch]
     if: needs.fetch.outputs.review == 'true'
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    # A review too large for one run is split into up to six reading
+    # passes and a final pass (internal/passes), each with --timeout.
+    timeout-minutes: 160
     outputs:
       verdict_sums: ${{ steps.sums.outputs.sums }}
     permissions:

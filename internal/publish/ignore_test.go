@@ -69,7 +69,7 @@ func TestSweepIgnoredEcosystem(t *testing.T) {
 			}
 			cfg, n, ck := setup(t, f)
 			cfg.IgnoreEcosystems = tt.ignore
-			f.commitDate = ck.Now().Add(-3 * time.Hour)
+			f.commitDate = ck.Now().Add(-5 * time.Hour)
 			var logs []string
 			cfg.Logf = func(format string, args ...any) {
 				t.Logf(format, args...)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sadbox/dep-review/internal/evidence"
+	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/passes"
 	"github.com/sadbox/dep-review/internal/proxy"
 	"github.com/sadbox/dep-review/internal/sandbox"
 )
@@ -101,6 +105,16 @@ func runReview(args []string) error {
 	if c.Command == nil && *out == "" {
 		return errors.New("review: --out is required")
 	}
+	if c.Command == nil {
+		// A review too large for one run is split (internal/passes).
+		ev, err := readEvidence(*evidence)
+		if err != nil {
+			return fmt.Errorf("review: %w", err)
+		}
+		if plan := passes.Plan(ev); len(plan) > 1 {
+			return runPasses(c, plan, *out)
+		}
+	}
 	res, err := sandbox.Run(context.Background(), c)
 	if err != nil {
 		return fmt.Errorf("review: %w", err)
@@ -122,5 +136,78 @@ func runReview(args []string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "review: verdict written")
+	return nil
+}
+
+// readEvidence reads the evidence directory's evidence.json.
+func readEvidence(dir string) (model.Evidence, error) {
+	var ev model.Evidence
+	b, err := os.ReadFile(filepath.Join(dir, evidence.EvidenceJSON))
+	if err != nil {
+		return ev, err
+	}
+	return ev, json.Unmarshal(b, &ev)
+}
+
+// runPasses runs a split review: each reading pass, then the final pass
+// with their reports, each a full sandboxed run with its own prompt (the
+// base prompt and its scope), and writes the merged verdict. Any pass
+// without a verdict leaves no verdict at all.
+func runPasses(base sandbox.Config, plan []passes.Pass, out string) error {
+	prompt, err := os.ReadFile(base.PromptFile)
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "dep-review-passes-")
+	if err != nil {
+		return err
+	}
+	// The directory is the gate's own, made just above.
+	defer os.RemoveAll(dir)
+	var vs []model.Verdict
+	var reports []passes.Report
+	for _, p := range plan {
+		c := base
+		var rnd [4]byte
+		rand.Read(rnd[:])
+		c.Name = base.Name + "-" + hex.EncodeToString(rnd[:])
+		c.PromptFile = filepath.Join(dir, fmt.Sprintf("prompt-%d.md", p.N))
+		if err := os.WriteFile(c.PromptFile, append(append([]byte(nil), prompt...), passes.Scope(p, reports)...), 0o644); err != nil {
+			return err
+		}
+		what := fmt.Sprintf("pass %d of %d", p.N, p.Of)
+		if p.Final {
+			what = "the final pass"
+		}
+		fmt.Fprintf(os.Stderr, "review: %s (%d bytes of reading)\n", what, p.Bytes)
+		res, err := sandbox.Run(context.Background(), c)
+		if err != nil {
+			return fmt.Errorf("review: %s: %w", what, err)
+		}
+		if !res.VerdictOK {
+			return fmt.Errorf("review: %s: no verdict: %w", what, res.VerdictE)
+		}
+		var v model.Verdict
+		if err := json.Unmarshal(res.Verdict, &v); err != nil {
+			return fmt.Errorf("review: %s: %w", what, err)
+		}
+		vs = append(vs, v)
+		reports = append(reports, passes.Report{N: p.N, Verdict: v.Verdict, Flags: v.Flags, Summary: v.Summary})
+	}
+	merged, err := passes.Merge(plan, vs)
+	if err != nil {
+		return fmt.Errorf("review: %w", err)
+	}
+	b, err := json.Marshal(merged)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(out, b, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "review: merged verdict of %d passes written\n", len(plan))
 	return nil
 }
