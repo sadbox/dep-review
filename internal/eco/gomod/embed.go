@@ -124,7 +124,7 @@ func (r *report) embeds(old, cur *ecoutil.Tree, ob, nb *builtSet) embedResult {
 	item := func(d string) string { return safeFile(d) }
 	if nb.unresolved() || ob.unresolved() {
 		for _, d := range dirs {
-			r.add(codeEmbed, item(d), false, "not resolved: the gate's go/build budget for the module was spent; a person decides\n")
+			r.add(codeEmbed, item(d), false, "not resolved: the gate could not analyze the module's build; a person decides\n")
 			res.unresolved = append(res.unresolved, unresolvedEmbed{".", "the //go:embed comments of package " + item(d), true})
 		}
 		return res
@@ -146,19 +146,15 @@ func (r *report) embeds(old, cur *ecoutil.Tree, ob, nb *builtSet) embedResult {
 		r.add(codeEmbed, item(d), false, quote("not resolved: "+safeFile(f)+" has a //go:embed comment and only a -tags build builds it (go list resolves default builds only), and its directory changed; a person decides", excerptEmbed(cur.ReadFile(f))))
 		res.unresolved = append(res.unresolved, unresolvedEmbed{d, "the //go:embed comments of " + safeFile(f), true})
 	}
-	now := r.lister.listEmbeds(cur, nb, dirs)
-	before := r.lister.listEmbeds(old, ob, packageDirs(embedFiles(old)))
-	r.listRuns += now.runs + before.runs
-	r.listTook += now.took + before.took
 	for _, d := range dirs {
 		// A name the tree does not list: the file system go list ran on
 		// folded or normalized it (macOS, Windows).
-		for _, e := range now.embedded(d) {
-			if !cur.Has(e) && now.failed[d] == "" {
-				now.failed[d] = "go list names " + safeFile(e) + ", which the module's file list does not hold (a case-folding or normalizing file system)"
+		for _, e := range nb.embedded(d) {
+			if !cur.Has(e) && nb.embedFailed[d] == "" {
+				nb.embedFailed[d] = "go list names " + safeFile(e) + ", which the module's file list does not hold (a case-folding or normalizing file system)"
 			}
 		}
-		if why := now.failed[d]; why != "" {
+		if why := nb.embedFailed[d]; why != "" {
 			r.add(codeEmbed, item(d), false, quote("not resolved (go list gave no answer for the package); a person decides", why))
 			res.unresolved = append(res.unresolved, unresolvedEmbed{d, "the //go:embed comments of package " + item(d), true})
 			continue
@@ -166,13 +162,13 @@ func (r *report) embeds(old, cur *ecoutil.Tree, ob, nb *builtSet) embedResult {
 		// Old embeds are credited only from go list's answer for the old
 		// package, configuration by configuration.
 		var was map[string][]bool
-		if before.failed[d] == "" {
-			was = before.files[d]
+		if ob != nil && ob.embedFailed[d] == "" {
+			was = ob.embedFiles[d]
 		}
 		credit := creditable(old, cur, ob, nb, d)
-		for _, e := range now.embedded(d) {
+		for _, e := range nb.embedded(d) {
 			res.embedded[e] = true
-			if !newIn(now.files[d][e], creditedIn(was[e], credit)) {
+			if !newIn(nb.embedFiles[d][e], creditedIn(was[e], credit)) {
 				continue
 			}
 			label := "package " + item(d) + " (go list EmbedFiles)"

@@ -478,11 +478,21 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	}
 	h.lister = lister
 	// Which files each configuration builds, by go/build (build.go).
-	ob, nb := analyzeBuild(old, true), analyzeBuild(cur, false)
+	ob, nb := analyzeBuild(old, true, lister), analyzeBuild(cur, false, lister)
+	for _, b := range []*builtSet{ob, nb} {
+		if b != nil {
+			h.listRuns += b.listRuns
+			h.listTook += b.listTook
+		}
+	}
 	if ob.unresolved() || nb.unresolved() {
 		// Nothing about the build is known: every file is checked as new
 		// (newlyBuilt), and a person decides.
-		h.add(codeParse, "(go/build budget)", false, "the gate's go/build work or time budget for the module was spent; every Go file is checked as new and a person decides\n")
+		why := nb.overWhy
+		if ob.unresolved() {
+			why = ob.overWhy
+		}
+		h.add(codeParse, "(go/build budget)", false, quote("the gate could not analyze the module's build; every Go file is checked as new and a person decides", why))
 	}
 	isGo := func(rel string) bool { return path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") }
 	shadow := map[string]*pkgScope{} // package directory -> scope

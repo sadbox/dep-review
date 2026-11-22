@@ -15,44 +15,45 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 )
 
-// What a package embeds is go list's answer (EmbedFiles), never the
-// gate's (README "Design rules"). go list runs over a copy of the tree
-// holding only the files the gate lists, with a go.mod the gate writes
-// (module gate.invalid/m, the gate toolchain's go version, no
-// requirements, no go.sum): embed resolution depends only on the package
-// directory's files, and the module's own go.mod could name a newer
-// toolchain or a replace directory outside the tree. Dependencies are
-// missing (GOPROXY=off); go list -e still resolves every package's embeds.
+// What a package embeds, and which of its files a configuration builds,
+// is go list's answer (README "Design rules"). go list runs over a copy
+// of the tree holding only the files the gate lists, with a go.mod the
+// gate writes (module gate.invalid/m, the gate toolchain's go version, no
+// requirements): embed resolution and file selection depend only on the
+// package directory's files, and the module's own go.mod could name a
+// newer toolchain or a replace directory outside the tree. Dependencies
+// are missing (GOPROXY=off); go list -e still answers for every package.
 //
 // Plain go list (no -compiled, -export or -test) runs neither cgo nor any
 // module code, also with CGO_ENABLED=1 (TestGoListRunsNoCompiler).
 //
-// Configurations: the union over every dist-list configuration, cgo on
-// and off. EmbedPatterns come from the files a configuration builds, and
-// go list resolves them against the directory alone, so configurations
-// in which go/build (analyzeBuild) builds the same files in the listed
-// directories get the same EmbedFiles: go list runs once per such group.
-// One go list per configuration would also do (x/net v0.61.0 and v0.63.0:
-// 188 runs, 5.1 s on an M-series Mac, TestMeasure), but grouping is 2
-// runs there and keeps the many small CheckTrees tests fast. Rewriting
-// files so that one go list covers every configuration was not chosen: it
-// means deciding which lines are build constraints, a hand port.
+// go list runs in every dist-list configuration, cgo on and off, over
+// every package directory with a //go:embed comment, several at a time
+// (x/net v0.61.0 and v0.63.0: 188 runs, about 5 s sequential, TestMeasure).
+// Each configuration uses its own tool tags (GOARCH feature levels,
+// default GOEXPERIMENTs), read from the toolchain (toolTags); go/build,
+// used for the other packages and the -tags search, is given the same.
 
 const (
 	// listTimeout bounds one go list run.
 	listTimeout = 2 * time.Minute
-	// listBudget bounds all go list runs over one tree; what is left
-	// unlisted is unresolved, for a person.
+	// listBudget bounds all go list runs over one tree; past it the tree
+	// is unresolved, for a person.
 	listBudget = 5 * time.Minute
 )
 
-// goLister runs go list. goBin "" means there is no go command: every
-// embed is unresolved.
+// listParallel is how many go list runs go at once, each in its own
+// memory-limited child.
+var listParallel = min(8, max(1, runtime.NumCPU()))
+
+// goLister runs go list. goBin "" means there is no go command: nothing
+// is resolved.
 type goLister struct {
 	goBin string
 }
@@ -66,48 +67,122 @@ func defaultLister() goLister {
 	return goLister{goBin: bin}
 }
 
-// listed is go list's answer for one tree, per configuration.
-type listed struct {
-	files  map[string]map[string][]bool // package dir -> embedded file (tree-relative) -> configs that embed it
-	failed map[string]string            // package dir -> why go list gave no answer in some configuration
-	runs   int
-	took   time.Duration
+// toolTags are, per GOOS/GOARCH, the tool tags the toolchain sets
+// (go list -f '{{context.ToolTags}}'), read once per go command.
+func (l goLister) toolTags() (map[string][]string, error) {
+	toolTagsMu.Lock()
+	defer toolTagsMu.Unlock()
+	if tt, ok := toolTagsCache[l.goBin]; ok {
+		return tt, nil
+	}
+	if l.goBin == "" {
+		return nil, errors.New("the gate has no go command")
+	}
+	root, err := os.MkdirTemp("", "gate-tooltags-")
+	if err != nil {
+		return nil, err
+	}
+	// The directory is the gate's own, made just above.
+	defer os.RemoveAll(root)
+	mod := filepath.Join(root, "mod")
+	if err := os.MkdirAll(mod, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(mod, "go.mod"), []byte("module gate.invalid/m\n\ngo "+goLine()+"\n"), 0o644); err != nil {
+		return nil, err
+	}
+	targets := map[string]bool{}
+	for _, c := range configs {
+		targets[c.goos+"/"+c.goarch] = true
+	}
+	tt := map[string][]string{}
+	var mu sync.Mutex
+	var firstErr error
+	run := func(target string) {
+		goos, goarch, _ := strings.Cut(target, "/")
+		out, err := ecoutil.RunGo(ecoutil.GoRun{Go: l.goBin, Dir: mod, Timeout: listTimeout,
+			Args: []string{"list", "-e", "-f", "{{context.ToolTags}}", "unsafe"},
+			Env:  append(listEnv(root), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")})
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("go list for the %s tool tags: %w", target, err)
+			}
+			return
+		}
+		s := strings.TrimSpace(string(out))
+		if !strings.HasPrefix(s, "[") || !strings.HasSuffix(s, "]") {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("go list for the %s tool tags printed %q", target, clipped(s))
+			}
+			return
+		}
+		tt[target] = strings.Fields(strings.Trim(s, "[]"))
+	}
+	parallel(slices.Sorted(maps.Keys(targets)), run)
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	toolTagsCache[l.goBin] = tt
+	return tt, nil
 }
 
-// embedded is the sorted list of files dir embeds in some configuration.
-func (l listed) embedded(dir string) []string {
-	return slices.Sorted(maps.Keys(l.files[dir]))
+var (
+	toolTagsMu    sync.Mutex
+	toolTagsCache = map[string]map[string][]string{}
+)
+
+func clipped(s string) string {
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
+}
+
+// parallel runs f over items, listParallel at a time.
+func parallel[T any](items []T, f func(T)) {
+	sem := make(chan struct{}, listParallel)
+	var wg sync.WaitGroup
+	for _, it := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			f(it)
+		}()
+	}
+	wg.Wait()
 }
 
 type listPkg struct {
-	Dir           string
-	EmbedPatterns []string
-	EmbedFiles    []string
-	Error         *struct{ Err string }
+	Dir                                               string
+	GoFiles, CgoFiles, InvalidGoFiles, IgnoredGoFiles []string
+	EmbedPatterns, EmbedFiles                         []string
+	Error                                             *struct{ Err string }
 }
 
-// listEmbeds resolves the embeds of dirs in t.
-func (l goLister) listEmbeds(t *ecoutil.Tree, b *builtSet, dirs []string) (res listed) {
-	res = listed{files: map[string]map[string][]bool{}, failed: map[string]string{}}
-	if len(dirs) == 0 {
-		return res
-	}
-	failAll := func(why string) listed {
-		for _, d := range dirs {
-			if res.failed[d] == "" {
-				res.failed[d] = why
-			}
+// listDirs runs go list in every configuration over dirs of t and records
+// in b, for those directories, what it builds (replacing go/build's
+// answer) and embeds, and where it gave no answer.
+func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool, goFiles map[string][]string) {
+	fail := func(d, why string) {
+		if b.embedFailed[d] == "" {
+			b.embedFailed[d] = why
 		}
-		return res
 	}
-	if l.goBin == "" {
-		return failAll("the gate has no go command")
+	failAll := func(why string) {
+		for _, d := range dirs {
+			fail(d, why)
+		}
 	}
 	start := time.Now()
-	defer func() { res.took = time.Since(start) }()
+	defer func() { b.listTook = time.Since(start) }()
 	root, err := os.MkdirTemp("", "gate-golist-")
 	if err != nil {
-		return failAll("the gate could not make a work directory: " + err.Error())
+		failAll("the gate could not make a work directory: " + err.Error())
+		return
 	}
 	// The directory is the gate's own, made just above.
 	defer os.RemoveAll(root)
@@ -116,53 +191,52 @@ func (l goLister) listEmbeds(t *ecoutil.Tree, b *builtSet, dirs []string) (res l
 	}
 	mod := filepath.Join(root, "mod")
 	if err := copyTree(t, mod); err != nil {
-		return failAll("the gate could not copy the tree: " + err.Error())
+		failAll("the gate could not copy the tree: " + err.Error())
+		return
 	}
 	env := listEnv(root)
-	groups := map[string][]int{} // signature -> configs
-	var order []string
-	for i := range configs {
-		var sig strings.Builder
-		for _, d := range dirs {
-			sig.WriteString(d + "\x00")
-			for _, f := range t.Files {
-				if path.Dir(f) == d && b.in[f] != nil && b.in[f][i] {
-					sig.WriteString(f + "\x01")
-				}
-			}
-		}
-		if _, ok := groups[sig.String()]; !ok {
-			order = append(order, sig.String())
-		}
-		groups[sig.String()] = append(groups[sig.String()], i)
+	args := []string{"list", "-e", "-json=Dir,GoFiles,CgoFiles,InvalidGoFiles,IgnoredGoFiles,EmbedPatterns,EmbedFiles,Error"}
+	for _, d := range dirs {
+		args = append(args, "./"+d)
 	}
-	for _, sig := range order {
-		c := configs[groups[sig][0]]
-		args := dirsBuiltIn(t, b, dirs, groups[sig][0])
-		if len(args) == 0 {
-			continue
-		}
+	type result struct {
+		out []byte
+		err error
+	}
+	results := make([]result, len(configs))
+	idx := make([]int, len(configs))
+	for i := range idx {
+		idx[i] = i
+	}
+	parallel(idx, func(i int) {
 		if time.Since(start) > listBudget {
-			for _, a := range args {
-				if d := path.Clean(strings.TrimPrefix(a, "./")); res.failed[d] == "" {
-					res.failed[d] = "the gate's time budget for go list over this tree is spent"
-				}
-			}
-			continue
+			results[i] = result{err: errors.New("the gate's time budget for go list over this tree is spent")}
+			return
 		}
+		c := configs[i]
 		cgo := "0"
 		if c.cgo {
 			cgo = "1"
 		}
-		out, err := ecoutil.RunGo(ecoutil.GoRun{
-			Go: l.goBin, Dir: mod, Timeout: listTimeout,
-			Args: append([]string{"list", "-e", "-json=Dir,EmbedPatterns,EmbedFiles,Error"}, args...),
-			Env:  append(slices.Clone(env), "GOOS="+c.goos, "GOARCH="+c.goarch, "CGO_ENABLED="+cgo),
-		})
-		res.runs++
+		out, err := ecoutil.RunGo(ecoutil.GoRun{Go: l.goBin, Dir: mod, Timeout: listTimeout, Args: args,
+			Env: append(slices.Clone(env), "GOOS="+c.goos, "GOARCH="+c.goarch, "CGO_ENABLED="+cgo)})
+		results[i] = result{out, err}
+	})
+	b.listRuns += len(configs)
+	// overApprox is go list's missing answer for d in configuration i:
+	// every file built in the new tree, none in the old.
+	overApprox := func(d string, i int) {
+		for _, f := range goFiles[d] {
+			b.in[f][i] = !old
+		}
+	}
+	for i, res := range results {
+		c := configs[i]
+		where := fmt.Sprintf("%s/%s, cgo %v", c.goos, c.goarch, c.cgo)
 		answered := map[string]bool{}
+		err := res.err
 		if err == nil {
-			dec := json.NewDecoder(bytes.NewReader(out))
+			dec := json.NewDecoder(bytes.NewReader(res.out))
 			for {
 				var p listPkg
 				if err = dec.Decode(&p); err != nil {
@@ -176,38 +250,112 @@ func (l goLister) listEmbeds(t *ecoutil.Tree, b *builtSet, dirs []string) (res l
 					continue
 				}
 				d := filepath.ToSlash(rel)
-				answered[d] = true
-				if p.Error != nil {
-					if res.failed[d] == "" {
-						res.failed[d] = fmt.Sprintf("go list (%s/%s, cgo %s): %s", c.goos, c.goarch, cgo, p.Error.Err)
-					}
+				if _, ok := goFiles[d]; !ok {
 					continue
 				}
-				if res.files[d] == nil {
-					res.files[d] = map[string][]bool{}
-				}
-				for _, e := range p.EmbedFiles {
-					f := path.Join(d, e)
-					if res.files[d][f] == nil {
-						res.files[d][f] = make([]bool, len(configs))
-					}
-					for _, i := range groups[sig] {
-						res.files[d][f][i] = true
-					}
-				}
+				answered[d] = true
+				l.record(b, d, i, where, p, old, goFiles[d], fail, overApprox)
 			}
 		}
-		for _, a := range args {
-			d := path.Clean(strings.TrimPrefix(a, "./"))
+		for _, d := range dirs {
 			switch {
-			case err != nil && res.failed[d] == "":
-				res.failed[d] = fmt.Sprintf("go list (%s/%s, cgo %s) failed: %v", c.goos, c.goarch, cgo, err)
-			case err == nil && !answered[d] && res.failed[d] == "":
-				res.failed[d] = "go list gave no answer for the package"
+			case err != nil:
+				fail(d, fmt.Sprintf("go list (%s) failed: %v", where, err))
+				overApprox(d, i)
+			case !answered[d]:
+				fail(d, "go list ("+where+") gave no answer for the package")
+				overApprox(d, i)
 			}
 		}
 	}
-	return res
+}
+
+// record takes go list's answer p for directory d in configuration i.
+func (l goLister) record(b *builtSet, d string, i int, where string, p listPkg, old bool, files []string, fail func(string, string), overApprox func(string, int)) {
+	base := func(names ...[]string) map[string]bool {
+		m := map[string]bool{}
+		for _, ns := range names {
+			for _, n := range ns {
+				m[path.Join(d, n)] = true
+			}
+		}
+		return m
+	}
+	if p.Error != nil {
+		// Every file excluded (go list's IgnoredGoFiles): nothing built,
+		// nothing embedded. Any other error: no answer.
+		ignored := base(p.IgnoredGoFiles)
+		if len(p.GoFiles)+len(p.CgoFiles)+len(p.InvalidGoFiles) == 0 && !slices.ContainsFunc(files, func(f string) bool { return !ignored[f] }) {
+			for _, f := range files {
+				b.in[f][i] = false
+			}
+			return
+		}
+		fail(d, fmt.Sprintf("go list (%s): %s", where, p.Error.Err))
+		overApprox(d, i)
+		return
+	}
+	built := base(p.GoFiles, p.CgoFiles)
+	if !old {
+		maps.Copy(built, base(p.InvalidGoFiles))
+	}
+	for _, f := range files {
+		b.in[f][i] = built[f]
+		if built[f] && hasEmbedComment(f, b.tf.read(f)) {
+			if b.embedders[d] == nil {
+				b.embedders[d] = map[string][]bool{}
+			}
+			if b.embedders[d][f] == nil {
+				b.embedders[d][f] = make([]bool, len(configs))
+			}
+			b.embedders[d][f][i] = true
+		}
+	}
+	for _, pat := range p.EmbedPatterns {
+		if why := patternUnmodelled(pat); why != "" {
+			fail(d, fmt.Sprintf("//go:embed pattern %q %s", pat, why))
+		}
+	}
+	if b.embedFiles[d] == nil {
+		b.embedFiles[d] = map[string][]bool{}
+	}
+	for _, e := range p.EmbedFiles {
+		f := path.Join(d, e)
+		if b.embedFiles[d][f] == nil {
+			b.embedFiles[d][f] = make([]bool, len(configs))
+		}
+		b.embedFiles[d][f][i] = true
+	}
+}
+
+// patternUnmodelled says why go list's answer for an embed pattern may
+// not be a consumer's: a backslash (an escape to the Linux go list the
+// gate runs, a path separator on Windows), or a byte module zips do not
+// allow in a file path (golang.org/x/mod's CheckFilePath: ASCII letters,
+// digits and !#$%&()+,-.=@[]^_{}~ and space, "/" between elements) other
+// than the glob characters *?[]-^. "" when it may.
+func patternUnmodelled(pat string) string {
+	p := strings.TrimPrefix(pat, "all:")
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		switch {
+		case c == '\\':
+			return "has a backslash: an escape on Linux, a path separator on Windows; a person decides"
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case strings.IndexByte("!#$%&()+,-.=@[]^_{}~ /*?", c) >= 0:
+		default:
+			return fmt.Sprintf("has the byte 0x%02x, which a module file path cannot hold; a person decides", c)
+		}
+	}
+	return ""
+}
+
+// embedded is the sorted list of files dir embeds in some configuration.
+func (b *builtSet) embedded(dir string) []string {
+	if b == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(b.embedFiles[dir]))
 }
 
 // listEnv is go list's complete environment (beyond GOOS, GOARCH and
@@ -220,21 +368,6 @@ func listEnv(root string) []string {
 		"GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "GONOSUMDB=", "GOPRIVATE=",
 		"GOFLAGS=-mod=mod -buildvcs=false", "GOWORK=off", "GOENV=off", "GOTELEMETRY=off",
 	}
-}
-
-// dirsBuiltIn are the go list arguments for configuration i: the dirs in
-// which go/build builds some file in it.
-func dirsBuiltIn(t *ecoutil.Tree, b *builtSet, dirs []string, i int) []string {
-	var args []string
-	for _, d := range dirs {
-		for _, f := range t.Files {
-			if path.Dir(f) == d && b.in[f] != nil && b.in[f][i] {
-				args = append(args, "./"+d)
-				break
-			}
-		}
-	}
-	return args
 }
 
 // copyTree writes t's listed files under dst, replacing the root go.mod

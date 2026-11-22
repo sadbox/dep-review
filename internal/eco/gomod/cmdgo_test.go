@@ -120,7 +120,7 @@ func TestBuiltMatchesGoList(t *testing.T) {
 			p := goList(t, files)
 			want := slices.Contains(p.GoFiles, "p.go")
 			for _, old := range []bool{false, true} {
-				b := analyzeBuild(writeTree(t, files), old)
+				b := analyzeBuild(writeTree(t, files), old, defaultLister())
 				if got := b.in["p.go"][i]; got != want {
 					t.Errorf("old=%v: gate built=%v, go list %v (GoFiles %q, Ignored %q)", old, got, want, p.GoFiles, p.IgnoredGoFiles)
 				}
@@ -139,10 +139,10 @@ func TestMismatchedPackageOverApproximated(t *testing.T) {
 		t.Fatalf("precondition: go list reports no error: %+v", p)
 	}
 	tree := writeTree(t, files)
-	if nb := analyzeBuild(tree, false); !nb.everywhere("p.go") || !nb.everywhere("q.go") {
+	if nb := analyzeBuild(tree, false, defaultLister()); !nb.everywhere("p.go") || !nb.everywhere("q.go") {
 		t.Errorf("new tree: not built everywhere")
 	}
-	if ob := analyzeBuild(tree, true); ob.anywhere("p.go") || ob.anywhere("q.go") {
+	if ob := analyzeBuild(tree, true, defaultLister()); ob.anywhere("p.go") || ob.anywhere("q.go") {
 		t.Errorf("old tree: credited as built")
 	}
 }
@@ -192,7 +192,7 @@ func TestDefaultTagsNotNoise(t *testing.T) {
 	if got := h.items(codeInitCallee); len(got) != 0 {
 		t.Errorf("unchanged callees in a release-tag file flagged: %q", got)
 	}
-	if b := analyzeBuild(cur, false); !b.anywhere("w.go") {
+	if b := analyzeBuild(cur, false, defaultLister()); !b.anywhere("w.go") {
 		t.Errorf("w.go built nowhere")
 	}
 }
@@ -203,7 +203,7 @@ func gateNewlyEmbedded(t *testing.T, old, cur *ecoutil.Tree) ([]string, bool) {
 	t.Helper()
 	r := newReport()
 	r.lister = defaultLister()
-	res := r.embeds(old, cur, analyzeBuild(old, true), analyzeBuild(cur, false))
+	res := r.embeds(old, cur, analyzeBuild(old, true, defaultLister()), analyzeBuild(cur, false, defaultLister()))
 	got := slices.Collect(maps.Keys(res.newly))
 	got = append(got, slices.Collect(maps.Keys(r.files))...)
 	slices.Sort(got)
@@ -316,7 +316,7 @@ func TestPossiblyBuiltMatchesGoList(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			files := map[string]string{"p.go": tc.src, "q.go": "package p\n"}
 			tree := writeTree(t, files)
-			nb := analyzeBuild(tree, false)
+			nb := analyzeBuild(tree, false, defaultLister())
 			if nb.anywhere("p.go") {
 				t.Fatalf("built with default tags")
 			}
@@ -394,8 +394,8 @@ func TestUserTagWidensBuild(t *testing.T) {
 		t.Errorf("linux -> linux || purego credited the old init: codes %q", h.codes())
 	}
 	// Platform tags alone keep the per-configuration rule.
-	h = CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build linux && go1.21\n\n" + body}),
-		writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build go1.21 && linux\n\n" + body}))
+	h = CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build linux && amd64\n\n" + body}),
+		writeTree(t, map[string]string{"q.go": "package p\n", "e.go": "//go:build amd64 && linux\n\n" + body}))
 	if slices.Contains(h.items(codeInit), "e.go") {
 		t.Errorf("a reordered platform-only constraint is not credited: codes %q", h.codes())
 	}
@@ -404,12 +404,13 @@ func TestUserTagWidensBuild(t *testing.T) {
 // TestPlatformTagsFromGoBuild: GOOS and GOARCH values are go/build's own,
 // also ones without a dist port; user tags are not.
 func TestPlatformTagsFromGoBuild(t *testing.T) {
-	for _, tag := range []string{"linux", "amd64", "zos", "hurd", "nacl", "riscv", "go1.21", "unix", "gc"} {
+	for _, tag := range []string{"linux", "amd64", "zos", "hurd", "nacl", "riscv", "unix", "cgo", "gc"} {
 		if !platformTag(tag) {
 			t.Errorf("%s is not a platform tag", tag)
 		}
 	}
-	for _, tag := range []string{"purego", "ignore", "netgo", "http2legacy", "goexperiment.rangefunc", "amd64.v3", "go1", "go1.x"} {
+	// Round 15: go1.N and gccgo vary between consumers too.
+	for _, tag := range []string{"purego", "ignore", "netgo", "http2legacy", "goexperiment.rangefunc", "amd64.v3", "amd64.v1", "go1", "go1.x", "go1.21", "go1.28", "gccgo", "linux_amd64"} {
 		if platformTag(tag) {
 			t.Errorf("%s is a platform tag", tag)
 		}
@@ -452,7 +453,7 @@ func TestBuildBudget(t *testing.T) {
 	prevTag := maxTagWork
 	maxTagWork = 1
 	t.Cleanup(func() { maxTagWork = prevTag })
-	b := analyzeBuild(writeTree(t, map[string]string{"p.go": "//go:build linux && windows && foo\n\npackage p\n", "q.go": "package p\n"}), false)
+	b := analyzeBuild(writeTree(t, map[string]string{"p.go": "//go:build linux && windows && foo\n\npackage p\n", "q.go": "package p\n"}), false, defaultLister())
 	if !b.possibly("p.go") || b.unresolved() {
 		t.Errorf("past the tag-search budget: possibly %v, unresolved %v", b.possibly("p.go"), b.unresolved())
 	}
@@ -597,7 +598,7 @@ func TestUnchangedEmbedderCredited(t *testing.T) {
 // only.
 func TestEmbedPatternPosPerConfiguration(t *testing.T) {
 	tree := writeTree(t, map[string]string{"e_windows.go": "package p\n\nimport _ \"embed\"\n\n//go:embed a.txt\nvar A string\n", "q.go": "package p\n", "a.txt": "a\n"})
-	b := analyzeBuild(tree, false)
+	b := analyzeBuild(tree, false, defaultLister())
 	in := b.embedders["."]["e_windows.go"]
 	for i, c := range configs {
 		if in[i] != (c.goos == "windows") {

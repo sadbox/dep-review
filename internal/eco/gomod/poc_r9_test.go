@@ -1,6 +1,7 @@
 package gomod
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -90,8 +91,11 @@ func TestR9TbdUnchanged(t *testing.T) {
 // binary's. conﬁg/p.go (//go:embed testdata/*.bin) merges into config/
 // on APFS; config/testdata/payload.bin is ASCII, so the !ascii(rel) rule
 // never fires and embeds are keyed by fold("conﬁg") != "config".
-// Linux only (macOS merges the dirs in writeTree).
+// Linux only: macOS may or may not merge the dirs in writeTree.
 func TestR9LigatureEmbedderDir(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("the result depends on how the macOS file system folds the ligature; run on Linux")
+	}
 	a := "package config\n\n// Name is the package name.\nconst Name = \"config\"\n"
 	p := "package config\n\nimport (\n\t\"embed\"\n\t\"fmt\"\n)\n\n//go:embed testdata/*.bin\nvar fixtures embed.FS\n\nfunc init() {\n\tb, _ := fixtures.ReadFile(\"testdata/payload.bin\")\n\tfmt.Printf(\"embedded %q\\n\", b)\n}\n"
 	old := writeTree(t, map[string]string{"config/a.go": a, "config/testdata/payload.bin": "\x00old fixture"})

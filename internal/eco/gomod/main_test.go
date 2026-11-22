@@ -23,10 +23,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestListEmbedsIsolated: go list runs through the isolated child (on
-// Linux under the 2 GiB address-space limit) and answers. GATE_MEASURE
-// trees, when set, are listed the same way.
-func TestListEmbedsIsolated(t *testing.T) {
+// TestListIsolated: go list runs through the isolated child (on Linux
+// under the 2 GiB address-space limit) in every configuration and
+// answers. GATE_MEASURE trees, when set, are analyzed the same way.
+func TestListIsolated(t *testing.T) {
 	needGo(t)
 	ecoutil.Isolate(&ecoutil.Isolation{GoCommand: []string{os.Args[0]}, Env: []string{"GOMOD_TEST_GO_CHILD=1"}})
 	t.Cleanup(func() { ecoutil.Isolate(nil) })
@@ -39,15 +39,13 @@ func TestListEmbedsIsolated(t *testing.T) {
 		trees = append(trees, tr)
 	}
 	for i, tr := range trees {
-		b := analyzeBuild(tr, false)
-		dirs := packageDirs(embedFiles(tr))
-		res := defaultLister().listEmbeds(tr, b, dirs)
-		if len(res.failed) != 0 {
-			t.Errorf("tree %d: go list failed through the child: %q", i, res.failed)
+		b := analyzeBuild(tr, false, defaultLister())
+		if b.unresolved() || len(b.embedFailed) != 0 {
+			t.Errorf("tree %d: unresolved %v (%s), failed %q", i, b.unresolved(), b.overWhy, b.embedFailed)
 		}
-		if i == 0 && !slices.Equal(res.embedded("."), []string{"a.txt"}) {
-			t.Errorf("EmbedFiles through the child = %q", res.embedded("."))
+		if i == 0 && !slices.Equal(b.embedded("."), []string{"a.txt"}) {
+			t.Errorf("EmbedFiles through the child = %q", b.embedded("."))
 		}
-		t.Logf("tree %d: %d packages, %d runs, %v", i, len(dirs), res.runs, res.took)
+		t.Logf("tree %d: %d go list runs, %v; analysis %v", i, b.listRuns, b.listTook, b.took)
 	}
 }

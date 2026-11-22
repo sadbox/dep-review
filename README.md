@@ -168,17 +168,20 @@ keep SHA pins.
 
 **Don't re-implement Go toolchain behaviour.** Where Go's own tooling
 (`go/build`, `go list`, `go/parser`, `go/scanner`, `go/build/constraint`)
-gives an authoritative answer, the gate uses it: which files are built is
-`build.Context.ImportDir` over the module tree for every platform of `go
-tool dist list` with cgo on and off; what a package embeds is `go list -e
--json` (`EmbedFiles`), run offline in an isolated child with a clean
-environment. Where the tooling gives no answer, the gate over-approximates
-in the direction that flags more (for the new tree, a directory go/build
-fails on counts as built everywhere; for the old tree, nowhere), and it
-never credits the old side with a hand-ported rule: directives go/build
-does not report (`//go:linkname`, `//go:cgo_*`, `//go:generate`) are
-flagged in every changed or newly built file whether or not they were
-there before.
+gives an authoritative answer, the gate uses it. For every platform of `go
+tool dist list`, cgo on and off, with each target's own tool tags (GOARCH
+feature levels, default GOEXPERIMENTs) read from the toolchain: which
+files are built, and what a package embeds, is `go list -e -json`
+(`GoFiles`, `CgoFiles`, `EmbedFiles`) for every package with a
+`//go:embed` comment, run offline in isolated children with a clean
+environment, and `build.Context.ImportDir` over the module tree for the
+other packages. Where the tooling gives no answer, the gate
+over-approximates in the direction that flags more (for the new tree, a
+directory the tooling fails on counts as built everywhere; for the old
+tree, nowhere), and it never credits the old side with a hand-ported
+rule: directives go/build does not report (`//go:linkname`, `//go:cgo_*`,
+`//go:generate`) are flagged in every changed or newly built file whether
+or not they were there before.
 
 Why: every differential review rounds 8 to 10 (and the later scans) found
 came from cmd/go logic re-implemented in the gate (constraint headers,
@@ -186,22 +189,28 @@ block comments, a BOM, `package documentation`, default release tags,
 embed pattern matching, directive placement). Each port was close, and
 each gap was a way to bring old or unseen text into the build.
 
-Tags a consumer sets with `-tags` (`purego`, `netgo`, even `ignore`) have
-no authoritative answer. A changed file whose constraint consults such a
-tag in either tree (go/build's `AllTags` for the file; GOOS/GOARCH
-values, `go1.N`, `cgo`, `unix`, `gc` and `gccgo` do not count) gets no old
-text credited, and nothing its `//go:embed` patterns match is credited. A
-file no default configuration builds counts as possibly built when
-go/build builds it, alone in its directory, with some set of the tags it
-consults; its embeds go to a person when its directory changes. A
-byte-identical file keeps its credit. Past a work or time budget for
-go/build over a tree, nothing is credited and a person decides.
+What varies between consumers has no authoritative answer: tags set with
+`-tags` (`purego`, `netgo`, even `ignore`), `go1.N` (older and newer
+toolchains), `gccgo`, GOARCH feature levels (`GOAMD64`) and
+`goexperiment.*` (`GOEXPERIMENT`); only GOOS/GOARCH values, `unix`, `cgo`
+and `gc` are fixed by a platform. A changed file whose constraint
+consults a varying tag in either tree (go/build's `AllTags` for the file)
+gets no old text credited, and nothing its `//go:embed` patterns match is
+credited. A file no default configuration builds counts as possibly built
+when go/build builds it, alone in its directory, with some set of the
+tags it consults; its embeds go to a person when its directory changes.
+A byte-identical file keeps its credit only when every configuration that
+builds it now built it before (a sibling's fixed package clause can bring
+it into a build). Past a work or time budget, nothing is credited and a
+person decides.
 
 An old `EmbedFiles` answer is credited only where every file the package
-takes `//go:embed` patterns from (go/build's `EmbedPatternPos`, per
-configuration) is byte-identical and built as before: go list also
-reports patterns the compiler rejects, and this needs no rule about where
-a directive may stand.
+takes `//go:embed` patterns from (the files go list builds there with a
+`//go:embed` comment, per configuration) is byte-identical and built as
+before: go list also reports patterns the compiler rejects, and this needs
+no rule about where a directive may stand. A pattern with a backslash (an
+escape on Linux, a separator on Windows) or a byte a module file path
+cannot hold, other than the glob characters, goes to a person.
 
 Known limit: go/build is compiled into the gate and `go list` is the
 runner's `go` (the fetch summary records both versions).
