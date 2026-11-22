@@ -32,6 +32,13 @@ type Env struct {
 type Writer interface {
 	Add(name, description string, content []byte) error
 	AddUntrusted(name, description string, content []byte) error
+	// AddPart writes third-party text as a part of navigable evidence
+	// (evidence.Dir.AddPart), returning its path ("" if not written) and
+	// the bytes written.
+	AddPart(name string, content []byte) (string, int, error)
+	// AddLarge is AddUntrusted under the part caps (evidence.Dir.AddLarge),
+	// returning the bytes written.
+	AddLarge(name, description string, content []byte) (int, error)
 }
 
 // GitHub is the subset of the REST client the fetchers need.
@@ -55,6 +62,8 @@ type Result struct {
 	// Upstream is, per update, the upstream history attached for the
 	// flagged items (model.Evidence.Upstream).
 	Upstream []model.Upstream
+	// Diffs are the navigable evidence's per-file diffs (model.Evidence.Diffs).
+	Diffs []model.DiffFile
 }
 
 // Ecosystem is one package ecosystem's fetcher.

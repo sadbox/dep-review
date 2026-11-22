@@ -287,10 +287,15 @@ jobs:
       - name: Checksum the artifact
         id: sums
         run: |
+          # One sum per file can pass the 128 KiB a single environment value
+          # may hold (Go modules' per-file diffs), so the sums go into the
+          # artifact as SHA256SUMS and the job outputs that file's own sum.
           cd "$RUNNER_TEMP/evidence"
+          find . -type f -print0 | sort -z | xargs -0 sha256sum >"$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" ./SHA256SUMS
           {
             echo 'sums<<DEP_REVIEW_SUMS'
-            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            sha256sum ./SHA256SUMS
             echo 'DEP_REVIEW_SUMS'
           } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.2
@@ -338,9 +343,11 @@ jobs:
           SUMS: ${{ needs.fetch.outputs.evidence_sums }}
         run: |
           cd "evidence"
+          # The manifest is the one fetch summed, then every file is in it...
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          sha256sum --check --strict --quiet ./SHA256SUMS
           # ...and nothing else is there.
-          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+          diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
       - name: Check out the default branch (for usage search and the review notes)
         uses: actions/checkout@v7.0.1
         with:
@@ -449,9 +456,11 @@ jobs:
           # be no artifact either.
           if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/evidence"; exit; fi
           cd "$RUNNER_TEMP/in/evidence"
+          # The manifest is the one fetch summed, then every file is in it...
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          sha256sum --check --strict --quiet ./SHA256SUMS
           # ...and nothing else is there.
-          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+          diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
       - name: Verify the verdict artifact
         env:
           SUMS: ${{ needs.review.outputs.verdict_sums }}

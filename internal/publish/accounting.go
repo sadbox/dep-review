@@ -115,3 +115,45 @@ func citesListed(cited []string, listed map[string]bool) bool {
 	}
 	return len(listed) == 0 || len(cited) > 0
 }
+
+// examinedAll checks the verdict's examined list against the evidence's
+// diffs: every required one is listed, and nothing the evidence does not
+// have. Optional diffs may be listed or not.
+func examinedAll(diffs []model.DiffFile, examined []string) (ok bool, reason string) {
+	required := 0
+	known := map[string]bool{}
+	for _, d := range diffs {
+		known[d.ID] = true
+		if d.Required {
+			required++
+		}
+	}
+	if required > model.MaxRequiredDiffs {
+		return false, fmt.Sprintf("the evidence has too many required diffs for a review (%d, limit %d)", required, model.MaxRequiredDiffs)
+	}
+	listed := map[string]bool{}
+	unknown := 0
+	for _, id := range examined {
+		if !known[id] {
+			unknown++
+		}
+		listed[id] = true
+	}
+	missing := 0
+	for _, d := range diffs {
+		if d.Required && !listed[d.ID] {
+			missing++
+		}
+	}
+	var why []string
+	if missing > 0 {
+		why = append(why, fmt.Sprintf("did not list %d of %d required diffs as examined", missing, required))
+	}
+	if unknown > 0 {
+		why = append(why, fmt.Sprintf("listed %d %s the evidence does not have", unknown, plural(unknown, "diff", "diffs")))
+	}
+	if len(why) == 0 {
+		return true, ""
+	}
+	return false, "the reviewer answered pass but " + strings.Join(why, "; ")
+}

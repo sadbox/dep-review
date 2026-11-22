@@ -73,7 +73,7 @@ jobs:
           echo 'package main // dep-review-e2e-marker' >"$f/repo/main.go"
           printf '[core]\n\tmarker = dep-review-e2e-marker\n' >"$f/repo/.git/config"
           echo '- Test notes.' >"$f/repo/.github/dep-review.md"
-          echo '{"verdict":"pass","flags":[],"summary":"canned verdict from the fake upstream","items":[]}' >"$f/canned.json"
+          echo '{"verdict":"pass","flags":[],"summary":"canned verdict from the fake upstream","items":[],"examined":[]}' >"$f/canned.json"
           cd "$f"
           "$RUNNER_TEMP/dep-review" review-prep --prompt "$GITHUB_WORKSPACE/prompts/review.md" \
             --schema "$GITHUB_WORKSPACE/schema/verdict.json" --notes repo/.github/dep-review.md --out-dir prep

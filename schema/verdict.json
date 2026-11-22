@@ -1,7 +1,7 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "flags", "summary", "items"],
+  "required": ["verdict", "flags", "summary", "items", "examined"],
   "properties": {
     "verdict": {
       "type": "string",
@@ -36,6 +36,13 @@
       "type": "string",
       "maxLength": 3000,
       "description": "Plain-text reasoning a human can audit: what was diffed, what changed, how the repository uses it, and the decision. No links, no @-mentions, no markdown headings."
+    },
+    "examined": {
+      "type": "array",
+      "maxItems": 5000,
+      "uniqueItems": true,
+      "description": "The ID of every diff you read from the diffs.md index files (every row marked required must be here); [] when there is no diffs.md.",
+      "items": {"type": "string", "pattern": "^D[0-9]{5}$"}
     },
     "items": {
       "type": "array",

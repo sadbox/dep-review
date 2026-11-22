@@ -160,7 +160,12 @@ type report struct {
 	// lenient: the update is a well-known module whose upstream history
 	// was verified (lenient.go); eligible are the binary items leniency
 	// may put on review.
-	lenient  bool
+	lenient bool
+	// unbuilt are the files declared builds do not compile (declaredUnbuilt).
+	unbuilt map[string]bool
+	// nb and cur are the new tree and its build analysis (testOnly).
+	nb       *builtSet
+	cur      *ecoutil.Tree
 	eligible map[[2]string]bool
 }
 
@@ -524,6 +529,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	var bins []string           // flagged binaries; their context is built last
 	var tdBins []string         // testdata binaries, flagged only if reachable
 	unbuilt := declaredUnbuilt(cur, nb)
+	h.unbuilt, h.nb, h.cur = unbuilt, nb, cur
 	for _, rel := range cur.Files {
 		if unbuilt[rel] {
 			// Declared builds (go_platforms) compile none of it.
@@ -653,7 +659,8 @@ func moduleLinks(t *ecoutil.Tree) string {
 				return "cgo (a Go file whose imports the gate cannot read)"
 			}
 			for _, imp := range file.Imports {
-				if imp.Path.Value == `"C"` {
+				// The path as the compiler reads it: "\x43" is "C" too.
+				if p, err := strconv.Unquote(imp.Path.Value); err != nil || p == "C" {
 					return "cgo"
 				}
 			}
@@ -1790,4 +1797,28 @@ func safeImportSpec(spec string) string {
 		return safeIdent(name) + " " + safeImport(p)
 	}
 	return safeImport(spec)
+}
+
+// testOnly reports that rel, a _test.go file, provably reaches no
+// consumer build: the build analysis resolved, go list embeds it in no
+// configuration, its package's embeds resolved, and nothing in the module
+// can make the build read a file by name (moduleLinks: cgo, C, assembly,
+// a .syso).
+func (r *report) testOnly(rel string) bool {
+	nb := r.nb
+	if !strings.HasSuffix(rel, "_test.go") || nb == nil || nb.unresolved() || r.cur == nil {
+		return false
+	}
+	for _, files := range nb.embedFiles {
+		if files[rel] != nil {
+			return false
+		}
+	}
+	for d := range nb.embedFailed {
+		if d == "." || rel == d || strings.HasPrefix(rel, d+"/") {
+			return false
+		}
+	}
+	// moduleLinks parses imports (an unparseable file counts as cgo).
+	return moduleLinks(r.cur) == ""
 }

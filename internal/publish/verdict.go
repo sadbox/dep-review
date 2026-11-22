@@ -64,12 +64,12 @@ func ParseVerdict(raw []byte) (model.Verdict, error) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return v, fmt.Errorf("verdict is not a JSON object: %w", err)
 	}
-	for _, k := range []string{"verdict", "flags", "summary", "items"} {
+	for _, k := range []string{"verdict", "flags", "summary", "items", "examined"} {
 		if _, ok := fields[k]; !ok {
 			return v, fmt.Errorf("verdict lacks %q", k)
 		}
 	}
-	if len(fields) != 4 {
+	if len(fields) != 5 {
 		return v, errors.New("verdict has unexpected fields")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -80,7 +80,7 @@ func ParseVerdict(raw []byte) (model.Verdict, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return v, errors.New("trailing data after verdict")
 	}
-	if fields["flags"][0] != '[' || fields["verdict"][0] != '"' || fields["summary"][0] != '"' || fields["items"][0] != '[' {
+	if fields["flags"][0] != '[' || fields["verdict"][0] != '"' || fields["summary"][0] != '"' || fields["items"][0] != '[' || fields["examined"][0] != '[' {
 		return v, errors.New("verdict fields have the wrong types")
 	}
 	if err := checkItems(fields["items"], v.Items); err != nil {
@@ -106,6 +106,14 @@ func ParseVerdict(raw []byte) (model.Verdict, error) {
 	}
 	if utf8.RuneCountInString(v.Summary) > summaryMax {
 		return v, errors.New("summary is too long")
+	}
+	if len(v.Examined) > model.MaxDiffs {
+		return v, errors.New("examined lists too many diffs")
+	}
+	for i, id := range v.Examined {
+		if !isDiffID(id) || slices.Contains(v.Examined[:i], id) {
+			return v, errors.New("examined is not a list of distinct diff IDs")
+		}
 	}
 	return v, nil
 }
@@ -187,6 +195,19 @@ func isCommitHash(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// isDiffID: "D" and five digits (model.DiffFile.ID).
+func isDiffID(s string) bool {
+	if len(s) != 6 || s[0] != 'D' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}

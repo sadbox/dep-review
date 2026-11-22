@@ -35,6 +35,12 @@ const (
 	// model can read in one review without losing the start.
 	DefaultTotalCap = 4 << 20
 
+	// PartFileCap and ScanCap bound navigable evidence (AddPart): parts the
+	// reviewer opens one at a time through an index, sized for the gate's
+	// deterministic analysis, not for one reading.
+	PartFileCap = 2 << 20
+	ScanCap     = 50 << 20
+
 	GateDir      = "gate"
 	UntrustedDir = "untrusted"
 	EvidenceJSON = "evidence.json"
@@ -48,6 +54,9 @@ type Dir struct {
 
 	mu        sync.Mutex
 	total     int
+	partTotal int
+	partCap   int
+	scanCap   int
 	files     []model.EvidenceFile
 	names     map[string]bool
 	findings  []model.Finding
@@ -60,6 +69,11 @@ type Option func(*Dir)
 
 func WithCaps(fileCap, totalCap int) Option {
 	return func(d *Dir) { d.fileCap, d.totalCap = fileCap, totalCap }
+}
+
+// WithPartCaps adjusts the navigable evidence caps (tests).
+func WithPartCaps(fileCap, scanCap int) Option {
+	return func(d *Dir) { d.partCap, d.scanCap = fileCap, scanCap }
 }
 
 // Create makes dir (which must not exist, or be empty) and opens it.
@@ -78,7 +92,7 @@ func Create(dir string, opts ...Option) (*Dir, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &Dir{root: root, fileCap: DefaultFileCap, totalCap: DefaultTotalCap, names: map[string]bool{}}
+	d := &Dir{root: root, fileCap: DefaultFileCap, totalCap: DefaultTotalCap, partCap: PartFileCap, scanCap: ScanCap, names: map[string]bool{}}
 	for _, o := range opts {
 		o(d)
 	}
@@ -98,7 +112,33 @@ func (d *Dir) AddUntrusted(name, description string, content []byte) error {
 	return d.add(UntrustedDir, name, description, content, true)
 }
 
+// AddPart writes third-party text under untrusted/ as one part of
+// navigable evidence: a file the reviewer reaches through a gate-written
+// index, not one listed in Files. Parts have caps of their own
+// (PartFileCap each, ScanCap together); a cut part is truncation, as for
+// any file. It returns the path written ("" when nothing was) and the
+// bytes written: what the reviewer reads, after Normalize.
+func (d *Dir) AddPart(name string, content []byte) (string, int, error) {
+	return d.addFile(UntrustedDir, name, "", content, true, true, false)
+}
+
+// AddLarge is AddUntrusted under the part caps: a file listed in Files
+// that may be larger than the reviewer reads in one go (a module's
+// flagged items with every file they quote), read in pieces. It returns
+// the bytes written.
+func (d *Dir) AddLarge(name, description string, content []byte) (int, error) {
+	_, n, err := d.addFile(UntrustedDir, name, description, content, true, true, true)
+	return n, err
+}
+
 func (d *Dir) add(top, name, description string, content []byte, untrusted bool) error {
+	_, _, err := d.addFile(top, name, description, content, untrusted, false, true)
+	return err
+}
+
+// addFile writes one file: under the part caps when part, listed in Files
+// when listed.
+func (d *Dir) addFile(top, name, description string, content []byte, untrusted, part, listed bool) (string, int, error) {
 	rel := top + "/" + SanitizeName(name)
 
 	text, ok := Normalize(content)
@@ -110,7 +150,7 @@ func (d *Dir) add(top, name, description string, content []byte, untrusted bool)
 			Route:  model.RouteHuman,
 			Detail: fmt.Sprintf("%s is binary (%d bytes) and was not written; nobody can review it as text", rel, len(content)),
 		})
-		return nil
+		return "", 0, nil
 	}
 	if untrusted && hasBidi(content) {
 		d.findings = append(d.findings, model.Finding{
@@ -123,10 +163,13 @@ func (d *Dir) add(top, name, description string, content []byte, untrusted bool)
 
 	desc := description
 	room := min(d.fileCap, d.totalCap-d.total)
+	if part {
+		room = min(d.partCap, d.scanCap-d.partTotal)
+	}
 	if room <= 0 {
 		d.truncated = true
 		d.omitted = append(d.omitted, rel)
-		return nil
+		return "", 0, nil
 	}
 	if len(text) > room {
 		const format = "\n[dep-review: truncated here; %d of %d bytes shown]\n"
@@ -142,12 +185,19 @@ func (d *Dir) add(top, name, description string, content []byte, untrusted bool)
 		desc += " (TRUNCATED)"
 	}
 	if err := d.write(rel, text); err != nil {
-		return err
+		return "", 0, err
 	}
-	d.total += len(text)
 	d.names[rel] = true
+	if part {
+		d.partTotal += len(text)
+	} else {
+		d.total += len(text)
+	}
+	if !listed {
+		return rel, len(text), nil
+	}
 	d.files = append(d.files, model.EvidenceFile{Path: rel, Description: desc, Untrusted: untrusted, Bytes: int64(len(text))})
-	return nil
+	return rel, len(text), nil
 }
 
 func (d *Dir) write(rel string, data []byte) error {

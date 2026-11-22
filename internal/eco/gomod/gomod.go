@@ -120,12 +120,12 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		work = work[:MaxModules]
 	}
 	if len(work) > 0 {
-		fs, flagged, upstream, err := f.verifyAndDiff(ctx, env, home, work, &summary)
+		fs, flagged, upstream, diffs, err := f.verifyAndDiff(ctx, env, home, work, &summary)
 		if err != nil {
 			return fetch.Result{}, err
 		}
 		res.Findings = append(res.Findings, fs...)
-		res.Flagged, res.Upstream = flagged, upstream
+		res.Flagged, res.Upstream, res.Diffs = flagged, upstream, diffs
 	}
 	if err := env.Evidence.Add("gomod-summary.md", "Go module change set, hash verification and checks run by the gate", summary.Bytes()); err != nil {
 		return fetch.Result{}, err
@@ -342,10 +342,13 @@ func majorPrefix(mod string) (string, bool) {
 // verifyAndDiff downloads both sides of each change, checks hashes,
 // writes diffs, runs the checks and writes, per module with flagged
 // items, the focused evidence that lists them.
-func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, []model.Upstream, error) {
+func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, []model.Upstream, []model.DiffFile, error) {
 	var findings []model.Finding
 	var flagged []model.FlaggedItem
 	var upstream []model.Upstream
+	var diffs []model.DiffFile
+	reports := map[string]*report{}       // flaggedUpdate key -> its checks
+	flaggedBytes := 0                     // bytes of the flagged-items files, read in full
 	checked := map[string]bool{}          // flaggedUpdate keys already checked
 	clock := ecoutil.NewClock(renderTime) // one for every module of this fetch
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
@@ -359,7 +362,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 	}
 	got, err := dl.Download(ctx, slices.Compact(slices.Sorted(slices.Values(args))))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	summary.WriteString("## Downloads (proxy.golang.org, checked against sum.golang.org)\n\n")
 	// go/build is compiled into the gate; go list is the runner's go.
@@ -382,7 +385,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			m, ok := got[u.Name+"@"+side.ver]
 			if !ok {
-				return nil, nil, nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
+				return nil, nil, nil, nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
 			}
 			if m.Error != "" {
 				switch errorClass(m.Error) {
@@ -393,7 +396,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 					findings = append(findings, model.Finding{Code: "gomod.download-failed", Route: model.RouteHuman, Update: safeImport(u.Name),
 						Detail: fmt.Sprintf("%s@%s could not be fetched from proxy.golang.org (not found or gone)", safeImport(u.Name), safeVersion(side.ver))})
 				default:
-					return nil, nil, nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
+					return nil, nil, nil, nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
 				}
 				bad = true
 				continue
@@ -413,7 +416,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			t, err := ecoutil.DirTree(m.Dir)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			trees[i], dirs[i] = t, m.Dir
 		}
@@ -422,9 +425,6 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 		}
 		su := safeUpdate(u)
 		key := flaggedUpdate(su)
-		if err := writeDiff(ctx, env, home, u, dirs); err != nil {
-			return nil, nil, nil, err
-		}
 		// The same module change in several directories (a grouped bump)
 		// is the same two trees: checked, flagged and rendered once.
 		if checked[key] {
@@ -432,6 +432,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 		} else {
 			checked[key] = true
 			h := checkTrees(trees[0], trees[1], clock, lister)
+			reports[key] = h
 			if h.listRuns > 0 {
 				fmt.Fprintf(summary, "- %s: go list ran %d times for //go:embed (%s)\n", key, h.listRuns, h.listTook.Round(time.Millisecond))
 			}
@@ -439,9 +440,13 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			flagged = append(flagged, items...)
 			if len(h.hits) > 0 {
 				desc := fmt.Sprintf("every item the gate's checks flagged in %s, with exactly what changed (third-party code quoted under the gate's headings); assess each one", key)
-				if err := env.Evidence.AddUntrusted(evName(u, "flagged.md"), desc, h.render(key)); err != nil {
-					return nil, nil, nil, err
+				// What the reviewer reads is the written text (Normalize
+				// escapes control characters).
+				n, err := env.Evidence.AddLarge(evName(u, "flagged.md"), desc, h.render(key))
+				if err != nil {
+					return nil, nil, nil, nil, err
 				}
+				flaggedBytes += n
 			}
 			if len(items) > 0 {
 				up, md := f.upstream(env, u, key, got, items, trees)
@@ -457,20 +462,26 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 				if md != nil {
 					desc := fmt.Sprintf("upstream commits between the two versions of %s and which flagged items each touched (third-party text); cite the explaining commits per item", key)
 					if err := env.Evidence.AddUntrusted(evName(u, "upstream.md"), desc, md); err != nil {
-						return nil, nil, nil, err
+						return nil, nil, nil, nil, err
 					}
 				}
 			}
 			findings = append(findings, h.findings(su.Name)...)
 		}
+		ds, fs, err := writeDiff(ctx, env, home, u, key, dirs, trees, reports[key], len(diffs))
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		diffs, findings = append(diffs, ds...), append(findings, fs...)
 		if ex := changelogExcerpt(trees[0], trees[1]); ex != nil {
 			if err := env.Evidence.AddUntrusted(evName(u, "changelog.md"), "changelog excerpt for "+safeImport(u.Name)+" "+safeVersion(u.To)+" (from the module, third-party text)", ex); err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 		}
 	}
+	findings = append(findings, readingLimits(diffs, flaggedBytes)...)
 	summary.WriteString("\n")
-	return findings, flagged, upstream, nil
+	return findings, flagged, upstream, diffs, nil
 }
 
 // upstream fetches and attaches one update's upstream history (upstream.go).
@@ -494,7 +505,14 @@ func flaggedUpdate(su model.Update) string {
 	return su.Name + " " + ecoutil.OrNew(su.From) + " -> " + su.To
 }
 
-func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, dirs [2]string) error {
+// writeDiff writes the module's diff as navigable evidence: one part per
+// changed file and a gate-written index of them (diffs.md). A file is
+// required reading unless the go command's own rules say no consumer
+// build reads it: a _test.go file nothing embeds or includes (testOnly),
+// or (with declared builds) a file declaredUnbuilt skips. h is the update's checks (nil: none ran, so
+// every file is required). n numbers the IDs after the fetch's earlier
+// ones.
+func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, key string, dirs [2]string, trees [2]*ecoutil.Tree, h *report, n int) ([]model.DiffFile, []model.Finding, error) {
 	parent := filepath.Dir(dirs[1])
 	rel := func(d string) string {
 		if d == "" {
@@ -507,19 +525,83 @@ func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, 
 	}
 	diffs, cut, err := ecoutil.DiffTrees(ctx, home, parent, rel(dirs[0]), rel(dirs[1]))
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	// Nothing is left out: vendor/ and testdata/ can hold compiled code.
-	text, _ := ecoutil.JoinDiffs(diffs, nil)
-	if cut {
-		text = append(text, "\n[dep-review: diff exceeded the gate's read limit]\n"...)
-	}
-	if len(text) == 0 {
-		text = []byte("(the module trees are identical)\n")
-	}
+	var findings []model.Finding
 	su := safeUpdate(u)
-	desc := fmt.Sprintf("diff of module %s %s -> %s (third-party code)", su.Name, ecoutil.OrNew(su.From), su.To)
-	return env.Evidence.AddUntrusted(evName(u, "diff"), desc, text)
+	if cut {
+		findings = append(findings, model.Finding{Code: "gomod.diff-cut", Route: model.RouteHuman, Update: su.Name,
+			Detail: fmt.Sprintf("the diff of %s exceeded the gate's read limit, so some changes were never shown", key)})
+	}
+	// git's "diff --git a/x b/y" header is ambiguous for a path with a
+	// space, so a file's path is believed only when the diffs' paths are
+	// exactly the files that changed between the trees, each once.
+	// Otherwise nothing is optional, and a person decides.
+	trusted := true
+	if trees[1] != nil {
+		want := map[string]bool{}
+		for _, f := range changedFiles(trees[0], trees[1]) {
+			want[f] = true
+		}
+		got := map[string]bool{}
+		for _, d := range diffs {
+			if got[d.Path] || !want[d.Path] {
+				trusted = false
+			}
+			got[d.Path] = true
+		}
+		trusted = trusted && len(got) == len(want)
+	}
+	if !trusted {
+		findings = append(findings, model.Finding{Code: "gomod.diff-paths", Route: model.RouteHuman, Update: su.Name,
+			Detail: fmt.Sprintf("the per-file diffs of %s do not match the files that changed (a path git cannot write unambiguously); every diff is required", key)})
+	}
+	var out []model.DiffFile
+	var idx strings.Builder
+	fmt.Fprintf(&idx, "# Changed files: %s\n\n", key)
+	idx.WriteString("Written by the gate. Each row is one changed file of the module, its diff in the evidence file named in the last column.\n")
+	idx.WriteString("Read the diff of every row marked required and list its ID in the verdict's \"examined\"; the gate merges only when all of them are listed.\n")
+	idx.WriteString("A row marked optional is a file no consumer build reads (the reason says why): read it when it helps.\n\n")
+	idx.WriteString("| ID | File | Bytes | Reading | Diff |\n|---|---|---|---|---|\n")
+	if len(diffs) == 0 {
+		idx.WriteString("(the module trees are identical)\n")
+	}
+	for _, d := range diffs {
+		why := ""
+		switch {
+		case !trusted:
+		case h != nil && h.testOnly(d.Path):
+			why = "a _test.go file nothing embeds or includes: only the module's own tests compile it"
+		case h != nil && h.unbuilt[d.Path]:
+			why = "no declared build (go_platforms, go_tags) compiles it"
+		}
+		n++
+		id := fmt.Sprintf("D%05d", n)
+		// Named by ID: no module path can collide with another's part.
+		file, written, err := env.Evidence.AddPart(evName(u, "diff/"+id+".diff"), d.Body)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Bytes is what the reviewer reads: the written, normalized text.
+		df := model.DiffFile{ID: id, Update: key, Path: safeFile(d.Path), File: file,
+			Bytes: int64(written), Required: why == "", Why: why}
+		if df.File == "" {
+			// Binary or past the caps: the writer recorded why (a person
+			// decides); the row stays, with nothing to read.
+			df.File = "(not written)"
+		}
+		out = append(out, df)
+		reading := "required"
+		if !df.Required {
+			reading = "optional: " + why
+		}
+		fmt.Fprintf(&idx, "| %s | %s | %d | %s | %s |\n", df.ID, df.Path, df.Bytes, reading, df.File)
+	}
+	desc := fmt.Sprintf("index of the per-file diffs of %s %s -> %s: read every required one and list its ID in examined", su.Name, ecoutil.OrNew(su.From), su.To)
+	if err := env.Evidence.Add(evName(u, "diffs.md"), desc, []byte(idx.String())); err != nil {
+		return nil, nil, err
+	}
+	return out, findings, nil
 }
 
 func evName(u model.Update, suffix string) string {
@@ -576,6 +658,35 @@ func changedFiles(old, cur *ecoutil.Tree) []string {
 				out = append(out, rel)
 			}
 		}
+	}
+	return out
+}
+
+// maxMustRead bounds what a review must read in full: every required diff
+// and every flagged-items file of the fetch (the single-file evidence's
+// total, evidence.DefaultTotalCap). Past it, a person decides.
+const maxMustRead = 4 << 20
+
+// readingLimits are the person-routed findings for more required reading
+// than a review can take: more than model.MaxRequiredDiffs required
+// diffs, or more than maxMustRead bytes of required diffs and flagged
+// items together.
+func readingLimits(diffs []model.DiffFile, flaggedBytes int) []model.Finding {
+	var out []model.Finding
+	required, bytes := 0, flaggedBytes
+	for _, d := range diffs {
+		if d.Required {
+			required++
+			bytes += int(d.Bytes)
+		}
+	}
+	if required > model.MaxRequiredDiffs {
+		out = append(out, model.Finding{Code: "gomod.too-many-diffs", Route: model.RouteHuman,
+			Detail: fmt.Sprintf("%d changed files a consumer build can read; more than %d is too many to review", required, model.MaxRequiredDiffs)})
+	}
+	if bytes > maxMustRead {
+		out = append(out, model.Finding{Code: "gomod.too-much-to-read", Route: model.RouteHuman,
+			Detail: fmt.Sprintf("the required diffs and flagged items come to %d bytes; more than %d is more than a review can read", bytes, maxMustRead)})
 	}
 	return out
 }

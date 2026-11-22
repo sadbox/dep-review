@@ -178,6 +178,9 @@ type Evidence struct {
 	// an item with commits listed here is assessed benign only when the
 	// verdict cites at least one of them, and nothing else, for it.
 	Upstream []Upstream `json:"upstream,omitempty"`
+	// Diffs is the navigable evidence's per-file diffs (Go modules): the
+	// reference list the verdict's Examined is checked against.
+	Diffs []DiffFile `json:"diffs,omitempty"`
 	// Triage: the route is human only because of findings marked Triage,
 	// so the review still runs, and its answer is shown to the person
 	// deciding. It never merges.
@@ -188,6 +191,28 @@ type Evidence struct {
 // assess every item, so fetch sends the PR to a human (and publish
 // refuses to merge even if it somehow did not).
 const MaxFlagged = 200
+
+// MaxRequiredDiffs bounds the required entries of Evidence.Diffs: past it
+// no reviewer can be expected to read them all, so a person decides.
+const MaxRequiredDiffs = 500
+
+// MaxDiffs bounds Evidence.Diffs (and Verdict.Examined).
+const MaxDiffs = 5000
+
+// DiffFile is one file's diff in navigable evidence: written as its own
+// part and listed in a gate-written index. Required: some build a
+// consumer makes can read the file, so the reviewer must read its diff
+// and list ID in Verdict.Examined; otherwise Why says what the gate's
+// tooling proved (a _test.go file, a file no declared build compiles).
+type DiffFile struct {
+	ID       string `json:"id"`     // D00001...
+	Update   string `json:"update"` // as FlaggedItem.Update
+	Path     string `json:"path"`   // module file, sanitized
+	File     string `json:"file"`   // the evidence part holding the diff
+	Bytes    int64  `json:"bytes"`
+	Required bool   `json:"required"`
+	Why      string `json:"why"`
+}
 
 // MaxItemField bounds a FlaggedItem's (and an ItemAssessment's) update,
 // code and item. It is above the longest the gate builds (a module path
@@ -285,6 +310,9 @@ type Verdict struct {
 	// Items assesses every Evidence.Flagged item (empty when there are
 	// none). publish checks it against the evidence, never the reverse.
 	Items []ItemAssessment `json:"items"`
+	// Examined lists the Evidence.Diffs IDs the reviewer read. Every
+	// required one must be here (publish's accounting).
+	Examined []string `json:"examined"`
 }
 
 // Decision is publish's final, deterministic result.
