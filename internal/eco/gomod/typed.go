@@ -80,14 +80,44 @@ type typesDir struct {
 }
 
 // typedWalk type-checks the walk's directories of cur (nil: not available).
-func typedWalk(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string) typedRefs {
+// typesChunk is how many package directories one types child checks: it
+// keeps every checked package in memory, and a large module's packages
+// together pass its memory limit.
+var typesChunk = 24
+
+// typesBudget bounds the time all types children of one module take;
+// the directories left after it are walked by name.
+var typesBudget = 6 * time.Minute
+
+// typedWalkChunks runs typedWalk over walk a chunk at a time and returns
+// the references it resolved and how many directories it could not check.
+func typedWalkChunks(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string, mod string) (typedRefs, int) {
+	refs := typedRefs{}
+	failed := 0
+	start := time.Now()
+	for i := 0; i < len(walk); i += typesChunk {
+		part := walk[i:min(i+typesChunk, len(walk))]
+		if time.Since(start) > typesBudget {
+			failed += len(part)
+			continue
+		}
+		r, err := typedWalk(cur, nb, l, part, mod)
+		if err != nil {
+			failed += len(part)
+			continue
+		}
+		maps.Copy(refs, r)
+	}
+	return refs, failed
+}
+
+func typedWalk(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string, mod string) (typedRefs, error) {
 	if cur == nil || nb == nil || nb.unresolved() || len(walk) == 0 {
-		return nil
+		return nil, errors.New("no build analysis")
 	}
 	goroot := l.goroot()
-	mod := modulePath(cur)
 	if goroot == "" || mod == "" {
-		return nil
+		return nil, errors.New("no GOROOT or module path")
 	}
 	req := typesRequest{Root: cur.Dir, Module: mod, GOROOT: goroot, Dirs: map[string]typesDir{}, Walk: walk}
 	for _, c := range nb.cfgs {
@@ -123,19 +153,19 @@ func typedWalk(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string) typed
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	out, err := ecoutil.RunChild(TypesChild, b, typesTimeout, func(stdin io.Reader, stdout io.Writer) error {
 		return typesChild(stdin, stdout, false)
 	})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var refs typedRefs
 	if err := json.Unmarshal(out, &refs); err != nil {
-		return nil
+		return nil, err
 	}
-	return refs
+	return refs, nil
 }
 
 // modulePath is the module path of cur's go.mod ("" if none).
