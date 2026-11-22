@@ -99,6 +99,8 @@ func TestTestOnly(t *testing.T) {
 		{"embeds unresolved", &report{nb: &builtSet{embedFailed: map[string]string{"e": "x"}}, cur: tree}, "e/e_test.go", false},
 		{"assembly in the module", &report{nb: &builtSet{}, cur: asm}, "a_test.go", false},
 		{"cgo in the module", &report{nb: &builtSet{}, cur: cgo}, "a_test.go", false},
+		{"escaped cgo import", &report{nb: &builtSet{}, cur: writeTree(t, map[string]string{"a.go": "package m\n\nimport \"\\x43\"\n", "a_test.go": "package m\n"})}, "a_test.go", false},
+		{"unparseable go file", &report{nb: &builtSet{}, cur: writeTree(t, map[string]string{"a.go": "package m\nimport {{{\n", "a_test.go": "package m\n"})}, "a_test.go", false},
 	}
 	for _, tt := range tests {
 		if got := tt.r.testOnly(tt.rel); got != tt.want {

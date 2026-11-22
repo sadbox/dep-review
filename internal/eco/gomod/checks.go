@@ -659,7 +659,8 @@ func moduleLinks(t *ecoutil.Tree) string {
 				return "cgo (a Go file whose imports the gate cannot read)"
 			}
 			for _, imp := range file.Imports {
-				if imp.Path.Value == `"C"` {
+				// The path as the compiler reads it: "\x43" is "C" too.
+				if p, err := strconv.Unquote(imp.Path.Value); err != nil || p == "C" {
 					return "cgo"
 				}
 			}
@@ -1800,8 +1801,9 @@ func safeImportSpec(spec string) string {
 
 // testOnly reports that rel, a _test.go file, provably reaches no
 // consumer build: the build analysis resolved, go list embeds it in no
-// configuration, its package's embeds resolved, and the module has no
-// assembly or cgo text that could #include it.
+// configuration, its package's embeds resolved, and nothing in the module
+// can make the build read a file by name (moduleLinks: cgo, C, assembly,
+// a .syso).
 func (r *report) testOnly(rel string) bool {
 	nb := r.nb
 	if !strings.HasSuffix(rel, "_test.go") || nb == nil || nb.unresolved() || r.cur == nil {
@@ -1817,11 +1819,6 @@ func (r *report) testOnly(rel string) bool {
 			return false
 		}
 	}
-	return !slices.ContainsFunc(r.cur.Files, func(f string) bool {
-		ext := path.Ext(f)
-		if ext == ".s" || ext == ".S" || ext == ".sx" || cgoSourceExts[ext] {
-			return true
-		}
-		return ext == ".go" && bytes.Contains(r.cur.ReadFile(f), []byte(`"C"`))
-	})
+	// moduleLinks parses imports (an unparseable file counts as cgo).
+	return moduleLinks(r.cur) == ""
 }
