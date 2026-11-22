@@ -88,6 +88,9 @@ func (l goLister) toolTags() (map[string][]string, error) {
 	if err := os.MkdirAll(mod, 0o755); err != nil {
 		return nil, err
 	}
+	if err := ecoutil.GoHome(filepath.Join(root, "home")); err != nil {
+		return nil, err
+	}
 	if err := os.WriteFile(filepath.Join(mod, "go.mod"), []byte("module gate.invalid/m\n\ngo "+goLine()+"\n"), 0o644); err != nil {
 		return nil, err
 	}
@@ -193,6 +196,10 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 	mod := filepath.Join(root, "mod")
 	if err := copyTree(t, mod); err != nil {
 		failAll("the gate could not copy the tree: " + err.Error())
+		return
+	}
+	if err := ecoutil.GoHome(filepath.Join(root, "home")); err != nil {
+		failAll("the gate could not prepare the go command's home: " + err.Error())
 		return
 	}
 	env := listEnv(root)
@@ -364,13 +371,14 @@ func (b *builtSet) embedded(dir string) []string {
 
 // listEnv is go list's complete environment (beyond GOOS, GOARCH and
 // CGO_ENABLED), with its homes and caches under root: no PATH, no
-// toolchain switch, no network, no inherited variable.
+// toolchain switch, no network, no inherited variable. root's home must
+// be prepared with ecoutil.GoHome (telemetry off).
 func listEnv(root string) []string {
 	return []string{
 		"HOME=" + filepath.Join(root, "home"), "GOPATH=" + filepath.Join(root, "gopath"), "GOCACHE=" + filepath.Join(root, "cache"),
 		"GOMODCACHE=" + filepath.Join(root, "gopath", "pkg", "mod"),
 		"GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "GONOSUMDB=", "GOPRIVATE=",
-		"GOFLAGS=-mod=mod -buildvcs=false", "GOWORK=off", "GOENV=off", "GOTELEMETRY=off",
+		"GOFLAGS=-mod=mod -buildvcs=false", "GOWORK=off", "GOENV=off",
 	}
 }
 
@@ -422,8 +430,17 @@ func (f Fetcher) lister(ctx context.Context) (goLister, string) {
 	if err != nil {
 		return goLister{}, "none"
 	}
-	out, err := ecoutil.RunGo(ecoutil.GoRun{Go: abs, Dir: os.TempDir(), Args: []string{"env", "GOVERSION"},
-		Env: []string{"GOTOOLCHAIN=local", "GOENV=off", "GOTELEMETRY=off", "HOME=" + os.TempDir()}, Timeout: time.Minute})
+	home, err := os.MkdirTemp("", "gate-gohome-")
+	if err != nil {
+		return goLister{}, "none"
+	}
+	// The directory is the gate's own, made just above.
+	defer os.RemoveAll(home)
+	if err := ecoutil.GoHome(home); err != nil {
+		return goLister{}, "none"
+	}
+	out, err := ecoutil.RunGo(ecoutil.GoRun{Go: abs, Dir: home, Args: []string{"env", "GOVERSION"},
+		Env: []string{"GOTOOLCHAIN=local", "GOENV=off", "HOME=" + home, "GOCACHE=" + filepath.Join(home, "cache")}, Timeout: time.Minute})
 	if err != nil || ctx.Err() != nil {
 		return goLister{}, "none"
 	}

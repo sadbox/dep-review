@@ -80,9 +80,12 @@ func TestProductionGoChild(t *testing.T) {
 	goBin, _ := exec.LookPath("go")
 	goBin, _ = filepath.Abs(goBin)
 	home := t.TempDir()
+	if err := GoHome(home); err != nil {
+		t.Fatal(err)
+	}
 	withIsolation(t, &Isolation{GoCommand: []string{bin, "go-child"}})
 	out, err := RunGo(GoRun{Go: goBin, Dir: home, Args: []string{"env", "GOVERSION"},
-		Env: []string{"HOME=" + home, "GOENV=off", "GOTOOLCHAIN=local", "GOTELEMETRY=off", "GOCACHE=" + filepath.Join(home, "c")}})
+		Env: []string{"HOME=" + home, "GOENV=off", "GOTOOLCHAIN=local", "GOCACHE=" + filepath.Join(home, "c")}})
 	if err != nil || !strings.HasPrefix(string(out), "go1.") {
 		t.Errorf("go env through the production go-child: %q, %v", out, err)
 	}

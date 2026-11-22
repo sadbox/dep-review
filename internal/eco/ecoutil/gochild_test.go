@@ -19,9 +19,12 @@ func TestRunGoIsolated(t *testing.T) {
 	}
 	bin, _ = filepath.Abs(bin)
 	home := t.TempDir()
+	if err := GoHome(home); err != nil {
+		t.Fatal(err)
+	}
 	withIsolation(t, &Isolation{GoCommand: []string{os.Args[0]}, Env: []string{"ECOUTIL_TEST_CHILD=go"}})
 	out, err := RunGo(GoRun{Go: bin, Dir: home, Args: []string{"env", "GOVERSION", "GOFLAGS"},
-		Env: []string{"HOME=" + home, "GOENV=off", "GOTOOLCHAIN=local", "GOTELEMETRY=off", "GOCACHE=" + filepath.Join(home, "c")}})
+		Env: []string{"HOME=" + home, "GOENV=off", "GOTOOLCHAIN=local", "GOCACHE=" + filepath.Join(home, "c")}})
 	if err != nil {
 		t.Fatal(err)
 	}

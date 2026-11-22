@@ -493,6 +493,9 @@ func TestGoListRunsNoCompiler(t *testing.T) {
 	if err := copyTree(tree, mod); err != nil {
 		t.Fatal(err)
 	}
+	if err := ecoutil.GoHome(filepath.Join(root, "home")); err != nil {
+		t.Fatal(err)
+	}
 	out, err := ecoutil.RunGo(ecoutil.GoRun{Go: bin, Dir: mod, Args: []string{"list", "-e", "-json=Dir,CgoFiles,EmbedFiles,Error", "./c"},
 		Env: append(listEnv(root), "PATH="+fake, "CC="+filepath.Join(fake, "cc"), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=1")})
 	if err != nil {
