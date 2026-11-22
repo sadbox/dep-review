@@ -372,6 +372,33 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 	return b
 }
 
+// linkDirsNewlyBuilt are the package directories whose assembly and
+// .syso files count as newly built whatever their own analysis says: a Go
+// file of the directory is newly built (newlyBuilt), or possibly built in
+// one tree and not the other. A link file gets only the default-tag
+// analysis, not the -tags search, so a package that builds only under a
+// user tag (//go:build ignore turned //go:build purego) newly assembles
+// it unseen otherwise. Fail closed.
+func linkDirsNewlyBuilt(old, cur *ecoutil.Tree, ob, nb *builtSet) map[string]bool {
+	out := map[string]bool{}
+	if nb == nil {
+		return out
+	}
+	for dir := range nb.linkFiles {
+		for _, f := range cur.Files {
+			if path.Dir(f) != dir || path.Ext(f) != ".go" || strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			identical := old.Has(f) && bytes.Equal(old.ReadFile(f), cur.ReadFile(f))
+			if newlyBuilt(ob, nb, f, identical) || nb.possibly(f) != ob.possibly(f) {
+				out[dir] = true
+				break
+			}
+		}
+	}
+	return out
+}
+
 // linkedExt: an assembly or .syso file, which the toolchain assembles or
 // links into its package.
 func linkedExt(f string) bool {

@@ -500,6 +500,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 		h.add(codeParse, "(go/build budget)", false, quote("the gate could not analyze the module's build; every Go file is checked as new and a person decides", why))
 	}
 	isGo := func(rel string) bool { return path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") }
+	linkDirs := linkDirsNewlyBuilt(old, cur, ob, nb)
 	shadow := map[string]*pkgScope{} // package directory -> scope
 	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
 	var bins []string                // flagged binaries; their context is built last
@@ -514,7 +515,9 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			// before (a dropped //go:build ignore, a moved constraint, a
 			// package clause no longer "documentation") enters that build
 			// with its whole text: check it as new, changed or not.
-			switch nbuilt := (isGo(rel) || linkedExt(rel)) && newlyBuilt(ob, nb, rel, bytes.Equal(prev, data)); {
+			nbuilt := (isGo(rel) || linkedExt(rel)) && newlyBuilt(ob, nb, rel, bytes.Equal(prev, data))
+			nbuilt = nbuilt || (linkedExt(rel) && linkDirs[path.Dir(rel)])
+			switch {
 			case nbuilt && linkedExt(rel):
 				// An assembly or .syso file newly assembled or linked,
 				// changed or not: checked as a new file below (assembly:

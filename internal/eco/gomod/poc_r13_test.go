@@ -89,3 +89,16 @@ func TestR13UnchangedAsmGoListPath(t *testing.T) {
 	}
 	r13Report(t, "go list path", o, c, "p/p_amd64.s")
 }
+
+// TestR13UnchangedAsmUserTagPackage (round 19 scan MEDIUM): the old
+// package's only Go file is //go:build ignore, the new one's //go:build
+// purego: no default configuration builds either, but a -tags purego
+// build newly assembles the unchanged p_amd64.s. Link files get no -tags
+// search of their own, so a Go file of the directory newly built or newly
+// possibly built makes them newly built.
+func TestR13UnchangedAsmUserTagPackage(t *testing.T) {
+	body := "package p\n\nfunc Run()\n\nfunc Go() { Run() }\n"
+	o := map[string]string{"m.go": "package m\n", "p/p_amd64.s": r13Asm, "p/p.go": "//go:build ignore\n\n" + body}
+	c := map[string]string{"m.go": "package m\n", "p/p_amd64.s": r13Asm, "p/p.go": "//go:build purego\n\n" + body}
+	r13Report(t, "purego package", o, c, "p/p_amd64.s")
+}
