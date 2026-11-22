@@ -121,6 +121,11 @@ What is flagged:
   old (go/build's answer, compared per configuration and for `-tags`
   builds) is checked as a new file throughout (init code,
   imports, the declarations init reaches);
+- an assembly (`.s`, `.S`, `.sx`) or `.syso` file, changed or not, that
+  some configuration newly assembles or links: one the toolchain lists
+  (`SFiles`, `SysoFiles`) in a package that builds there and did not
+  before. Assembly goes to a person with its full text, a `.syso` as a
+  binary;
 - every binary, when the module's link sources change (new cgo, C or
   assembly, or a new `.syso` or library).
 

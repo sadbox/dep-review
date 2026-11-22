@@ -71,10 +71,17 @@ var (
 
 // builtSet is, per non-test .go file, the configurations that build it
 // with default tags, whether some -tags set can build it, and whether
-// its constraint consults a tag a consumer can set.
+// its constraint consults a tag a consumer can set. in also holds the
+// assembly and .syso files of each package directory: built in a
+// configuration when the toolchain lists them (SFiles, SysoFiles) and the
+// package builds there (it has Go or cgo files to build); a package whose
+// Go files a configuration excludes still lists its .s files.
 type builtSet struct {
-	in       map[string][]bool // rel -> per configs index
-	possible map[string]bool   // rel -> built by no default configuration, but by some -tags set
+	in map[string][]bool // rel -> per configs index
+	// linkFiles are, per package directory, its .s, .S, .sx and .syso
+	// files.
+	linkFiles map[string][]string
+	possible  map[string]bool // rel -> built by no default configuration, but by some -tags set
 	// userTags: go/build's AllTags for the file, alone in its directory,
 	// hold a tag that is not a platform tag (platformTag).
 	userTags map[string]bool
@@ -267,7 +274,7 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 	start := time.Now()
 	b := &builtSet{in: map[string][]bool{}, possible: map[string]bool{}, userTags: map[string]bool{},
 		embedders: map[string]map[string][]bool{}, embedFiles: map[string]map[string][]bool{}, embedFailed: map[string]string{},
-		errs: map[string]string{}}
+		errs: map[string]string{}, linkFiles: map[string][]string{}}
 	defer func() { b.took = time.Since(start) }()
 	tf := newTreeFS(t)
 	b.tf = tf
@@ -282,6 +289,12 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 	for _, f := range t.Files {
 		if path.Ext(f) == ".go" && !strings.HasSuffix(f, "_test.go") {
 			goFiles[path.Dir(f)] = append(goFiles[path.Dir(f)], f)
+			b.in[f] = make([]bool, len(configs))
+		}
+	}
+	for _, f := range t.Files {
+		if _, ok := goFiles[path.Dir(f)]; ok && linkedExt(f) {
+			b.linkFiles[path.Dir(f)] = append(b.linkFiles[path.Dir(f)], f)
 			b.in[f] = make([]bool, len(configs))
 		}
 	}
@@ -301,16 +314,17 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 			case errors.As(err, &noGo):
 				continue
 			default:
-				// New tree: every non-test .go file is built. Old tree:
-				// none is.
+				// New tree: every non-test .go, .s and .syso file is built.
+				// Old tree: none is.
 				if b.errs[dir] == "" {
 					b.errs[dir] = err.Error()
 				}
-				for _, f := range files {
+				for _, f := range append(slices.Clone(files), b.linkFiles[dir]...) {
 					b.in[f][i] = !old
 				}
 				continue
 			}
+			b.recordLinked(dir, i, len(p.GoFiles)+len(p.CgoFiles) > 0, p.SFiles, p.SysoFiles)
 			lists := [][]string{p.GoFiles, p.CgoFiles}
 			if !old {
 				lists = append(lists, p.InvalidGoFiles)
@@ -356,6 +370,30 @@ func analyzeBuild(t *ecoutil.Tree, old bool, l goLister) *builtSet {
 		}
 	}
 	return b
+}
+
+// linkedExt: an assembly or .syso file, which the toolchain assembles or
+// links into its package.
+func linkedExt(f string) bool {
+	switch path.Ext(f) {
+	case ".s", ".S", ".sx", ".syso":
+		return true
+	}
+	return false
+}
+
+// recordLinked sets, for configuration i, the assembly and .syso files of
+// dir that are built: those listed, when the package builds.
+func (b *builtSet) recordLinked(dir string, i int, builds bool, lists ...[]string) {
+	listed := map[string]bool{}
+	for _, l := range lists {
+		for _, n := range l {
+			listed[path.Join(dir, n)] = true
+		}
+	}
+	for _, f := range b.linkFiles[dir] {
+		b.in[f][i] = builds && listed[f]
+	}
 }
 
 // work counts go/build calls over one tree against the budgets.

@@ -514,7 +514,13 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			// before (a dropped //go:build ignore, a moved constraint, a
 			// package clause no longer "documentation") enters that build
 			// with its whole text: check it as new, changed or not.
-			switch nbuilt := isGo(rel) && newlyBuilt(ob, nb, rel, bytes.Equal(prev, data)); {
+			switch nbuilt := (isGo(rel) || linkedExt(rel)) && newlyBuilt(ob, nb, rel, bytes.Equal(prev, data)); {
+			case nbuilt && linkedExt(rel):
+				// An assembly or .syso file newly assembled or linked,
+				// changed or not: checked as a new file below (assembly:
+				// its full text, for a person; .syso: a binary, for a
+				// person).
+				prev, hadOld = nil, false
 			case nbuilt:
 				// Its whole text: constructs alone do not show a body the
 				// build newly runs.

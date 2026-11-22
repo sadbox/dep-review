@@ -159,6 +159,7 @@ func parallel[T any](items []T, f func(T)) {
 type listPkg struct {
 	Dir                                               string
 	GoFiles, CgoFiles, InvalidGoFiles, IgnoredGoFiles []string
+	SFiles, SysoFiles                                 []string
 	EmbedPatterns, EmbedFiles                         []string
 	Error                                             *struct{ Err string }
 }
@@ -195,7 +196,7 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 		return
 	}
 	env := listEnv(root)
-	args := []string{"list", "-e", "-json=Dir,GoFiles,CgoFiles,InvalidGoFiles,IgnoredGoFiles,EmbedPatterns,EmbedFiles,Error"}
+	args := []string{"list", "-e", "-json=Dir,GoFiles,CgoFiles,InvalidGoFiles,IgnoredGoFiles,SFiles,SysoFiles,EmbedPatterns,EmbedFiles,Error"}
 	for _, d := range dirs {
 		args = append(args, "./"+d)
 	}
@@ -226,7 +227,7 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 	// overApprox is go list's missing answer for d in configuration i:
 	// every file built in the new tree, none in the old.
 	overApprox := func(d string, i int) {
-		for _, f := range goFiles[d] {
+		for _, f := range append(slices.Clone(goFiles[d]), b.linkFiles[d]...) {
 			b.in[f][i] = !old
 		}
 	}
@@ -286,7 +287,9 @@ func (l goLister) record(b *builtSet, d string, i int, where string, p listPkg, 
 		// nothing embedded. Any other error: no answer.
 		ignored := base(p.IgnoredGoFiles)
 		if len(p.GoFiles)+len(p.CgoFiles)+len(p.InvalidGoFiles) == 0 && !slices.ContainsFunc(files, func(f string) bool { return !ignored[f] }) {
-			for _, f := range files {
+			// go list still lists SFiles and SysoFiles here; the
+			// package does not build, so neither is built.
+			for _, f := range append(slices.Clone(files), b.linkFiles[d]...) {
 				b.in[f][i] = false
 			}
 			return
@@ -299,6 +302,7 @@ func (l goLister) record(b *builtSet, d string, i int, where string, p listPkg, 
 	if !old {
 		maps.Copy(built, base(p.InvalidGoFiles))
 	}
+	b.recordLinked(d, i, len(p.GoFiles)+len(p.CgoFiles) > 0, p.SFiles, p.SysoFiles)
 	for _, f := range files {
 		b.in[f][i] = built[f]
 		if built[f] && hasEmbedComment(f, b.tf.read(f)) {
