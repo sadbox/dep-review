@@ -211,7 +211,7 @@ func subtreeChanged(old, cur *ecoutil.Tree, dir string) bool {
 // constraint consults a tag a consumer can set uncredits every
 // configuration: a -tags build can take its patterns anywhere.
 func creditable(old, cur *ecoutil.Tree, ob, nb *builtSet, dir string) []bool {
-	ok := make([]bool, len(configs))
+	ok := make([]bool, len(nb.cfgs))
 	for i := range ok {
 		ok[i] = old != nil
 	}

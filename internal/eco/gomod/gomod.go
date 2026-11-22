@@ -44,6 +44,9 @@ const MaxModules = 25
 // Fetcher implements fetch.Ecosystem for go_modules.
 type Fetcher struct {
 	GoBin string // the go command; "go" from PATH if empty
+	// Plan is the repository's declared builds (gate inputs go_platforms
+	// and go_tags, ParseBuildPlan); nil: every configuration.
+	Plan *BuildPlan
 }
 
 type change struct {

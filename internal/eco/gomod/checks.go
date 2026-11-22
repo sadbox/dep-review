@@ -523,7 +523,12 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	goDirs := map[string]bool{} // package directories with a changed non-test .go file
 	var bins []string           // flagged binaries; their context is built last
 	var tdBins []string         // testdata binaries, flagged only if reachable
+	unbuilt := declaredUnbuilt(cur, nb)
 	for _, rel := range cur.Files {
+		if unbuilt[rel] {
+			// Declared builds (go_platforms) compile none of it.
+			continue
+		}
 		data := cur.ReadFile(rel)
 		var prev []byte
 		hadOld := old.Has(rel)
@@ -958,7 +963,16 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, oldShadow, shadow *p
 	keep := func(rel string) bool {
 		return cur.Has(rel) && !newlyBuilt(ob, nb, rel, bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)))
 	}
-	o, n := indexPackage(old, dir, oldShadow, keep), indexPackage(cur, dir, shadow, nil)
+	var keepNew func(string) bool
+	if nb != nil && nb.declared && !nb.unresolved() {
+		// Declared builds: only what they compile can run at init, on both
+		// sides (an old declaration in a file they do not compile would
+		// make its name look changed).
+		keepNew = nb.anywhere
+		oldKeep := keep
+		keep = func(rel string) bool { return nb.anywhere(rel) && oldKeep(rel) }
+	}
+	o, n := indexPackage(old, dir, oldShadow, keep), indexPackage(cur, dir, shadow, keepNew)
 	type step struct {
 		name string
 		from *step     // nil at a root's direct reference
