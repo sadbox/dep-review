@@ -170,7 +170,7 @@ func Decide(in Inputs) Outcome {
 		if ev.Truncated {
 			why = "the evidence was truncated"
 		} else if len(codes) == 0 {
-			why = "the version policy needs a person (major or 0.x update)"
+			why = "the version policy needs a person (major or unknown update)"
 		}
 		o := human(route, why+codeList(codes), codes)
 		// Triage: the review ran for the person deciding. Recomputed from

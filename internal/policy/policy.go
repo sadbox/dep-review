@@ -3,18 +3,15 @@
 // ecosystem-specific lives in the fetchers and arrives here as Findings.
 package policy
 
-import (
-	"strings"
-
-	"github.com/sadbox/dep-review/internal/model"
-)
+import "github.com/sadbox/dep-review/internal/model"
 
 // RouteFor returns the least automatic route the version policy allows for
 // one update, before any evidence is looked at.
 //
 //   - major, unknown: human.
-//   - 0.x minor (0.19 -> 0.20): treated as major, except golang.org/x/*,
-//     which the Go project keeps at v0 by policy.
+//   - 0.x minor (0.19 -> 0.20): reviewed like any minor. Many long-lived
+//     modules never reach 1.0 (golang.org/x/*, quic-go); the review and
+//     every check apply as for any other update.
 //   - a Go module major (new /vN path) shows up as a different Name and is
 //     caught by the fetcher, not here.
 //   - proven no-op (Update.NoOp): auto.
@@ -27,12 +24,7 @@ func RouteFor(u model.Update) model.Route {
 	switch u.Type {
 	case model.Major, model.Unknown:
 		return model.RouteHuman
-	case model.Minor:
-		if zeroMajor(u.From) && !strings.HasPrefix(u.Name, "golang.org/x/") {
-			return model.RouteHuman
-		}
-		return model.RouteReview
-	case model.Patch, model.Digest:
+	case model.Minor, model.Patch, model.Digest:
 		return model.RouteReview
 	}
 	return model.RouteHuman
@@ -77,9 +69,4 @@ func Triage(updates []model.Update, findings []model.Finding, truncated bool) bo
 		}
 	}
 	return true
-}
-
-func zeroMajor(v string) bool {
-	v = strings.TrimPrefix(v, "v")
-	return strings.HasPrefix(v, "0.")
 }
