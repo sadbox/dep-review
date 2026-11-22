@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime/debug"
 	"time"
 )
 
@@ -133,4 +134,37 @@ func goChildMain(stdin io.Reader, stdout io.Writer, memory uint64) error {
 	}
 	_, err = stdout.Write(out.b)
 	return err
+}
+
+// RunChild runs one request in the named child process (Isolation.Children,
+// a re-exec of the gate that limits itself with LimitChild) when Isolate
+// set one up, and through local in this process otherwise (tests). It
+// returns the child's stdout; a failure, a timeout or too much output is
+// an error.
+func RunChild(name string, req []byte, timeout time.Duration, local func(stdin io.Reader, stdout io.Writer) error) ([]byte, error) {
+	if isolation != nil && len(isolation.Children[name]) == 0 {
+		// Never fall back to this process once the fetch isolated itself.
+		return nil, fmt.Errorf("no %s child is set up", name)
+	}
+	if isolation == nil {
+		var out bytes.Buffer
+		err := local(bytes.NewReader(req), &out)
+		return out.Bytes(), err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	argv := isolation.Children[name]
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = append([]string{"GOTRACEBACK=none"}, isolation.Env...)
+	return runGroup(ctx, cmd, bytes.NewReader(req))
+}
+
+// LimitChild is what a child process does first: the address-space
+// limit (Linux) and a soft Go memory limit, as ChildMain.
+func LimitChild() error {
+	if err := limitMemory(childMemory); err != nil {
+		return fmt.Errorf("limiting memory: %w", err)
+	}
+	debug.SetMemoryLimit(childMemory / 2)
+	return nil
 }

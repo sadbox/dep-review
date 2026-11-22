@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/model"
@@ -109,8 +110,12 @@ func ParseVerdict(raw []byte) (model.Verdict, error) {
 	return v, nil
 }
 
-// itemKeys are the fields of one item, every one required and a string.
+// itemKeys are the string fields of one item, every one required; commits,
+// also required, is an array of full commit hashes.
 var itemKeys = []string{"update", "code", "item", "assessment", "note"}
+
+// maxItemCommits bounds one item's cited commits (schema maxItems).
+const maxItemCommits = 20
 
 // checkItems validates the items array: raw is its JSON, items what it
 // decoded to.
@@ -124,8 +129,11 @@ func checkItems(raw json.RawMessage, items []model.ItemAssessment) error {
 	}
 	seen := map[model.FlaggedItem]bool{}
 	for i, o := range objs {
-		if len(o) != len(itemKeys) {
+		if len(o) != len(itemKeys)+1 {
 			return errors.New("an item has missing or unexpected fields")
+		}
+		if f, ok := o["commits"]; !ok || len(f) == 0 || f[0] != '[' {
+			return errors.New(`an item lacks "commits" or it is not an array`)
 		}
 		for _, k := range itemKeys {
 			if f, ok := o[k]; !ok || len(f) == 0 || f[0] != '"' {
@@ -146,6 +154,14 @@ func checkItems(raw json.RawMessage, items []model.ItemAssessment) error {
 		if utf8.RuneCountInString(it.Note) > itemNoteMax {
 			return errors.New("an item's note is too long")
 		}
+		if len(it.Commits) > maxItemCommits {
+			return errors.New("an item cites too many commits")
+		}
+		for j, c := range it.Commits {
+			if !isCommitHash(c) || slices.Contains(it.Commits[:j], c) {
+				return errors.New("an item's commits are not distinct full commit hashes")
+			}
+		}
 		k := model.FlaggedItem{Update: it.Update, Code: it.Code, Item: it.Item}
 		if seen[k] {
 			return errors.New("duplicate item")
@@ -162,4 +178,17 @@ func knownFlag(f string) bool {
 		}
 	}
 	return false
+}
+
+// isCommitHash: 40 lowercase hex digits (a SHA-1 commit hash).
+func isCommitHash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }

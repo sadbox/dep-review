@@ -12,6 +12,7 @@ import (
 
 	"github.com/sadbox/dep-review/internal/eco/docker"
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
+	"github.com/sadbox/dep-review/internal/eco/gomod"
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/fetch"
 	"github.com/sadbox/dep-review/internal/gh"
@@ -60,7 +61,8 @@ func runFetch(args []string) error {
 	if err != nil {
 		return err
 	}
-	ecoutil.Isolate(&ecoutil.Isolation{Command: []string{self, describeBinaryCommand}, GoCommand: []string{self, goChildCommand}})
+	ecoutil.Isolate(&ecoutil.Isolation{Command: []string{self, describeBinaryCommand}, GoCommand: []string{self, goChildCommand},
+		Children: map[string][]string{gomod.UpstreamChild: {self, upstreamChildCommand}}})
 
 	// The fetch job's own read-only token (contents/pull-requests: read):
 	// REST reads of the caller repository and public upstreams.

@@ -23,6 +23,7 @@ type Downloaded struct {
 	Dir      string
 	Sum      string
 	GoModSum string
+	Origin   *Origin // where the proxy got this version (upstream.go)
 }
 
 // Downloader runs `go mod download` in an empty directory with a module

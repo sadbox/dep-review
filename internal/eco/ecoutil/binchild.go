@@ -54,6 +54,8 @@ type Isolation struct {
 	GoCommand []string      // argv of the go-command child (RunGo); none: RunGo runs go directly
 	Timeout   time.Duration // childTimeout if zero
 	Env       []string      // the child's environment beyond GOTRACEBACK (tests)
+	// Children are the argv of the other children (RunChild), by name.
+	Children map[string][]string
 }
 
 // isolation, when set, is used by every structure rendering.

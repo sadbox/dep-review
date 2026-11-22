@@ -16,6 +16,8 @@ package gomod
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -115,12 +117,12 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		work = work[:MaxModules]
 	}
 	if len(work) > 0 {
-		fs, flagged, err := f.verifyAndDiff(ctx, env, home, work, &summary)
+		fs, flagged, upstream, err := f.verifyAndDiff(ctx, env, home, work, &summary)
 		if err != nil {
 			return fetch.Result{}, err
 		}
 		res.Findings = append(res.Findings, fs...)
-		res.Flagged = flagged
+		res.Flagged, res.Upstream = flagged, upstream
 	}
 	if err := env.Evidence.Add("gomod-summary.md", "Go module change set, hash verification and checks run by the gate", summary.Bytes()); err != nil {
 		return fetch.Result{}, err
@@ -337,9 +339,10 @@ func majorPrefix(mod string) (string, bool) {
 // verifyAndDiff downloads both sides of each change, checks hashes,
 // writes diffs, runs the checks and writes, per module with flagged
 // items, the focused evidence that lists them.
-func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, error) {
+func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, []model.Upstream, error) {
 	var findings []model.Finding
 	var flagged []model.FlaggedItem
+	var upstream []model.Upstream
 	checked := map[string]bool{}          // flaggedUpdate keys already checked
 	clock := ecoutil.NewClock(renderTime) // one for every module of this fetch
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
@@ -353,7 +356,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 	}
 	got, err := dl.Download(ctx, slices.Compact(slices.Sorted(slices.Values(args))))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	summary.WriteString("## Downloads (proxy.golang.org, checked against sum.golang.org)\n\n")
 	// go/build is compiled into the gate; go list is the runner's go.
@@ -376,7 +379,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			m, ok := got[u.Name+"@"+side.ver]
 			if !ok {
-				return nil, nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
+				return nil, nil, nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
 			}
 			if m.Error != "" {
 				switch errorClass(m.Error) {
@@ -387,7 +390,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 					findings = append(findings, model.Finding{Code: "gomod.download-failed", Route: model.RouteHuman, Update: safeImport(u.Name),
 						Detail: fmt.Sprintf("%s@%s could not be fetched from proxy.golang.org (not found or gone)", safeImport(u.Name), safeVersion(side.ver))})
 				default:
-					return nil, nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
+					return nil, nil, nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
 				}
 				bad = true
 				continue
@@ -407,7 +410,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			t, err := ecoutil.DirTree(m.Dir)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			trees[i], dirs[i] = t, m.Dir
 		}
@@ -417,7 +420,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 		su := safeUpdate(u)
 		key := flaggedUpdate(su)
 		if err := writeDiff(ctx, env, home, u, dirs); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		// The same module change in several directories (a grouped bump)
 		// is the same two trees: checked, flagged and rendered once.
@@ -430,22 +433,50 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 				fmt.Fprintf(summary, "- %s: go list ran %d times for //go:embed (%s)\n", key, h.listRuns, h.listTook.Round(time.Millisecond))
 			}
 			findings = append(findings, h.findings(su.Name)...)
-			flagged = append(flagged, h.flagged(key)...)
+			items := h.flagged(key)
+			flagged = append(flagged, items...)
 			if len(h.hits) > 0 {
 				desc := fmt.Sprintf("every item the gate's checks flagged in %s, with exactly what changed (third-party code quoted under the gate's headings); assess each one", key)
 				if err := env.Evidence.AddUntrusted(evName(u, "flagged.md"), desc, h.render(key)); err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
+				}
+			}
+			if len(items) > 0 {
+				up, md := f.upstream(env, u, key, got, items, trees)
+				upstream = append(upstream, up)
+				fmt.Fprintf(summary, "- %s: upstream history %s: %s\n", key, up.Status, up.Detail)
+				if up.Status == model.UpstreamMismatch {
+					findings = append(findings, model.Finding{Code: codeUpstreamMismatch, Route: model.RouteHuman, Update: safeImport(u.Name), Detail: up.Detail})
+				}
+				if md != nil {
+					desc := fmt.Sprintf("upstream commits between the two versions of %s and which flagged items each touched (third-party text); cite the explaining commits per item", key)
+					if err := env.Evidence.AddUntrusted(evName(u, "upstream.md"), desc, md); err != nil {
+						return nil, nil, nil, err
+					}
 				}
 			}
 		}
 		if ex := changelogExcerpt(trees[0], trees[1]); ex != nil {
 			if err := env.Evidence.AddUntrusted(evName(u, "changelog.md"), "changelog excerpt for "+safeImport(u.Name)+" "+safeVersion(u.To)+" (from the module, third-party text)", ex); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	}
 	summary.WriteString("\n")
-	return findings, flagged, nil
+	return findings, flagged, upstream, nil
+}
+
+// upstream fetches and attaches one update's upstream history (upstream.go).
+func (f Fetcher) upstream(env fetch.Env, u model.Update, key string, got map[string]Downloaded, items []model.FlaggedItem, trees [2]*ecoutil.Tree) (model.Upstream, []byte) {
+	req, why := planUpstream(u, got[u.Name+"@"+u.From], got[u.Name+"@"+u.To])
+	if why != "" {
+		return model.Upstream{Update: key, Status: model.UpstreamUnavailable, Detail: why}, nil
+	}
+	// One repository per URL: updates from the same repository share it.
+	sum := sha256.Sum256([]byte(req.URL))
+	req.Dir = filepath.Join(env.Scratch, "upstream", hex.EncodeToString(sum[:8]))
+	has := func(p string) bool { return trees[1].Has(p) || trees[0] != nil && trees[0].Has(p) }
+	return attachUpstream(key, fetchUpstream(req), items, has, changedFiles(trees[0], trees[1]))
 }
 
 // flaggedUpdate is the update a flagged item belongs to, as the verdict
@@ -522,4 +553,22 @@ func orEmpty(v string, f func(string) string) string {
 		return ""
 	}
 	return f(v)
+}
+
+// changedFiles is every file added, removed or edited between two trees.
+func changedFiles(old, cur *ecoutil.Tree) []string {
+	var out []string
+	for _, rel := range cur.Files {
+		if old == nil || !old.Has(rel) || !bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)) {
+			out = append(out, rel)
+		}
+	}
+	if old != nil {
+		for _, rel := range old.Files {
+			if !cur.Has(rel) {
+				out = append(out, rel)
+			}
+		}
+	}
+	return out
 }

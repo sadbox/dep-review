@@ -139,6 +139,38 @@ Unparseable Go files, truncated evidence and a module with more flagged
 items than a review can take also go to a person. Module diffs do not
 detect renames.
 
+#### Upstream commits
+
+For an update with flagged items, the gate also fetches the module's
+upstream history between the two versions and attaches, per item, the
+commits that touched its files (`.upstream.md`). Go's own tooling makes
+those commits the change. `go mod download -json` reports the proxy's
+`Origin` for each version: repository, subdirectory and commit.
+`x/mod/zip.CreateFromVCS` rebuilds each module zip from the repository at
+that commit, as the go command does, and `dirhash` must give the go.sum
+hash. A mismatch is `gomod.upstream-mismatch`, which goes to a person.
+When upstream history is verified, a benign item that has commits listed
+counts only if the verdict cites at least one of them and nothing else.
+The reviewer is told to read each message against the diff, since the
+repository's owner wrote it. A message that doesn't fit makes the item
+unclear.
+
+Nothing is attached, and the review runs as without it, when any of
+these hold:
+- the update is a new module;
+- the proxy recorded no origin, or the repository isn't git;
+- the host isn't github.com, go.googlesource.com or gitlab.com;
+- the two versions share no history within 1000 commits;
+- more than 150 commits lie between them;
+- the attachment would pass its size budget;
+- the fetch fails.
+
+git runs in its own memory-limited child, killed after four minutes. Its
+configuration is the gate's alone: https only, no system or global
+config, no credential helper or hooks, and objects are fsck'd on fetch.
+It makes a blob-less shallow fetch and a sparse checkout of the module's
+directory.
+
 ### GitHub workflow lockfiles
 
 In a workflow onboarded to `.github/workflows/actions.lock`, a step names

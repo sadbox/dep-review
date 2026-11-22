@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
+	"github.com/sadbox/dep-review/internal/eco/gomod"
 )
 
 // commands are the gate's subcommands.
@@ -41,6 +42,12 @@ var extraCommands = map[string]func([]string) error{
 		}
 		return ecoutil.GoChildMain(os.Stdin, os.Stdout)
 	},
+	upstreamChildCommand: func(args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("%s takes no arguments", upstreamChildCommand)
+		}
+		return gomod.UpstreamChildMain(os.Stdin, os.Stdout)
+	},
 }
 
 const (
@@ -48,6 +55,9 @@ const (
 	// goChildCommand runs one go command (go list over a dependency's
 	// tree) under the same memory limit (ecoutil.RunGo).
 	goChildCommand = "go-child"
+	// upstreamChildCommand fetches a Go module's upstream history and
+	// rebuilds its zips with git, under the same limit (gomod/upstream.go).
+	upstreamChildCommand = "upstream-child"
 )
 
 func main() {

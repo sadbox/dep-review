@@ -173,6 +173,11 @@ type Evidence struct {
 	// only when every item here, and nothing else, was assessed benign.
 	// This list, not the model's, is the reference.
 	Flagged []FlaggedItem `json:"flagged"`
+	// Upstream is, per update with flagged items, what the gate found in
+	// the module's upstream repository. Where Status is UpstreamVerified,
+	// an item with commits listed here is assessed benign only when the
+	// verdict cites at least one of them, and nothing else, for it.
+	Upstream []Upstream `json:"upstream,omitempty"`
 	// Triage: the route is human only because of findings marked Triage,
 	// so the review still runs, and its answer is shown to the person
 	// deciding. It never merges.
@@ -216,6 +221,44 @@ type ItemAssessment struct {
 	Item       string     `json:"item"`
 	Assessment Assessment `json:"assessment"`
 	Note       string     `json:"note"` // model text; sanitized before it is shown
+	// Commits are the upstream commits (full hashes, from the evidence's
+	// list for this item) whose stated purpose explains the change.
+	Commits []string `json:"commits"`
+}
+
+// UpstreamStatus is what the gate could establish about an update's
+// upstream history.
+type UpstreamStatus string
+
+const (
+	// UpstreamVerified: both module zips were rebuilt from the upstream
+	// repository at the proxy's recorded commits (x/mod/zip) and their
+	// hashes equal go.sum's, so the commits between them are the change.
+	UpstreamVerified UpstreamStatus = "verified"
+	// UpstreamMismatch: a rebuilt zip's hash differs (a finding routes the
+	// PR to a person).
+	UpstreamMismatch UpstreamStatus = "mismatch"
+	// UpstreamUnavailable: no history was attached; the review runs
+	// without it.
+	UpstreamUnavailable UpstreamStatus = "unavailable"
+)
+
+// Upstream is one update's upstream history as the gate attached it.
+type Upstream struct {
+	Update string         `json:"update"` // as FlaggedItem.Update
+	Status UpstreamStatus `json:"status"`
+	Detail string         `json:"detail"` // the gate's words
+	// Items lists, per flagged item, the commits between the two versions
+	// that touched one of the item's files (full hashes). An item missing
+	// here, or with none, needs no citation.
+	Items []UpstreamItem `json:"items,omitempty"`
+}
+
+// UpstreamItem is the commits attached to one flagged item.
+type UpstreamItem struct {
+	Code    string   `json:"code"`
+	Item    string   `json:"item"`
+	Commits []string `json:"commits"`
 }
 
 type EvidenceFile struct {

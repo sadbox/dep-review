@@ -16,7 +16,7 @@ func TestTriageNeverMerges(t *testing.T) {
 	triage := model.Finding{Code: "gomod.cgo", Route: model.RouteHuman, Triage: true, Update: "github.com/x/y"}
 	pass := func() []byte {
 		b, _ := json.Marshal(model.Verdict{Verdict: model.Pass, Flags: []string{}, Summary: "includes nothing odd",
-			Items: []model.ItemAssessment{{Update: flagged[0].Update, Code: flagged[0].Code, Item: flagged[0].Item, Assessment: model.Benign, Note: "links libc only"}}})
+			Items: []model.ItemAssessment{{Update: flagged[0].Update, Code: flagged[0].Code, Item: flagged[0].Item, Assessment: model.Benign, Note: "links libc only", Commits: []string{}}}})
 		return b
 	}()
 	ev := func(findings ...model.Finding) *model.Evidence {
