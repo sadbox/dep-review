@@ -81,7 +81,7 @@ func TestMerge(t *testing.T) {
 	}
 	m, err := Merge(plan, []model.Verdict{
 		v(model.Pass, nil, []model.ItemAssessment{item}, []string{"D00001"}, "one"),
-		v(model.Pass, []string{"default-changed"}, []model.ItemAssessment{item}, []string{"D00002"}, "two"),
+		v(model.Pass, []string{"default-changed"}, []model.ItemAssessment{item}, []string{"D00002", "D00003"}, "two"),
 		v(model.Pass, []string{"default-changed"}, []model.ItemAssessment{item}, []string{"D00009"}, "the whole"),
 	})
 	if err != nil {
@@ -94,7 +94,7 @@ func TestMerge(t *testing.T) {
 		t.Errorf("items only from pass 1: %+v", m.Items)
 	}
 	if !slices.Equal(m.Examined, []string{"D00001", "D00002"}) {
-		t.Errorf("examined from the reading passes only: %v", m.Examined)
+		t.Errorf("examined from the reading passes, each within its share: %v", m.Examined)
 	}
 	for _, tt := range []struct {
 		vs   [3]model.VerdictValue

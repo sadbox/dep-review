@@ -138,8 +138,8 @@ type Report struct {
 const SummaryMax = 3000
 
 // Merge folds the passes' verdicts into one: the worst verdict, every
-// flag, pass 1's item assessments (only it was asked), every pass's
-// examined IDs, and the final pass's summary.
+// flag, pass 1's item assessments (only it was asked), each reading
+// pass's examined IDs within its own share, and the final pass's summary.
 func Merge(plan []Pass, vs []model.Verdict) (model.Verdict, error) {
 	if len(plan) != len(vs) || len(vs) == 0 {
 		return model.Verdict{}, fmt.Errorf("%d verdicts for %d passes", len(vs), len(plan))
@@ -160,8 +160,10 @@ func Merge(plan []Pass, vs []model.Verdict) (model.Verdict, error) {
 			out.Items = append(out.Items, v.Items...)
 		}
 		if !p.Final {
+			// Only its own share: a pass listing another's diffs did not
+			// read them for that share.
 			for _, id := range v.Examined {
-				if !slices.Contains(out.Examined, id) {
+				if slices.Contains(p.Diffs, id) && !slices.Contains(out.Examined, id) {
 					out.Examined = append(out.Examined, id)
 				}
 			}
