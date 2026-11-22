@@ -110,7 +110,12 @@ env:
   npm_config_ignore_scripts: "true"
 
 jobs:
+  # The trigger's only job runs for Dependabot's PRs alone, so a skipped
+  # trigger run is someone else's PR: nothing to gate, and every job here
+  # needs build, so skipping it skips the run (no billed minutes on every
+  # push to every other PR). Any other conclusion still classifies.
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'skipped'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
