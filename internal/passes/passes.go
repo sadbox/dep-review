@@ -45,9 +45,11 @@ type Pass struct {
 // Plan splits ev's reading into passes: one when it fits PassBudget (the
 // plain review, no scope), else reading passes and a final pass.
 func Plan(ev model.Evidence) []Pass {
+	// Pass 1's reading: the flagged items and the upstream histories it
+	// cites commits from.
 	flagged := 0
 	for _, f := range ev.Files {
-		if strings.HasSuffix(f.Path, ".flagged.md") {
+		if strings.HasSuffix(f.Path, ".flagged.md") || strings.HasSuffix(f.Path, ".upstream.md") {
 			flagged += int(f.Bytes)
 		}
 	}

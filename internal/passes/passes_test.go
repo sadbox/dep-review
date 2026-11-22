@@ -23,6 +23,11 @@ func TestPlan(t *testing.T) {
 	if p := Plan(evidence(1000, 1000, 1000)); len(p) != 1 || !p[0].Items || p[0].Of != 1 {
 		t.Errorf("small review: %+v", p)
 	}
+	up := evidence(PassBudget/2, PassBudget/4)
+	up.Files = append(up.Files, model.EvidenceFile{Path: "untrusted/gomod/m@a...b.upstream.md", Bytes: PassBudget / 2})
+	if p := Plan(up); len(p) == 1 {
+		t.Errorf("upstream history not counted as reading: %+v", p)
+	}
 	k := 300 << 10
 	p := Plan(evidence(k, k, k, k, k, k))
 	// flagged + 2 diffs, then 3 diffs, then the final pass.
