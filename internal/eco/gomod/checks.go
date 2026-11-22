@@ -1127,40 +1127,35 @@ func hasText(ss []snippet, text string) bool {
 // directivePrefixes are the directives checkGoFile compares.
 var directivePrefixes = []string{"//go:linkname", "//go:generate", "//go:embed", "//go:cgo_"}
 
-// facts reads one version of a file. The new version (old false) takes
-// directives from every line that looks like one (over-approximating);
-// the old version only from line comments of a file that parses (under-
-// approximating), so a directive-like line in an old string literal or
-// block comment cannot make a real new directive look unchanged.
+// facts reads one version of a file. Directives come from the Go
+// scanner's comment tokens, as the go command finds them (directives.go),
+// the same way on both sides: a directive-like line inside a string or a
+// /* */ comment is not one in either version. A new version the scanner
+// rejects is unparseable (checkGoFile sends it to a person); an old one
+// then has no directives (under-approximating).
 func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
 	f := goFacts{imports: map[string]int{}, blank: map[string]int{}, directives: map[string][]int{}, blobs: map[string]int{}}
 	if src == nil {
 		f.parsed = true
 		return f
 	}
-	if !old {
-		for i, line := range strings.Split(string(src), "\n") {
-			t := strings.TrimSpace(line)
-			for _, d := range directivePrefixes {
-				if strings.HasPrefix(t, d) {
-					f.directives[t] = append(f.directives[t], i+1)
+	if dirs, scanErr := scanDirectives(name, src); !(old && scanErr) {
+		for _, d := range dirs {
+			// The old side counts only directives the compiler acts on:
+			// comments at column 1 (a trailing "x := 1 //go:embed f" is
+			// none). The new side counts them all.
+			if old && d.col != 1 {
+				continue
+			}
+			for _, p := range directivePrefixes {
+				if strings.HasPrefix(d.text, p) {
+					f.directives[d.text] = append(f.directives[d.text], d.line)
 				}
 			}
 		}
 	}
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, name, src, parser.ParseComments|parser.SkipObjectResolution)
-	if err == nil && old {
-		for _, cg := range file.Comments {
-			for _, c := range cg.List {
-				for _, d := range directivePrefixes {
-					if strings.HasPrefix(c.Text, d) {
-						f.directives[c.Text] = append(f.directives[c.Text], fset.Position(c.Pos()).Line)
-					}
-				}
-			}
-		}
-	}
 	if err == nil {
 		f.parsed = true
 		pkgs := map[string]string{} // file-scope name -> import path
@@ -1503,61 +1498,6 @@ func clipText(s string) string {
 		return s[:200] + "..."
 	}
 	return s
-}
-
-// parseGoEmbed splits a //go:embed argument list exactly as go/build
-// does: patterns separated by unicode.IsSpace, each bare, "quoted" (Go
-// string syntax) or `backquoted`. An error is a list the go command
-// rejects, which the caller treats as "could embed anything".
-func parseGoEmbed(args string) ([]string, error) {
-	var list []string
-	for args = strings.TrimSpace(args); args != ""; args = strings.TrimSpace(args) {
-		var p string
-	Switch:
-		switch args[0] {
-		default:
-			i := len(args)
-			for j, c := range args {
-				if unicode.IsSpace(c) {
-					i = j
-					break
-				}
-			}
-			p, args = args[:i], args[i:]
-		case '`':
-			i := strings.Index(args[1:], "`")
-			if i < 0 {
-				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
-			}
-			p, args = args[1:1+i], args[1+i+1:]
-		case '"':
-			i := 1
-			for ; i < len(args); i++ {
-				if args[i] == '\\' {
-					i++
-					continue
-				}
-				if args[i] == '"' {
-					q, err := strconv.Unquote(args[:i+1])
-					if err != nil {
-						return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args[:i+1])
-					}
-					p, args = q, args[i+1:]
-					break Switch
-				}
-			}
-			if i >= len(args) {
-				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
-			}
-		}
-		if args != "" {
-			if r, _ := utf8.DecodeRuneInString(args); !unicode.IsSpace(r) {
-				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
-			}
-		}
-		list = append(list, p)
-	}
-	return list, nil
 }
 
 // pureCalls are standard-library functions a package-level var may call

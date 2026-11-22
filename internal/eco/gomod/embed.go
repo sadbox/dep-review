@@ -1,6 +1,7 @@
 package gomod
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -191,15 +192,21 @@ type embedLine struct {
 	err  error
 }
 
+// embedLinesOf finds a new file's //go:embed comments as go/build does
+// (directives.go), in every file whatever its constraints or imports. A
+// comment whose arguments do not parse, or a file the scanner rejects,
+// is a line with an error: unresolved, for a person.
 func embedLinesOf(src []byte) []embedLine {
 	var out []embedLine
-	for n, line := range strings.Split(string(src), "\n") {
-		tl := strings.TrimSpace(line)
-		if !strings.HasPrefix(tl, "//go:embed") {
-			continue
+	dirs, scanErr := scanDirectives("x.go", src)
+	if scanErr && bytes.Contains(src, []byte("//go:embed")) {
+		out = append(out, embedLine{0, nil, errors.New("the Go scanner rejects the file")})
+	}
+	for _, d := range dirs {
+		pats, ok, err := embedArgs(d.text)
+		if ok {
+			out = append(out, embedLine{d.line, pats, err})
 		}
-		pats, err := parseGoEmbed(strings.TrimPrefix(tl, "//go:embed"))
-		out = append(out, embedLine{n + 1, pats, err})
 	}
 	return out
 }
