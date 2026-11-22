@@ -305,7 +305,11 @@ func runUpstream(req upstreamRequest, own bool) (reply upstreamReply) {
 	if req.Subdir != "" {
 		spec = req.Subdir
 	}
-	raw, err := git("log", "--no-renames", "--format=%x1e%H%x00%an%x00%aI%x00%B%x00", "--name-only",
+	// Merges are listed with what they changed against their first
+	// parent (a change made in a merge is a change), and no history is
+	// simplified away.
+	raw, err := git("log", "--no-renames", "--full-history", "--diff-merges=first-parent",
+		"--format=%x1e%H%x00%an%x00%aI%x00%B%x00", "--name-only",
 		"--max-count="+strconv.Itoa(maxUpstreamCommits+1), req.From+".."+req.To, "--", spec)
 	if err != nil {
 		return unavailable("git log failed")
@@ -408,8 +412,11 @@ func itemFiles(code, item string, has func(string) bool) (file, dir string) {
 }
 
 // attachUpstream turns a reply into the evidence's Upstream entry and
-// the reviewer's upstream.md. items are the update's flagged items.
-func attachUpstream(key string, r upstreamReply, items []model.FlaggedItem, has func(string) bool) (model.Upstream, []byte) {
+// the reviewer's upstream.md. items are the update's flagged items;
+// changed reports that a module file differs between the two versions.
+// A flagged file that changed with no listed commit touching it means
+// the history does not account for the change: nothing is attached.
+func attachUpstream(key string, r upstreamReply, items []model.FlaggedItem, has, changed func(string) bool) (model.Upstream, []byte) {
 	up := model.Upstream{Update: key, Status: r.Status, Detail: r.Detail}
 	if r.Status != model.UpstreamVerified {
 		return up, nil
@@ -427,6 +434,10 @@ func attachUpstream(key string, r upstreamReply, items []model.FlaggedItem, has 
 			if slices.ContainsFunc(c.Files, func(f string) bool { return f == file || file == "" && path.Dir(f) == dir }) {
 				hs = append(hs, c.Hash)
 			}
+		}
+		if len(hs) == 0 && file != "" && changed(file) {
+			return model.Upstream{Update: key, Status: model.UpstreamUnavailable,
+				Detail: "the history between the versions does not account for every change (" + safeFile(file) + " changed with no commit touching it)"}, nil
 		}
 		if len(hs) > 0 {
 			up.Items = append(up.Items, model.UpstreamItem{Code: it.Code, Item: it.Item, Commits: hs})

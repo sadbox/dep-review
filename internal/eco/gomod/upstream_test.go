@@ -166,7 +166,8 @@ func TestRunUpstream(t *testing.T) {
 		{Update: "k", Code: codeNewlyBuilt, Item: "untouched.go"},
 	}
 	has := func(p string) bool { return p == "a.go" || p == "p/b.go" || p == "untouched.go" }
-	up, md := attachUpstream("k", r, items, has)
+	changed := func(p string) bool { return p != "untouched.go" }
+	up, md := attachUpstream("k", r, items, has, changed)
 	want := map[string][]string{"a.go": {to}, "p/X": {mid}, "a.go (os)": {to}}
 	if len(up.Items) != len(want) {
 		t.Fatalf("items %+v", up.Items)
@@ -178,6 +179,12 @@ func TestRunUpstream(t *testing.T) {
 	}
 	if !strings.Contains(string(md), "untouched.go: no commit") || !strings.Contains(string(md), "sub: print at init") {
 		t.Errorf("upstream.md:\n%s", md)
+	}
+
+	// A flagged file that changed with no commit touching it: the history
+	// does not explain the change, so nothing is attached.
+	if up, _ := attachUpstream("k", r, []model.FlaggedItem{{Update: "k", Code: codeNewlyBuilt, Item: "untouched.go"}}, has, func(string) bool { return true }); up.Status != model.UpstreamUnavailable {
+		t.Errorf("unexplained change: status %s", up.Status)
 	}
 
 	// A zip that is not what go.sum says: the update goes to a person.
@@ -210,5 +217,70 @@ func TestRunUpstream(t *testing.T) {
 	maxUpstreamCommits = 1
 	if r := runUpstream(req(fromSum, toSum), false); r.Status != model.UpstreamUnavailable {
 		t.Errorf("over budget: status %s", r.Status)
+	}
+}
+
+// A change made in a merge commit (not in either parent) is listed under
+// the merge.
+func TestUpstreamMergeChange(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@example.com", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@example.com")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(rel, s string) {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	write("go.mod", "module example.com/r\n\ngo 1.24\n")
+	write("a.go", "package r\n")
+	write("c.go", "package r\n")
+	run("add", "-A")
+	run("commit", "-q", "-m", "v1")
+	from := run("rev-parse", "HEAD")
+	run("switch", "-q", "-c", "side")
+	write("c.go", "package r\n\nvar C = 1\n")
+	run("commit", "-q", "-am", "side: C")
+	run("switch", "-q", "main")
+	run("merge", "-q", "--no-ff", "--no-commit", "side")
+	write("a.go", "package r\n\nfunc init() { println(1) }\n")
+	run("add", "-A")
+	run("commit", "-q", "-m", "Merge branch side")
+	to := run("rev-parse", "HEAD")
+	url := "file://" + dir
+	git, _ := exec.LookPath("git")
+	sum := func(rev, ver string) string {
+		wt := t.TempDir()
+		if out, err := exec.Command("git", "clone", "-q", dir, wt).CombinedOutput(); err != nil {
+			t.Fatalf("clone: %v %s", err, out)
+		}
+		zf := filepath.Join(t.TempDir(), "m.zip")
+		f, _ := os.Create(zf)
+		if err := modzip.CreateFromVCS(f, module.Version{Path: "example.com/r", Version: ver}, wt, rev, ""); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		h, _ := dirhash.HashZip(zf, dirhash.Hash1)
+		return h
+	}
+	r := runUpstream(upstreamRequest{Git: git, Dir: t.TempDir(), URL: url, From: from, To: to, Module: "example.com/r",
+		FromVer: "v1.0.0", ToVer: "v1.1.0", FromSum: sum(from, "v1.0.0"), ToSum: sum(to, "v1.1.0"),
+		PATH: os.Getenv("PATH"), Protocols: "file"}, false)
+	if r.Status != model.UpstreamVerified {
+		t.Fatalf("status %s: %s", r.Status, r.Detail)
+	}
+	if len(r.Commits) == 0 || r.Commits[0].Hash != to || !slices.Contains(r.Commits[0].Files, "a.go") {
+		t.Errorf("the merge's own change to a.go is not listed under it: %+v", r.Commits)
 	}
 }

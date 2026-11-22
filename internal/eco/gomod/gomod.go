@@ -476,7 +476,13 @@ func (f Fetcher) upstream(env fetch.Env, u model.Update, key string, got map[str
 	sum := sha256.Sum256([]byte(req.URL))
 	req.Dir = filepath.Join(env.Scratch, "upstream", hex.EncodeToString(sum[:8]))
 	has := func(p string) bool { return trees[1].Has(p) || trees[0] != nil && trees[0].Has(p) }
-	return attachUpstream(key, fetchUpstream(req), items, has)
+	changed := func(p string) bool {
+		if trees[0] == nil || trees[0].Has(p) != trees[1].Has(p) {
+			return true
+		}
+		return !bytes.Equal(trees[0].ReadFile(p), trees[1].ReadFile(p))
+	}
+	return attachUpstream(key, fetchUpstream(req), items, has, changed)
 }
 
 // flaggedUpdate is the update a flagged item belongs to, as the verdict
