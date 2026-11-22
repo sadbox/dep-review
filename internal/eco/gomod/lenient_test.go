@@ -2,6 +2,7 @@ package gomod
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
@@ -67,6 +68,9 @@ func TestLenientRoutes(t *testing.T) {
 		{"testdata binary of no known format", with(map[string]string{"f_amd64.s": asm}), with(map[string]string{"f_amd64.s": asm, "testdata/fixture.png": "\x00\x01\x02\x03"}), false},
 		{"testdata fixture a non-cgo text file names", with(map[string]string{"f_amd64.s": asm}), with(map[string]string{"f_amd64.s": asm, "link.ld": "INPUT(testdata/FIXTURE.PNG)\n", "testdata/fixture.png": "\x89PNG\r\n\x1a\n\x00\x01"}), false},
 		{"testdata fixture named by its stem", with(map[string]string{"f_amd64.s": asm}), with(map[string]string{"f_amd64.s": asm, "x.h": "#define F \"testdata/fixture\"\n", "testdata/fixture.png": "\x89PNG\r\n\x1a\n\x00\x01"}), false},
+		{"testdata fixture in a cgo module", with(map[string]string{"f_amd64.s": asm, "c.go": "package m\n\nimport \"C\"\n"}), with(map[string]string{"f_amd64.s": asm, "c.go": "package m\n\nimport \"C\"\n", "testdata/fixture.png": "\x89PNG\r\n\x1a\n\x00\x01"}), false},
+		{"testdata fixture beside preprocessed assembly", with(map[string]string{"f_amd64.S": asm}), with(map[string]string{"f_amd64.S": asm, "testdata/fixture.png": "\x89PNG\r\n\x1a\n\x00\x01"}), false},
+		{"testdata tar-magic file", with(map[string]string{"f_amd64.s": asm}), with(map[string]string{"f_amd64.s": asm, "testdata/fixture.tar": "!<thin>\n" + strings.Repeat("\x00", 249) + "ustar\x00\x01"}), false},
 		{"testdata fixture assembly includes", with(map[string]string{"f_amd64.s": asm}), with(map[string]string{"f_amd64.s": "#include \"testdata/fixture.png\"\n" + asm, "testdata/fixture.png": "\x89PNG\r\n\x1a\n\x00\x01"}), false},
 		{"binary outside testdata", with(nil), with(map[string]string{"x.bin": "\x00\x01\x02"}), false},
 		{"embedded testdata binary", with(nil), with(map[string]string{"e.go": "package m\n\nimport _ \"embed\"\n\n//go:embed testdata/x.bin\nvar b []byte\n", "testdata/x.bin": "\x00\x01\x02"}), false},
