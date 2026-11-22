@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 )
@@ -347,6 +348,11 @@ func (c *checker) importPath(p string, ci int) (*types.Package, error) {
 			return q.pkg, nil
 		}
 		return nil, errors.New("not resolved")
+	}
+	// A well-formed path only: "x/../cmd/compile" would otherwise clean
+	// to the compiler's source.
+	if module.CheckImportPath(p) != nil {
+		return nil, errors.New("not a valid import path")
 	}
 	if first, _, _ := strings.Cut(p, "/"); strings.Contains(first, ".") || first == "cmd" || p == "C" {
 		return nil, errors.New("outside the module and the standard library")
