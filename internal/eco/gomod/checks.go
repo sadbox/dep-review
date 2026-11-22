@@ -1198,6 +1198,7 @@ func (fs fileScope) ownType(name string, generic bool) bool {
 // the reviewer is shown); comparison is on the keys.
 type goFacts struct {
 	imports    map[string]int
+	binds      map[string]string // file-scope import name -> path; dot imports as "." + path
 	cgo        bool
 	preamble   string    // the cgo preamble: every import "C" doc comment, raw, as cmd/cgo reads it
 	inits      []snippet // each func init
@@ -1227,7 +1228,7 @@ var directivePrefixes = []string{"//go:linkname", "//go:generate", "//go:cgo_"}
 // version only (directives.go) and every one is flagged: the old side is
 // never credited with a directive.
 func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
-	f := goFacts{imports: map[string]int{}, blank: map[string]int{}, directives: map[string][]int{}, blobs: map[string]int{}}
+	f := goFacts{imports: map[string]int{}, binds: map[string]string{}, blank: map[string]int{}, directives: map[string][]int{}, blobs: map[string]int{}}
 	if src == nil {
 		f.parsed = true
 		return f
@@ -1260,6 +1261,13 @@ func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
 			}
 			if name == "_" && p != "embed" && p != "unsafe" { // neither has an init; unsafe is a risky import anyway
 				f.blank[p] = line
+			}
+			switch name {
+			case "_":
+			case ".":
+				f.binds["."+p] = p
+			default:
+				f.binds[name] = p
 			}
 			pkgs[name] = p
 			if p == "C" {
@@ -1421,11 +1429,27 @@ func checkGoFile(h *report, rel string, prev, cur []byte, oldShadow, shadow *pkg
 		}
 		return ctx
 	}
-	if slices.ContainsFunc(n.inits, func(s snippet) bool { return !hasText(o.inits, s.text) }) {
-		h.add(codeInit, f, true, append(initCtx("func init", o.inits, n.inits), fullText())...)
+	// Unchanged init text is credited only under the same import
+	// bindings: the same name can now be another package, and a dot
+	// import can supply what a removed declaration was.
+	rebound := ""
+	if prev != nil {
+		rebound = reboundImports(o.binds, n.binds)
 	}
-	if slices.ContainsFunc(n.varInits, func(s snippet) bool { return !hasText(o.varInits, s.text) }) {
-		h.add(codeVarInit, f, true, append(initCtx("package-level var initializer", o.varInits, n.varInits), fullText())...)
+	if rebound != "" {
+		rebound = quote("import bindings changed, so every init of this file runs differently resolved names", rebound)
+	}
+	withRebound := func(ctx []string) []string {
+		if rebound != "" {
+			ctx = append([]string{rebound}, ctx...)
+		}
+		return ctx
+	}
+	if (rebound != "" && len(n.inits) > 0) || slices.ContainsFunc(n.inits, func(s snippet) bool { return !hasText(o.inits, s.text) }) {
+		h.add(codeInit, f, true, append(withRebound(initCtx("func init", o.inits, n.inits)), fullText())...)
+	}
+	if (rebound != "" && len(n.varInits) > 0) || slices.ContainsFunc(n.varInits, func(s snippet) bool { return !hasText(o.varInits, s.text) }) {
+		h.add(codeVarInit, f, true, append(withRebound(initCtx("package-level var initializer", o.varInits, n.varInits)), fullText())...)
 	}
 	// Every directive of a changed or newly built file, old or not.
 	for _, d := range slices.Sorted(maps.Keys(n.directives)) {
@@ -1669,4 +1693,34 @@ func looksEncoded(s string) bool {
 		}
 	}
 	return good*100 >= len(s)*95
+}
+
+// reboundImports describes how a file's import bindings changed in a
+// way that can change what unchanged code refers to: a name that is gone
+// or now names another path, or any change to the dot imports. A new name
+// cannot: it would collide with whatever the old code used it for. ""
+// when there is no such change.
+func reboundImports(old, cur map[string]string) string {
+	var b strings.Builder
+	for _, name := range slices.Sorted(maps.Keys(old)) {
+		p := old[name]
+		if strings.HasPrefix(name, ".") {
+			if _, ok := cur[name]; !ok {
+				fmt.Fprintf(&b, "dot import of %s removed\n", safeImport(p))
+			}
+			continue
+		}
+		switch q, ok := cur[name]; {
+		case !ok:
+			fmt.Fprintf(&b, "%s no longer imported (was %s)\n", safeIdent(name), safeImport(p))
+		case q != p:
+			fmt.Fprintf(&b, "%s now imports %s (was %s)\n", safeIdent(name), safeImport(q), safeImport(p))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(cur)) {
+		if _, ok := old[name]; strings.HasPrefix(name, ".") && !ok {
+			fmt.Fprintf(&b, "dot import of %s added\n", safeImport(cur[name]))
+		}
+	}
+	return b.String()
 }
