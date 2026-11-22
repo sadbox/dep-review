@@ -13,7 +13,7 @@ import (
 
 func TestParseVerdictItems(t *testing.T) {
 	item := func(extra string) string {
-		return `{"update":"github.com/x/y","code":"gomod.init-changed","item":"a.go","assessment":"benign","note":"registers a codec"` + extra + `}`
+		return `{"update":"github.com/x/y","code":"gomod.init-changed","item":"a.go","assessment":"benign","note":"registers a codec","commits":[]` + extra + `}`
 	}
 	many := make([]string, model.MaxFlagged+1)
 	for i := range many {
@@ -35,6 +35,13 @@ func TestParseVerdictItems(t *testing.T) {
 		{"unknown assessment", `[` + strings.Replace(item(""), "benign", "fine", 1) + `]`, false},
 		{"extra field", `[` + item(`,"merge":true`) + `]`, false},
 		{"missing note", `[` + strings.Replace(item(""), `,"note":"registers a codec"`, "", 1) + `]`, false},
+		{"missing commits", `[` + strings.Replace(item(""), `,"commits":[]`, "", 1) + `]`, false},
+		{"null commits", `[` + strings.Replace(item(""), `"commits":[]`, `"commits":null`, 1) + `]`, false},
+		{"commit cited", `[` + strings.Replace(item(""), `"commits":[]`, `"commits":["`+strings.Repeat("ab", 20)+`"]`, 1) + `]`, true},
+		{"short commit", `[` + strings.Replace(item(""), `"commits":[]`, `"commits":["abcdef1"]`, 1) + `]`, false},
+		{"uppercase commit", `[` + strings.Replace(item(""), `"commits":[]`, `"commits":["`+strings.Repeat("AB", 20)+`"]`, 1) + `]`, false},
+		{"repeated commit", `[` + strings.Replace(item(""), `"commits":[]`, `"commits":["`+strings.Repeat("ab", 20)+`","`+strings.Repeat("ab", 20)+`"]`, 1) + `]`, false},
+		{"commit not a string", `[` + strings.Replace(item(""), `"commits":[]`, `"commits":[1]`, 1) + `]`, false},
 		{"duplicate", `[` + item("") + `,` + item("") + `]`, false},
 		{"null", `null`, false},
 		{"not an array", `{}`, false},
@@ -83,7 +90,26 @@ func TestDecideAccounting(t *testing.T) {
 		return b
 	}
 	as := func(f model.FlaggedItem, a model.Assessment) model.ItemAssessment {
-		return model.ItemAssessment{Update: f.Update, Code: f.Code, Item: f.Item, Assessment: a, Note: "n"}
+		return model.ItemAssessment{Update: f.Update, Code: f.Code, Item: f.Item, Assessment: a, Note: "n", Commits: []string{}}
+	}
+	c1, c2, c3 := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	cite := func(a model.ItemAssessment, cs ...string) model.ItemAssessment {
+		a.Commits = cs
+		return a
+	}
+	up := func(st model.UpstreamStatus) *model.Evidence {
+		e := ev(flagged)
+		e.Upstream = []model.Upstream{{Update: "github.com/x/y", Status: st, Items: []model.UpstreamItem{
+			{Code: flagged[0].Code, Item: flagged[0].Item, Commits: []string{c1, c2}},
+		}}}
+		return e
+	}
+	upOther := func() *model.Evidence {
+		e := ev(flagged)
+		e.Upstream = []model.Upstream{{Update: "github.com/other", Status: model.UpstreamVerified, Items: []model.UpstreamItem{
+			{Code: flagged[0].Code, Item: flagged[0].Item, Commits: []string{c1}},
+		}}}
+		return e
 	}
 	many := make([]model.FlaggedItem, model.MaxFlagged+1)
 	manyBenign := make([]model.ItemAssessment, model.MaxFlagged)
@@ -108,12 +134,23 @@ func TestDecideAccounting(t *testing.T) {
 		{"unclear", ev(flagged), verdict(as(flagged[0], model.Benign), as(flagged[1], model.Unclear)), model.DecisionHuman, "1 unclear"},
 		{"suspicious", ev(flagged), verdict(as(flagged[0], model.Suspicious), as(flagged[1], model.Benign)), model.DecisionHuman, "1 suspicious"},
 		{"extra item", ev(flagged), verdict(as(flagged[0], model.Benign), as(flagged[1], model.Benign),
-			model.ItemAssessment{Update: "github.com/x/y", Code: "gomod.init-changed", Item: "b.go", Assessment: model.Benign, Note: "n"}), model.DecisionHuman, "1 item the gate did not flag"},
+			model.ItemAssessment{Update: "github.com/x/y", Code: "gomod.init-changed", Item: "b.go", Assessment: model.Benign, Note: "n", Commits: []string{}}), model.DecisionHuman, "1 item the gate did not flag"},
 		{"item of another update", ev(flagged), verdict(as(flagged[0], model.Benign),
-			model.ItemAssessment{Update: "github.com/other", Code: flagged[1].Code, Item: flagged[1].Item, Assessment: model.Benign, Note: "n"}), model.DecisionHuman, "did not assess 1 of 2"},
+			model.ItemAssessment{Update: "github.com/other", Code: flagged[1].Code, Item: flagged[1].Item, Assessment: model.Benign, Note: "n", Commits: []string{}}), model.DecisionHuman, "did not assess 1 of 2"},
 		{"no flagged, item listed", ev(nil), verdict(as(flagged[0], model.Benign)), model.DecisionHuman, "did not flag"},
 		{"too many flagged", ev(many), verdict(manyBenign...), model.DecisionHuman, "too many"},
 		{"duplicate flagged entry", ev(append(flagged, flagged[0])), verdict(as(flagged[0], model.Benign), as(flagged[1], model.Benign)), model.DecisionHuman, "flagged list"},
+		// Upstream citations: where commits are listed for an item of a
+		// verified update, benign needs one of them and nothing else.
+		{"cites a listed commit", up(model.UpstreamVerified), verdict(cite(as(flagged[0], model.Benign), c1), as(flagged[1], model.Benign)), model.DecisionMerge, "approved"},
+		{"cites two listed commits", up(model.UpstreamVerified), verdict(cite(as(flagged[0], model.Benign), c1, c2), as(flagged[1], model.Benign)), model.DecisionMerge, "approved"},
+		{"cites nothing", up(model.UpstreamVerified), verdict(as(flagged[0], model.Benign), as(flagged[1], model.Benign)), model.DecisionHuman, "cleared 1 item without citing"},
+		{"cites an unlisted commit", up(model.UpstreamVerified), verdict(cite(as(flagged[0], model.Benign), c1, c3), as(flagged[1], model.Benign)), model.DecisionHuman, "cleared 1 item without citing"},
+		{"cites where none are listed", up(model.UpstreamVerified), verdict(cite(as(flagged[0], model.Benign), c1), cite(as(flagged[1], model.Benign), c1)), model.DecisionHuman, "cleared 1 item without citing"},
+		{"unavailable needs no citation", up(model.UpstreamUnavailable), verdict(as(flagged[0], model.Benign), as(flagged[1], model.Benign)), model.DecisionMerge, "approved"},
+		{"unavailable refuses citations", up(model.UpstreamUnavailable), verdict(cite(as(flagged[0], model.Benign), c1), as(flagged[1], model.Benign)), model.DecisionHuman, "cleared 1 item without citing"},
+		{"listed for another update", upOther(), verdict(as(flagged[0], model.Benign), as(flagged[1], model.Benign)), model.DecisionMerge, "approved"},
+		{"unclear stays unclear", up(model.UpstreamVerified), verdict(cite(as(flagged[0], model.Unclear), c1), as(flagged[1], model.Benign)), model.DecisionHuman, "1 unclear"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -197,7 +234,7 @@ func TestItemsSchemaInSync(t *testing.T) {
 	if it.Items.AdditionalProperties == nil || *it.Items.AdditionalProperties {
 		t.Errorf("items allow additional properties")
 	}
-	want := []string{"update", "code", "item", "assessment", "note"}
+	want := []string{"update", "code", "item", "assessment", "note", "commits"}
 	if !reflect.DeepEqual(it.Items.Required, want) || len(it.Items.Properties) != len(want) {
 		t.Errorf("item fields = %q / %v", it.Items.Required, it.Items.Properties)
 	}

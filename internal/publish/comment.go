@@ -207,7 +207,8 @@ func renderComment(d commentData) string {
 			b.WriteString("\n```\n")
 		}
 		if d.Evidence != nil && len(d.Evidence.Flagged) > 0 {
-			renderItems(&b, d.Evidence.Flagged, v.Items)
+			renderUpstream(&b, d.Evidence.Upstream)
+			renderItems(&b, d.Evidence.Flagged, v.Items, d.Evidence.Upstream)
 		}
 	}
 
@@ -232,7 +233,8 @@ func renderStuck(head string, m marker) string {
 // evidence (the gate's strings); only the assessment and the note
 // (sanitized) come from the model, and an item the reviewer listed but
 // the gate did not flag is only counted.
-func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.ItemAssessment) {
+func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.ItemAssessment, upstream []model.Upstream) {
+	listed := listedCommits(upstream)
 	got := map[model.FlaggedItem]model.ItemAssessment{}
 	for _, it := range items {
 		got[model.FlaggedItem{Update: it.Update, Code: it.Code, Item: it.Item}] = it
@@ -249,6 +251,16 @@ func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.
 		r := row{f: f, a: "not assessed"}
 		if it, ok := got[f]; ok {
 			r.a, r.note = string(it.Assessment), it.Note
+			if it.Assessment == model.Benign && !citesListed(it.Commits, listed[f]) {
+				// Counted as accounting counts it.
+				it.Assessment, r.a = model.Unclear, "unclear (benign without a listed commit)"
+			} else if len(listed[f]) > 0 {
+				var short []string
+				for _, c := range it.Commits {
+					short = append(short, c[:7])
+				}
+				r.a += ", cites " + strings.Join(short, " ")
+			}
 			switch it.Assessment {
 			case model.Suspicious:
 				r.rank = 1
@@ -259,7 +271,14 @@ func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.
 			}
 			delete(got, f)
 		}
-		counts[r.a]++
+		switch {
+		case strings.HasPrefix(r.a, "unclear"):
+			counts["unclear"]++
+		case strings.HasPrefix(r.a, "benign"):
+			counts["benign"]++
+		default:
+			counts[r.a]++
+		}
 		rows = append(rows, r)
 	}
 	slices.SortStableFunc(rows, func(x, y row) int { return x.rank - y.rank })
@@ -275,5 +294,17 @@ func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.
 			break
 		}
 		fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n", code(r.f.Update), code(r.f.Code), code(r.f.Item), code(r.a), code(r.note))
+	}
+}
+
+// renderUpstream says, per update, what the gate found upstream: the
+// gate's own words.
+func renderUpstream(b *strings.Builder, upstream []model.Upstream) {
+	if len(upstream) == 0 {
+		return
+	}
+	b.WriteString("\n#### Upstream history\n\n| Update | Status | Detail |\n|---|---|---|\n")
+	for _, u := range upstream {
+		fmt.Fprintf(b, "| %s | %s | %s |\n", code(u.Update), code(string(u.Status)), code(u.Detail))
 	}
 }

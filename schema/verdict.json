@@ -44,7 +44,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["update", "code", "item", "assessment", "note"],
+        "required": ["update", "code", "item", "assessment", "note", "commits"],
         "properties": {
           "update": {"type": "string", "maxLength": 640},
           "code": {"type": "string", "maxLength": 640},
@@ -58,6 +58,13 @@
             "type": "string",
             "maxLength": 400,
             "description": "What the item does, in plain text: why it is benign, or what is suspicious or unclear about it."
+          },
+          "commits": {
+            "type": "array",
+            "maxItems": 20,
+            "uniqueItems": true,
+            "description": "Full hashes of the upstream commits listed for this item in the upstream.md evidence file whose stated purpose explains this change; [] when none are listed. Benign needs at least one when commits are listed.",
+            "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
           }
         }
       }

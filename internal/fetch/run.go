@@ -67,6 +67,7 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 		Files:          ev.Files(),
 		Truncated:      ev.Truncated(),
 		Flagged:        res.Flagged,
+		Upstream:       res.Upstream,
 	}
 	if out.Updates == nil {
 		out.Updates = []model.Update{}

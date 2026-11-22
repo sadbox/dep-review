@@ -52,6 +52,9 @@ type Result struct {
 	// Flagged lists every item a review-routed check flagged; the
 	// reviewer must assess each one (model.Evidence.Flagged).
 	Flagged []model.FlaggedItem
+	// Upstream is, per update, the upstream history attached for the
+	// flagged items (model.Evidence.Upstream).
+	Upstream []model.Upstream
 }
 
 // Ecosystem is one package ecosystem's fetcher.

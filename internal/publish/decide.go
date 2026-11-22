@@ -152,7 +152,7 @@ func Decide(in Inputs) Outcome {
 		}
 		o := human(route, "", nil)
 		o.Verdict = &v
-		accounted, why := accounting(ev.Flagged, v.Items)
+		accounted, why := accounting(ev.Flagged, v.Items, ev.Upstream)
 		switch {
 		case v.Verdict != model.Pass:
 			o.Reason = "the reviewer answered " + string(v.Verdict)
