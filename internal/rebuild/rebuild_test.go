@@ -32,16 +32,18 @@ func TestScripts(t *testing.T) {
 		t.Fatalf("Scripts = %v, %v", got, err)
 	}
 	for name, c := range map[string]struct{ pkg, lock string }{
-		"git dependency":  {okPkg, strings.Replace(okLock, "https://registry.npmjs.org/x/-/x-1.0.0.tgz", "git+ssh://git@github.com/x/x.git#abc", 1)},
-		"other registry":  {okPkg, strings.Replace(okLock, "registry.npmjs.org/x", "registry.example.com/x", 1)},
-		"no integrity":    {okPkg, strings.Replace(okLock, `"integrity":"sha512-AAAA"`, `"integrity":"sha1-AAAA"`, 1)},
-		"lockfile v1":     {okPkg, strings.Replace(okLock, `"lockfileVersion":3`, `"lockfileVersion":1`, 1)},
-		"link":            {okPkg, strings.Replace(okLock, `"node_modules/x":{`, `"node_modules/x":{"link":true,`, 1)},
-		"workspace entry": {okPkg, strings.Replace(okLock, `"node_modules/x":{`, `"packages/w":{"version":"1.0.0"},"node_modules/x":{`, 1)},
-		"workspaces":      {`{"workspaces":["packages/*"],"scripts":{"build":"tsc"}}`, okLock},
-		"no build script": {`{"scripts":{"test":"jest"}}`, okLock},
-		"duplicate key":   {`{"scripts":{"build":"tsc"},"scripts":{"build":"evil"}}`, okLock},
-		"traversal":       {okPkg, strings.Replace(okLock, "x/-/x-1.0.0.tgz", "x/-/../../evil.tgz", 1)},
+		"git dependency":     {okPkg, strings.Replace(okLock, "https://registry.npmjs.org/x/-/x-1.0.0.tgz", "git+ssh://git@github.com/x/x.git#abc", 1)},
+		"other registry":     {okPkg, strings.Replace(okLock, "registry.npmjs.org/x", "registry.example.com/x", 1)},
+		"no integrity":       {okPkg, strings.Replace(okLock, `"integrity":"sha512-AAAA"`, `"integrity":"sha1-AAAA"`, 1)},
+		"lockfile v1":        {okPkg, strings.Replace(okLock, `"lockfileVersion":3`, `"lockfileVersion":1`, 1)},
+		"link":               {okPkg, strings.Replace(okLock, `"node_modules/x":{`, `"node_modules/x":{"link":true,`, 1)},
+		"workspace entry":    {okPkg, strings.Replace(okLock, `"node_modules/x":{`, `"packages/w":{"version":"1.0.0"},"node_modules/x":{`, 1)},
+		"workspaces":         {`{"workspaces":["packages/*"],"scripts":{"build":"tsc"}}`, okLock},
+		"no build script":    {`{"scripts":{"test":"jest"}}`, okLock},
+		"duplicate key":      {`{"scripts":{"build":"tsc"},"scripts":{"build":"evil"}}`, okLock},
+		"traversal":          {okPkg, strings.Replace(okLock, "x/-/x-1.0.0.tgz", "x/-/../../evil.tgz", 1)},
+		"top-level inBundle": {okPkg, strings.Replace(okLock, `"node_modules/x":{"version":"1.0.0","resolved":"https://registry.npmjs.org/x/-/x-1.0.0.tgz","integrity":"sha512-AAAA"}`, `"node_modules/x":{"version":"1.0.0","inBundle":true}`, 1)},
+		"inBundle resolved":  {okPkg, strings.Replace(okLock, `"inBundle":true}`, `"inBundle":true,"resolved":"https://evil.example/z.tgz"}`, 1)},
 	} {
 		if _, err := Scripts([]byte(c.pkg), []byte(c.lock)); !errors.As(err, new(ErrNotRebuildable)) {
 			t.Errorf("%s: Scripts error %v, want not rebuildable", name, err)

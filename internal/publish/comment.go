@@ -316,11 +316,12 @@ func renderUpstream(b *strings.Builder, upstream []model.Upstream) {
 }
 
 // rebuildOutcome is the result shown for a plan: the first result bound
-// to it (same update, repository and commit) with a known outcome, or
+// to it (same update, repository, commit and directories) with a known
+// outcome, or
 // "not run".
 func rebuildOutcome(p model.RebuildPlan, results []model.RebuildResult) (outcome, script, detail string) {
 	for _, r := range results {
-		if r.Update != p.Update || r.Repo != p.Repo || r.Commit != p.Commit {
+		if r.Update != p.Update || r.Repo != p.Repo || r.Commit != p.Commit || !slices.Equal(r.Dirs, p.Dirs) {
 			continue
 		}
 		switch r.Outcome {

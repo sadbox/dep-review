@@ -198,9 +198,9 @@ func sortedValues(m map[string]string) []string {
 
 func TestRenderRebuilds(t *testing.T) {
 	c := strings.Repeat("a", 40)
-	ev := &model.Evidence{Rebuilds: []model.RebuildPlan{{Update: "actions/setup-go", Repo: "actions/setup-go", Commit: c}, {Update: "o/r", Repo: "o/r", Commit: c}, {Update: "o/s", Repo: "o/s", Commit: c}}}
+	ev := &model.Evidence{Rebuilds: []model.RebuildPlan{{Update: "actions/setup-go", Repo: "actions/setup-go", Commit: c, Dirs: []string{"dist/setup"}}, {Update: "o/r", Repo: "o/r", Commit: c}, {Update: "o/s", Repo: "o/s", Commit: c}}}
 	results := []model.RebuildResult{
-		{Update: "actions/setup-go", Repo: "actions/setup-go", Commit: c, Outcome: model.RebuildVerified, Script: "build", Detail: "npm run build rebuilt all 4 files byte for byte"},
+		{Update: "actions/setup-go", Repo: "actions/setup-go", Commit: c, Dirs: []string{"dist/setup"}, Outcome: model.RebuildVerified, Script: "build", Detail: "npm run build rebuilt all 4 files byte for byte"},
 		// Not bound to its plan (another commit), and an unknown outcome: both "not run".
 		{Update: "o/r", Repo: "o/r", Commit: strings.Repeat("b", 40), Outcome: model.RebuildVerified},
 		{Update: "o/s", Repo: "o/s", Commit: c, Outcome: "approved"},

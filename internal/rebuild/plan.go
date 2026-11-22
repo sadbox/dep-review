@@ -181,8 +181,9 @@ func Scripts(pkgJSON, lock []byte) ([]string, error) {
 			return nil, notRebuildable("package-lock.json has a workspace or linked package")
 		case e.Link:
 			return nil, notRebuildable("package-lock.json links a package")
-		case e.InBundle:
-			// Shipped inside its parent's tarball, which integrity covers.
+		case e.InBundle && strings.Contains(k, "/node_modules/") && e.Resolved == "" && e.Integrity == "":
+			// Shipped inside its parent's tarball, which integrity covers;
+			// npm fetches nothing for it.
 		case !resolvedRe.MatchString(e.Resolved) || !strings.HasPrefix(e.Integrity, "sha512-"):
 			return nil, notRebuildable("a locked package is not a registry.npmjs.org tarball with sha512 integrity")
 		}

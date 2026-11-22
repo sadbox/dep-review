@@ -98,7 +98,7 @@ func short(s string) string {
 }
 
 func one(ctx context.Context, cfg Config, p model.RebuildPlan, n int) model.RebuildResult {
-	res := model.RebuildResult{Update: p.Update, Repo: p.Repo, Commit: p.Commit, Outcome: model.RebuildFailed}
+	res := model.RebuildResult{Update: p.Update, Repo: p.Repo, Commit: p.Commit, Dirs: p.Dirs, Outcome: model.RebuildFailed}
 	fail := func(format string, args ...any) model.RebuildResult {
 		res.Detail = fmt.Sprintf(format, args...)
 		return res

@@ -1461,7 +1461,11 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		if err != nil {
 			return err
 		}
-		if plan != nil && !slices.ContainsFunc(fs.rebuilds, func(q model.RebuildPlan) bool { return q.Repo == plan.Repo && q.Commit == plan.Commit }) {
+		// Two pairs of one commit (a direct and a transitive bump) may use
+		// different subpaths: each set of directories is its own plan.
+		if plan != nil && !slices.ContainsFunc(fs.rebuilds, func(q model.RebuildPlan) bool {
+			return q.Repo == plan.Repo && q.Commit == plan.Commit && slices.Equal(q.Dirs, plan.Dirs)
+		}) {
 			fs.rebuilds = append(fs.rebuilds, *plan)
 		}
 		if plan != nil {

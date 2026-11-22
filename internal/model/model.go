@@ -219,12 +219,13 @@ type RebuildFile struct {
 
 // RebuildResult is the rebuild job's answer for one RebuildPlan.
 type RebuildResult struct {
-	Update  string `json:"update"`
-	Repo    string `json:"repo"`
-	Commit  string `json:"commit"`
-	Outcome string `json:"outcome"` // RebuildVerified, RebuildDiffers or RebuildFailed
-	Script  string `json:"script,omitempty"`
-	Detail  string `json:"detail,omitempty"`
+	Update  string   `json:"update"`
+	Repo    string   `json:"repo"`
+	Commit  string   `json:"commit"`
+	Dirs    []string `json:"dirs"`
+	Outcome string   `json:"outcome"` // RebuildVerified, RebuildDiffers or RebuildFailed
+	Script  string   `json:"script,omitempty"`
+	Detail  string   `json:"detail,omitempty"`
 }
 
 // Rebuild outcomes.
