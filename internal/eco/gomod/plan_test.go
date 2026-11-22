@@ -92,6 +92,11 @@ func TestDeclaredBuilds(t *testing.T) {
 			base(map[string]string{"f_linux_amd64.s": "#include \"mid.h\"\n" + asm, "mid.h": "#include \"evil.h\"\n", "evil.h": "#define X 2\n"}), []string{codeCSource}},
 		// SWIG compiles the package's C as cgo does.
 		{"C beside a SWIG file", "linux/amd64", "", base(nil), base(map[string]string{"m.swig": "%module m\n", "evil.c": "int f(void){return 1;}\n"}), []string{codeCSource}},
+		// ... also when the SWIG file's own constraint holds a toolchain tag.
+		{"C beside a toolchain-tagged SWIG file", "linux/arm64", "",
+			base(map[string]string{"m.swig": "//go:build !goexperiment.greenteagc\n\n%module m\n", "evil.c": "//go:build !goexperiment.greenteagc\n\nint f(void){return 0;}\n"}),
+			base(map[string]string{"m.swig": "//go:build !goexperiment.greenteagc\n\n%module m\n", "evil.c": "//go:build !goexperiment.greenteagc\n\nint f(void){return 1;}\n"}),
+			[]string{codeCSource}},
 		// Anything go list embeds is checked, built or not.
 		{"embedded unbuilt syso", "darwin/arm64", "",
 			base(map[string]string{"e.go": "package m\n\nimport _ \"embed\"\n\n//go:embed *.syso\nvar B []byte\n", "blob_windows_amd64.syso": "\x00\x01\x02v1"}),

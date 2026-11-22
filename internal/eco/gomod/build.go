@@ -742,7 +742,14 @@ func declaredUnbuilt(cur *ecoutil.Tree, nb *builtSet) map[string]bool {
 			cgo = cgo || bytes.Contains(text, []byte(`"C"`)) || bytes.Contains(text, []byte("#cgo"))
 		}
 	}
-	cSkippable := !cgo && !asm
+	// A SWIG file makes cmd/go compile the package's C, and its own
+	// constraint can hold a toolchain tag: any one counts, whatever its
+	// constraint.
+	swig := slices.ContainsFunc(cur.Files, func(f string) bool {
+		ext := path.Ext(f)
+		return ext == ".swig" || ext == ".swigcxx"
+	})
+	cSkippable := !cgo && !asm && !swig
 	for _, rel := range cur.Files {
 		if embedded[rel] || unresolvedEmbed(rel) || nb.userTags[rel] {
 			continue
