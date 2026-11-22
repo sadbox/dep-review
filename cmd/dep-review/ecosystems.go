@@ -14,14 +14,15 @@ import (
 // ecosystems is the fetcher for each Dependabot ecosystem, one line each.
 // An ecosystem missing here gets fetch.Run's "ecosystem.unknown" finding,
 // which forces a human decision. dockerPlatforms is the optional
-// docker_platforms input (see docker.WithPlatforms).
-func ecosystems(dockerPlatforms []string) fetch.Registry {
+// docker_platforms input (see docker.WithPlatforms); goPlan the optional
+// go_platforms and go_tags (gomod.ParseBuildPlan).
+func ecosystems(dockerPlatforms []string, goPlan *gomod.BuildPlan) fetch.Registry {
 	var dockerOpts []docker.Option
 	if len(dockerPlatforms) > 0 {
 		dockerOpts = append(dockerOpts, docker.WithPlatforms(dockerPlatforms))
 	}
 	return fetch.Registry{
-		model.GoModules:     gomod.Fetcher{},
+		model.GoModules:     gomod.Fetcher{Plan: goPlan},
 		model.NPM:           npm.Fetcher{},
 		model.UV:            uv.Fetcher{},
 		model.GitHubActions: actions.New(actions.Config{}),
