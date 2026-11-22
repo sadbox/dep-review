@@ -294,9 +294,33 @@ Known limits:
   buildable keeps credit for its unchanged files. The `-tags` search
   looks at each file alone, so it does not see the old package fail. The
   gap is narrow: no build using that tag could have used the old package,
-  so nothing of it ran before. Planned fix: a per-repository declared
-  build configuration (the tags and platforms the repository actually
-  builds with), evaluated exactly with go list.
+  so nothing of it ran before. A repository that declares its builds
+  (below) does not have this limit for the tags it declares.
+
+### Declared Go builds
+
+A caller can set `go_platforms`, the GOOS/GOARCH pairs it builds Go for,
+and `go_tags`, tag sets its builds also use: sets separated by spaces,
+tags within a set by commas, such as `race` for `go test -race`. Go module
+checks then evaluate each platform, cgo off and on, with no tags and with
+each tag set, using go/build and go list. That replaces every platform
+with `-tags` over-approximated. Tags the toolchain sets still vary between
+consumers whatever they declare: `go1.N`, GOARCH feature levels such as
+`amd64.v3`, `gccgo` and GOEXPERIMENT. A file whose constraint consults one
+is still treated as possibly built, and checked as new when it changes.
+
+The checks then skip:
+- `.go` and `.syso` files that none of those builds compile;
+- C and other cgo sources, when no package builds cgo or SWIG files in
+  them and the module has no assembly.
+
+Nothing else is skipped:
+- assembly, since a built `.s` can include another under any spelling;
+- anything go list embeds;
+- anything in a package whose embeds go list could not resolve.
+
+The list must cover every build the repository uses: CI, releases and
+developer machines. A build missing from it is not checked.
 
 ## Layout
 

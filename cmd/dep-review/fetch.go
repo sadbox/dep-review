@@ -32,6 +32,8 @@ func runFetch(args []string) error {
 	repoDir := fl.String("repo-dir", "", "the PR's head checkout (full history) (required)")
 	outDir := fl.String("out", "", "evidence directory to create (required)")
 	dockerPlatforms := fl.String("docker-platforms", "", "optional: the platforms the repository builds, e.g. linux/amd64,linux/arm64 (default: every platform in the image index must be unchanged for a no-op)")
+	goPlatforms := fl.String("go-platforms", "", "optional: the GOOS/GOARCH pairs the repository builds Go for, e.g. linux/amd64,darwin/arm64 (default: every platform, tags over-approximated)")
+	goTags := fl.String("go-tags", "", "optional, with --go-platforms: the build tags every declared Go build sets, e.g. race")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
@@ -41,6 +43,10 @@ func runFetch(args []string) error {
 	platforms, err := docker.ParsePlatforms(*dockerPlatforms)
 	if err != nil {
 		return err
+	}
+	plan, err := gomod.ParseBuildPlan(*goPlatforms, *goTags)
+	if err != nil {
+		return fmt.Errorf("go_platforms/go_tags: %w", err)
 	}
 	b, err := os.ReadFile(*classPath)
 	if err != nil {
@@ -92,7 +98,7 @@ func runFetch(args []string) error {
 		HTTP:    ecoutil.NewClient(),
 		GitHub:  ghc,
 	}
-	out, err := fetch.Run(ctx, env, ecosystems(platforms), ev)
+	out, err := fetch.Run(ctx, env, ecosystems(platforms, plan), ev)
 	if err != nil {
 		return err
 	}

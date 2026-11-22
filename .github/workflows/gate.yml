@@ -36,6 +36,24 @@ on:
           index must be unchanged.
         type: string
         default: ""
+      go_platforms:
+        description: >-
+          Comma-separated GOOS/GOARCH pairs the repository builds for
+          (e.g. linux/amd64,linux/arm64,darwin/arm64). When set, Go module
+          checks evaluate exactly these builds (cgo off and on, with no
+          tags and with each go_tags set) and skip Go and .syso files
+          they never compile. Empty: every platform, with build tags
+          over-approximated.
+        type: string
+        default: ""
+      go_tags:
+        description: >-
+          Extra tag sets the repository's Go builds use, separated by
+          spaces, the tags of one set by commas (e.g. "race" for go test
+          -race). Builds without tags are always checked. Only with
+          go_platforms.
+        type: string
+        default: ""
       ignore_ecosystems:
         description: >-
           Comma-separated ecosystems, as in Dependabot's branch names (e.g.
@@ -256,12 +274,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}
+          GO_PLATFORMS: ${{ inputs.go_platforms }}
+          GO_TAGS: ${{ inputs.go_tags }}
         run: |
           "$RUNNER_TEMP/bin/dep-review" fetch \
             --classification "$RUNNER_TEMP/in/classification.json" \
             --repo-dir pr \
             --out "$RUNNER_TEMP/evidence" \
-            --docker-platforms "$DOCKER_PLATFORMS"
+            --docker-platforms "$DOCKER_PLATFORMS" \
+            --go-platforms "$GO_PLATFORMS" \
+            --go-tags "$GO_TAGS"
       - name: Checksum the artifact
         id: sums
         run: |

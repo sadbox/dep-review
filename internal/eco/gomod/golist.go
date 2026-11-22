@@ -56,6 +56,16 @@ var listParallel = min(8, max(1, runtime.NumCPU()))
 // is resolved.
 type goLister struct {
 	goBin string
+	plan  *BuildPlan // nil: every configuration, tags over-approximated
+}
+
+// configs is what the lister evaluates: the declared configurations, or
+// every one.
+func (l goLister) configs() []config {
+	if l.plan != nil {
+		return l.plan.cfgs
+	}
+	return configs
 }
 
 // defaultLister is the go command on PATH, for CheckTrees (tests).
@@ -211,8 +221,9 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 		out []byte
 		err error
 	}
-	results := make([]result, len(configs))
-	idx := make([]int, len(configs))
+	cfgs := b.cfgs
+	results := make([]result, len(cfgs))
+	idx := make([]int, len(cfgs))
 	for i := range idx {
 		idx[i] = i
 	}
@@ -221,16 +232,20 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 			results[i] = result{err: errors.New("the gate's time budget for go list over this tree is spent")}
 			return
 		}
-		c := configs[i]
+		c := cfgs[i]
 		cgo := "0"
 		if c.cgo {
 			cgo = "1"
+		}
+		args := args
+		if len(c.tags) > 0 {
+			args = append([]string{"list", "-tags=" + strings.Join(c.tags, ",")}, args[1:]...)
 		}
 		out, err := ecoutil.RunGo(ecoutil.GoRun{Go: l.goBin, Dir: mod, Timeout: listTimeout, Args: args,
 			Env: append(slices.Clone(env), "GOOS="+c.goos, "GOARCH="+c.goarch, "CGO_ENABLED="+cgo)})
 		results[i] = result{out, err}
 	})
-	b.listRuns += len(configs)
+	b.listRuns += len(cfgs)
 	// overApprox is go list's missing answer for d in configuration i:
 	// every file built in the new tree, none in the old.
 	overApprox := func(d string, i int) {
@@ -239,7 +254,7 @@ func (l goLister) listDirs(t *ecoutil.Tree, b *builtSet, dirs []string, old bool
 		}
 	}
 	for i, res := range results {
-		c := configs[i]
+		c := cfgs[i]
 		where := fmt.Sprintf("%s/%s, cgo %v", c.goos, c.goarch, c.cgo)
 		answered := map[string]bool{}
 		err := res.err
@@ -317,7 +332,7 @@ func (l goLister) record(b *builtSet, d string, i int, where string, p listPkg, 
 				b.embedders[d] = map[string][]bool{}
 			}
 			if b.embedders[d][f] == nil {
-				b.embedders[d][f] = make([]bool, len(configs))
+				b.embedders[d][f] = make([]bool, len(b.cfgs))
 			}
 			b.embedders[d][f][i] = true
 		}
@@ -333,7 +348,7 @@ func (l goLister) record(b *builtSet, d string, i int, where string, p listPkg, 
 	for _, e := range p.EmbedFiles {
 		f := path.Join(d, e)
 		if b.embedFiles[d][f] == nil {
-			b.embedFiles[d][f] = make([]bool, len(configs))
+			b.embedFiles[d][f] = make([]bool, len(b.cfgs))
 		}
 		b.embedFiles[d][f][i] = true
 	}
@@ -444,5 +459,5 @@ func (f Fetcher) lister(ctx context.Context) (goLister, string) {
 	if err != nil || ctx.Err() != nil {
 		return goLister{}, "none"
 	}
-	return goLister{goBin: abs}, strings.TrimSpace(string(out))
+	return goLister{goBin: abs, plan: f.Plan}, strings.TrimSpace(string(out))
 }

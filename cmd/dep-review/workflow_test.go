@@ -189,6 +189,25 @@ func TestDockerPlatformsPassed(t *testing.T) {
 	}
 }
 
+// fetch gets the caller's go_platforms and go_tags (the Go builds module
+// checks evaluate), and the example sets go_platforms.
+func TestGoBuildsPassed(t *testing.T) {
+	fetch := gateJobs(t)["fetch"]
+	for _, want := range []string{"GO_PLATFORMS: ${{ inputs.go_platforms }}", "GO_TAGS: ${{ inputs.go_tags }}",
+		`--go-platforms "$GO_PLATFORMS"`, `--go-tags "$GO_TAGS"`} {
+		if !strings.Contains(fetch, want) {
+			t.Errorf("fetch lacks %s", want)
+		}
+	}
+	example, err := os.ReadFile("../../examples/dep-review.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(example), "go_platforms: ") {
+		t.Error("the example does not set go_platforms")
+	}
+}
+
 // The ignore_ecosystems input reaches classify (which ignores) and sweep
 // (which must skip what classify ignores), through env only, and the
 // example documents it commented out.
