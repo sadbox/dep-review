@@ -3,6 +3,7 @@ package gomod
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/importer"
@@ -10,6 +11,7 @@ import (
 	"go/token"
 	"go/types"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -185,26 +187,57 @@ func checkTyped(req typesRequest) (refs typedRefs, err error) {
 	defer stdMu.Unlock()
 	saved := build.Default
 	defer func() { build.Default = saved }()
+	// GOPATH mode, no GOPATH: go/build never runs the go command (in
+	// module mode it would, for a path outside GOROOT).
 	build.Default.GOROOT, build.Default.CgoEnabled = req.GOROOT, false
 	build.Default.GOPATH = ""
+	if old, had := os.LookupEnv("GO111MODULE"); had {
+		defer os.Setenv("GO111MODULE", old)
+	} else {
+		defer os.Unsetenv("GO111MODULE")
+	}
+	os.Setenv("GO111MODULE", "off")
 	fset := token.NewFileSet()
-	std := importer.ForCompiler(fset, "source", nil)
-	c := &checker{req: req, fset: fset, std: std, pkgs: map[[2]int]*checked{}, dirIDs: map[string]int{}, parsed: map[string]*ast.File{}}
+	c := &checker{req: req, fset: fset, pkgs: map[[2]int]*checked{},
+		dirIDs: map[string]int{}, parsed: map[string]*ast.File{}, sig: make([]int, len(req.Configs))}
 	refs = typedRefs{}
-	for _, dir := range req.Walk {
-		td, ok := req.Dirs[dir]
-		if !ok {
-			continue
+	// A package is checked once per configuration signature: the file
+	// set of every in-module package in that configuration. Configurations
+	// alike in all of them check alike; any difference (a platform-only
+	// file in an imported package) is checked on its own. The standard
+	// library is the gate host's: what differs by platform or Go version
+	// there resolves to another package's object, which the walk follows
+	// by name when it is unqualified (a dot import) and which runs no
+	// code of this package otherwise.
+	var reps []int
+	seen := map[string]bool{}
+	dirs := slices.Sorted(maps.Keys(req.Dirs))
+	for ci := range req.Configs {
+		var b strings.Builder
+		for _, d := range dirs {
+			fmt.Fprintf(&b, " %d", req.Dirs[d].Config[ci])
 		}
-		for s := range td.Sets {
-			ci := slices.Index(td.Config, s)
+		if !seen[b.String()] {
+			seen[b.String()] = true
+			c.sig[ci] = len(reps)
+			reps = append(reps, ci)
+		} else {
+			c.sig[ci] = -1
+		}
+	}
+	for _, ci := range reps {
+		for _, dir := range req.Walk {
+			td, ok := req.Dirs[dir]
+			if !ok || td.Config[ci] < 0 {
+				continue
+			}
 			p := c.check(dir, ci)
 			if p == nil {
 				continue
 			}
 			for i, f := range p.files {
-				rel := td.Sets[s][i]
-				for off, ts := range declRefs(f, fset, p.pkg, p.info) {
+				rel := td.Sets[td.Config[ci]][i]
+				for off, ts := range declRefs(f, fset, p.pkg, p.info, p.recv) {
 					if refs[rel] == nil {
 						refs[rel] = map[int][]string{}
 					}
@@ -220,12 +253,14 @@ type checked struct {
 	pkg   *types.Package
 	info  *types.Info
 	files []*ast.File
+	recv  map[*types.Func]string // each method -> its receiver type as written
 }
 
 type checker struct {
 	req    typesRequest
 	fset   *token.FileSet
-	std    types.Importer
+	std    types.Importer      // the standard library from source (the host's)
+	sig    []int               // per configuration: its signature's index, -1 if another represents it
 	pkgs   map[[2]int]*checked // (dir ID, set) -> result; nil value: in progress or failed
 	dirIDs map[string]int
 	parsed map[string]*ast.File
@@ -246,7 +281,7 @@ func (c *checker) check(dir string, ci int) *checked {
 	if !ok || ci < 0 || ci >= len(td.Config) || td.Config[ci] < 0 {
 		return nil
 	}
-	key := [2]int{c.dirID(dir), td.Config[ci]}
+	key := [2]int{c.dirID(dir), ci} // ci is its signature's representative
 	if p, seen := c.pkgs[key]; seen {
 		return p // nil while in progress: an import cycle does not compile
 	}
@@ -283,7 +318,18 @@ func (c *checker) check(dir string, ci int) *checked {
 	if pkg == nil {
 		pkg = types.NewPackage(c.req.Module+"/"+dir, name)
 	}
-	p := &checked{pkg: pkg, info: info, files: files}
+	p := &checked{pkg: pkg, info: info, files: files, recv: map[*types.Func]string{}}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv != nil && len(fd.Recv.List) == 1 {
+				if fn, ok := info.Defs[fd.Name].(*types.Func); ok {
+					if r := recvTypeName(fd.Recv.List[0].Type); r != "" {
+						p.recv[fn] = r
+					}
+				}
+			}
+		}
+	}
 	c.pkgs[key] = p
 	return p
 }
@@ -302,8 +348,14 @@ func (c *checker) importPath(p string, ci int) (*types.Package, error) {
 		}
 		return nil, errors.New("not resolved")
 	}
-	if first, _, _ := strings.Cut(p, "/"); strings.Contains(first, ".") {
+	if first, _, _ := strings.Cut(p, "/"); strings.Contains(first, ".") || first == "cmd" || p == "C" {
 		return nil, errors.New("outside the module and the standard library")
+	}
+	if fi, err := os.Stat(filepath.Join(c.req.GOROOT, "src", filepath.FromSlash(p))); err != nil || !fi.IsDir() {
+		return nil, errors.New("not in the standard library")
+	}
+	if c.std == nil {
+		c.std = importer.ForCompiler(c.fset, "source", nil)
 	}
 	return c.std.Import(p)
 }
@@ -315,7 +367,7 @@ func (f importerFunc) Import(p string) (*types.Package, error) { return f(p) }
 // declRefs are, per top-level declaration of f (a func or method, or one
 // spec of a var, const or type declaration), the references the walk
 // follows from it.
-func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.Info) map[int][]string {
+func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.Info, recv map[*types.Func]string) map[int][]string {
 	out := map[int][]string{}
 	off := func(n ast.Node) int { return fset.Position(n.Pos()).Offset }
 	for _, d := range f.Decls {
@@ -329,7 +381,7 @@ func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.
 			if d.Body != nil {
 				nodes = append(nodes, d.Body)
 			}
-			out[off(d)] = refsIn(nodes, pkg, info)
+			out[off(d)] = refsIn(nodes, pkg, info, recv)
 		case *ast.GenDecl:
 			for _, s := range d.Specs {
 				switch s := s.(type) {
@@ -341,14 +393,14 @@ func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.
 					for _, v := range s.Values {
 						nodes = append(nodes, v)
 					}
-					out[off(s)] = refsIn(nodes, pkg, info)
+					out[off(s)] = refsIn(nodes, pkg, info, recv)
 				case *ast.TypeSpec:
 					var nodes []ast.Node
 					if s.TypeParams != nil {
 						nodes = append(nodes, s.TypeParams)
 					}
 					nodes = append(nodes, s.Type)
-					out[off(s)] = refsIn(nodes, pkg, info)
+					out[off(s)] = refsIn(nodes, pkg, info, recv)
 				}
 			}
 		}
@@ -357,7 +409,7 @@ func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.
 }
 
 // refsIn resolves the references in nodes (see the package comment).
-func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info) []string {
+func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info, recv map[*types.Func]string) []string {
 	set := map[string]bool{}
 	var visit func(n ast.Node) bool
 	visit = func(n ast.Node) bool {
@@ -365,7 +417,7 @@ func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info) []string {
 		case *ast.SelectorExpr:
 			if sel := info.Selections[n]; sel != nil {
 				if sel.Kind() != types.FieldVal {
-					if t := methodTarget(sel, pkg); t != "" {
+					if t := methodTarget(sel, pkg, recv); t != "" {
 						set[t] = true
 					}
 				}
@@ -388,16 +440,21 @@ func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info) []string {
 			}
 			return false
 		case *ast.Ident:
-			if info.Defs[n] != nil {
-				return false
-			}
+			// An embedded field's identifier is both a definition (the
+			// field) and a use (its type): the use wins.
 			obj := info.Uses[n]
 			switch {
+			case obj == nil && info.Defs[n] != nil:
 			case obj == nil:
 				if n.Name != "_" {
 					set[n.Name] = true // unresolved: by name
 				}
 			case obj.Pkg() == pkg && obj.Parent() == pkg.Scope():
+				set[n.Name] = true
+			case obj.Pkg() != nil && obj.Pkg() != pkg:
+				// Unqualified, yet another package's: a dot import, which
+				// another configuration or Go version may resolve to a
+				// local declaration instead. By name too.
 				set[n.Name] = true
 			}
 			return false
@@ -419,7 +476,11 @@ func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info) []string {
 // a concrete type of pkg, the bare name for one selected on an interface
 // (it can dispatch to any method of that name), "" for a method of
 // another package's concrete type.
-func methodTarget(sel *types.Selection, pkg *types.Package) string {
+//
+// "T" is the receiver type as the method's declaration writes it (recv),
+// which is how the walk's index keys it: an alias receiver (type A = T;
+// func (A) M()) is "A.M".
+func methodTarget(sel *types.Selection, pkg *types.Package, recv map[*types.Func]string) string {
 	f, ok := sel.Obj().(*types.Func)
 	if !ok {
 		return sel.Obj().Name()
@@ -449,7 +510,10 @@ func methodTarget(sel *types.Selection, pkg *types.Package) string {
 	if types.IsInterface(named) {
 		return f.Name()
 	}
-	return obj.Name() + "." + f.Name()
+	if r, ok := recv[f.Origin()]; ok {
+		return r + "." + f.Name()
+	}
+	return f.Name() // a method the index cannot name exactly: by name
 }
 
 func union(a, b []string) []string {

@@ -74,6 +74,24 @@ func TestTypedWalk(t *testing.T) {
 			map[string]string{"a.go": "package m\n\nvar f = helper\n\nfunc init() { f() }\n\nfunc helper() {}\n"},
 			map[string]string{"a.go": "package m\n\nvar f = helper\n\nfunc init() { f() }\n\nfunc helper() { println(1) }\n"},
 			[]string{"helper"}},
+		// An embedded field's type is a reference (its methods are
+		// promoted): the identifier is a use as well as a definition.
+		{"embedded field",
+			map[string]string{"a.go": "package m\n\nimport \"fmt\"\n\ntype U struct{}\n\nfunc (U) String() string { return \"a\" }\n\ntype T struct{ U }\n\nvar s = fmt.Sprint(T{})\n"},
+			map[string]string{"a.go": "package m\n\nimport \"fmt\"\n\ntype U struct{}\n\nfunc (U) String() string { return \"b\" }\n\ntype T struct{ U }\n\nvar s = fmt.Sprint(T{})\n"},
+			[]string{"U"}},
+		// A method declared on an alias receiver is the index's "A.M".
+		{"alias receiver",
+			map[string]string{"a.go": "package m\n\ntype T struct{}\n\ntype A = T\n\nfunc (A) M() {}\n\nfunc init() { var t T; t.M() }\n"},
+			map[string]string{"a.go": "package m\n\ntype T struct{}\n\ntype A = T\n\nfunc (A) M() { println(1) }\n\nfunc init() { var t T; t.M() }\n"},
+			[]string{"A", "A.M"}},
+		// Each configuration's in-module imports: a dot-imported name only
+		// one platform's file declares resolves to the local function
+		// everywhere else.
+		{"dot import resolved per configuration",
+			map[string]string{"a.go": "package m\n\nfunc init() { helper() }\n", "h.go": "package m\n\nfunc helper() { Foo() }\n", "f.go": "package m\n\nfunc Foo() {}\n", "b/b.go": "package b\n\nvar Bar = 1\n"},
+			map[string]string{"a.go": "package m\n\nfunc init() { helper() }\n", "h.go": "package m\n\nimport . \"example.com/m/b\"\n\nvar _ = Bar\n\nfunc helper() { Foo() }\n", "f.go": "package m\n\nfunc Foo() { println(1) }\n", "b/b.go": "package b\n\nvar Bar = 1\n", "b/b_aix.go": "//go:build aix\n\npackage b\n\nfunc Foo() {}\n"},
+			[]string{"Foo"}},
 		// A value of a local type handed to fmt: its methods (String).
 		{"implicit String",
 			map[string]string{"a.go": "package m\n\nimport \"fmt\"\n\ntype T struct{}\n\nfunc (T) String() string { return \"a\" }\n\nvar s = fmt.Sprint(T{})\n"},
