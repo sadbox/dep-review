@@ -163,6 +163,34 @@ sum, which review and publish verify first.
 The flagged-items file uses the same caps. Other ecosystems keep the
 single-file limits (400 KB a file, 4 MB in all).
 
+#### Split reviews
+
+When the required reading passes about 900 KB, one reviewer run doesn't
+finish it. homelab-configs#127 read 37 of about 90 required diffs in 80
+turns. Such a review is split into passes, each a full sandboxed run with
+its own budget:
+- pass 1 assesses every flagged item and reads as many required diffs as
+  fit;
+- each later pass reads the next share of required diffs;
+- a final pass, given every pass's report as data, decides on the whole.
+
+The merged verdict is the worst of them all, with every flag, pass 1's
+items, every reading pass's `examined` and the final pass's summary.
+Publish checks it like a single verdict, with two more rules:
+- an item any pass marks suspicious or unclear makes the review unsure;
+- so do items from a pass that wasn't asked to assess them.
+
+Diffs are packed largest first. Reading that doesn't fit six passes of
+900 KB is refused, and a person decides: it is never piled onto the last
+pass, because the attacker picks the sizes and the order. A pass with no
+verdict also leaves no verdict at all. The final pass sees which files
+each pass read, so it can look for something one share defines and
+another uses.
+
+Each pass has the per-run limits (`max_model_requests`, 80 turns, 20
+minutes), and all of them together get 140 minutes. A split review costs
+up to seven runs.
+
 #### Upstream commits
 
 For an update with flagged items, the gate also fetches the module's
