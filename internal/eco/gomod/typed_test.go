@@ -91,7 +91,21 @@ func TestTypedWalk(t *testing.T) {
 		{"dot import resolved per configuration",
 			map[string]string{"a.go": "package m\n\nfunc init() { helper() }\n", "h.go": "package m\n\nfunc helper() { Foo() }\n", "f.go": "package m\n\nfunc Foo() {}\n", "b/b.go": "package b\n\nvar Bar = 1\n"},
 			map[string]string{"a.go": "package m\n\nfunc init() { helper() }\n", "h.go": "package m\n\nimport . \"example.com/m/b\"\n\nvar _ = Bar\n\nfunc helper() { Foo() }\n", "f.go": "package m\n\nfunc Foo() { println(1) }\n", "b/b.go": "package b\n\nvar Bar = 1\n", "b/b_aix.go": "//go:build aix\n\npackage b\n\nfunc Foo() {}\n"},
-			[]string{"Foo"}},
+			[]string{"Foo", "b/Foo"}},
+		// Across the module's packages: an unchanged init reaching a
+		// changed function of another package of the module.
+		{"another package of the module",
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() { g() }\n\nfunc g() {}\n"},
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() { g() }\n\nfunc g() { println(1) }\n"},
+			[]string{"b/g"}},
+		{"another package's method",
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { var t b.T; t.M() }\n", "b/b.go": "package b\n\ntype T struct{}\n\nfunc (T) M() {}\n\ntype U struct{}\n\nfunc (U) M() {}\n"},
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { var t b.T; t.M() }\n", "b/b.go": "package b\n\ntype T struct{}\n\nfunc (T) M() { println(1) }\n\ntype U struct{}\n\nfunc (U) M() { println(1) }\n"},
+			[]string{"b/T", "b/T.M"}},
+		{"init in an unchanged package",
+			map[string]string{"c/c.go": "package c\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() {}\n"},
+			map[string]string{"c/c.go": "package c\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() { println(1) }\n"},
+			[]string{"b/F"}},
 		// A value of a local type handed to fmt: its methods (String).
 		{"implicit String",
 			map[string]string{"a.go": "package m\n\nimport \"fmt\"\n\ntype T struct{}\n\nfunc (T) String() string { return \"a\" }\n\nvar s = fmt.Sprint(T{})\n"},
@@ -115,5 +129,15 @@ func TestTypedImportPaths(t *testing.T) {
 		if _, err := c.importPath(p, 0); err == nil {
 			t.Errorf("%q imported", p)
 		}
+	}
+}
+
+// Without the type checker, a qualified pkg.Name of the module's own
+// package is still that package's.
+func TestByNameCrossPackage(t *testing.T) {
+	tr := writeTree(t, map[string]string{"go.mod": "module example.com/m\n", "a.go": "package m\n\nimport x \"example.com/m/b\"\n\nfunc init() { x.F() }\n"})
+	ix := indexPackage(tr, ".", &pkgScope{declared: map[string]bool{}, types: map[string]map[string]bool{}, valueNames: map[string]bool{}}, nil, nil, "example.com/m")
+	if len(ix.roots) != 1 || !slices.Contains(ix.roots[0].refs, "b:F") {
+		t.Errorf("roots %+v", ix.roots)
 	}
 }

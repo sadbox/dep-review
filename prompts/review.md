@@ -87,9 +87,8 @@ Hold these items to a stricter bar than ordinary changes:
 
 - Read every item in full, in the `.flagged.md` file and in the module
   diff. The gate's walk from init code uses the type checker where it can
-  and names where it cannot, and it stays inside one package: it does not
-  follow calls into other packages, even of the same module. Trace those
-  yourself in the diff.
+  and names where it cannot. It follows calls across the module's own
+  packages, but not into other modules. Trace those yourself in the diff.
 - Code that runs at import must do what a library needs at import and
   nothing more: registering codecs, building lookup tables, reading
   `runtime` or `GODEBUG` settings. Network or DNS access, process

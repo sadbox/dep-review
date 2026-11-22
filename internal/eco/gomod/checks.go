@@ -626,15 +626,26 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			}
 		}
 	}
-	// The walk's references, resolved by the type checker (typed.go).
-	typed := typedWalk(cur, nb, lister, slices.Sorted(maps.Keys(goDirs)))
-	h.typedDirs = len(typed)
-	for _, dir := range slices.Sorted(maps.Keys(goDirs)) {
-		scopes(dir)
-		for _, c := range initCalleesChanged(old, cur, dir, oldShadow[dir], shadow[dir], ob, nb, typed) {
-			// The declarations' texts, old and new, are shown whole.
-			h.add(codeInitCallee, path.Join(safeFile(dir), safeRef(c.name)), true, c.context())
+	// The walk runs from every package's init code over the whole module:
+	// an unchanged init can reach a changed declaration of another package
+	// of the module. Its references are the type checker's (typed.go).
+	pkgDirs := map[string]bool{}
+	for _, rel := range cur.Files {
+		if isGo(rel) {
+			pkgDirs[path.Dir(rel)] = true
 		}
+	}
+	allDirs := slices.Sorted(maps.Keys(pkgDirs))
+	typed := typedWalk(cur, nb, lister, allDirs)
+	h.typedDirs = len(typed)
+	scope := func(dir string) (*pkgScope, *pkgScope) {
+		scopes(dir)
+		return oldShadow[dir], shadow[dir]
+	}
+	_ = goDirs
+	for _, c := range initCalleesModule(old, cur, allDirs, scope, ob, nb, typed, modulePath(cur)) {
+		// The declarations' texts, old and new, are shown whole.
+		h.add(codeInitCallee, path.Join(safeFile(c.dir), safeRef(c.name)), true, c.context())
 	}
 	h.binaries(old, cur, bins, tdBins, h.embeds(old, cur, ob, nb))
 	return h
@@ -816,6 +827,7 @@ type declInfo struct {
 	refs  []string
 	root  bool   // a var spec that is also an init root (compared by codeVarInit instead)
 	file  string // the file it is declared in (sanitized)
+	rel   string // the same, raw
 	line  int
 	label string // for a root: "func init" or "var x, y"
 }
@@ -866,7 +878,7 @@ func identsIn(n ast.Node) []string {
 	return out
 }
 
-func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(string) bool, typed typedRefs) pkgIndex {
+func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(string) bool, typed typedRefs, mod string) pkgIndex {
 	ix := pkgIndex{decls: map[string][]declInfo{}}
 	if t == nil {
 		return ix
@@ -894,9 +906,30 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 		fs := newFileScope(shadow, file, pkgs)
 		// withTyped replaces a declaration's by-name references with the
 		// type checker's, when it checked the declaration (typed.go).
+		// By name, a qualified pkg.Name whose package is the module's is
+		// that package's ("dir:Name"): the import spec says which.
+		modDirs := map[string]string{}
+		for name, p := range pkgs {
+			if p == mod && mod != "" {
+				modDirs[name] = "."
+			} else if d, ok := strings.CutPrefix(p, mod+"/"); ok && mod != "" {
+				modDirs[name] = d
+			}
+		}
 		withTyped := func(n ast.Node, di declInfo) declInfo {
 			if refs, ok := typed[rel][fset.Position(n.Pos()).Offset]; ok {
 				di.refs = refs
+				return di
+			}
+			if len(modDirs) > 0 {
+				ast.Inspect(n, func(n ast.Node) bool {
+					if sel, ok := n.(*ast.SelectorExpr); ok {
+						if id, ok := sel.X.(*ast.Ident); ok && modDirs[id.Name] != "" {
+							di.refs = append(di.refs, modDirs[id.Name]+":"+sel.Sel.Name)
+						}
+					}
+					return true
+				})
 			}
 			return di
 		}
@@ -905,6 +938,7 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 				text: string(src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]),
 				refs: identsIn(n),
 				file: safeFile(rel),
+				rel:  rel,
 				line: fset.Position(n.Pos()).Line,
 			}
 		}
@@ -1016,7 +1050,7 @@ func recvTypeName(e ast.Expr) string {
 // Each result carries the first path the walk found from a root to it
 // (breadth first, so a shortest one) and the declarations under its name
 // on both sides, which is what the reviewer is shown.
-func initCalleesChanged(old, cur *ecoutil.Tree, dir string, oldShadow, shadow *pkgScope, ob, nb *builtSet, typed typedRefs) []calleeHit {
+func initCalleesModule(old, cur *ecoutil.Tree, dirs []string, scope func(string) (*pkgScope, *pkgScope), ob, nb *builtSet, typed typedRefs, mod string) []calleeHit {
 	// The old side holds only files the new tree has and builds the same
 	// way: a renamed or newly unconstrained file's declarations are new.
 	// An old declaration is credited only from a file every configuration
@@ -1034,60 +1068,103 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, oldShadow, shadow *p
 		oldKeep := keep
 		keep = func(rel string) bool { return keepNew(rel) && oldKeep(rel) }
 	}
-	o, n := indexPackage(old, dir, oldShadow, keep, nil), indexPackage(cur, dir, shadow, keepNew, typed)
-	type step struct {
-		name string
-		from *step     // nil at a root's direct reference
-		root *declInfo // the root this walk started at
+	known := map[string]bool{}
+	for _, d := range dirs {
+		known[d] = true
 	}
-	seen := map[string]bool{}
+	type index struct{ o, n pkgIndex }
+	idx := map[string]*index{}
+	get := func(dir string) *index {
+		if x := idx[dir]; x != nil {
+			return x
+		}
+		os, ns := scope(dir)
+		x := &index{indexPackage(old, dir, os, keep, nil, mod), indexPackage(cur, dir, ns, keepNew, typed, mod)}
+		idx[dir] = x
+		return x
+	}
+	type step struct {
+		dir, name string
+		from      *step     // nil at a root's direct reference
+		root      *declInfo // the root this walk started at
+	}
+	// at resolves a reference made in dir: "d:name" is package d's (when
+	// it is one of the module's), anything else dir's own.
+	at := func(dir, ref string) (string, string) {
+		if d, n, ok := strings.Cut(ref, ":"); ok && known[d] {
+			return d, n
+		}
+		return dir, ref
+	}
+	seen := map[[2]string]bool{}
 	var queue []*step
-	for i := range n.roots {
-		for _, ref := range n.roots[i].refs {
-			queue = append(queue, &step{name: ref, root: &n.roots[i]})
+	for _, dir := range dirs {
+		x := get(dir)
+		for i := range x.n.roots {
+			for _, ref := range x.n.roots[i].refs {
+				d, n := at(dir, ref)
+				queue = append(queue, &step{dir: d, name: n, root: &x.n.roots[i]})
+			}
 		}
 	}
 	var changed []calleeHit
 	for len(queue) > 0 {
 		s := queue[0]
 		queue = queue[1:]
-		if seen[s.name] {
+		if seen[[2]string{s.dir, s.name}] {
 			continue
 		}
-		seen[s.name] = true
+		seen[[2]string{s.dir, s.name}] = true
+		x := get(s.dir)
 		// A var root's own spec is compared by codeVarInit; every other
 		// declaration under the name (a method, a declaration in another
 		// file or under other build tags) is compared and followed here.
-		ds := nonRoots(n.decls[s.name])
-		if len(ds) == 0 && len(nonRoots(o.decls[s.name])) == 0 {
+		ds := nonRoots(x.n.decls[s.name])
+		if len(ds) == 0 && len(nonRoots(x.o.decls[s.name])) == 0 {
 			continue
 		}
-		if !sameDecls(nonRoots(o.decls[s.name]), ds) {
+		if !sameDecls(nonRoots(x.o.decls[s.name]), ds) {
 			var chain []string
 			for p := s; p != nil; p = p.from {
-				chain = append(chain, safeRef(p.name))
+				name := safeRef(p.name)
+				prev := path.Dir(s.root.rel)
+				if p.from != nil {
+					prev = p.from.dir
+				}
+				if p.dir != prev {
+					name = safeFile(p.dir) + ":" + name
+				}
+				chain = append(chain, name)
 			}
 			slices.Reverse(chain)
 			r := s.root
 			changed = append(changed, calleeHit{
+				dir:  s.dir,
 				name: s.name,
 				path: fmt.Sprintf("%s (%s:%d) -> %s", r.label, r.file, r.line, strings.Join(chain, " -> ")),
-				old:  nonRoots(o.decls[s.name]),
+				old:  nonRoots(x.o.decls[s.name]),
 				cur:  ds,
 			})
 		}
 		for _, d := range ds {
 			for _, ref := range d.refs {
-				queue = append(queue, &step{name: ref, from: s, root: s.root})
+				dd, n := at(s.dir, ref)
+				queue = append(queue, &step{dir: dd, name: n, from: s, root: s.root})
 			}
 		}
 	}
-	slices.SortFunc(changed, func(a, b calleeHit) int { return strings.Compare(a.name, b.name) })
+	slices.SortFunc(changed, func(a, b calleeHit) int {
+		if c := strings.Compare(a.dir, b.dir); c != 0 {
+			return c
+		}
+		return strings.Compare(a.name, b.name)
+	})
 	return changed
 }
 
 // calleeHit is one changed declaration reached from init.
 type calleeHit struct {
+	dir      string // its package directory
 	name     string
 	path     string // root -> ... -> name
 	old, cur []declInfo
@@ -1097,7 +1174,7 @@ type calleeHit struct {
 // old and new. Identical texts on both sides are shown once.
 func (c calleeHit) context() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "reached at init (by name; the walk does not follow calls into other packages): %s\n", c.path)
+	fmt.Fprintf(&b, "reached at init (resolved by the type checker where it could, by name where not; across the module's packages): %s\n", c.path)
 	same := map[string]bool{}
 	for _, d := range c.old {
 		for _, e := range c.cur {

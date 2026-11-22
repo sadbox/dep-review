@@ -159,8 +159,13 @@ memory-limited child with a timeout. The rules:
   imports outside the module and the standard library, type errors, and
   files no configuration builds.
 
-If the child fails, the whole walk is by name. The walk still doesn't
-follow calls into other packages of the module.
+The walk runs from every package's init code over the whole module. A
+qualified use of another of the module's packages (`b.F`, a method of
+`b.T`, a dot-imported name) is followed into that package, with or
+without the type checker, because the import spec names the package. An
+unchanged init can therefore reach a changed function of another
+package. Calls into other modules aren't followed. If the child fails,
+the whole walk is by name.
 
 #### Navigable diffs
 

@@ -59,7 +59,7 @@ func TestRenderInitCallee(t *testing.T) {
 		"func init (a.go:2) -> helper -> deeper",
 		"old declaration (b.go:3), removed or changed:\n    | func deeper() {}\n",
 		"new declaration (b.go:3):\n    | func deeper() { exfiltrate() }\n",
-		"does not follow calls into other packages",
+		"across the module's packages",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
