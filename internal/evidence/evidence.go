@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -142,6 +143,11 @@ func (d *Dir) addFile(top, name, description string, content []byte, untrusted, 
 	rel := top + "/" + SanitizeName(name)
 
 	text, ok := Normalize(content)
+	if ok && part && !listed {
+		// A diff part: long lines wrapped after escaping, so the written
+		// lines are the ones the reviewer reads.
+		text = WrapLong(text)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if !ok {
@@ -333,8 +339,16 @@ func Normalize(b []byte) ([]byte, bool) {
 		switch {
 		case r == utf8.RuneError && n <= 1:
 			out.WriteRune(utf8.RuneError)
+		case r == '\r' && (len(b) < 2 || b[1] != '\n'):
+			// A lone CR ends a line for JavaScript and Python, not for
+			// the reviewer's reader.
+			out.WriteString("<0x0D>")
 		case r == '\t' || r == '\n' || r == '\r':
 			out.WriteRune(r)
+		case r == 0x2028 || r == 0x2029 || r == 0x85:
+			// Line and paragraph separators (and NEL): line ends to
+			// JavaScript, not to the reader.
+			fmt.Fprintf(&out, "<U+%04X>", r)
 		case r < 0x20 || r == 0x7f:
 			fmt.Fprintf(&out, "<0x%02X>", r)
 		case isBidi(r):
@@ -363,6 +377,56 @@ func IsBinary(b []byte) bool {
 		b = b[sz:]
 	}
 	return n > 0 && bad*10 > n
+}
+
+// MaxReadableLine is the longest line the reviewer reads whole (its file
+// reader cuts longer lines).
+const MaxReadableLine = 2000
+
+// ContinuationNote tells the reviewer how WrapLong marks a wrapped line.
+const ContinuationNote = "A line that starts with `~` is not part of the diff: the gate wrapped the line above it (longer than 2000 bytes) and continues it there. The character after `~` is that line's own +, - or space; read the pieces as one line, with no line break between them."
+
+// WrapLong splits every line of a normalized diff longer than
+// MaxReadableLine. Each continuation starts with "~" (no diff line does:
+// git begins content lines with +, - or a space) and the wrapped line's
+// own first byte, so no line written is longer than MaxReadableLine and
+// a continuation cannot be mistaken for, or forged by, source text.
+func WrapLong(text []byte) []byte {
+	lines := bytes.Split(text, []byte("\n"))
+	if !slices.ContainsFunc(lines, func(l []byte) bool { return len(l) > MaxReadableLine }) {
+		return text
+	}
+	var out bytes.Buffer
+	for i, line := range lines {
+		if i > 0 {
+			out.WriteByte('\n')
+		}
+		if len(line) <= MaxReadableLine {
+			out.Write(line)
+			continue
+		}
+		prefix := []byte{'~', line[0]}
+		limit := MaxReadableLine
+		for {
+			if len(line) <= limit {
+				out.Write(line)
+				break
+			}
+			cut := limit
+			for cut > limit-utf8.UTFMax && cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			if !utf8.RuneStart(line[cut]) {
+				cut = limit // not UTF-8 there: cut bytes
+			}
+			out.Write(line[:cut])
+			out.WriteByte('\n')
+			out.Write(prefix)
+			line = line[cut:]
+			limit = MaxReadableLine - len(prefix)
+		}
+	}
+	return out.Bytes()
 }
 
 func isBidi(r rune) bool {

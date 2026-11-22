@@ -3,9 +3,7 @@ package ecoutil
 import (
 	"bytes"
 	"fmt"
-	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/fetch"
@@ -79,7 +77,8 @@ func (nd NavDiffs) Write(env fetch.Env, n int) ([]model.DiffFile, []model.Findin
 	fmt.Fprintf(&idx, "# Changed files: %s\n\n", nd.Key)
 	fmt.Fprintf(&idx, "Written by the gate. Each row is one changed file of the %s, its diff in the evidence file named in the last column.\n", nd.What)
 	idx.WriteString("Read the diff of every row marked required and list its ID in the verdict's \"examined\"; the gate merges only when all of them are listed.\n")
-	idx.WriteString("A row marked optional is a file no consumer build reads (the reason says why): read it when it helps.\n\n")
+	idx.WriteString("A row marked optional is a file no consumer build reads (the reason says why): read it when it helps.\n")
+	idx.WriteString(evidence.ContinuationNote + "\n\n")
 	idx.WriteString("| ID | File | Bytes | Reading | Diff |\n|---|---|---|---|---|\n")
 	if len(nd.Diffs) == 0 {
 		fmt.Fprintf(&idx, "(the %s trees are identical)\n", nd.What)
@@ -101,7 +100,7 @@ func (nd NavDiffs) Write(env fetch.Env, n int) ([]model.DiffFile, []model.Findin
 		n++
 		id := fmt.Sprintf("D%05d", n)
 		// Named by ID: no path can collide with another's part.
-		file, written, err := env.Evidence.AddPart(nd.Name("diff/"+id+".diff"), wrapLong(d.Body))
+		file, written, err := env.Evidence.AddPart(nd.Name("diff/"+id+".diff"), d.Body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -151,43 +150,6 @@ func ChangedFiles(old, cur *Tree) []string {
 		}
 	}
 	return out
-}
-
-// MaxReadableLine is the longest line the reviewer reads whole (its file
-// reader cuts longer lines).
-const MaxReadableLine = 2000
-
-// wrapLong splits every diff line longer than MaxReadableLine into
-// chunks the reviewer reads whole: each continuation repeats the line's
-// diff marker (+, - or space) and carries "[cont] ", so a minified
-// bundle is read in full, not cut at its first 2000 characters.
-func wrapLong(body []byte) []byte {
-	if !slices.ContainsFunc(bytes.Split(body, []byte("\n")), func(l []byte) bool { return len(l) > MaxReadableLine }) {
-		return body
-	}
-	var out bytes.Buffer
-	lines := bytes.Split(body, []byte("\n"))
-	for i, line := range lines {
-		if len(line) > MaxReadableLine {
-			marker := line[:1]
-			for len(line) > MaxReadableLine {
-				cut := MaxReadableLine - 16 // room for a continuation's marker
-				for cut > 0 && !utf8.RuneStart(line[cut]) {
-					cut--
-				}
-				out.Write(line[:cut])
-				out.WriteString("\n")
-				out.Write(marker)
-				out.WriteString("[cont] ")
-				line = line[cut:]
-			}
-		}
-		out.Write(line)
-		if i < len(lines)-1 {
-			out.WriteString("\n")
-		}
-	}
-	return out.Bytes()
 }
 
 // MaxMustRead bounds what a review must read in full: every required

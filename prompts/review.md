@@ -37,7 +37,13 @@ For every update in `evidence.json`:
    The gate merges only when every required ID is there. A row marked
    optional is a file no consumer build reads, such as a `_test.go` file.
    Read it when it helps; list its ID only if you read it. With no
-   `diffs.md`, answer `examined: []`.
+   `diffs.md`, answer `examined: []`. In these diffs, a line that starts
+   with `~` is the gate's continuation of the line above it, which was
+   longer than 2000 bytes; read the two as one line. No line of the
+   dependency's own text starts with `~`: git begins each with `+`, `-`
+   or a space. Escapes such as `<0x0D>` (a lone carriage return) or
+   `<U+2028>` stand for characters some languages treat as a line break:
+   code after one may run.
 2. Look for supply-chain signals: new or changed network endpoints, HTTP
    calls, DNS lookups, process execution, reads of environment variables or
    credential files the library has no business touching, encoded or
