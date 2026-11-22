@@ -757,7 +757,8 @@ func declaredUnbuilt(cur *ecoutil.Tree, nb *builtSet) map[string]bool {
 		ext := path.Ext(rel)
 		switch {
 		case nb.in[rel] != nil && ext == ".go":
-			out[rel] = !nb.anywhere(rel)
+			// Unbuilt Go source is still text assembly or C can include.
+			out[rel] = !nb.anywhere(rel) && !asm && !cgo
 		case nb.in[rel] != nil && ext == ".syso":
 			out[rel] = !nb.anywhere(rel) && !varied[path.Dir(rel)]
 		case cgoSourceExts[ext]:

@@ -587,6 +587,10 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 				// flagged, inside it goes through the testdata logic (a
 				// non-test //go:embed can reach it).
 				switch {
+				case !evidence.IsBinary(data) && links != "":
+					// Never compiled as Go for a consumer, but assembly,
+					// C or cgo can include it by name.
+					h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
 				case !evidence.IsBinary(data):
 				case testdata:
 					tdBins = append(tdBins, rel)
