@@ -3,7 +3,9 @@ package ecoutil
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sadbox/dep-review/internal/evidence"
 	"github.com/sadbox/dep-review/internal/fetch"
@@ -82,7 +84,16 @@ func (nd NavDiffs) Write(env fetch.Env, n int) ([]model.DiffFile, []model.Findin
 	if len(nd.Diffs) == 0 {
 		fmt.Fprintf(&idx, "(the %s trees are identical)\n", nd.What)
 	}
+	var binary []string
 	for _, d := range nd.Diffs {
+		// A binary on either side goes to a person: git shows only
+		// "Binary files ... differ", also when the new side is text.
+		for _, line := range bytes.Split(d.Body, []byte("\n")) {
+			if bytes.HasPrefix(line, []byte("Binary files ")) || bytes.HasPrefix(line, []byte("GIT binary patch")) {
+				binary = append(binary, safe(d.Path))
+				break
+			}
+		}
 		why := ""
 		if trusted && nd.Optional != nil {
 			why = nd.Optional(d.Path)
@@ -90,7 +101,7 @@ func (nd NavDiffs) Write(env fetch.Env, n int) ([]model.DiffFile, []model.Findin
 		n++
 		id := fmt.Sprintf("D%05d", n)
 		// Named by ID: no path can collide with another's part.
-		file, written, err := env.Evidence.AddPart(nd.Name("diff/"+id+".diff"), d.Body)
+		file, written, err := env.Evidence.AddPart(nd.Name("diff/"+id+".diff"), wrapLong(d.Body))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -108,6 +119,10 @@ func (nd NavDiffs) Write(env fetch.Env, n int) ([]model.DiffFile, []model.Findin
 			reading = "optional: " + why
 		}
 		fmt.Fprintf(&idx, "| %s | %s | %d | %s | %s |\n", df.ID, cell(df.Path), df.Bytes, reading, df.File)
+	}
+	if len(binary) > 0 {
+		findings = append(findings, model.Finding{Code: nd.Eco + ".binary-diff", Route: model.RouteHuman, Update: nd.Update,
+			Detail: fmt.Sprintf("%s: binary on one side or both, so the diff shows no content: %s", nd.Key, List(binary, 10))})
 	}
 	if err := env.Evidence.Add(nd.Name("diffs.md"), nd.Desc, []byte(idx.String())); err != nil {
 		return nil, nil, err
@@ -136,6 +151,43 @@ func ChangedFiles(old, cur *Tree) []string {
 		}
 	}
 	return out
+}
+
+// MaxReadableLine is the longest line the reviewer reads whole (its file
+// reader cuts longer lines).
+const MaxReadableLine = 2000
+
+// wrapLong splits every diff line longer than MaxReadableLine into
+// chunks the reviewer reads whole: each continuation repeats the line's
+// diff marker (+, - or space) and carries "[cont] ", so a minified
+// bundle is read in full, not cut at its first 2000 characters.
+func wrapLong(body []byte) []byte {
+	if !slices.ContainsFunc(bytes.Split(body, []byte("\n")), func(l []byte) bool { return len(l) > MaxReadableLine }) {
+		return body
+	}
+	var out bytes.Buffer
+	lines := bytes.Split(body, []byte("\n"))
+	for i, line := range lines {
+		if len(line) > MaxReadableLine {
+			marker := line[:1]
+			for len(line) > MaxReadableLine {
+				cut := MaxReadableLine - 16 // room for a continuation's marker
+				for cut > 0 && !utf8.RuneStart(line[cut]) {
+					cut--
+				}
+				out.Write(line[:cut])
+				out.WriteString("\n")
+				out.Write(marker)
+				out.WriteString("[cont] ")
+				line = line[cut:]
+			}
+		}
+		out.Write(line)
+		if i < len(lines)-1 {
+			out.WriteString("\n")
+		}
+	}
+	return out.Bytes()
 }
 
 // MaxMustRead bounds what a review must read in full: every required

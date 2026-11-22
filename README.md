@@ -161,7 +161,10 @@ Parts are named by ID. The fetch job ships the evidence's checksums as a
 `SHA256SUMS` manifest inside the artifact and outputs only that file's
 sum, which review and publish verify first.
 The flagged-items file uses the same caps. For npm and Python packages every file is required, since whatever is
-installed can be loaded. Actions and Docker evidence keep the single-file
+installed can be loaded. A diff that is binary on either side goes to a person
+(`<eco>.binary-diff`), since git shows no content for it. Lines longer
+than 2,000 bytes are wrapped in the part, with `[cont]` continuations,
+because the reviewer's reader cuts longer ones. Actions and Docker evidence keep the single-file
 limits (400 KB a file, 4 MB in all).
 
 #### Upstream commits
