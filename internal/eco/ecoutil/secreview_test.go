@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,11 +23,25 @@ func TestMain(m *testing.M) {
 	case "":
 		os.Exit(m.Run())
 	case "ok":
-		if err := ChildMain(os.Stdin, os.Stdout); err != nil {
+		// A cgo-linked test binary (-race needs cgo) cannot run under
+		// the address-space limit (binchild.go); the production binary is
+		// checked by TestProductionChildRenders.
+		var memory uint64 = childMemory
+		if testCgo {
+			memory = 0
+		}
+		if v := os.Getenv("ECOUTIL_TEST_MEMORY"); v != "" {
+			memory, _ = strconv.ParseUint(v, 10, 64)
+		}
+		if err := childMain(os.Stdin, os.Stdout, memory); err != nil {
 			os.Exit(1)
 		}
 	case "go":
-		if err := GoChildMain(os.Stdin, os.Stdout); err != nil {
+		var memory uint64 = childMemory
+		if testCgo {
+			memory = 0 // see "ok"; TestProductionGoChild checks the gate's
+		}
+		if err := goChildMain(os.Stdin, os.Stdout, memory); err != nil {
 			fmt.Fprint(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -79,7 +94,7 @@ func TestIsolatedStructure(t *testing.T) {
 	withIsolation(t, childIsolation(t, "ok", time.Minute))
 	got := DescribeBinary(self, nil, false, nil)
 	if !reached(got) || got.Text != local.Text {
-		t.Errorf("child rendering differs from the local one (complete %v)", reached(got))
+		t.Errorf("child rendering differs from the local one (complete %v): %.600s", reached(got), got.Text)
 	}
 	for mode, want := range map[string]string{"hang": "timed out", "crash": "failed", "garbage": "returned no valid result"} {
 		withIsolation(t, childIsolation(t, mode, 2*time.Second))

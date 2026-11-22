@@ -95,8 +95,16 @@ func runGroup(ctx context.Context, cmd *exec.Cmd, stdin io.Reader) ([]byte, erro
 // GoChildMain is the go-command child: it limits its own memory, reads a
 // GoRun from stdin and runs it, passing its stdout through.
 func GoChildMain(stdin io.Reader, stdout io.Writer) error {
-	if err := limitMemory(childMemory); err != nil {
-		return fmt.Errorf("limiting memory: %w", err)
+	return goChildMain(stdin, stdout, childMemory)
+}
+
+// goChildMain is GoChildMain with an address-space limit (0: none, for a
+// cgo-linked test binary, which cannot run under one: binchild.go).
+func goChildMain(stdin io.Reader, stdout io.Writer, memory uint64) error {
+	if memory > 0 {
+		if err := limitMemory(memory); err != nil {
+			return fmt.Errorf("limiting memory: %w", err)
+		}
 	}
 	b, err := io.ReadAll(io.LimitReader(stdin, maxGoRequest+1))
 	if err != nil {

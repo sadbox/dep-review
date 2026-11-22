@@ -28,6 +28,11 @@ func TestMain(m *testing.M) {
 // answers. GATE_MEASURE trees, when set, are analyzed the same way.
 func TestListIsolated(t *testing.T) {
 	needGo(t)
+	if testCgo {
+		// A cgo-linked (-race) test binary cannot run under the limit;
+		// ecoutil's TestProductionGoChild checks the gate's own child.
+		t.Skip("the test binary is cgo-linked")
+	}
 	ecoutil.Isolate(&ecoutil.Isolation{GoCommand: []string{os.Args[0]}, Env: []string{"GOMOD_TEST_GO_CHILD=1"}})
 	t.Cleanup(func() { ecoutil.Isolate(nil) })
 	trees := []*ecoutil.Tree{writeTree(t, map[string]string{"p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed a.txt\nvar A string\n", "a.txt": "a\n"})}

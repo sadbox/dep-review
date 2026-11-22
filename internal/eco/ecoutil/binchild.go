@@ -29,6 +29,17 @@ const (
 	// what a legitimate rendering needs (inputs are at most maxParse),
 	// and an amplifying parser hits it quickly. ChildMain also sets a
 	// soft Go memory limit of half of it, everywhere.
+	//
+	// It holds for the gate as built (CGO_ENABLED=0, gate.yml), whose
+	// threads are the Go runtime's own. A cgo-linked binary cannot run
+	// under it: every thread glibc creates reserves its stack and a
+	// malloc arena (up to 64 MiB each on 64-bit), and pthread_create
+	// fails (measured on linux/amd64); a -race binary's shadow memory
+	// alone is far past it. Such a child fails, which renders as "not
+	// parsed": closed, not open. TestProductionChildRenders builds the
+	// gate as gate.yml does and renders through its child; a static child
+	// renders the gate's own ELF from 1536 MiB on linux/amd64 (emulated)
+	// and 1280 MiB on linux/arm64, in 128 MiB steps (TestChildMemoryHeadroom).
 	childMemory = 2 << 30
 	// childTimeout bounds one rendering.
 	childTimeout = 15 * time.Second
@@ -70,6 +81,8 @@ func (i *Isolation) run(b []byte, limit int64, sn Sniff) childResult {
 	in.Write(b)
 	cmd.Stdin = &in
 	cmd.Env = append([]string{"GOTRACEBACK=none"}, i.Env...)
+	// The child's stderr is untrusted output: it never reaches evidence.
+	cmd.Stderr = io.Discard
 	var out cappedBuffer
 	out.max = maxChildOutput
 	cmd.Stdout = &out
@@ -109,8 +122,16 @@ func (l *cappedBuffer) Write(p []byte) (int, error) {
 // then reads an 8-byte little-endian decompression limit, one Sniff byte
 // and the file, renders the structure and writes the result as JSON.
 func ChildMain(stdin io.Reader, stdout io.Writer) error {
-	if err := limitMemory(childMemory); err != nil {
-		return fmt.Errorf("limiting memory: %w", err)
+	return childMain(stdin, stdout, childMemory)
+}
+
+// childMain is ChildMain with an address-space limit (0: none, for a
+// cgo-linked test binary, which cannot run under one).
+func childMain(stdin io.Reader, stdout io.Writer, memory uint64) error {
+	if memory > 0 {
+		if err := limitMemory(memory); err != nil {
+			return fmt.Errorf("limiting memory: %w", err)
+		}
 	}
 	debug.SetMemoryLimit(childMemory / 2)
 	var limit int64
