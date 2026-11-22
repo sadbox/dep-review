@@ -272,3 +272,18 @@ func TestIgnoreEcosystemsUnknownFails(t *testing.T) {
 		}
 	}
 }
+
+// A skipped trigger run (another author's PR) runs no gate job: build is
+// skipped, and every other job needs it.
+func TestSkippedTriggerRunsNothing(t *testing.T) {
+	jobs := gateJobs(t)
+	const cond = "if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'skipped'"
+	if !strings.Contains(jobs["build"], cond) {
+		t.Errorf("build lacks %q", cond)
+	}
+	for name, job := range jobs {
+		if name != "build" && !regexp.MustCompile(`(?m)^    needs: (build|\[build[],])`).MatchString(job) {
+			t.Errorf("%s does not need build, so a skipped trigger would still run it", name)
+		}
+	}
+}

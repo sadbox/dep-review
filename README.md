@@ -26,8 +26,8 @@ deterministic check. It cannot push, change workflows or reach other repos.
 
 ```
 PR opened/synchronized
-  └─ caller's dep-review-trigger (no-op, every PR)
-       └─ workflow_run → gate.yml
+  └─ caller's dep-review-trigger (no-op, every PR; its job runs for Dependabot's)
+       └─ workflow_run → gate.yml (nothing runs when the trigger's job was skipped)
             build    build the gate from its own pinned commit
             classify Dependabot's alone? head still current?        (read-only)
             fetch    real change set, downloads, diffs, findings,   (read-only)
