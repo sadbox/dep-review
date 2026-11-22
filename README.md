@@ -175,6 +175,8 @@ that commit, as the go command does, and `dirhash` must give the go.sum
 hash. A mismatch is `gomod.upstream-mismatch`, which goes to a person.
 When upstream history is verified, a benign item that has commits listed
 counts only if the verdict cites at least one of them and nothing else.
+The history is read in pieces like the flagged-items file, up to 1 MB,
+and counts toward the 4 MB of required reading.
 The reviewer is told to read each message against the diff, since the
 repository's owner wrote it. A message that doesn't fit makes the item
 unclear.
@@ -185,7 +187,7 @@ these hold:
 - the proxy recorded no origin, or the repository isn't git;
 - the host isn't github.com, go.googlesource.com or gitlab.com;
 - the two versions share no history within 1000 commits;
-- more than 150 commits lie between them;
+- more than 400 commits lie between them;
 - the attachment would pass its size budget;
 - the fetch fails.
 
