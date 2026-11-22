@@ -955,8 +955,12 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope, ob
 	}
 	var keepNew func(string) bool
 	if nb != nil && nb.declared && !nb.unresolved() {
-		// Declared builds: only what they compile can run at init.
+		// Declared builds: only what they compile can run at init, on both
+		// sides (an old declaration in a file they do not compile would
+		// make its name look changed).
 		keepNew = nb.anywhere
+		oldKeep := keep
+		keep = func(rel string) bool { return nb.anywhere(rel) && oldKeep(rel) }
 	}
 	o, n := indexPackage(old, dir, shadow, keep), indexPackage(cur, dir, shadow, keepNew)
 	type step struct {
