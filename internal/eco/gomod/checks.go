@@ -968,9 +968,10 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, oldShadow, shadow *p
 		// Declared builds: only what they compile can run at init, on both
 		// sides (an old declaration in a file they do not compile would
 		// make its name look changed).
-		keepNew = nb.anywhere
+		// A file another toolchain builds (userTags) stays in.
+		keepNew = func(rel string) bool { return nb.anywhere(rel) || nb.userTags[rel] }
 		oldKeep := keep
-		keep = func(rel string) bool { return nb.anywhere(rel) && oldKeep(rel) }
+		keep = func(rel string) bool { return keepNew(rel) && oldKeep(rel) }
 	}
 	o, n := indexPackage(old, dir, oldShadow, keep), indexPackage(cur, dir, shadow, keepNew)
 	type step struct {

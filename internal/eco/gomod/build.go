@@ -701,7 +701,8 @@ func ParseBuildPlan(platforms, tagSets string) (*BuildPlan, error) {
 //
 // Assembly is never skipped: a built .s can include another under any
 // spelling. Nor is a file whose constraint consults a tag the toolchain
-// sets (userTags: another Go version or GOAMD64 builds it), anything go
+// sets (userTags: another Go version or GOAMD64 builds it), C when such a
+// file uses cgo, a .syso beside one, anything go
 // list embeds in some configuration, or anything in a package whose
 // embeds go list did not resolve. Nothing is skipped without a plan, or
 // when the tree is unresolved.
@@ -728,15 +729,30 @@ func declaredUnbuilt(cur *ecoutil.Tree, nb *builtSet) map[string]bool {
 		ext := path.Ext(f)
 		return ext == ".s" || ext == ".S" || ext == ".sx"
 	})
-	cSkippable := len(nb.cgoDirs) == 0 && !asm
+	// Whether a package builds cgo or links a .syso is go/build's answer
+	// at the gate toolchain's defaults; a .go file another toolchain
+	// builds (userTags) can change it: then its cgo counts, and no .syso
+	// of its directory is skipped.
+	varied := map[string]bool{} // directories with a userTags .go file
+	cgo := len(nb.cgoDirs) > 0
+	for _, rel := range cur.Files {
+		if path.Ext(rel) == ".go" && nb.userTags[rel] {
+			varied[path.Dir(rel)] = true
+			text := cur.ReadFile(rel)
+			cgo = cgo || bytes.Contains(text, []byte(`"C"`)) || bytes.Contains(text, []byte("#cgo"))
+		}
+	}
+	cSkippable := !cgo && !asm
 	for _, rel := range cur.Files {
 		if embedded[rel] || unresolvedEmbed(rel) || nb.userTags[rel] {
 			continue
 		}
 		ext := path.Ext(rel)
 		switch {
-		case nb.in[rel] != nil && (ext == ".go" || ext == ".syso"):
+		case nb.in[rel] != nil && ext == ".go":
 			out[rel] = !nb.anywhere(rel)
+		case nb.in[rel] != nil && ext == ".syso":
+			out[rel] = !nb.anywhere(rel) && !varied[path.Dir(rel)]
 		case cgoSourceExts[ext]:
 			out[rel] = cSkippable
 		}

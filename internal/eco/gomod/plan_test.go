@@ -112,6 +112,19 @@ func TestDeclaredBuilds(t *testing.T) {
 		// ... and tags are exact.
 		{"race file, race declared", "linux/amd64", "race", base(nil), base(map[string]string{"r.go": "//go:build race\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
 		{"race file, race not declared", "linux/amd64", "", base(nil), base(map[string]string{"r.go": "//go:build race\n\npackage m\n\nfunc init() { println(1) }\n"}), nil},
+		// What only another toolchain builds keeps its cgo and .syso.
+		{"C of a feature-level cgo package", "linux/amd64", "",
+			base(map[string]string{"c.go": "//go:build amd64.v3\n\npackage m\n\nimport \"C\"\n", "x.c": "//go:build amd64.v3\nint g(void){return 0;}\n"}),
+			base(map[string]string{"c.go": "//go:build amd64.v3\n\npackage m\n\nimport \"C\"\n", "x.c": "//go:build amd64.v3\nint g(void){return 1;}\n"}),
+			[]string{codeCSource}},
+		{"syso of a newer-toolchain package", "linux/amd64", "",
+			base(map[string]string{"p/p.go": "//go:build go1.99\n\npackage p\n", "p/blob_linux_amd64.syso": "\x00\x01v1"}),
+			base(map[string]string{"p/p.go": "//go:build go1.99\n\npackage p\n", "p/blob_linux_amd64.syso": "\x7fELF\x00v2"}),
+			[]string{codeBinary, codeIncomplete}},
+		{"newer-toolchain init callee", "linux/amd64", "",
+			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_old.go": "//go:build !go1.99\n\npackage m\n\nfunc helper() {}\n", "h_new.go": "//go:build go1.99\n\npackage m\n\nfunc helper() { println(1) }\n"}),
+			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_old.go": "//go:build !go1.99\n\npackage m\n\nfunc helper() {}\n", "h_new.go": "//go:build go1.99\n\npackage m\n\nfunc helper() { println(2) }\n"}),
+			[]string{codeInitCallee, codeNewlyBuilt}},
 		// A tag set adds builds: the no-tag build is still checked.
 		{"!race file, race declared", "linux/amd64", "race", base(nil), base(map[string]string{"r.go": "//go:build !race\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},
 		// The documented sibling limit: under the declared tag the old
