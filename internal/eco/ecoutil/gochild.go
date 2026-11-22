@@ -142,7 +142,11 @@ func goChildMain(stdin io.Reader, stdout io.Writer, memory uint64) error {
 // returns the child's stdout; a failure, a timeout or too much output is
 // an error.
 func RunChild(name string, req []byte, timeout time.Duration, local func(stdin io.Reader, stdout io.Writer) error) ([]byte, error) {
-	if isolation == nil || len(isolation.Children[name]) == 0 {
+	if isolation != nil && len(isolation.Children[name]) == 0 {
+		// Never fall back to this process once the fetch isolated itself.
+		return nil, fmt.Errorf("no %s child is set up", name)
+	}
+	if isolation == nil {
 		var out bytes.Buffer
 		err := local(bytes.NewReader(req), &out)
 		return out.Bytes(), err

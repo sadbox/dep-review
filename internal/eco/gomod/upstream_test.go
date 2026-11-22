@@ -54,15 +54,13 @@ func TestPlanUpstream(t *testing.T) {
 	}
 }
 
-func TestParseLog(t *testing.T) {
-	h := strings.Repeat("c", 40)
-	raw := "\x1e" + h + "\x00Ann\x002026-01-01T00:00:00Z\x00fix: x\n\nbody\n\x00\nsub/a.go\nother/b.go\n\"sub/t\\303\\251st.go\"\n"
-	got := parseLog([]byte(raw), "sub")
-	if len(got) != 1 || got[0].Hash != h || got[0].Message != "fix: x\n\nbody" {
-		t.Fatalf("got %+v", got)
+func TestModuleFiles(t *testing.T) {
+	raw := "sub/a.go\x00other/b.go\x00sub/t\u00e9st.go\x00sub/ lead.go\x00LICENSE\x00"
+	if got := moduleFiles([]byte(raw), "sub"); !slices.Equal(got, []string{"a.go", "tést.go", " lead.go", "LICENSE"}) {
+		t.Errorf("files = %q", got)
 	}
-	if !slices.Equal(got[0].Files, []string{"a.go", "tést.go"}) {
-		t.Errorf("files = %q", got[0].Files)
+	if got := moduleFiles([]byte("a.go\x00p/b.go\x00"), ""); !slices.Equal(got, []string{"a.go", "p/b.go"}) {
+		t.Errorf("root files = %q", got)
 	}
 }
 
@@ -206,6 +204,41 @@ func TestRunUpstream(t *testing.T) {
 	if r := runUpstream(https, false); r.Status != model.UpstreamUnavailable {
 		t.Errorf("file URL under https only: status %s", r.Status)
 	}
+	// Commit text cannot hide a commit: a record separator in a message
+	// or an author name is just text.
+	sneaky := filepath.Join(t.TempDir(), "sneaky")
+	if out, err := exec.Command("git", "clone", "-q", strings.TrimPrefix(url, "file://"), sneaky).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, out)
+	}
+	commit := func(author, msg, file, text string) string {
+		if err := os.WriteFile(filepath.Join(sneaky, file), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_AUTHOR_NAME="+author, "GIT_AUTHOR_EMAIL=a@example.com", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@example.com")
+		for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "--cleanup=verbatim", "-m", msg}} {
+			cmd := exec.Command("git", append([]string{"-C", sneaky}, args...)...)
+			cmd.Env = env
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v %s", args, err, out)
+			}
+		}
+		out, _ := exec.Command("git", "-C", sneaky, "rev-parse", "HEAD").Output()
+		return strings.TrimSpace(string(out))
+	}
+	c1 := commit("a\x1eb", "one\x1e", "sub/a.go", "package sub\n\nfunc init() { println(2) }\n")
+	c2 := commit("a", "two\x1e"+strings.Repeat("0", 40), "sub/p/b.go", "package p\n\nvar X = 2\n")
+	sr := req(fromSum, moduleSum(t, "file://"+sneaky, c2, "v1.1.0"))
+	sr.URL, sr.To = "file://"+sneaky, c2
+	got := runUpstream(sr, false)
+	var hs []string
+	for _, c := range got.Commits {
+		hs = append(hs, c.Hash)
+	}
+	if got.Status != model.UpstreamVerified || !slices.Equal(hs, []string{c2, c1, to, mid}) {
+		t.Errorf("record separators: status %s, commits %q, want %q", got.Status, hs, []string{c2, c1, to, mid})
+	}
+
 	// A second update from the same repository reuses its clone.
 	shared := req(fromSum, toSum)
 	for i := range 2 {

@@ -254,7 +254,7 @@ func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.
 			if it.Assessment == model.Benign && !citesListed(it.Commits, listed[f]) {
 				// Counted as accounting counts it.
 				it.Assessment, r.a = model.Unclear, "unclear (benign without a listed commit)"
-			} else if len(listed[f]) > 0 {
+			} else if it.Assessment == model.Benign && len(it.Commits) > 0 {
 				var short []string
 				for _, c := range it.Commits {
 					short = append(short, c[:7])
@@ -271,13 +271,15 @@ func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.
 			}
 			delete(got, f)
 		}
-		switch {
-		case strings.HasPrefix(r.a, "unclear"):
+		switch r.rank {
+		case 1:
+			counts["suspicious"]++
+		case 2:
 			counts["unclear"]++
-		case strings.HasPrefix(r.a, "benign"):
+		case 3:
 			counts["benign"]++
 		default:
-			counts[r.a]++
+			counts["not assessed"]++
 		}
 		rows = append(rows, r)
 	}
