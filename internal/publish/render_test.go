@@ -195,3 +195,30 @@ func sortedValues(m map[string]string) []string {
 	}
 	return vs
 }
+
+func TestRenderRebuilds(t *testing.T) {
+	c := strings.Repeat("a", 40)
+	ev := &model.Evidence{Rebuilds: []model.RebuildPlan{{Update: "actions/setup-go", Repo: "actions/setup-go", Commit: c}, {Update: "o/r", Repo: "o/r", Commit: c}, {Update: "o/s", Repo: "o/s", Commit: c}}}
+	results := []model.RebuildResult{
+		{Update: "actions/setup-go", Repo: "actions/setup-go", Commit: c, Outcome: model.RebuildVerified, Script: "build", Detail: "npm run build rebuilt all 4 files byte for byte"},
+		// Not bound to its plan (another commit), and an unknown outcome: both "not run".
+		{Update: "o/r", Repo: "o/r", Commit: strings.Repeat("b", 40), Outcome: model.RebuildVerified},
+		{Update: "o/s", Repo: "o/s", Commit: c, Outcome: "approved"},
+	}
+	out := renderComment(commentData{Evidence: ev, Outcome: Outcome{Decision: model.DecisionHuman}, Rebuild: results})
+	for _, want := range []string{"Bundle rebuilds (3; information only", "`verified`", "rebuilt all 4 files"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("comment lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "`not run`") != 2 {
+		t.Errorf("want two unbound results shown as not run:\n%s", out)
+	}
+	// Decide never reads the rebuild results.
+	in := Inputs{Class: model.Classification{Kind: model.KindDependabot}, Evidence: ev, FetchResult: "success"}
+	a := Decide(in)
+	in.Rebuild = results
+	if b := Decide(in); a.Decision != b.Decision || a.Route != b.Route || a.State != b.State || a.Reason != b.Reason {
+		t.Errorf("rebuild results changed the decision: %+v vs %+v", a, b)
+	}
+}

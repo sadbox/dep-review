@@ -64,6 +64,8 @@ type Result struct {
 	Upstream []model.Upstream
 	// Diffs are the navigable evidence's per-file diffs (model.Evidence.Diffs).
 	Diffs []model.DiffFile
+	// Rebuilds are the bundles the rebuild job rebuilds (model.Evidence.Rebuilds).
+	Rebuilds []model.RebuildPlan
 }
 
 // Ecosystem is one package ecosystem's fetcher.

@@ -31,6 +31,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -144,6 +145,8 @@ type findings struct {
 	// pair, so Fetch can mark it explained when actions.lock locks that
 	// nested action and its transitive pair passes.
 	nested []nestedNote
+	// rebuilds are the plans for the rebuild job (package rebuild).
+	rebuilds []model.RebuildPlan
 }
 
 type nestedNote struct {
@@ -327,7 +330,7 @@ func (f *fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error
 	if err := env.Evidence.Add("actions/summary.md", "github_actions fetcher summary: pins, versions, upstream checks, provenance and bundle attribution numbers", []byte(summary.String())); err != nil {
 		return fetch.Result{}, err
 	}
-	return fetch.Result{Updates: updates, Findings: fs.list}, nil
+	return fetch.Result{Updates: updates, Findings: fs.list, Rebuilds: fs.rebuilds}, nil
 }
 
 // groupPairs validates each rewritten line and groups them by action
@@ -1151,7 +1154,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 	}
 
 	// action.yml for every subpath used.
-	var entries []string
+	var entries, usings []string
 	var metaText strings.Builder
 	for _, sub := range p.subs {
 		oldY, oldPath := readActionYML(ctx, up, p.oldRef, sub)
@@ -1207,6 +1210,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 			fs.add(model.RouteHuman, "actions.entrypoint-invalid", name, "%s: an entrypoint escapes the repository", safePath(where))
 		}
 		entries = append(entries, es...)
+		usings = append(usings, nm.using)
 	}
 	if metaText.Len() > 0 {
 		if err := env.Evidence.AddUntrusted(evName(p, "action-yml.txt"), "structured and raw action.yml diff for "+p.label(), []byte(metaText.String())); err != nil {
@@ -1451,7 +1455,20 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 	}
 	if len(reports) > 0 {
 		fs.add(model.RouteReview, CodeRebuildNotRun, name, "dist/ was attributed from committed source maps and module markers, not rebuilt from source")
-		sum.WriteString("- rebuild: not run (" + CodeRebuildNotRun + ")\n")
+		// The rebuild job (package rebuild) rebuilds it where it can; its
+		// result goes to the comment, and changes no route.
+		plan, why, err := planRebuild(ctx, up, p, entries, usings)
+		if err != nil {
+			return err
+		}
+		if plan != nil && !slices.ContainsFunc(fs.rebuilds, func(q model.RebuildPlan) bool { return q.Repo == plan.Repo && q.Commit == plan.Commit }) {
+			fs.rebuilds = append(fs.rebuilds, *plan)
+		}
+		if plan != nil {
+			fmt.Fprintf(sum, "- rebuild: planned in the rebuild job (Node %d, npm run %s; %d files under %s)\n", plan.Node, strings.Join(plan.Scripts, " | "), len(plan.Files), strings.Join(plan.Dirs, ", "))
+		} else {
+			sum.WriteString("- rebuild: not possible (" + why + "; " + CodeRebuildNotRun + ")\n")
+		}
 	}
 	return nil
 }

@@ -34,6 +34,8 @@ PR opened/synchronized
                      route: auto | review | human | refuse
             review   model reads ./evidence and ./repo → verdict    (gVisor sandbox;
                      proxy holds the Claude token)
+            rebuild  an action's bundle, rebuilt from its source    (gVisor; no
+                     and compared byte for byte (information only)   permissions)
             publish  decide, comment, status, merge on green CI     (gate app)
   schedule → sweep   merge approved PRs whose CI finished later;    (gate app)
                      report PRs stuck without a decision (including
@@ -240,6 +242,43 @@ than 8 transitive pairs, a step of any onboarded workflow whose pin the
 new lockfile does not lock (or a workflow whose steps the gate cannot
 read in full), and any other lockfile change. Job-level reusable workflows and workflows not in the lockfile
 keep SHA pins.
+
+### Rebuilding action bundles
+
+When an action's committed bundle changed, the `rebuild` job rebuilds it
+from the new commit's source and compares the result byte for byte with
+what is committed (`internal/rebuild`). It works when the action runs on
+Node 20, 22 or 24, its entrypoints are inside bundle directories, and the
+repository root has a plain npm project: `package-lock.json` version 2
+or 3, no workspaces, and every package a `registry.npmjs.org` tarball
+with sha512 integrity. The first of the scripts `build`, `package`,
+`bundle` and `release` that it has is run, and up to three are tried. On
+actions/setup-go 7.1.0, `npm run build` reproduces all four files.
+
+The build runs the action's own code, so the job has no permissions, no
+secrets and no OIDC token, and runs two containers under gVisor. Both are
+the official Node image pinned in `sandbox/rebuild/Dockerfile`, with no
+capabilities, a read-only root and an unprivileged user.
+
+1. **Install.** Only `package.json` and `package-lock.json` go in, and
+   `npm ci --ignore-scripts` runs against the public registry.
+2. **Build.** The tree goes in without its bundle directories, plus the
+   installed `node_modules`, and the script runs with no network. The
+   input is written by the gate from the git tree, so no `.gitattributes`
+   export rule applies. The only output is a tar of the bundle
+   directories, read with caps: regular files only, inside those
+   directories, each named once.
+
+The result (`verified`, `differs`, `failed`, or `not run`) is shown in the
+comment, and no route depends on it. A match shows that the committed
+bundle is what the source, lockfile and build script produce, not that
+they are benign. A build-only package (a compiler or bundler plugin) is
+in no diff the reviewer reads, and a build may copy any file of the tree.
+A gVisor escape would also let a build forge the result, which is
+harmless while it decides nothing. Whether a verified rebuild should ever
+relax `actions.dist-residual` is an open decision: if it does, only when
+no build-only locked package changed, and with the residual still
+required reading.
 
 ## Design rules
 
@@ -509,7 +548,8 @@ review.
 ## Updating pins
 
 Dependabot (`.github/dependabot.yml`) bumps the Go toolchain, the actions,
-the sandbox images' bases (`sandbox/Dockerfile`, one grouped PR) and the
+the sandbox images' bases (`sandbox/Dockerfile`, one grouped PR), the
+rebuild job's Node images (`sandbox/rebuild/Dockerfile`) and the
 Claude Code CLI (`sandbox/package.json`, both architectures in one PR),
 daily with a three-day cooldown. Two things are by hand:
 

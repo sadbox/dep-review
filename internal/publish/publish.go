@@ -117,7 +117,8 @@ func (cfg *Config) defaults() {
 }
 
 // ReadInputs loads <dir>/classification/classification.json (required),
-// <dir>/evidence/evidence.json and <dir>/verdict/verdict.json (optional).
+// <dir>/evidence/evidence.json, <dir>/verdict/verdict.json and
+// <dir>/rebuild/rebuild.json (optional).
 func ReadInputs(dir, fetchResult, reviewResult string) (Inputs, error) {
 	in := Inputs{FetchResult: fetchResult, ReviewResult: reviewResult}
 	b, err := os.ReadFile(filepath.Join(dir, "classification", "classification.json"))
@@ -142,6 +143,19 @@ func ReadInputs(dir, fetchResult, reviewResult string) (Inputs, error) {
 	switch {
 	case err == nil:
 		in.Verdict = b
+	case !errors.Is(err, fs.ErrNotExist):
+		return in, err
+	}
+	b, err = os.ReadFile(filepath.Join(dir, "rebuild", "rebuild.json"))
+	switch {
+	case err == nil:
+		var r struct {
+			Results []model.RebuildResult `json:"results"`
+		}
+		// An unreadable rebuild.json is treated as missing: "not run".
+		if json.Unmarshal(b, &r) == nil {
+			in.Rebuild = r.Results
+		}
 	case !errors.Is(err, fs.ErrNotExist):
 		return in, err
 	}
@@ -239,7 +253,7 @@ func Publish(ctx context.Context, cfg Config, in Inputs) error {
 	if err != nil {
 		return err
 	}
-	data := commentData{Class: cl, Evidence: in.Evidence, Outcome: o, RunURL: cfg.RunURL}
+	data := commentData{Class: cl, Evidence: in.Evidence, Outcome: o, RunURL: cfg.RunURL, Rebuild: in.Rebuild}
 	if prev != nil {
 		data.Marker, _ = parseMarker(prev.Body)
 	}
