@@ -1198,7 +1198,7 @@ func (fs fileScope) ownType(name string, generic bool) bool {
 // the reviewer is shown); comparison is on the keys.
 type goFacts struct {
 	imports    map[string]int
-	binds      map[string]string // file-scope import name -> path; dot imports as "." + path
+	binds      map[string]string // each import spec ("path" or "name path") -> path
 	cgo        bool
 	preamble   string    // the cgo preamble: every import "C" doc comment, raw, as cmd/cgo reads it
 	inits      []snippet // each func init
@@ -1262,13 +1262,14 @@ func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
 			if name == "_" && p != "embed" && p != "unsafe" { // neither has an init; unsafe is a risky import anyway
 				f.blank[p] = line
 			}
-			switch name {
-			case "_":
-			case ".":
-				f.binds["."+p] = p
-			default:
-				f.binds[name] = p
+			// The spec as written: the name Go binds for an unnamed
+			// import is the imported package's clause, which the gate
+			// does not resolve, so any change to the specs counts.
+			spec := p
+			if imp.Name != nil {
+				spec = imp.Name.Name + " " + p
 			}
+			f.binds[spec] = p
 			pkgs[name] = p
 			if p == "C" {
 				f.preamble += cgoPreamble(src, fset, file, imp)
@@ -1695,32 +1696,29 @@ func looksEncoded(s string) bool {
 	return good*100 >= len(s)*95
 }
 
-// reboundImports describes how a file's import bindings changed in a
-// way that can change what unchanged code refers to: a name that is gone
-// or now names another path, or any change to the dot imports. A new name
-// cannot: it would collide with whatever the old code used it for. ""
-// when there is no such change.
+// reboundImports describes how a file's import specs changed: any
+// added, removed or renamed import can change what unchanged code
+// refers to (the same name now another package, a dot import supplying
+// a removed declaration). "" when they are the same.
 func reboundImports(old, cur map[string]string) string {
 	var b strings.Builder
-	for _, name := range slices.Sorted(maps.Keys(old)) {
-		p := old[name]
-		if strings.HasPrefix(name, ".") {
-			if _, ok := cur[name]; !ok {
-				fmt.Fprintf(&b, "dot import of %s removed\n", safeImport(p))
-			}
-			continue
-		}
-		switch q, ok := cur[name]; {
-		case !ok:
-			fmt.Fprintf(&b, "%s no longer imported (was %s)\n", safeIdent(name), safeImport(p))
-		case q != p:
-			fmt.Fprintf(&b, "%s now imports %s (was %s)\n", safeIdent(name), safeImport(q), safeImport(p))
+	for _, spec := range slices.Sorted(maps.Keys(old)) {
+		if _, ok := cur[spec]; !ok {
+			fmt.Fprintf(&b, "import removed: %s\n", safeImportSpec(spec))
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(cur)) {
-		if _, ok := old[name]; strings.HasPrefix(name, ".") && !ok {
-			fmt.Fprintf(&b, "dot import of %s added\n", safeImport(cur[name]))
+	for _, spec := range slices.Sorted(maps.Keys(cur)) {
+		if _, ok := old[spec]; !ok {
+			fmt.Fprintf(&b, "import added: %s\n", safeImportSpec(spec))
 		}
 	}
 	return b.String()
+}
+
+// safeImportSpec is a "path" or "name path" import spec, sanitized.
+func safeImportSpec(spec string) string {
+	if name, p, ok := strings.Cut(spec, " "); ok {
+		return safeIdent(name) + " " + safeImport(p)
+	}
+	return safeImport(spec)
 }

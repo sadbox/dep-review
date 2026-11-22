@@ -309,6 +309,16 @@ func TestCheckTrees(t *testing.T) {
 			map[string]string{"a.go": "package p\nfunc init() { var t T; t.init() }\ntype T struct{}\nfunc (T) init() {}\n"},
 			map[string]string{"a.go": "package p\nfunc init() { var t T; t.init() }\ntype T struct{}\nfunc (T) init() { println(1) }\n"},
 			[]string{codeInitCallee}},
+		// Any import change re-flags the file's unchanged inits: the gate
+		// does not resolve the name an unnamed import binds.
+		{"import added beside an unchanged init",
+			map[string]string{"a.go": "package p\nimport \"os\"\nfunc init() { _ = os.Getpid() }\n"},
+			map[string]string{"a.go": "package p\nimport (\"os\"; \"example.com/m/x\")\nfunc init() { _ = os.Getpid() }\nvar _ = x.Y\n"},
+			[]string{codeInit}},
+		{"import renamed under an unchanged var initializer",
+			map[string]string{"a.go": "package p\nimport \"example.com/m/x\"\nvar v = x.F()\n"},
+			map[string]string{"a.go": "package p\nimport x \"example.com/m/y\"\nvar v = x.F()\n"},
+			[]string{codeVarInit}},
 		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
 	}
