@@ -20,7 +20,9 @@ import (
 //     link lines could reach, that the linker cannot take by name (not a
 //     .syso, .a, .o, .so, .dylib, .lib or .dll), whose bytes are a known
 //     data format (an image, a document, a compressed stream: never a
-//     linker input), and whose name no text file of the module holds;
+//     linker input), in a module with no cgo, C or preprocessed assembly
+//     (Go assembly includes only literal paths), and whose name no text
+//     file of the module holds;
 //   - embeds the gate could not resolve.
 //
 // Leniency never skips the review or the accounting, and nothing else
@@ -67,6 +69,23 @@ func (r *report) lenientCode(code string) bool {
 		}
 	}
 	return true
+}
+
+// cgoText reports that the module has text the C toolchain compiles or
+// preprocesses (cgo, C, C++, preprocessed assembly and the other cgo
+// sources): its includes and .incbin can name a file through macros and
+// concatenation, so no name search rules a fixture out. Over-approximated:
+// any .go file holding "C" in quotes counts.
+func cgoText(t *ecoutil.Tree) bool {
+	for _, f := range t.Files {
+		switch ext := path.Ext(f); {
+		case cgoSourceExts[ext], ext == ".S", ext == ".sx":
+			return true
+		case ext == ".go" && bytes.Contains(t.ReadFile(f), []byte(`"C"`)):
+			return true
+		}
+	}
+	return false
 }
 
 // textNames reports that some text file of the module may name rel: its

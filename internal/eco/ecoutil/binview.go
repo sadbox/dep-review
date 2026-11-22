@@ -1270,4 +1270,6 @@ func KnownData(b []byte) bool {
 }
 
 // dataTypes are the magics table's data formats (KnownData).
-var dataTypes = []string{"PNG image", "JPEG image", "GIF image", "PDF document", "gzip", "bzip2", "xz", "zstd", "zip archive", "tar archive", "7-zip archive", "SQLite database"}
+// Each is matched at offset 0 (tar's magic, at 257, leaves the leading
+// bytes free for anything, so it is not one).
+var dataTypes = []string{"PNG image", "JPEG image", "GIF image", "PDF document", "gzip", "bzip2", "xz", "zstd", "zip archive", "7-zip archive", "SQLite database"}
