@@ -278,6 +278,47 @@ func TestCheckTrees(t *testing.T) {
 		// A .go file: the toolchain compiles it, so it is never inert.
 		{"binary-looking test file", nil, map[string]string{"x_test.go": "\x00\x01\x02"}, []string{codeBinary, codeIncomplete}},
 		{"plus-build without space", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "//+build linux\n\npackage p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
+		// A conversion to a type the same file declares: wherever the file
+		// compiles, the name is that type (any other declaration of it is a
+		// redeclaration), whatever its build constraint.
+		{"own func type conversion", nil, map[string]string{"a.go": "package p\ntype I interface{ M() }\ntype A func() int\nfunc (A) M() {}\nvar _ I = A(nil)\n"}, nil},
+		{"own type in a constrained file", nil, map[string]string{"a.go": "//go:build !go1.27 && !mytag\n\npackage p\ntype T struct{}\nvar _ = (*T)(nil)\n"}, nil},
+		{"own generic type", nil, map[string]string{"a.go": "package p\ntype G[X any] []X\ntype H[X, Y comparable] map[X]Y\nvar _ = G[int](nil)\nvar _ = H[int, string](nil)\nvar _ = (*(G[int]))(nil)\n"}, nil},
+		{"own type, parenthesized", nil, map[string]string{"a.go": "package p\ntype T struct{}\nvar _ = (*(T))(nil)\nvar _ = (T)(T{})\n"}, nil},
+		// ... and never otherwise.
+		{"own type and a func in a constrained sibling", nil, map[string]string{"a.go": "package p\ntype T struct{}\nvar _ = (*T)(nil)\n", "b.go": "//go:build mytag\n\npackage p\nfunc T() {}\n"}, []string{codeInitCallee, codeVarInit}},
+		{"own type and a var in an ignored sibling", nil, map[string]string{"a.go": "package p\ntype T func()\nvar _ = T(nil)\n", "b.go": "//go:build ignore\n\npackage p\nvar T = 1\n"}, []string{codeInitCallee, codeVarInit}},
+		{"own type and a const in a test file", nil, map[string]string{"a.go": "package p\ntype T func()\nvar _ = T(nil)\n", "a_test.go": "package p\nconst T = 1\n"}, []string{codeInitCallee, codeVarInit}},
+		{"own type with a dot import", nil, map[string]string{"a.go": "package p\nimport . \"example.com/q\"\ntype T func()\nvar _ = T(nil)\n"}, []string{codeInitCallee, codeVarInit}},
+		{"own type with an import of its name", nil, map[string]string{"a.go": "package p\nimport T \"example.com/q\"\ntype T func()\nvar _ = T(nil)\n"}, []string{codeInitCallee, codeVarInit}},
+		{"own type, unparseable sibling", nil, map[string]string{"a.go": "package p\ntype T func()\nvar _ = T(nil)\n", "u.go": "package p\nfunc {{{\n"}, []string{codeInitCallee, codeParse, codeVarInit}},
+		{"conversion wrapping a call", nil, map[string]string{"a.go": "package p\ntype T int\nvar _ = T(f())\nfunc f() int { return 1 }\n"}, []string{codeInitCallee, codeVarInit}},
+		{"generic func call", nil, map[string]string{"a.go": "package p\nfunc F[X any](x X) X { return x }\nvar _ = F[int](1)\n"}, []string{codeInitCallee, codeVarInit}},
+		{"generic shape mismatch", nil, map[string]string{"a.go": "package p\ntype T func()\nvar _ = T[int](nil)\n"}, []string{codeInitCallee, codeVarInit}},
+		{"method expression", nil, map[string]string{"a.go": "package p\ntype T struct{}\nfunc (T) M() int { return 1 }\nvar _ = T.M(T{})\n"}, []string{codeInitCallee, codeVarInit}},
+		{"own type flips to a func",
+			map[string]string{"a.go": "package p\nvar _ = T(nil)\ntype T func()\n"},
+			map[string]string{"a.go": "package p\nvar _ = T(nil)\nfunc T(x any) int { return 0 }\n"},
+			[]string{codeInitCallee, codeVarInit}},
+		// func init's own name is not a reference to a method init.
+		{"method init not reached from func init",
+			map[string]string{"a.go": "package p\nfunc init() { x() }\nfunc x() {}\ntype T struct{}\nfunc (T) init() {}\n"},
+			map[string]string{"a.go": "package p\nfunc init() { x() }\nfunc x() {}\ntype T struct{}\nfunc (T) init() { println(1) }\n"},
+			nil},
+		{"method init called from func init",
+			map[string]string{"a.go": "package p\nfunc init() { var t T; t.init() }\ntype T struct{}\nfunc (T) init() {}\n"},
+			map[string]string{"a.go": "package p\nfunc init() { var t T; t.init() }\ntype T struct{}\nfunc (T) init() { println(1) }\n"},
+			[]string{codeInitCallee}},
+		// Any import change re-flags the file's unchanged inits: the gate
+		// does not resolve the name an unnamed import binds.
+		{"import added beside an unchanged init",
+			map[string]string{"a.go": "package p\nimport \"os\"\nfunc init() { _ = os.Getpid() }\n"},
+			map[string]string{"a.go": "package p\nimport (\"os\"; \"example.com/m/x\")\nfunc init() { _ = os.Getpid() }\nvar _ = x.Y\n"},
+			[]string{codeInit}},
+		{"import renamed under an unchanged var initializer",
+			map[string]string{"a.go": "package p\nimport \"example.com/m/x\"\nvar v = x.F()\n"},
+			map[string]string{"a.go": "package p\nimport x \"example.com/m/y\"\nvar v = x.F()\n"},
+			[]string{codeVarInit}},
 		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
 	}

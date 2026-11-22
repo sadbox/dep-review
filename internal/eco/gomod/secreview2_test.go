@@ -93,7 +93,8 @@ func TestBlobNotDecodedGoesToPerson(t *testing.T) {
 			tr := writeTree(t, map[string]string{"b.go": string(src)})
 			h := newReport()
 			h.budget.Left = tc.left
-			checkGoFile(h, "b.go", nil, src, packageScope(tr, ".", analyzeBuild(tr, false, defaultLister())))
+			sc := packageScope(tr, ".", analyzeBuild(tr, false, defaultLister()))
+			checkGoFile(h, "b.go", nil, src, sc, sc)
 			if got := len(h.items(codeIncomplete)) > 0; got != tc.want {
 				t.Errorf("blob-not-decoded = %v, want %v; context %q", got, tc.want, h.ctx[codeBlob]["b.go"])
 			}
