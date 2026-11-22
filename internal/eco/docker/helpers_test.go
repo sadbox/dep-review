@@ -114,3 +114,11 @@ func codes(fs []model.Finding) string {
 	}
 	return strings.Join(c, " ")
 }
+
+func (m *memWriter) AddPart(name string, content []byte) (string, error) {
+	return name, m.AddUntrusted(name, "", content)
+}
+
+func (m *memWriter) AddLarge(name, desc string, content []byte) error {
+	return m.AddUntrusted(name, desc, content)
+}

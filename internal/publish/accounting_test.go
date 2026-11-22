@@ -54,7 +54,7 @@ func TestParseVerdictItems(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := `{"verdict":"pass","flags":[],"summary":"ok","items":` + tt.items + `}`
+			raw := `{"verdict":"pass","flags":[],"summary":"ok","items":` + tt.items + `,"examined":[]}`
 			_, err := ParseVerdict([]byte(raw))
 			if (err == nil) != tt.ok {
 				t.Errorf("err = %v, want ok=%v", err, tt.ok)
@@ -79,7 +79,7 @@ func TestDecideAccounting(t *testing.T) {
 		return e
 	}
 	verdict := func(items ...model.ItemAssessment) []byte {
-		v := model.Verdict{Verdict: model.Pass, Flags: []string{}, Summary: "ok", Items: items}
+		v := model.Verdict{Verdict: model.Pass, Flags: []string{}, Summary: "ok", Items: items, Examined: []string{}}
 		if v.Items == nil {
 			v.Items = []model.ItemAssessment{}
 		}
@@ -165,6 +165,75 @@ func TestDecideAccounting(t *testing.T) {
 	}
 }
 
+// TestExaminedAll: every required diff must be listed as examined, and
+// nothing the evidence does not have.
+func TestExaminedAll(t *testing.T) {
+	diffs := []model.DiffFile{{ID: "D00001", Required: true}, {ID: "D00002", Required: true}, {ID: "D00003"}}
+	tests := []struct {
+		name     string
+		diffs    []model.DiffFile
+		examined []string
+		ok       bool
+		why      string
+	}{
+		{"all required", diffs, []string{"D00002", "D00001"}, true, ""},
+		{"optional too", diffs, []string{"D00001", "D00002", "D00003"}, true, ""},
+		{"one missing", diffs, []string{"D00001", "D00003"}, false, "did not list 1 of 2 required"},
+		{"unknown", diffs, []string{"D00001", "D00002", "D00009"}, false, "1 diff the evidence does not have"},
+		{"no diffs", nil, []string{}, true, ""},
+		{"no diffs, one listed", nil, []string{"D00001"}, false, "does not have"},
+	}
+	for _, tt := range tests {
+		ok, why := examinedAll(tt.diffs, tt.examined)
+		if ok != tt.ok || !strings.Contains(why, tt.why) {
+			t.Errorf("%s: %v %q", tt.name, ok, why)
+		}
+	}
+	many := make([]model.DiffFile, model.MaxRequiredDiffs+1)
+	ids := make([]string, len(many))
+	for i := range many {
+		many[i] = model.DiffFile{ID: fmt.Sprintf("D%05d", i+1), Required: true}
+		ids[i] = many[i].ID
+	}
+	if ok, why := examinedAll(many, ids); ok || !strings.Contains(why, "too many") {
+		t.Errorf("too many required: %v %q", ok, why)
+	}
+	// The decision: an accounted pass still needs the diffs examined.
+	ev := evidence(model.RouteReview, patch)
+	ev.Diffs = diffs
+	for _, tt := range []struct {
+		examined string
+		decision model.Decision
+	}{{`["D00001","D00002"]`, model.DecisionMerge}, {`["D00001"]`, model.DecisionHuman}} {
+		o := Decide(Inputs{Class: class(), FetchResult: "success", Evidence: ev, ReviewResult: "success",
+			Verdict: []byte(`{"verdict":"pass","flags":[],"summary":"ok","items":[],"examined":` + tt.examined + `}`)})
+		if o.Decision != tt.decision {
+			t.Errorf("examined %s: %s (%s)", tt.examined, o.Decision, o.Reason)
+		}
+	}
+}
+
+func TestParseVerdictExamined(t *testing.T) {
+	for raw, ok := range map[string]bool{
+		`[]`:                  true,
+		`["D00001","D12345"]`: true,
+		`["D0001"]`:           false,
+		`["d00001"]`:          false,
+		`["D00001","D00001"]`: false,
+		`[1]`:                 false,
+		`null`:                false,
+		`{}`:                  false,
+	} {
+		_, err := ParseVerdict([]byte(`{"verdict":"pass","flags":[],"summary":"ok","items":[],"examined":` + raw + `}`))
+		if (err == nil) != ok {
+			t.Errorf("examined %s: err %v, want ok=%v", raw, err, ok)
+		}
+	}
+	if _, err := ParseVerdict([]byte(`{"verdict":"pass","flags":[],"summary":"ok","items":[]}`)); err == nil {
+		t.Error("a verdict without examined parsed")
+	}
+}
+
 // TestRenderItems: the comment shows each flagged item with the gate's
 // strings, the stoppers first; model notes are sanitized and an item the
 // gate did not flag is only counted.
@@ -224,7 +293,7 @@ func TestItemsSchemaInSync(t *testing.T) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(s.Required, []string{"verdict", "flags", "summary", "items"}) {
+	if !reflect.DeepEqual(s.Required, []string{"verdict", "flags", "summary", "items", "examined"}) {
 		t.Errorf("required = %q", s.Required)
 	}
 	it := s.Properties.Items

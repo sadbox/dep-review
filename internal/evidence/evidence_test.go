@@ -166,3 +166,45 @@ func TestCreateRefusesNonEmpty(t *testing.T) {
 		t.Fatal("Create on a non-empty directory succeeded")
 	}
 }
+
+// Parts have caps of their own and are not listed; AddLarge is listed
+// under the part caps. A cut or omitted part is truncation.
+func TestParts(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ev")
+	d, err := Create(dir, WithCaps(10, 20), WithPartCaps(30, 50))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	p, err := d.AddPart("gomod/m/diff/a.go.diff", []byte(strings.Repeat("a", 25)))
+	if err != nil || p != "untrusted/gomod/m/diff/a.go.diff" {
+		t.Fatalf("AddPart = %q, %v", p, err)
+	}
+	if d.Truncated() || len(d.Files()) != 0 {
+		t.Fatalf("a part within its caps: truncated %v, files %v", d.Truncated(), d.Files())
+	}
+	if err := d.AddLarge("gomod/m/flagged.md", "flagged", []byte(strings.Repeat("b", 20))); err != nil {
+		t.Fatal(err)
+	}
+	if fs := d.Files(); len(fs) != 1 || fs[0].Bytes != 20 || d.Truncated() {
+		t.Fatalf("AddLarge: files %v, truncated %v", fs, d.Truncated())
+	}
+	// The part total (25 + 20) leaves 5 bytes: the next part is cut.
+	if _, err := d.AddPart("gomod/m/diff/b.go.diff", []byte(strings.Repeat("c", 25))); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Truncated() {
+		t.Error("a part past the scan cap was not truncation")
+	}
+	// The ordinary caps are untouched by parts.
+	if err := d.AddUntrusted("x.diff", "x", []byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if fs := d.Files(); len(fs) != 2 || fs[1].Bytes != 10 {
+		t.Errorf("AddUntrusted after parts: %v", fs)
+	}
+	// A binary part is not written and is a finding.
+	if p, _ := d.AddPart("gomod/m/diff/bin.diff", []byte("\x00\x01")); p != "" || len(d.Findings()) == 0 {
+		t.Errorf("binary part: path %q, findings %v", p, d.Findings())
+	}
+}

@@ -34,7 +34,7 @@ var (
 )
 
 func TestDecide(t *testing.T) {
-	pass := []byte(`{"verdict":"pass","flags":[],"summary":"ok","items":[]}`)
+	pass := []byte(`{"verdict":"pass","flags":[],"summary":"ok","items":[],"examined":[]}`)
 	tests := []struct {
 		name     string
 		in       Inputs
@@ -58,10 +58,10 @@ func TestDecide(t *testing.T) {
 		{"review pass", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: pass}, model.DecisionMerge, StateSuccess, "approved"},
 		{"review pass, review job failed", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "failure", Verdict: pass}, model.DecisionHuman, StateFailure, "no verdict (failure)"},
 		{"review missing verdict", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success"}, model.DecisionHuman, StateFailure, "no verdict"},
-		{"review fail", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"fail","flags":["network-access-added"],"summary":"x","items":[]}`)}, model.DecisionHuman, StateFailure, "answered fail"},
-		{"review unsure", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"unsure","flags":["evidence-incomplete"],"summary":"x","items":[]}`)}, model.DecisionHuman, StateFailure, "answered unsure"},
-		{"review pass with flags", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"pass","flags":["default-changed"],"summary":"x","items":[]}`)}, model.DecisionHuman, StateFailure, "raised flags"},
-		{"review invalid verdict", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"PASS","flags":[],"summary":"x","items":[]}`)}, model.DecisionHuman, StateFailure, "failed validation"},
+		{"review fail", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"fail","flags":["network-access-added"],"summary":"x","items":[],"examined":[]}`)}, model.DecisionHuman, StateFailure, "answered fail"},
+		{"review unsure", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"unsure","flags":["evidence-incomplete"],"summary":"x","items":[],"examined":[]}`)}, model.DecisionHuman, StateFailure, "answered unsure"},
+		{"review pass with flags", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"pass","flags":["default-changed"],"summary":"x","items":[],"examined":[]}`)}, model.DecisionHuman, StateFailure, "raised flags"},
+		{"review invalid verdict", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, patch), ReviewResult: "success", Verdict: []byte(`{"verdict":"PASS","flags":[],"summary":"x","items":[],"examined":[]}`)}, model.DecisionHuman, StateFailure, "failed validation"},
 		{"review route but major", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteReview, major), ReviewResult: "success", Verdict: pass}, model.DecisionHuman, StateFailure, "version policy"},
 		{"human finding", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteHuman, patch, model.Finding{Code: "npm.install-script-added", Route: model.RouteHuman, Detail: "x"})}, model.DecisionHuman, StateFailure, "npm.install-script-added"},
 		{"finding code sanitized", Inputs{Class: class(), FetchResult: "success", Evidence: evidence(model.RouteHuman, patch, model.Finding{Code: "@evil <b>", Route: model.RouteHuman})}, model.DecisionHuman, StateFailure, "unnamed-finding"},
@@ -91,21 +91,21 @@ func TestParseVerdict(t *testing.T) {
 		raw string
 		ok  bool
 	}{
-		{`{"verdict":"pass","flags":[],"summary":"ok","items":[]}`, true},
-		{`{"verdict":"fail","flags":["network-access-added","new-dependency"],"summary":"","items":[]}`, true},
-		{`{"verdict":"pass","flags":[],"summary":"` + long + `","items":[]}`, true},
-		{`{"verdict":"pass","flags":[],"summary":"` + long + `x","items":[]}`, false},
+		{`{"verdict":"pass","flags":[],"summary":"ok","items":[],"examined":[]}`, true},
+		{`{"verdict":"fail","flags":["network-access-added","new-dependency"],"summary":"","items":[],"examined":[]}`, true},
+		{`{"verdict":"pass","flags":[],"summary":"` + long + `","items":[],"examined":[]}`, true},
+		{`{"verdict":"pass","flags":[],"summary":"` + long + `x","items":[],"examined":[]}`, false},
 		{`{"verdict":"pass","flags":[],"summary":"ok","extra":1}`, false},
 		{`{"verdict":"pass","flags":[]}`, false},
-		{`{"verdict":"pass","flags":null,"summary":"ok","items":[]}`, false},
-		{`{"verdict":"pass","flags":["made-up"],"summary":"ok","items":[]}`, false},
-		{`{"verdict":"pass","flags":["new-dependency","new-dependency"],"summary":"ok","items":[]}`, false},
-		{`{"verdict":"maybe","flags":[],"summary":"ok","items":[]}`, false},
+		{`{"verdict":"pass","flags":null,"summary":"ok","items":[],"examined":[]}`, false},
+		{`{"verdict":"pass","flags":["made-up"],"summary":"ok","items":[],"examined":[]}`, false},
+		{`{"verdict":"pass","flags":["new-dependency","new-dependency"],"summary":"ok","items":[],"examined":[]}`, false},
+		{`{"verdict":"maybe","flags":[],"summary":"ok","items":[],"examined":[]}`, false},
 		{`{"verdict":"pass","flags":[],"summary":null}`, false},
-		{`{"verdict":"pass","flags":[],"summary":"ok","items":[]} {"verdict":"pass"}`, false},
+		{`{"verdict":"pass","flags":[],"summary":"ok","items":[],"examined":[]} {"verdict":"pass"}`, false},
 		{`["pass"]`, false},
 		{``, false},
-		{`{"verdict":"pass","flags":["a","b","c","d","e","f","g","h","i","j","k","l","m"],"summary":"ok","items":[]}`, false},
+		{`{"verdict":"pass","flags":["a","b","c","d","e","f","g","h","i","j","k","l","m"],"summary":"ok","items":[],"examined":[]}`, false},
 	}
 	for _, tt := range tests {
 		_, err := ParseVerdict([]byte(tt.raw))

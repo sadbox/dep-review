@@ -172,14 +172,14 @@ func TestDockerEnv(t *testing.T) {
 }
 
 const okResult = `{"type":"result","subtype":"success","is_error":false,"result":"done","num_turns":3,` +
-	`"structured_output":{"verdict":"fail","flags":["network-access-added"],"summary":"adds a fetch","items":[]},"usage":{"input_tokens":1}}`
+	`"structured_output":{"verdict":"fail","flags":["network-access-added"],"summary":"adds a fetch","items":[],"examined":[]},"usage":{"input_tokens":1}}`
 
 func TestReadVerdict(t *testing.T) {
 	v, err := ReadVerdict(strings.NewReader(okResult + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(v) != `{"verdict":"fail","flags":["network-access-added"],"summary":"adds a fetch","items":[]}` {
+	if string(v) != `{"verdict":"fail","flags":["network-access-added"],"summary":"adds a fetch","items":[],"examined":[]}` {
 		t.Errorf("verdict %s", v)
 	}
 	v, err = ReadVerdict(strings.NewReader(strings.Replace(okResult, `"flags":["network-access-added"]`, `"flags":[]`, 1)))
@@ -202,7 +202,7 @@ func TestReadVerdict(t *testing.T) {
 		"extra field":       strings.Replace(okResult, `"summary":"adds a fetch"`, `"summary":"x","merge":true`, 1),
 		"missing field":     strings.Replace(okResult, `,"summary":"adds a fetch"`, ``, 1),
 		"summary too long":  strings.Replace(okResult, `adds a fetch`, strings.Repeat("é", 3001), 1),
-		"output not object": strings.Replace(okResult, `{"verdict":"fail","flags":["network-access-added"],"summary":"adds a fetch","items":[]}`, `"pass"`, 1),
+		"output not object": strings.Replace(okResult, `{"verdict":"fail","flags":["network-access-added"],"summary":"adds a fetch","items":[],"examined":[]}`, `"pass"`, 1),
 		"over the cap":      okResult + strings.Repeat(" ", MaxStdout),
 	}
 	for name, out := range bad {

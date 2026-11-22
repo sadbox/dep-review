@@ -52,7 +52,7 @@ a newer head can never be merged on an old verdict.
 |---|---|---|
 | auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, or, when the caller sets `docker_platforms`, for exactly those platforms) | merge on green CI |
 | review | patch/minor/digest updates whose deterministic checks all passed, or flagged only items the reviewer assesses one by one (see below) | model review; merge only on `pass` with every flagged item assessed `benign` |
-| human | majors (0.x minors are reviewed like any minor), anything a check routes to a person (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, more than 200 flagged items, model `fail`/`unsure` or a `pass` that does not assess every flagged item `benign`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
+| human | majors (0.x minors are reviewed like any minor), anything a check routes to a person (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, more than 200 flagged items, model `fail`/`unsure` or a `pass` that does not assess every flagged item `benign` or list every required diff as examined, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
 | refuse | the PR is malformed (no updates, tag instead of SHA pin outside a workflow onboarded to `actions.lock`, a lockfile the gate cannot read strictly or that disagrees with the `uses:` lines, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |
 
 ### Flagged items (Go modules)
@@ -138,6 +138,19 @@ quoted, with controls and default-ignorable characters shown as escapes.
 Unparseable Go files, truncated evidence and a module with more flagged
 items than a review can take also go to a person. Module diffs do not
 detect renames.
+
+#### Navigable diffs
+
+A Go module's diff is split per file, and each file's diff is its own
+evidence file. The parts have caps of their own: 2 MB each, 50 MB
+together. A gate-written `diffs.md` index lists every changed file with an
+ID. Every file is required reading unless the go command's own rules say
+no consumer build reads it: a `_test.go` file, or, with declared builds,
+a file none of them compiles. The verdict's `examined` must list every
+required ID, or a person decides. More than 500 required files also goes
+to a person. So does a part the caps cut, and a diff git stopped reading.
+The flagged-items file uses the same caps. Other ecosystems keep the
+single-file limits (400 KB a file, 4 MB in all).
 
 #### Upstream commits
 

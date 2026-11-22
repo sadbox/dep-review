@@ -168,3 +168,11 @@ func (m *memEvidence) dump(t *testing.T, dir string) {
 		}
 	}
 }
+
+func (m *memEvidence) AddPart(name string, b []byte) (string, error) {
+	return name, m.put(name, "", b, true)
+}
+
+func (m *memEvidence) AddLarge(name, desc string, b []byte) error {
+	return m.put(name, desc, b, true)
+}

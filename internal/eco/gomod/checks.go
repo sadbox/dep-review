@@ -160,7 +160,9 @@ type report struct {
 	// lenient: the update is a well-known module whose upstream history
 	// was verified (lenient.go); eligible are the binary items leniency
 	// may put on review.
-	lenient  bool
+	lenient bool
+	// unbuilt are the files declared builds do not compile (declaredUnbuilt).
+	unbuilt  map[string]bool
 	eligible map[[2]string]bool
 }
 
@@ -524,6 +526,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	var bins []string           // flagged binaries; their context is built last
 	var tdBins []string         // testdata binaries, flagged only if reachable
 	unbuilt := declaredUnbuilt(cur, nb)
+	h.unbuilt = unbuilt
 	for _, rel := range cur.Files {
 		if unbuilt[rel] {
 			// Declared builds (go_platforms) compile none of it.
