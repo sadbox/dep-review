@@ -340,6 +340,21 @@ func TestCheckTrees(t *testing.T) {
 			map[string]string{"a.go": "package p\nimport \"example.com/m/x\"\nvar v = x.F()\n"},
 			map[string]string{"a.go": "package p\nimport x \"example.com/m/y\"\nvar v = x.F()\n"},
 			[]string{codeVarInit}},
+		// Assembly, C or cgo can include any file by name: in such a
+		// module every changed text file counts.
+		{"included file in an assembly module",
+			map[string]string{"f_amd64.s": "#include \"mid.inc\"\nTEXT ·f(SB),0,$0\nRET\n", "mid.inc": "MOVQ $1, AX\n"},
+			map[string]string{"f_amd64.s": "#include \"mid.inc\"\nTEXT ·f(SB),0,$0\nRET\n", "mid.inc": "MOVQ $2, AX\n"},
+			[]string{codeIncludable}},
+		{"text in a cgo module",
+			map[string]string{"c.go": "package p\n\n// #include \"p.txt\"\nimport \"C\"\n", "p.txt": "int x = 1;\n"},
+			map[string]string{"c.go": "package p\n\n// #include \"p.txt\"\nimport \"C\"\n", "p.txt": "int x = 2;\n"},
+			[]string{codeIncludable}},
+		{"text in a plain Go module", map[string]string{"a.go": plain, "notes.txt": "a\n"}, map[string]string{"a.go": plain, "notes.txt": "b\n"}, nil},
+		{"go.mod in an assembly module",
+			map[string]string{"f_amd64.s": "TEXT ·f(SB),0,$0\nRET\n", "go.mod": "module p\n"},
+			map[string]string{"f_amd64.s": "TEXT ·f(SB),0,$0\nRET\n", "go.mod": "module p\n\ngo 1.24\n"},
+			nil},
 		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
 	}

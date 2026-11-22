@@ -92,6 +92,10 @@ const (
 	codeBlob       = "gomod.encoded-blob"
 	codeBinary     = "gomod.binary-file"
 	codeAsm        = "gomod.assembly-changed"
+	// codeIncludable is a changed text file of a module whose assembly,
+	// C or cgo can include it by name (#include, .incbin), whatever its
+	// extension: it can become compiled code.
+	codeIncludable = "gomod.includable-changed"
 	codeParse      = "gomod.unparseable"
 	// codeNewlyBuilt is an old file that a build newly includes: its whole
 	// text, which no other item may show (its diff can be a constraint
@@ -110,14 +114,14 @@ var checkRoute = map[string]model.Route{
 	// cgo, C and assembly go to a person as on main: what they compile,
 	// include or link is beyond what the gate shows. The reviewer still
 	// assesses them, as triage for that person.
-	codeCgo: model.RouteHuman, codeCSource: model.RouteHuman, codeAsm: model.RouteHuman,
+	codeCgo: model.RouteHuman, codeCSource: model.RouteHuman, codeAsm: model.RouteHuman, codeIncludable: model.RouteHuman,
 }
 
 // triageCodes are the person-routed codes the review may still assess as
 // triage (policy.Triage): their items are in the flagged list and their
 // findings are marked Triage. codeIncomplete covers binaries and decoded
 // bytes that are not text.
-var triageCodes = map[string]bool{codeCgo: true, codeCSource: true, codeAsm: true, codeIncomplete: true}
+var triageCodes = map[string]bool{codeCgo: true, codeCSource: true, codeAsm: true, codeIncludable: true, codeIncomplete: true}
 
 func routeOf(code string) model.Route {
 	if r, ok := checkRoute[code]; ok {
@@ -465,6 +469,7 @@ var checkText = map[string]string{
 	codeBlob:       fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
 	codeBinary:     "binary file added or changed, or newly reachable (testdata/ fixtures excepted unless the module can reach them); it goes to a person, and renderings are " + ecoutil.ForThePerson,
 	codeAsm:        "assembly (.s) file added or changed; a person decides (the review is triage)",
+	codeIncludable: "text file added or changed in a module whose assembly, C or cgo can include any file by name; a person decides (the review is triage)",
 	codeParse:      "Go file the gate could not parse (checked as text only)",
 	codeIncomplete: "flagged item the gate did not show in full as text (every binary, decoded bytes that are not text, anything past a cap or limit)",
 }
@@ -529,6 +534,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	var bins []string           // flagged binaries; their context is built last
 	var tdBins []string         // testdata binaries, flagged only if reachable
 	unbuilt := declaredUnbuilt(cur, nb)
+	links := moduleLinks(cur) // what in the module can include a file by name
 	h.unbuilt, h.nb, h.cur = unbuilt, nb, cur
 	for _, rel := range cur.Files {
 		if unbuilt[rel] {
@@ -613,6 +619,10 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			// (binaries decides: cgo, C, assembly or a .syso in the module,
 			// or a non-test //go:embed pattern that matches it).
 			tdBins = append(tdBins, rel)
+		case links != "" && rel != "go.mod" && rel != "go.sum":
+			// Any other text: assembly, C or cgo can #include (or .incbin)
+			// it under any name, so it can be compiled code.
+			h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
 		}
 	}
 	// Deleted .go files change a package too.

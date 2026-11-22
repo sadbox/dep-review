@@ -107,6 +107,11 @@ What is flagged:
 - a changed binary under `testdata/` (never built by itself) when the new
   tree embeds it, or when the module has cgo, C or assembly sources or a
   `.syso` (which can link or include any file without naming it);
+- in such a module, any other changed text file except `go.mod` and
+  `go.sum` (`gomod.includable-changed`), whatever its extension.
+  Assembly, C or cgo can `#include` or `.incbin` it by name, so it can be
+  compiled code. It routes like assembly: to a person, with the review as
+  triage, or reviewed for well-known modules;
 - a file the new tree newly embeds, changed or not: what each package
   embeds is `go list`'s `EmbedFiles` in both trees (the union over every
   `go tool dist list` platform, cgo on and off), compared per package. An
