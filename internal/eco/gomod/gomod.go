@@ -476,13 +476,7 @@ func (f Fetcher) upstream(env fetch.Env, u model.Update, key string, got map[str
 	sum := sha256.Sum256([]byte(req.URL))
 	req.Dir = filepath.Join(env.Scratch, "upstream", hex.EncodeToString(sum[:8]))
 	has := func(p string) bool { return trees[1].Has(p) || trees[0] != nil && trees[0].Has(p) }
-	changed := func(p string) bool {
-		if trees[0] == nil || trees[0].Has(p) != trees[1].Has(p) {
-			return true
-		}
-		return !bytes.Equal(trees[0].ReadFile(p), trees[1].ReadFile(p))
-	}
-	return attachUpstream(key, fetchUpstream(req), items, has, changed)
+	return attachUpstream(key, fetchUpstream(req), items, has, changedFiles(trees[0], trees[1]))
 }
 
 // flaggedUpdate is the update a flagged item belongs to, as the verdict
@@ -559,4 +553,22 @@ func orEmpty(v string, f func(string) string) string {
 		return ""
 	}
 	return f(v)
+}
+
+// changedFiles is every file added, removed or edited between two trees.
+func changedFiles(old, cur *ecoutil.Tree) []string {
+	var out []string
+	for _, rel := range cur.Files {
+		if old == nil || !old.Has(rel) || !bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)) {
+			out = append(out, rel)
+		}
+	}
+	if old != nil {
+		for _, rel := range old.Files {
+			if !cur.Has(rel) {
+				out = append(out, rel)
+			}
+		}
+	}
+	return out
 }

@@ -301,16 +301,17 @@ func runUpstream(req upstreamRequest, own bool) (reply upstreamReply) {
 		return unavailable(fmt.Sprintf("the two versions share no history within %d commits", upstreamDepth))
 	}
 	// The log first: its size decides whether anything is attached.
-	spec := "."
+	// A subdirectory module without a LICENSE takes the root's.
+	spec := []string{"."}
 	if req.Subdir != "" {
-		spec = req.Subdir
+		spec = []string{req.Subdir, "LICENSE"}
 	}
 	// Merges are listed with what they changed against their first
 	// parent (a change made in a merge is a change), and no history is
 	// simplified away.
-	raw, err := git("log", "--no-renames", "--full-history", "--diff-merges=first-parent",
+	raw, err := git(append([]string{"log", "--no-renames", "--full-history", "--diff-merges=first-parent",
 		"--format=%x1e%H%x00%an%x00%aI%x00%B%x00", "--name-only",
-		"--max-count="+strconv.Itoa(maxUpstreamCommits+1), req.From+".."+req.To, "--", spec)
+		"--max-count=" + strconv.Itoa(maxUpstreamCommits+1), req.From + ".." + req.To, "--"}, spec...)...)
 	if err != nil {
 		return unavailable("git log failed")
 	}
@@ -383,7 +384,7 @@ func parseLog(raw []byte, subdir string) []upstreamCommit {
 				}
 				p = q
 			}
-			if subdir != "" {
+			if subdir != "" && p != "LICENSE" {
 				rest, ok := strings.CutPrefix(p, subdir+"/")
 				if !ok {
 					continue
@@ -413,13 +414,25 @@ func itemFiles(code, item string, has func(string) bool) (file, dir string) {
 
 // attachUpstream turns a reply into the evidence's Upstream entry and
 // the reviewer's upstream.md. items are the update's flagged items;
-// changed reports that a module file differs between the two versions.
-// A flagged file that changed with no listed commit touching it means
+// changed is every module file that differs between the two versions
+// (added, removed or edited). Each must be touched by a listed commit, or
 // the history does not account for the change: nothing is attached.
-func attachUpstream(key string, r upstreamReply, items []model.FlaggedItem, has, changed func(string) bool) (model.Upstream, []byte) {
+func attachUpstream(key string, r upstreamReply, items []model.FlaggedItem, has func(string) bool, changed []string) (model.Upstream, []byte) {
 	up := model.Upstream{Update: key, Status: r.Status, Detail: r.Detail}
 	if r.Status != model.UpstreamVerified {
 		return up, nil
+	}
+	touched := map[string]bool{}
+	for _, c := range r.Commits {
+		for _, f := range c.Files {
+			touched[f] = true
+		}
+	}
+	for _, f := range changed {
+		if !touched[f] {
+			return model.Upstream{Update: key, Status: model.UpstreamUnavailable,
+				Detail: "the history between the versions does not account for every change (" + safeFile(f) + " changed with no listed commit touching it)"}, nil
+		}
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Upstream history: %s\n\n", key)
@@ -434,10 +447,6 @@ func attachUpstream(key string, r upstreamReply, items []model.FlaggedItem, has,
 			if slices.ContainsFunc(c.Files, func(f string) bool { return f == file || file == "" && path.Dir(f) == dir }) {
 				hs = append(hs, c.Hash)
 			}
-		}
-		if len(hs) == 0 && file != "" && changed(file) {
-			return model.Upstream{Update: key, Status: model.UpstreamUnavailable,
-				Detail: "the history between the versions does not account for every change (" + safeFile(file) + " changed with no commit touching it)"}, nil
 		}
 		if len(hs) > 0 {
 			up.Items = append(up.Items, model.UpstreamItem{Code: it.Code, Item: it.Item, Commits: hs})

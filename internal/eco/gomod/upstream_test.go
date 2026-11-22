@@ -166,8 +166,7 @@ func TestRunUpstream(t *testing.T) {
 		{Update: "k", Code: codeNewlyBuilt, Item: "untouched.go"},
 	}
 	has := func(p string) bool { return p == "a.go" || p == "p/b.go" || p == "untouched.go" }
-	changed := func(p string) bool { return p != "untouched.go" }
-	up, md := attachUpstream("k", r, items, has, changed)
+	up, md := attachUpstream("k", r, items, has, []string{"a.go", "p/b.go"})
 	want := map[string][]string{"a.go": {to}, "p/X": {mid}, "a.go (os)": {to}}
 	if len(up.Items) != len(want) {
 		t.Fatalf("items %+v", up.Items)
@@ -183,8 +182,10 @@ func TestRunUpstream(t *testing.T) {
 
 	// A flagged file that changed with no commit touching it: the history
 	// does not explain the change, so nothing is attached.
-	if up, _ := attachUpstream("k", r, []model.FlaggedItem{{Update: "k", Code: codeNewlyBuilt, Item: "untouched.go"}}, has, func(string) bool { return true }); up.Status != model.UpstreamUnavailable {
-		t.Errorf("unexplained change: status %s", up.Status)
+	for _, changed := range [][]string{{"a.go", "untouched.go"}, {"p/c.go"}} {
+		if up, _ := attachUpstream("k", r, items, has, changed); up.Status != model.UpstreamUnavailable {
+			t.Errorf("unexplained change %q: status %s", changed, up.Status)
+		}
 	}
 
 	// A zip that is not what go.sum says: the update goes to a person.
