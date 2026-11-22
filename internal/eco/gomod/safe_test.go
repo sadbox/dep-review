@@ -58,8 +58,8 @@ func TestSafeValues(t *testing.T) {
 		if tt.ok && got != tt.in {
 			t.Errorf("%q -> %q, want unchanged", tt.in, got)
 		}
-		if !tt.ok && (!strings.HasPrefix(got, tt.prefix) || (tt.in != "" && strings.Contains(got, tt.in)) || len(got) != len(tt.prefix)+9) {
-			t.Errorf("%q -> %q, want %s<8 hex>>", tt.in, got, tt.prefix)
+		if !tt.ok && (!strings.HasPrefix(got, tt.prefix) || (tt.in != "" && strings.Contains(got, tt.in)) || len(got) != len(tt.prefix)+25) {
+			t.Errorf("%q -> %q, want %s<24 hex>>", tt.in, got, tt.prefix)
 		}
 	}
 	if safeImport("a b") != safeImport("a b") || safeImport("a b") == safeImport("a c") {

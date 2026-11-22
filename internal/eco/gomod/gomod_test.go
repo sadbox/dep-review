@@ -209,13 +209,17 @@ func TestCheckTrees(t *testing.T) {
 		{"exec in test file", nil, map[string]string{"a_test.go": "package p\nimport \"os/exec\"\nvar _ = exec.Command\n"}, nil},
 		{"net/http", nil, map[string]string{"h.go": "package p\nimport \"net/http\"\nvar _ = http.Get\n"}, []string{codeImport}},
 		{"go:generate", nil, map[string]string{"g.go": "package p\n//go:generate sh -c evil\n"}, []string{codeGenerate}},
-		{"go:embed", nil, map[string]string{"e.go": "package p\nimport _ \"embed\"\n//go:embed testdata/x\nvar s string\n"}, []string{codeEmbed}},
-		{"blob", nil, map[string]string{"b.go": "package p\nvar s = " + blob + "\n"}, []string{codeBlob}},
+		// testdata/x does not exist: cmd/go fails, the gate cannot resolve it.
+		{"go:embed", nil, map[string]string{"e.go": "package p\nimport _ \"embed\"\n//go:embed testdata/x\nvar s string\n"}, []string{codeEmbed, codeIncomplete}},
+		// "ABC"... decodes to text that is itself base64: decoded again,
+		// to bytes nothing parses.
+		{"blob", nil, map[string]string{"b.go": "package p\nvar s = " + blob + "\n"}, []string{codeBlob, codeIncomplete}},
 		{"long prose literal", nil, map[string]string{"b.go": "package p\nvar s = \"" + strings.Repeat("lorem ipsum ", 100) + "\"\n"}, nil},
 		{"assembly", nil, map[string]string{"x_amd64.s": "TEXT ·f(SB),0,$0\nRET\n"}, []string{codeAsm}},
-		{"binary", nil, map[string]string{"x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
+		// A linked .syso whose ELF structure cannot be read goes to a person.
+		{"binary", nil, map[string]string{"x.syso": "\x7fELF\x00\x00"}, []string{codeBinary, codeIncomplete}},
 		{"testdata binary fixture", nil, map[string]string{"testdata/x.bin": "\x00\x01"}, nil},
-		{"testdata syso", nil, map[string]string{"testdata/p/x.syso": "\x7fELF\x00\x00"}, []string{codeBinary}},
+		{"testdata syso", nil, map[string]string{"testdata/p/x.syso": "\x7fELF\x00\x00"}, []string{codeBinary, codeIncomplete}},
 		{"vendor checked", nil, map[string]string{"vendor/x/x.go": "package x\nimport \"os/exec\"\n"}, []string{codeImport}},
 		{"c source", map[string]string{"x.c": "int f(void) { return 0; }\n"}, map[string]string{"x.c": "int f(void) { return 1; }\n"}, []string{codeCSource}},
 		{"net subpackage", nil, map[string]string{"h.go": "package p\nimport \"net/http/httputil\"\nvar _ httputil.BufferPool\n"}, []string{codeImport}},
@@ -271,7 +275,8 @@ func TestCheckTrees(t *testing.T) {
 			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 1 }\n"},
 			map[string]string{"a.go": "package p\nvar run = setup()\nfunc setup() int { return r.run() }\nvar r runner\ntype runner interface{ run() int }\n", "b.go": "package p\ntype T struct{}\nfunc (T) run() int { return 2 }\n"},
 			[]string{codeInitCallee}},
-		{"binary-looking test file", nil, map[string]string{"x_test.go": "\x00\x01\x02"}, []string{codeBinary}},
+		// A .go file: the toolchain compiles it, so it is never inert.
+		{"binary-looking test file", nil, map[string]string{"x_test.go": "\x00\x01\x02"}, []string{codeBinary, codeIncomplete}},
 		{"plus-build without space", nil, map[string]string{"a.go": "package p\nvar _ = (*T)(nil)\n", "b.go": "//+build linux\n\npackage p\ntype T struct{}\n"}, []string{codeInitCallee, codeVarInit}},
 		{"unparseable var", nil, map[string]string{"u.go": "package p\nvar x = {{{\n"}, []string{codeParse, codeVarInit}},
 		{"unparseable", nil, map[string]string{"u.go": "package p\nfunc {{{\n"}, []string{codeParse}},
@@ -286,8 +291,12 @@ func TestCheckTrees(t *testing.T) {
 			var got []string
 			for _, f := range h.findings("m") {
 				got = append(got, f.Code)
-				if f.Route != model.RouteHuman || f.Update != "m" {
-					t.Errorf("finding %+v", f)
+				want := model.RouteReview
+				if r, ok := checkRoute[f.Code]; ok {
+					want = r
+				}
+				if f.Route != want || f.Update != "m" {
+					t.Errorf("finding %+v, want route %s", f, want)
 				}
 			}
 			if !slices.Equal(got, tt.want) {
@@ -312,18 +321,18 @@ func TestReproVendorSkip(t *testing.T) {
 		"testdata/td/z.go":     "package td\nimport \"os/exec\"\nfunc init(){ exec.Command(\"id\").Run() }\n"})
 	h := CheckTrees(old, cur)
 	for _, want := range []string{"vendor/x.go", "internal/vendor/y.go", "testdata/td/z.go"} {
-		if !slices.Contains(h[codeInit], want) || !slices.Contains(h[codeImport], want+" (os/exec)") {
+		if !slices.Contains(h.hits[codeInit], want) || !slices.Contains(h.hits[codeImport], want+" (os/exec)") {
 			t.Errorf("%s: init/import not flagged: %v", want, h)
 		}
 	}
-	if len(h[codeBlank]) != 3 {
-		t.Errorf("blank imports = %q", h[codeBlank])
+	if len(h.hits[codeBlank]) != 3 {
+		t.Errorf("blank imports = %q", h.hits[codeBlank])
 	}
 
 	cur = writeTree(t, map[string]string{"go.mod": gomod,
 		"a.go": "package dep\nimport \"os\"\nvar _, _ = os.StartProcess(\"/bin/sh\", []string{\"sh\",\"-c\",\"id\"}, &os.ProcAttr{})\nfunc F(){}\n"})
 	h = CheckTrees(old, cur)
-	if !slices.Equal(h[codeVarInit], []string{"a.go"}) || !slices.Equal(h[codeImport], []string{"a.go (os)"}) {
+	if !slices.Equal(h.hits[codeVarInit], []string{"a.go"}) || !slices.Equal(h.hits[codeImport], []string{"a.go (os)"}) {
 		t.Errorf("StartProcess initializer: %v", h)
 	}
 }
@@ -394,7 +403,9 @@ func TestFetchNetwork(t *testing.T) {
 		wantRoute model.Route
 	}{
 		{"sprobot285", []model.Update{{Name: "github.com/aws/aws-sdk-go-v2/credentials", From: "1.21.0", To: "1.21.1"}}, model.RouteReview},
-		// x/sys always carries assembly and unsafe: a person decides.
+		// x/image has assembly sources, so its changed testdata binary
+		// (lzw-hi-overflow.tiff.bz2, which nothing parses) is flagged and
+		// cannot be shown in full: a person decides.
 		{"towngear49", []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}, model.RouteHuman},
 	}
 	for _, tt := range tests {

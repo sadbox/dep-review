@@ -40,6 +40,9 @@ type Outcome struct {
 	Reason   string         // one line in the gate's own words: safe for notifications
 	Codes    []string       // finding codes that forced the route
 	Verdict  *model.Verdict // set when a verdict parsed and validated
+	// Triage: Verdict is the review's answer for a person-routed PR,
+	// shown to the person deciding. The decision stays human.
+	Triage bool
 }
 
 var (
@@ -149,11 +152,14 @@ func Decide(in Inputs) Outcome {
 		}
 		o := human(route, "", nil)
 		o.Verdict = &v
+		accounted, why := accounting(ev.Flagged, v.Items)
 		switch {
 		case v.Verdict != model.Pass:
 			o.Reason = "the reviewer answered " + string(v.Verdict)
 		case len(v.Flags) > 0:
 			o.Reason = "the reviewer answered pass but raised flags"
+		case !accounted:
+			o.Reason = why
 		default:
 			o.Decision, o.State = model.DecisionMerge, StateSuccess
 			o.Reason = "checks passed and the reviewer approved; merging when CI is green"
@@ -166,7 +172,16 @@ func Decide(in Inputs) Outcome {
 		} else if len(codes) == 0 {
 			why = "the version policy needs a person (major or 0.x update)"
 		}
-		return human(route, why+codeList(codes), codes)
+		o := human(route, why+codeList(codes), codes)
+		// Triage: the review ran for the person deciding. Recomputed from
+		// the evidence, never taken from it; whatever the answer, a person
+		// decides.
+		if policy.Triage(ev.Updates, ev.Findings, ev.Truncated) && jobResult(in.ReviewResult) == "success" && in.Verdict != nil {
+			if v, err := ParseVerdict(in.Verdict); err == nil {
+				o.Verdict, o.Triage = &v, true
+			}
+		}
+		return o
 	}
 	return human(model.RouteRefuse, "the gate refused this pull request"+codeList(codes), codes)
 }

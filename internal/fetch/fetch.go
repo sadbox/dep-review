@@ -49,6 +49,9 @@ type GitHub interface {
 type Result struct {
 	Updates  []model.Update
 	Findings []model.Finding
+	// Flagged lists every item a review-routed check flagged; the
+	// reviewer must assess each one (model.Evidence.Flagged).
+	Flagged []model.FlaggedItem
 }
 
 // Ecosystem is one package ecosystem's fetcher.

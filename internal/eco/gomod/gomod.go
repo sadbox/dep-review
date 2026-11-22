@@ -3,7 +3,14 @@
 // go command never runs inside the repository), downloads both versions of
 // every changed module through proxy.golang.org with sum.golang.org
 // checking on, verifies the hashes against the PR's go.sum, diffs the
-// module trees and runs the Go hard stops (see checks.go).
+// module trees and runs the Go checks (see checks.go), writing every item
+// they flag into the focused evidence the reviewer must assess.
+//
+// Design rule (README "Design rules"): never re-implement the go
+// command. Which files are built is go/build's answer (build.go), what a
+// package embeds is go list's (golist.go, embed.go); where the toolchain
+// gives no answer, over-approximate toward flagging more, and never credit
+// the old tree with a hand-ported rule.
 package gomod
 
 import (
@@ -16,9 +23,11 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/fetch"
@@ -106,11 +115,12 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 		work = work[:MaxModules]
 	}
 	if len(work) > 0 {
-		fs, err := f.verifyAndDiff(ctx, env, home, work, &summary)
+		fs, flagged, err := f.verifyAndDiff(ctx, env, home, work, &summary)
 		if err != nil {
 			return fetch.Result{}, err
 		}
 		res.Findings = append(res.Findings, fs...)
+		res.Flagged = flagged
 	}
 	if err := env.Evidence.Add("gomod-summary.md", "Go module change set, hash verification and checks run by the gate", summary.Bytes()); err != nil {
 		return fetch.Result{}, err
@@ -324,11 +334,16 @@ func majorPrefix(mod string) (string, bool) {
 	return m[1], true
 }
 
-// verifyAndDiff downloads both sides of each change, checks hashes and
-// writes diffs.
-func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, error) {
+// verifyAndDiff downloads both sides of each change, checks hashes,
+// writes diffs, runs the checks and writes, per module with flagged
+// items, the focused evidence that lists them.
+func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, work []change, summary *bytes.Buffer) ([]model.Finding, []model.FlaggedItem, error) {
 	var findings []model.Finding
+	var flagged []model.FlaggedItem
+	checked := map[string]bool{}          // flaggedUpdate keys already checked
+	clock := ecoutil.NewClock(renderTime) // one for every module of this fetch
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
+	lister, version := f.lister(ctx)
 	var args []string
 	for _, c := range work {
 		if c.update.From != "" {
@@ -338,9 +353,14 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 	}
 	got, err := dl.Download(ctx, slices.Compact(slices.Sorted(slices.Values(args))))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	summary.WriteString("## Downloads (proxy.golang.org, checked against sum.golang.org)\n\n")
+	// go/build is compiled into the gate; go list is the runner's go.
+	fmt.Fprintf(summary, "- go/build: %s (compiled into the gate); go list: %s\n", runtime.Version(), version)
+	if version != runtime.Version() {
+		summary.WriteString("- the two toolchains differ: build constraints and embeds may be read differently\n")
+	}
 	for _, c := range work {
 		u := c.update
 		bad := false
@@ -356,7 +376,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			m, ok := got[u.Name+"@"+side.ver]
 			if !ok {
-				return nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
+				return nil, nil, fmt.Errorf("go mod download returned nothing for %s@%s", u.Name, side.ver)
 			}
 			if m.Error != "" {
 				switch errorClass(m.Error) {
@@ -367,7 +387,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 					findings = append(findings, model.Finding{Code: "gomod.download-failed", Route: model.RouteHuman, Update: safeImport(u.Name),
 						Detail: fmt.Sprintf("%s@%s could not be fetched from proxy.golang.org (not found or gone)", safeImport(u.Name), safeVersion(side.ver))})
 				default:
-					return nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
+					return nil, nil, fmt.Errorf("go mod download %s@%s: %s", u.Name, side.ver, m.Error)
 				}
 				bad = true
 				continue
@@ -387,26 +407,53 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			}
 			t, err := ecoutil.DirTree(m.Dir)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			trees[i], dirs[i] = t, m.Dir
 		}
 		if bad || trees[1] == nil {
 			continue
 		}
-		h := CheckTrees(trees[0], trees[1])
-		findings = append(findings, h.findings(safeImport(u.Name))...)
+		su := safeUpdate(u)
+		key := flaggedUpdate(su)
 		if err := writeDiff(ctx, env, home, u, dirs); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		// The same module change in several directories (a grouped bump)
+		// is the same two trees: checked, flagged and rendered once.
+		if checked[key] {
+			fmt.Fprintf(summary, "- %s: same change as in another directory; its flagged items are listed once\n", key)
+		} else {
+			checked[key] = true
+			h := checkTrees(trees[0], trees[1], clock, lister)
+			if h.listRuns > 0 {
+				fmt.Fprintf(summary, "- %s: go list ran %d times for //go:embed (%s)\n", key, h.listRuns, h.listTook.Round(time.Millisecond))
+			}
+			findings = append(findings, h.findings(su.Name)...)
+			flagged = append(flagged, h.flagged(key)...)
+			if len(h.hits) > 0 {
+				desc := fmt.Sprintf("every item the gate's checks flagged in %s, with exactly what changed (third-party code quoted under the gate's headings); assess each one", key)
+				if err := env.Evidence.AddUntrusted(evName(u, "flagged.md"), desc, h.render(key)); err != nil {
+					return nil, nil, err
+				}
+			}
 		}
 		if ex := changelogExcerpt(trees[0], trees[1]); ex != nil {
 			if err := env.Evidence.AddUntrusted(evName(u, "changelog.md"), "changelog excerpt for "+safeImport(u.Name)+" "+safeVersion(u.To)+" (from the module, third-party text)", ex); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
 	summary.WriteString("\n")
-	return findings, nil
+	return findings, flagged, nil
+}
+
+// flaggedUpdate is the update a flagged item belongs to, as the verdict
+// must name it: the module path and both versions, so the same module
+// changing differently in two directories gives two distinct keys. Its
+// parts are sanitized (at most maxDetailValue bytes each).
+func flaggedUpdate(su model.Update) string {
+	return su.Name + " " + ecoutil.OrNew(su.From) + " -> " + su.To
 }
 
 func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, dirs [2]string) error {

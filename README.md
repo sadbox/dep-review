@@ -51,9 +51,93 @@ a newer head can never be merged on an old verdict.
 | Route | When | Result |
 |---|---|---|
 | auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, or, when the caller sets `docker_platforms`, for exactly those platforms) | merge on green CI |
-| review | patch/minor/digest updates whose deterministic checks all passed | model review; merge only on `pass` |
-| human | majors, 0.x minors (except `golang.org/x/*`), anything a check flags (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, model `fail`/`unsure`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
+| review | patch/minor/digest updates whose deterministic checks all passed, or flagged only items the reviewer assesses one by one (see below) | model review; merge only on `pass` with every flagged item assessed `benign` |
+| human | majors, 0.x minors (except `golang.org/x/*`), anything a check routes to a person (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, more than 200 flagged items, model `fail`/`unsure` or a `pass` that does not assess every flagged item `benign`, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
 | refuse | the PR is malformed (no updates, tag instead of SHA pin outside a workflow onboarded to `actions.lock`, a lockfile the gate cannot read strictly or that disagrees with the `uses:` lines, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |
+
+### Flagged items (Go modules)
+
+The Go checks flag code that runs on import (a new or changed `func init`,
+a package-level initializer that calls code, any changed declaration that
+init code reaches by name within its package), code the compiler does not
+check (cgo and its preamble, C/C++/assembly sources, `//go:linkname`), new
+risky or blank imports, every `//go:linkname`, `//go:cgo_*` and
+`//go:generate` directive in a changed file, newly embedded files,
+binaries and long encoded literals. These route to the model review, not to
+a person: `evidence.json` lists every flagged item (`flagged`, capped at
+200, past which a person decides), and a `.flagged.md` evidence file per
+module shows exactly what changed for each one. For binaries and decoded
+blobs the gate renders, with Go's own parsers only (run in a child
+process of the gate under a 2 GiB address-space limit on Linux, which
+leaves its Go heap roughly 360 to 515 MB, and a timeout; with a
+per-module budget of bytes parsed and decompressed and a 10-minute
+rendering clock per fetch that starts with the first rendering), the type, structure
+(ELF/Mach-O/PE sections, imported libraries and symbols, Go build info;
+zip/tar/gzip entries), a hexdump, printable strings, a comparison with the
+previous version, and where the module refers to the file (linked `.syso`,
+`//go:embed`, test-only mentions). The verdict must assess every flagged
+item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
+list with the evidence's, and merges only when every flagged item, and
+nothing else, is `benign`.
+
+The default is a person, and only text can stay on the review route:
+valid UTF-8 with no control characters but tab, newline and carriage
+return, quoted in full. That is the whole new text of every file with a
+flagged Go item, and of every C, assembly or cgo file (always as text,
+controls and invisible letters shown as escapes), the whole declaration
+for an init callee, and a literal that decodes to such text (decoded again,
+up to three times, if the text looks encoded itself; for a person if that
+fails), when it fits an evidence file.
+
+Every flagged binary goes to a person; the AI never clears one. So do
+cgo, C, C++, Objective-C, Fortran, SWIG and assembly sources (`gomod.cgo`,
+`gomod.cgo-source-changed`, `gomod.assembly-changed`), as on main: what
+they compile, include or link is beyond what the gate shows. Their full
+text is still in the focused evidence, and when a person is needed only
+for such items (and binaries and other items not shown in full: no
+refusal, truncation, major or unknown version, or other reason), the
+review still runs as **triage**: `fetch` outputs `review=true`, and the PR
+comment shows the model's per-item notes under "Triage for the person
+deciding". The decision stays a person's whatever the model answers;
+`publish` never merges from triage.
+
+What is flagged:
+
+- a binary added or changed outside `testdata/` (as on main);
+- a changed binary under `testdata/` (never built by itself) when the new
+  tree embeds it, or when the module has cgo, C or assembly sources or a
+  `.syso` (which can link or include any file without naming it);
+- a file the new tree newly embeds, changed or not: what each package
+  embeds is `go list`'s `EmbedFiles` in both trees (the union over every
+  `go tool dist list` platform, cgo on and off), compared per package. An
+  unchanged file newly embedded is quoted in full under the package's
+  embed item if it is not binary (escapes show any control bytes), and
+  goes to a person otherwise. A package `go list` gives no answer for, a
+  file with `//go:embed` that only a `-tags` build builds (when anything
+  under its directory changed), or any
+  non-ASCII path element in either tree puts the embed item in front of a
+  person (and counts every binary it could reach as embedded). A `.go`
+  file that some configuration builds in the new tree and did not in the
+  old (go/build's answer, compared per configuration and for `-tags`
+  builds) is checked as a new file throughout (init code,
+  imports, the declarations init reaches);
+- an assembly (`.s`, `.S`, `.sx`) or `.syso` file, changed or not, that
+  some configuration newly assembles or links: one the toolchain lists
+  (`SFiles`, `SysoFiles`) in a package that builds there and did not
+  before. Assembly goes to a person with its full text, a `.syso` as a
+  binary;
+- every binary, when the module's link sources change (new cgo, C or
+  assembly, or a new `.syso` or library).
+
+The gate still renders every flagged binary and every literal that
+decodes to bytes that are not text (ELF, PE/COFF, Mach-O, tar, zip, gzip;
+parsed in the isolated child process), labelled "for the person deciding;
+the gate does not clear binaries by their content", with how it can reach
+the build. Module text in that evidence, reasons included, is always
+quoted, with controls and default-ignorable characters shown as escapes.
+Unparseable Go files, truncated evidence and a module with more flagged
+items than a review can take also go to a person. Module diffs do not
+detect renames.
 
 ### GitHub workflow lockfiles
 
@@ -84,6 +168,73 @@ than 8 transitive pairs, a step of any onboarded workflow whose pin the
 new lockfile does not lock (or a workflow whose steps the gate cannot
 read in full), and any other lockfile change. Job-level reusable workflows and workflows not in the lockfile
 keep SHA pins.
+
+## Design rules
+
+**Don't re-implement Go toolchain behaviour.** Where Go's own tooling
+(`go/build`, `go list`, `go/parser`, `go/scanner`, `go/build/constraint`)
+gives an authoritative answer, the gate uses it. For every platform of `go
+tool dist list`, cgo on and off, with each target's own tool tags (GOARCH
+feature levels, default GOEXPERIMENTs) read from the toolchain: which
+files are built, and what a package embeds, is `go list -e -json`
+(`GoFiles`, `CgoFiles`, `EmbedFiles`) for every package with a
+`//go:embed` comment, run offline in isolated children with a clean
+environment, and `build.Context.ImportDir` over the module tree for the
+other packages. Where the tooling gives no answer, the gate
+over-approximates in the direction that flags more (for the new tree, a
+directory the tooling fails on counts as built everywhere; for the old
+tree, nowhere), and it never credits the old side with a hand-ported
+rule: directives go/build does not report (`//go:linkname`, `//go:cgo_*`,
+`//go:generate`) are flagged in every changed or newly built file whether
+or not they were there before.
+
+Why: every differential review rounds 8 to 10 (and the later scans) found
+came from cmd/go logic re-implemented in the gate (constraint headers,
+block comments, a BOM, `package documentation`, default release tags,
+embed pattern matching, directive placement). Each port was close, and
+each gap was a way to bring old or unseen text into the build.
+
+What varies between consumers has no authoritative answer: tags set with
+`-tags` (`purego`, `netgo`, even `ignore`), `go1.N` (older and newer
+toolchains), `gccgo`, GOARCH feature levels (`GOAMD64`) and
+`goexperiment.*` (`GOEXPERIMENT`); only exact GOOS/GOARCH values, `unix`,
+`cgo` and `gc` are fixed by a platform (`arm.7`, `arm64.v9.0`,
+`foo_windows` vary). A changed file whose constraint
+consults a varying tag in either tree (go/build's `AllTags` for the file)
+gets no old text credited, and nothing its `//go:embed` patterns match is
+credited. A file no default configuration builds counts as possibly built
+when go/build builds it, alone in its directory, with exactly some subset
+of the tags it consults turned on (default release and tool tags such as
+`go1.27`, a default GOEXPERIMENT or `arm.7` off unless the subset turns
+them on); its embeds go to a person when its directory changes.
+A byte-identical file keeps its credit only when every configuration that
+builds it now built it before (a sibling's fixed package clause can bring
+it into a build). Every old file a build newly includes is quoted
+in full under `gomod.newly-built`: its diff can be a constraint line, or
+nothing. Past a work or time budget, nothing is credited and a
+person decides.
+
+An old `EmbedFiles` answer is credited only where every file the package
+takes `//go:embed` patterns from (the files go list builds there with a
+`//go:embed` comment, per configuration) is byte-identical and built as
+before: go list also reports patterns the compiler rejects, and this needs
+no rule about where a directive may stand. A pattern with a backslash (an
+escape on Linux, a separator on Windows) or a byte a module file path
+cannot hold, other than the glob characters, goes to a person.
+
+Known limits:
+
+- go/build is compiled into the gate and `go list` is the runner's `go`
+  (the fetch summary records both versions).
+- Under a non-default build tag, an old package that did not build at all
+  in that configuration (a package-consistency error, such as two package
+  clauses among the files that tag selects) and that a sibling's fix makes
+  buildable keeps credit for its unchanged files. The `-tags` search
+  looks at each file alone, so it does not see the old package fail. The
+  gap is narrow: no build using that tag could have used the old package,
+  so nothing of it ran before. Planned fix: a per-repository declared
+  build configuration (the tags and platforms the repository actually
+  builds with), evaluated exactly with go list.
 
 ## Layout
 
@@ -237,7 +388,7 @@ manager), in a container run under gVisor (`runsc`, pinned and sha512-checked by
 - **Only data we already publish**: the evidence and the default branch.
 
 Its answer comes back only on stdout: one `claude -p --output-format json`
-result, at most 64 KB, whose `structured_output` must pass the verdict
+result, at most 2 MB, whose `structured_output` must pass the verdict
 schema before `verdict.json` is written. Anything else is no verdict, which
 sends the PR to a human. The Read/Grep/Glob-only tool set and the
 permission settings from `review-prep` still apply inside, as a second

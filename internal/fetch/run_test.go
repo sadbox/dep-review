@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -229,6 +230,10 @@ func TestRun(t *testing.T) {
 		{"unknown ecosystem", "pip", model.KindDependabot, fetch.Registry{}, model.RouteHuman, []string{"ecosystem.unknown"}, false},
 		{"infra error", model.GoModules, model.KindDependabot, fetch.Registry{model.GoModules: fakeEco{err: errors.New("proxy down")}}, "", nil, true},
 		{"not dependabot", model.GoModules, model.KindDependabotUnverified, fetch.Registry{}, "", nil, true},
+		{"flagged at the cap", model.GoModules, model.KindDependabot, fetch.Registry{model.GoModules: fakeEco{res: fetch.Result{
+			Updates: []model.Update{patch}, Flagged: flaggedN(model.MaxFlagged)}}}, model.RouteReview, nil, false},
+		{"flagged over the cap", model.GoModules, model.KindDependabot, fetch.Registry{model.GoModules: fakeEco{res: fetch.Result{
+			Updates: []model.Update{patch}, Flagged: flaggedN(model.MaxFlagged + 1)}}}, model.RouteHuman, []string{"flagged.too-many"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -261,6 +266,22 @@ func TestRun(t *testing.T) {
 			if err := json.Unmarshal(b, &back); err != nil || back.Route != got.Route {
 				t.Errorf("evidence.json: %v route %s", err, back.Route)
 			}
+			// Every flagged item reaches evidence.json, even past the cap.
+			fe, _ := tt.reg[tt.eco].(fakeEco)
+			if want := fe.res.Flagged; len(back.Flagged) != len(want) {
+				t.Errorf("evidence.json has %d flagged items, want %d", len(back.Flagged), len(want))
+			}
+			if back.Flagged == nil {
+				t.Errorf("evidence.json flagged is null, want a list")
+			}
 		})
 	}
+}
+
+func flaggedN(n int) []model.FlaggedItem {
+	out := make([]model.FlaggedItem, n)
+	for i := range out {
+		out[i] = model.FlaggedItem{Update: "m", Code: "gomod.binary-file", Item: fmt.Sprintf("f%d", i)}
+	}
+	return out
 }

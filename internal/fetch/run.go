@@ -53,6 +53,12 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 	findings = append(res.Findings, findings...)
 	findings = append(findings, NewDependencies(updates)...)
 	findings = append(findings, ev.Findings()...)
+	if len(res.Flagged) > model.MaxFlagged {
+		findings = append(findings, model.Finding{
+			Code: "flagged.too-many", Route: model.RouteHuman,
+			Detail: fmt.Sprintf("checks flagged %d items for the reviewer to assess one by one; more than %d is too many to review", len(res.Flagged), model.MaxFlagged),
+		})
+	}
 
 	out := model.Evidence{
 		Classification: env.Class,
@@ -60,6 +66,7 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 		Findings:       findings,
 		Files:          ev.Files(),
 		Truncated:      ev.Truncated(),
+		Flagged:        res.Flagged,
 	}
 	if out.Updates == nil {
 		out.Updates = []model.Update{}
@@ -70,7 +77,11 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 	if out.Files == nil {
 		out.Files = []model.EvidenceFile{}
 	}
+	if out.Flagged == nil {
+		out.Flagged = []model.FlaggedItem{}
+	}
 	out.Route = policy.Combine(out.Updates, out.Findings, out.Truncated)
+	out.Triage = policy.Triage(out.Updates, out.Findings, out.Truncated)
 	if err := ev.WriteEvidence(out); err != nil {
 		return model.Evidence{}, err
 	}

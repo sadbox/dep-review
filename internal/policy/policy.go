@@ -57,6 +57,28 @@ func Combine(updates []model.Update, findings []model.Finding, truncated bool) m
 	return r
 }
 
+// Triage reports whether a human-routed PR may still be reviewed as
+// triage for the person deciding: every finding that forces a person is
+// marked Triage, no finding refuses, the evidence is complete and the
+// version policy alone would allow a review. It is never a reason to
+// merge.
+func Triage(updates []model.Update, findings []model.Finding, truncated bool) bool {
+	if truncated || len(updates) == 0 || Combine(updates, findings, false) != model.RouteHuman {
+		return false
+	}
+	for _, u := range updates {
+		if RouteFor(u) == model.RouteHuman {
+			return false
+		}
+	}
+	for _, f := range findings {
+		if model.Worse(f.Route, model.RouteHuman) == f.Route && !(f.Route == model.RouteHuman && f.Triage) {
+			return false
+		}
+	}
+	return true
+}
+
 func zeroMajor(v string) bool {
 	v = strings.TrimPrefix(v, "v")
 	return strings.HasPrefix(v, "0.")

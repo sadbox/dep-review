@@ -20,7 +20,7 @@ const maxDetailValue = 200
 
 func placeholder(kind, s string) string {
 	sum := sha256.Sum256([]byte(s))
-	return "<invalid-" + kind + ":" + hex.EncodeToString(sum[:4]) + ">"
+	return "<invalid-" + kind + ":" + hex.EncodeToString(sum[:12]) + ">"
 }
 
 // safeImport returns p if it is a valid import path by the rules of

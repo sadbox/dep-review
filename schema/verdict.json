@@ -1,7 +1,7 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "flags", "summary"],
+  "required": ["verdict", "flags", "summary", "items"],
   "properties": {
     "verdict": {
       "type": "string",
@@ -36,6 +36,31 @@
       "type": "string",
       "maxLength": 3000,
       "description": "Plain-text reasoning a human can audit: what was diffed, what changed, how the repository uses it, and the decision. No links, no @-mentions, no markdown headings."
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 200,
+      "description": "One entry for every item in the flagged list of evidence.json, with update, code and item copied exactly; [] when the list is empty. A pass merges only if every flagged item is here, nothing else is, and each is benign.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["update", "code", "item", "assessment", "note"],
+        "properties": {
+          "update": {"type": "string", "maxLength": 640},
+          "code": {"type": "string", "maxLength": 640},
+          "item": {"type": "string", "maxLength": 640},
+          "assessment": {
+            "type": "string",
+            "enum": ["benign", "suspicious", "unclear"],
+            "description": "benign only if you read exactly what changed and can say what it does and why that is safe; suspicious if it could be malicious; unclear if you could not tell."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "What the item does, in plain text: why it is benign, or what is suspicious or unclear about it."
+          }
+        }
+      }
     }
   }
 }

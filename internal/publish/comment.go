@@ -3,6 +3,7 @@ package publish
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/sadbox/dep-review/internal/gh"
@@ -182,8 +183,16 @@ func renderComment(d commentData) string {
 	}
 
 	if v := o.Verdict; v != nil {
-		b.WriteString("\n#### Review\n\n| | |\n|---|---|\n")
-		fmt.Fprintf(&b, "| Verdict | `%s` |\n", v.Verdict)
+		if o.Triage {
+			b.WriteString("\n#### Triage for the person deciding\n\nThe model reviewed this pull request as triage only: a person decides, whatever it answered.\n\n| | |\n|---|---|\n")
+		} else {
+			b.WriteString("\n#### Review\n\n| | |\n|---|---|\n")
+		}
+		if o.Triage {
+			fmt.Fprintf(&b, "| Triage verdict (does not decide) | `%s` |\n", v.Verdict)
+		} else {
+			fmt.Fprintf(&b, "| Verdict | `%s` |\n", v.Verdict)
+		}
 		flags := make([]string, len(v.Flags))
 		for i, f := range v.Flags {
 			flags[i] = code(f)
@@ -196,6 +205,9 @@ func renderComment(d commentData) string {
 			b.WriteString("\nReviewer's summary (model output, sanitized):\n\n```text\n")
 			b.WriteString(s)
 			b.WriteString("\n```\n")
+		}
+		if d.Evidence != nil && len(d.Evidence.Flagged) > 0 {
+			renderItems(&b, d.Evidence.Flagged, v.Items)
 		}
 	}
 
@@ -213,4 +225,55 @@ func renderStuck(head string, m marker) string {
 	return m.String() + "\n### dep-review: no decision\n\n" +
 		"The gate has not decided on head " + code(head) + " within two hours. " +
 		"Check the dep-review workflow runs for this pull request, or re-run the trigger.\n"
+}
+
+// renderItems lists the reviewer's assessment of each flagged item, the
+// ones that stopped a merge first. Update, code and item come from the
+// evidence (the gate's strings); only the assessment and the note
+// (sanitized) come from the model, and an item the reviewer listed but
+// the gate did not flag is only counted.
+func renderItems(b *strings.Builder, flagged []model.FlaggedItem, items []model.ItemAssessment) {
+	got := map[model.FlaggedItem]model.ItemAssessment{}
+	for _, it := range items {
+		got[model.FlaggedItem{Update: it.Update, Code: it.Code, Item: it.Item}] = it
+	}
+	type row struct {
+		f    model.FlaggedItem
+		a    string
+		note string
+		rank int // not assessed, suspicious, unclear, benign
+	}
+	var rows []row
+	counts := map[string]int{}
+	for _, f := range flagged {
+		r := row{f: f, a: "not assessed"}
+		if it, ok := got[f]; ok {
+			r.a, r.note = string(it.Assessment), it.Note
+			switch it.Assessment {
+			case model.Suspicious:
+				r.rank = 1
+			case model.Unclear:
+				r.rank = 2
+			default:
+				r.rank = 3
+			}
+			delete(got, f)
+		}
+		counts[r.a]++
+		rows = append(rows, r)
+	}
+	slices.SortStableFunc(rows, func(x, y row) int { return x.rank - y.rank })
+	fmt.Fprintf(b, "\n#### Flagged items (%d): %d benign, %d suspicious, %d unclear, %d not assessed",
+		len(flagged), counts["benign"], counts["suspicious"], counts["unclear"], counts["not assessed"])
+	if len(got) > 0 {
+		fmt.Fprintf(b, "; %d listed by the reviewer that the gate did not flag", len(got))
+	}
+	b.WriteString("\n\n| Update | Code | Item | Assessment | Reviewer's note (model output, sanitized) |\n|---|---|---|---|---|\n")
+	for i, r := range rows {
+		if i == maxRows {
+			fmt.Fprintf(b, "| … %d more | | | | |\n", len(rows)-maxRows)
+			break
+		}
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n", code(r.f.Update), code(r.f.Code), code(r.f.Item), code(r.a), code(r.note))
+	}
 }

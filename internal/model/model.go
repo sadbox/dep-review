@@ -147,6 +147,10 @@ type Finding struct {
 	Route  Route  `json:"route"` // the route this finding forces at least
 	Detail string `json:"detail"`
 	Update string `json:"update,omitempty"` // Update.Name it concerns
+	// Triage marks a person-routed finding the model may still review,
+	// as triage for the person deciding (policy.Triage): it never lets a
+	// PR merge.
+	Triage bool `json:"triage,omitempty"`
 }
 
 // Evidence is fetch's output: the real change set, findings, and the files
@@ -163,6 +167,55 @@ type Evidence struct {
 	// Truncated is set when a size cap cut the evidence short; it forces
 	// RouteHuman.
 	Truncated bool `json:"truncated"`
+	// Flagged is every item a review-routed check flagged (one changed
+	// init function, one new //go:linkname file, one binary...). The
+	// reviewer must assess each one in its verdict, and publish merges
+	// only when every item here, and nothing else, was assessed benign.
+	// This list, not the model's, is the reference.
+	Flagged []FlaggedItem `json:"flagged"`
+	// Triage: the route is human only because of findings marked Triage,
+	// so the review still runs, and its answer is shown to the person
+	// deciding. It never merges.
+	Triage bool `json:"triage"`
+}
+
+// MaxFlagged bounds Flagged: past it a reviewer cannot be expected to
+// assess every item, so fetch sends the PR to a human (and publish
+// refuses to merge even if it somehow did not).
+const MaxFlagged = 200
+
+// MaxItemField bounds a FlaggedItem's (and an ItemAssessment's) update,
+// code and item. It is above the longest the gate builds (a module path
+// and two versions of at most 200 bytes each; a file and an import path
+// of 200 each): a gomod test keeps it so.
+const MaxItemField = 640
+
+// FlaggedItem is one item of Evidence.Flagged: a check (Code) that
+// flagged a construct (Item, e.g. "http2/transportConfig" or
+// "x/x.syso") in one update (Update, the Update.Name). All three are the
+// gate's own sanitized strings.
+type FlaggedItem struct {
+	Update string `json:"update"`
+	Code   string `json:"code"`
+	Item   string `json:"item"`
+}
+
+// Assessment is the reviewer's judgement of one flagged item.
+type Assessment string
+
+const (
+	Benign     Assessment = "benign"
+	Suspicious Assessment = "suspicious"
+	Unclear    Assessment = "unclear"
+)
+
+// ItemAssessment is the verdict's entry for one FlaggedItem.
+type ItemAssessment struct {
+	Update     string     `json:"update"`
+	Code       string     `json:"code"`
+	Item       string     `json:"item"`
+	Assessment Assessment `json:"assessment"`
+	Note       string     `json:"note"` // model text; sanitized before it is shown
 }
 
 type EvidenceFile struct {
@@ -186,6 +239,9 @@ type Verdict struct {
 	Verdict VerdictValue `json:"verdict"`
 	Flags   []string     `json:"flags"`   // values from schema/verdict.json's enum only
 	Summary string       `json:"summary"` // shown in the PR comment after sanitizing
+	// Items assesses every Evidence.Flagged item (empty when there are
+	// none). publish checks it against the evidence, never the reverse.
+	Items []ItemAssessment `json:"items"`
 }
 
 // Decision is publish's final, deterministic result.

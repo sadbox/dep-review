@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 )
 
 // Downloaded is one module version from `go mod download -json`.
@@ -69,6 +71,10 @@ func (d Downloader) Download(ctx context.Context, mods []string) (map[string]Dow
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
 		}
+	}
+	// Telemetry off: no sidecar outlives the go command.
+	if err := ecoutil.GoHome(filepath.Join(d.Scratch, "home")); err != nil {
+		return nil, err
 	}
 	ents, err := os.ReadDir(work)
 	if err != nil {
