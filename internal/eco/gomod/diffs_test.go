@@ -44,10 +44,14 @@ func TestWriteDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldTree, err := ecoutil.DirTree(filepath.Join(root, "old"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := &report{unbuilt: map[string]bool{"w_windows.go": true}, nb: &builtSet{}, cur: newTree}
 	u := model.Update{Ecosystem: model.GoModules, Directory: "/", Name: "example.com/m", From: "v1.0.0", To: "v1.1.0"}
 	ds, fs, err := writeDiff(context.Background(), env, t.TempDir(), u, "example.com/m v1.0.0 -> v1.1.0",
-		[2]string{filepath.Join(root, "old"), filepath.Join(root, "new")}, h, 7)
+		[2]string{filepath.Join(root, "old"), filepath.Join(root, "new")}, [2]*ecoutil.Tree{oldTree, newTree}, h, 7)
 	if err != nil || len(fs) != 0 {
 		t.Fatalf("writeDiff: %v, findings %v", err, fs)
 	}
@@ -66,6 +70,11 @@ func TestWriteDiff(t *testing.T) {
 	}
 	if ds[0].ID != "D00008" {
 		t.Errorf("first ID %s, want D00008 (after the fetch's 7)", ds[0].ID)
+	}
+	for _, d := range ds {
+		if !strings.HasSuffix(d.File, ".diff/"+d.ID+".diff") {
+			t.Errorf("%s: part %s is not named by its ID", d.Path, d.File)
+		}
 	}
 	files := ev.Files()
 	if len(files) != 1 || !strings.HasSuffix(files[0].Path, ".diffs.md") || files[0].Untrusted {
@@ -106,5 +115,78 @@ func TestTestOnly(t *testing.T) {
 		if got := tt.r.testOnly(tt.rel); got != tt.want {
 			t.Errorf("%s: testOnly(%s) = %v, want %v", tt.name, tt.rel, got, tt.want)
 		}
+	}
+}
+
+// A path git cannot write unambiguously (a space before the new tree's
+// directory name) splits the header elsewhere: the diffs then do not
+// match the changed files, so every diff is required and a person decides.
+func TestWriteDiffPathsMismatch(t *testing.T) {
+	root := t.TempDir()
+	for _, side := range []struct{ dir, v string }{{"m@v1.0.0", "1"}, {"m@v1.1.0", "2"}} {
+		for rel, text := range map[string]string{"x_test.go": "package m\n", "x_test.go m@v1.1.0/payload.txt": "v" + side.v + "\n"} {
+			p := filepath.Join(root, side.dir, rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var trees [2]*ecoutil.Tree
+	for i, d := range []string{"m@v1.0.0", "m@v1.1.0"} {
+		tr, err := ecoutil.DirTree(filepath.Join(root, d))
+		if err != nil {
+			t.Fatal(err)
+		}
+		trees[i] = tr
+	}
+	ev, err := evidence.Create(filepath.Join(t.TempDir(), "ev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ev.Close()
+	h := &report{nb: &builtSet{}, cur: trees[1]}
+	u := model.Update{Ecosystem: model.GoModules, Directory: "/", Name: "example.com/m", From: "v1.0.0", To: "v1.1.0"}
+	ds, fs, err := writeDiff(context.Background(), fetch.Env{Evidence: ev}, t.TempDir(), u, "k",
+		[2]string{filepath.Join(root, "m@v1.0.0"), filepath.Join(root, "m@v1.1.0")}, trees, h, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 1 || fs[0].Code != "gomod.diff-paths" || fs[0].Route != model.RouteHuman {
+		t.Errorf("findings %+v", fs)
+	}
+	for _, d := range ds {
+		if !d.Required {
+			t.Errorf("%s (%s) optional although the paths are not trusted", d.ID, d.Path)
+		}
+	}
+}
+
+func TestReadingLimits(t *testing.T) {
+	d := func(n int, req bool) model.DiffFile { return model.DiffFile{Bytes: int64(n), Required: req} }
+	codes := func(fs []model.Finding) []string {
+		var out []string
+		for _, f := range fs {
+			if f.Route != model.RouteHuman {
+				t.Errorf("%s routes %s", f.Code, f.Route)
+			}
+			out = append(out, f.Code)
+		}
+		return out
+	}
+	if fs := readingLimits([]model.DiffFile{d(maxMustRead/2, true), d(10*maxMustRead, false)}, maxMustRead/2); len(fs) != 0 {
+		t.Errorf("at the limit (optional diffs do not count): %v", codes(fs))
+	}
+	if fs := codes(readingLimits([]model.DiffFile{d(maxMustRead/2, true)}, maxMustRead/2+1)); len(fs) != 1 || fs[0] != "gomod.too-much-to-read" {
+		t.Errorf("flagged items over the limit: %v", fs)
+	}
+	many := make([]model.DiffFile, model.MaxRequiredDiffs+1)
+	for i := range many {
+		many[i] = d(1, true)
+	}
+	if fs := codes(readingLimits(many, 0)); len(fs) != 1 || fs[0] != "gomod.too-many-diffs" {
+		t.Errorf("too many required: %v", fs)
 	}
 }

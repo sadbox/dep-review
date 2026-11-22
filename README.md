@@ -148,8 +148,18 @@ ID. Every file is required reading unless the go command's own rules say
 no consumer build reads it: a `_test.go` file that nothing embeds, in a
 module with no assembly or cgo that could include it, or, with declared
 builds, a file none of them compiles. The verdict's `examined` must list every
-required ID, or a person decides. More than 500 required files also goes
-to a person. So does a part the caps cut, and a diff git stopped reading.
+required ID, or a person decides. A person also decides when:
+- more than 500 files are required;
+- the required diffs and flagged items together pass 4 MB, the most one
+  review is asked to read;
+- a part is cut by the caps;
+- git stopped reading the diff;
+- the diffs' paths don't match the files that changed (a path git can't
+  write unambiguously); every diff is then required.
+
+Parts are named by ID. The fetch job ships the evidence's checksums as a
+`SHA256SUMS` manifest inside the artifact and outputs only that file's
+sum, which review and publish verify first.
 The flagged-items file uses the same caps. Other ecosystems keep the
 single-file limits (400 KB a file, 4 MB in all).
 
