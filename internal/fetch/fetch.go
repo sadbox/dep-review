@@ -33,10 +33,12 @@ type Writer interface {
 	Add(name, description string, content []byte) error
 	AddUntrusted(name, description string, content []byte) error
 	// AddPart writes third-party text as a part of navigable evidence
-	// (evidence.Dir.AddPart), returning its path ("" if not written).
-	AddPart(name string, content []byte) (string, error)
-	// AddLarge is AddUntrusted under the part caps (evidence.Dir.AddLarge).
-	AddLarge(name, description string, content []byte) error
+	// (evidence.Dir.AddPart), returning its path ("" if not written) and
+	// the bytes written.
+	AddPart(name string, content []byte) (string, int, error)
+	// AddLarge is AddUntrusted under the part caps (evidence.Dir.AddLarge),
+	// returning the bytes written.
+	AddLarge(name, description string, content []byte) (int, error)
 }
 
 // GitHub is the subset of the REST client the fetchers need.

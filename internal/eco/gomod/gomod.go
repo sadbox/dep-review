@@ -440,11 +440,13 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			flagged = append(flagged, items...)
 			if len(h.hits) > 0 {
 				desc := fmt.Sprintf("every item the gate's checks flagged in %s, with exactly what changed (third-party code quoted under the gate's headings); assess each one", key)
-				md := h.render(key)
-				flaggedBytes += len(md)
-				if err := env.Evidence.AddLarge(evName(u, "flagged.md"), desc, md); err != nil {
+				// What the reviewer reads is the written text (Normalize
+				// escapes control characters).
+				n, err := env.Evidence.AddLarge(evName(u, "flagged.md"), desc, h.render(key))
+				if err != nil {
 					return nil, nil, nil, nil, err
 				}
+				flaggedBytes += n
 			}
 			if len(items) > 0 {
 				up, md := f.upstream(env, u, key, got, items, trees)
@@ -576,12 +578,13 @@ func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, 
 		n++
 		id := fmt.Sprintf("D%05d", n)
 		// Named by ID: no module path can collide with another's part.
-		file, err := env.Evidence.AddPart(evName(u, "diff/"+id+".diff"), d.Body)
+		file, written, err := env.Evidence.AddPart(evName(u, "diff/"+id+".diff"), d.Body)
 		if err != nil {
 			return nil, nil, err
 		}
+		// Bytes is what the reviewer reads: the written, normalized text.
 		df := model.DiffFile{ID: id, Update: key, Path: safeFile(d.Path), File: file,
-			Bytes: int64(len(d.Body)), Required: why == "", Why: why}
+			Bytes: int64(written), Required: why == "", Why: why}
 		if df.File == "" {
 			// Binary or past the caps: the writer recorded why (a person
 			// decides); the row stays, with nothing to read.

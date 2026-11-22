@@ -176,21 +176,21 @@ func TestParts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	p, err := d.AddPart("gomod/m/diff/a.go.diff", []byte(strings.Repeat("a", 25)))
-	if err != nil || p != "untrusted/gomod/m/diff/a.go.diff" {
-		t.Fatalf("AddPart = %q, %v", p, err)
+	p, n, err := d.AddPart("gomod/m/diff/a.go.diff", []byte(strings.Repeat("a", 25)))
+	if err != nil || p != "untrusted/gomod/m/diff/a.go.diff" || n != 25 {
+		t.Fatalf("AddPart = %q, %d, %v", p, n, err)
 	}
 	if d.Truncated() || len(d.Files()) != 0 {
 		t.Fatalf("a part within its caps: truncated %v, files %v", d.Truncated(), d.Files())
 	}
-	if err := d.AddLarge("gomod/m/flagged.md", "flagged", []byte(strings.Repeat("b", 20))); err != nil {
-		t.Fatal(err)
+	if n, err := d.AddLarge("gomod/m/flagged.md", "flagged", []byte(strings.Repeat("b", 20))); err != nil || n != 20 {
+		t.Fatal(n, err)
 	}
 	if fs := d.Files(); len(fs) != 1 || fs[0].Bytes != 20 || d.Truncated() {
 		t.Fatalf("AddLarge: files %v, truncated %v", fs, d.Truncated())
 	}
 	// The part total (25 + 20) leaves 5 bytes: the next part is cut.
-	if _, err := d.AddPart("gomod/m/diff/b.go.diff", []byte(strings.Repeat("c", 25))); err != nil {
+	if _, _, err := d.AddPart("gomod/m/diff/b.go.diff", []byte(strings.Repeat("c", 25))); err != nil {
 		t.Fatal(err)
 	}
 	if !d.Truncated() {
@@ -204,7 +204,22 @@ func TestParts(t *testing.T) {
 		t.Errorf("AddUntrusted after parts: %v", fs)
 	}
 	// A binary part is not written and is a finding.
-	if p, _ := d.AddPart("gomod/m/diff/bin.diff", []byte("\x00\x01")); p != "" || len(d.Findings()) == 0 {
+	if p, _, _ := d.AddPart("gomod/m/diff/bin.diff", []byte("\x00\x01")); p != "" || len(d.Findings()) == 0 {
 		t.Errorf("binary part: path %q, findings %v", p, d.Findings())
+	}
+}
+
+// The length AddPart reports is what was written: Normalize turns each
+// escape character into "<0x1B>", six bytes the reviewer reads.
+func TestPartWrittenLength(t *testing.T) {
+	d, err := Create(filepath.Join(t.TempDir(), "ev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	in := []byte(strings.Repeat("a\x1b\n", 100))
+	_, n, err := d.AddPart("x.diff", in)
+	if err != nil || n != 100*len("a<0x1B>\n") {
+		t.Errorf("written %d (input %d), %v", n, len(in), err)
 	}
 }
