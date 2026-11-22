@@ -46,8 +46,11 @@ func TestPlan(t *testing.T) {
 	}
 	// One diff larger than a pass still gets a pass.
 	// One diff larger than a pass gets a pass of its own.
-	if p, err := Plan(evidence(0, 2*PassBudget)); err != nil || len(p) != 3 || len(p[1].Diffs) != 1 || !p[2].Final {
+	if p, err := Plan(evidence(0, 2*PassBudget)); err != nil || len(p) != 2 || len(p[0].Diffs) != 1 || !p[1].Final {
 		t.Errorf("oversized diff: %+v %v", p, err)
+	}
+	if p, err := Plan(evidence(PassBudget/2, 2*PassBudget)); err != nil || len(p) != 3 || len(p[0].Diffs) != 0 || len(p[1].Diffs) != 1 {
+		t.Errorf("oversized diff beside flagged items: %+v %v", p, err)
 	}
 	// Reading that does not fit MaxPasses passes is refused, never piled
 	// onto the last one (the attacker picks the sizes and the order).

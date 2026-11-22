@@ -83,7 +83,9 @@ func Plan(ev model.Evidence) ([]Pass, error) {
 		for _, d := range req {
 			placed := false
 			for i := range bins {
-				if bins[i].Bytes+int(d.Bytes) <= PassBudget || (bins[i].Bytes == 0 && !bins[i].Items) {
+				// An empty pass takes one diff of any size (pass 1 too, when
+				// there is nothing else for it to read).
+				if bins[i].Bytes+int(d.Bytes) <= PassBudget || bins[i].Bytes == 0 && len(bins[i].Diffs) == 0 {
 					bins[i].Diffs = append(bins[i].Diffs, d.ID)
 					bins[i].Bytes += int(d.Bytes)
 					placed = true
@@ -95,7 +97,7 @@ func Plan(ev model.Evidence) ([]Pass, error) {
 				break
 			}
 		}
-		if !ok || bins[0].Bytes > PassBudget && len(bins[0].Diffs) > 0 {
+		if !ok {
 			continue
 		}
 		var out []Pass
