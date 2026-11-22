@@ -105,6 +105,12 @@ func TestDeclaredBuilds(t *testing.T) {
 			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_linux.go": "package m\n\nfunc helper() {}\n", "h_windows.go": "package m\n\nfunc helper() {}\n"}),
 			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_linux.go": "package m\n\nfunc helper() {}\n", "h_windows.go": "package m\n\nfunc helper() { println(1) }\n"}),
 			nil},
+		// Both sides keep the same files: an identical windows variant does
+		// not make the unchanged linux helper look changed.
+		{"unchanged callee with an unbuilt variant", "linux/amd64", "",
+			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_linux.go": "package m\n\nfunc helper() {}\n", "h_windows.go": "package m\n\nfunc helper() { println(1) }\n", "z.go": "package m\n"}),
+			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_linux.go": "package m\n\nfunc helper() {}\n", "h_windows.go": "package m\n\nfunc helper() { println(1) }\n", "z.go": "package m\n\nvar Z = 1\n"}),
+			nil},
 		{"init callee linux builds", "linux/amd64", "",
 			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_linux.go": "package m\n\nfunc helper() {}\n", "h_windows.go": "package m\n\nfunc helper() {}\n"}),
 			base(map[string]string{"i.go": "package m\n\nfunc init() { helper() }\n", "h_linux.go": "package m\n\nfunc helper() { println(1) }\n", "h_windows.go": "package m\n\nfunc helper() {}\n"}),
