@@ -370,13 +370,25 @@ func visible(s string) string {
 			b.WriteRune(r)
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
 			fmt.Fprintf(&b, "<0x%02X>", r)
-		case r == 0x2028 || r == 0x2029 || unicode.Is(unicode.Cf, r):
+		case r == 0x2028 || r == 0x2029 || unicode.Is(unicode.Cf, r) || invisibleLetter(r):
 			fmt.Fprintf(&b, "<U+%04X>", r)
 		default:
 			b.WriteRune(r)
 		}
 	}
 	return b.String()
+}
+
+// invisibleLetter: letters and marks that render as nothing (Hangul
+// fillers, the braille blank, the combining grapheme joiner, a
+// Khmer inherent vowel, a variation selector, the no-break space) and
+// the tag characters, shown as escapes so text cannot hide in them.
+func invisibleLetter(r rune) bool {
+	switch r {
+	case 0x3164, 0x115F, 0x1160, 0xFFA0, 0x2800, 0x034F, 0x17B4, 0xFE0F, 0x00A0:
+		return true
+	}
+	return r >= 0xE0000 && r <= 0xE007F
 }
 
 // excerpt is lines [line-around, line+around] of src, numbered as the Go
@@ -403,10 +415,10 @@ var checkText = map[string]string{
 	codeGenerate:   "new //go:generate directive",
 	codeEmbed:      "new //go:embed directive",
 	codeBlob:       fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
-	codeBinary:     "binary file added or changed (testdata/ fixtures excepted unless the module can reach them); renderings are " + ecoutil.ForThePerson,
+	codeBinary:     "binary file added or changed, or newly reachable (testdata/ fixtures excepted unless the module can reach them); it goes to a person, and renderings are " + ecoutil.ForThePerson,
 	codeAsm:        "assembly (.s) file added or changed",
 	codeParse:      "Go file the gate could not parse (checked as text only)",
-	codeIncomplete: "flagged item the gate did not show in full as text, nor prove unable to reach the build (every binary that may reach the build, decoded bytes that are not text, anything past a cap or limit)",
+	codeIncomplete: "flagged item the gate did not show in full as text (every binary, decoded bytes that are not text, anything past a cap or limit)",
 }
 
 // cgoSourceExts are the extensions the go command hands to the C, C++,
@@ -525,14 +537,6 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 // linkExts are libraries and objects a cgo link line can take by name.
 var linkExts = map[string]bool{".a": true, ".o": true, ".so": true, ".dylib": true, ".lib": true, ".dll": true}
 
-// compiledExts are the extensions the Go toolchain compiles or links by
-// name alone: a binary with one is never inert.
-var compiledExts = map[string]bool{
-	".go": true, ".c": true, ".h": true, ".cc": true, ".cpp": true, ".cxx": true, ".hh": true, ".hpp": true, ".hxx": true,
-	".m": true, ".f": true, ".F": true, ".for": true, ".f90": true, ".s": true, ".S": true, ".sx": true,
-	".swig": true, ".swigcxx": true, ".syso": true, ".a": true, ".o": true, ".so": true, ".dylib": true, ".lib": true, ".dll": true,
-}
-
 // moduleLinks names what in the module can make the build read a file it
 // never names: cgo (import "C" or a #cgo directive in any .go file, test
 // files included), C/C++/ObjC/Fortran/SWIG or assembly sources (-L/-l,
@@ -564,52 +568,43 @@ func moduleLinks(t *ecoutil.Tree) string {
 	return ""
 }
 
-// nonTestEmbed: a //go:embed pattern in non-test code matches rel. A
-// path with a non-ASCII character counts as matched by any non-test
-// pattern of an ancestor directory: fold does not model Unicode folding.
-func (ix *refIndex) nonTestEmbed(rel string) bool {
-	dir := path.Dir(rel)
-	for d := dir; ; d = path.Dir(d) {
-		r := rel
-		if d != "." {
-			r = strings.TrimPrefix(rel, d+"/")
-		}
-		for _, e := range ix.embeds[fold(d)] {
-			if !e.test && (embedMatches(e.pat, r) || !ascii(rel)) {
-				return true
-			}
-		}
-		if d == "." {
-			return false
-		}
-	}
-}
-
-// binaries builds each flagged binary's context: the gate's rendering and
-// where the module refers to it, from one index of the tree. When the
-// module is over the cap, the context is skipped (a person decides). A
-// binary that reaches the program (a .syso, or embedded by non-test code)
-// whose structure could not be rendered also goes to a person.
+// binaries builds each flagged binary's context and sends every one to a
+// person: the gate does not clear binaries, by content or otherwise. The
+// reachability check over the whole new tree only decides what is
+// flagged: a changed testdata binary when the new tree can reach it, and
+// any binary, changed or not, the new tree can reach but the old one
+// could not ("newly reachable").
 func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
-	if len(bins)+len(tdBins) == 0 {
-		return
+	nr, or := newReach(cur), newReach(old)
+	why := map[string]string{}
+	for _, rel := range bins {
+		why[rel] = nr.reachable(rel)
 	}
-	links := moduleLinks(cur)
-	if len(tdBins) > 0 {
-		names := map[string]bool{}
-		for _, rel := range tdBins {
-			names[fold(path.Base(rel))] = true
+	for _, rel := range tdBins {
+		if w := nr.reachable(rel); w != "" {
+			r.reserve(codeBinary, safeFile(rel))
+			bins = append(bins, rel)
+			why[rel] = w
 		}
-		ix := indexRefs(cur, names)
-		for _, rel := range tdBins {
-			if links != "" || ix.nonTestEmbed(rel) || !ix.complete {
-				r.reserve(codeBinary, safeFile(rel))
-				bins = append(bins, rel)
-			}
+	}
+	changed := map[string]bool{}
+	for _, rel := range append(slices.Clone(bins), tdBins...) {
+		changed[rel] = true
+	}
+	for _, rel := range cur.Files {
+		if changed[rel] || !isBinaryFile(rel, cur.ReadFile(rel)) {
+			continue
 		}
-		if len(bins) == 0 {
-			return
+		w := nr.reachable(rel)
+		if w == "" || (old.Has(rel) && or.reachable(rel) != "") {
+			continue
 		}
+		r.reserve(codeBinary, safeFile(rel))
+		bins = append(bins, rel)
+		why[rel] = "unchanged, but newly reachable: " + w
+	}
+	if len(bins) == 0 {
+		return
 	}
 	if len(r.keys) > model.MaxFlagged {
 		for _, rel := range bins {
@@ -617,11 +612,6 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 		}
 		return
 	}
-	names := map[string]bool{}
-	for _, rel := range bins {
-		names[fold(path.Base(rel))] = true
-	}
-	ix := indexRefs(cur, names)
 	for _, rel := range bins {
 		data, prev, hadOld := cur.ReadFile(rel), []byte(nil), old.Has(rel)
 		if hadOld {
@@ -633,14 +623,14 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string) {
 			sn = ecoutil.LinkerInput
 		}
 		d := ecoutil.DescribeAs(data, prev, hadOld, r.budget, sn)
-		refs, inert, _ := ix.refs(rel, links)
 		item := safeFile(rel)
-		// The allowlist: a binary stays on review only when the gate finds
-		// no way for it to reach the build. Its rendering is evidence for a
-		// person, never a reason to clear it.
-		r.add(codeBinary, item, inert,
-			quote("the gate's rendering of "+item+" ("+ecoutil.ForThePerson+")", d.Text),
-			quote("where the module refers to "+item+" (found by the gate)", refs))
+		reason := why[rel]
+		if reason == "" {
+			reason = "added or changed outside testdata/; the gate found no //go:embed, cgo or link line that reaches it, but code can read it by a constructed name"
+		}
+		r.add(codeBinary, item, false,
+			"how it can reach the build (found by the gate): "+reason+"\n",
+			quote("the gate's rendering of "+item+" ("+ecoutil.ForThePerson+")", d.Text))
 	}
 }
 
@@ -1417,351 +1407,11 @@ func renderDecoded(dec []byte, how string, depth int, budget *ecoutil.Budget) (s
 	return b.String(), false
 }
 
-// Bounds for indexRefs: files and bytes read, the mentions shown per name
-// and kind of file, the non-test files remembered per name, and the
-// //go:embed patterns kept per directive and in all.
-const (
-	maxRefFiles      = 5000
-	maxRefScan       = 64 << 20
-	maxRefs          = 15
-	maxNonTestFiles  = 64
-	maxDirectivePats = 64
-	maxEmbedPatterns = 4096
-	maxSkippedListed = 5
-)
-
-// refIndex is one pass over a module tree for the flagged binaries'
-// references: the //go:embed patterns by package directory, the non-test
-// Go files per directory, and, for each flagged binary's base name, the
-// files that mention it. Every file is searched, text or binary, by one
-// linear tokenizer, so "searched everything" can be a fact (complete).
-type refIndex struct {
-	embeds   map[string][]embedPat // package directory -> its patterns
-	goFiles  map[string]int        // directory -> non-test .go files
-	mentions map[string]*mentionList
-	// complete: every file was searched and every //go:embed directive
-	// read and kept. Only then can a binary be proven inert.
-	complete bool
-	notes    []string
-}
-
-type embedPat struct {
-	file string // sanitized
-	line int
-	pat  string
-	test bool
-}
-
-// mentionList is what the index keeps for one name: shown entries per
-// kind, and the raw paths of non-test files that mention it (up to
-// maxNonTestFiles; any one besides the binary itself means "mentioned").
-type mentionList struct {
-	test, nonTest []string
-	nonTestFiles  []string
-}
-
-// isTokenByte is the file-name alphabet tokens are made of.
-func isTokenByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
-		c == '_' || c == '.' || c == '+' || c == '@' || c == '=' || c == '~' || c == '-' || c == '/'
-}
-
-// searchable: the name is one token, so a mention of it is found.
-func searchable(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		if !isTokenByte(name[i]) || name[i] == '/' {
-			return false
-		}
-	}
-	return true
-}
-
-func indexRefs(t *ecoutil.Tree, wanted map[string]bool) *refIndex {
-	ix := &refIndex{embeds: map[string][]embedPat{}, goFiles: map[string]int{}, mentions: map[string]*mentionList{}, complete: true}
-	skipped := map[string][]string{} // reason -> files
-	skip := func(why, f string) {
-		ix.complete = false
-		skipped[why] = append(skipped[why], f)
-	}
-	scanned, patterns := 0, 0
-	for i, f := range t.Files {
-		isGo := path.Ext(f) == ".go"
-		if isGo && !strings.HasSuffix(f, "_test.go") {
-			ix.goFiles[path.Dir(f)]++
-		}
-		if i >= maxRefFiles || scanned >= maxRefScan {
-			skip(fmt.Sprintf("past the search limit (%d files, %d bytes)", maxRefFiles, maxRefScan), f)
-			continue
-		}
-		src := t.ReadFile(f)
-		scanned += len(src)
-		test := strings.HasSuffix(f, "_test.go")
-		// A .go file is read line by line whatever it looks like: the go
-		// command compiles it, and its //go:embed lines count.
-		binary := !isGo && evidence.IsBinary(src)
-		lineNo, lineStart := 1, 0
-		for at := 0; at <= len(src); {
-			// One line at a time for text; a binary file is one "line".
-			end := len(src)
-			if !binary {
-				if j := bytes.IndexByte(src[at:], '\n'); j >= 0 {
-					end = at + j
-				}
-			}
-			line := src[at:end]
-			tl := ""
-			if !binary {
-				tl = strings.TrimSpace(string(line))
-			}
-			if isGo && strings.HasPrefix(tl, "//go:embed") {
-				pats, err := parseGoEmbed(strings.TrimPrefix(tl, "//go:embed"))
-				switch {
-				case err != nil:
-					skip("//go:embed lines the gate could not split as the go command does", fmt.Sprintf("%s:%d", f, lineNo))
-				case len(pats) > maxDirectivePats || patterns+len(pats) > maxEmbedPatterns:
-					skip("//go:embed patterns past the limit", fmt.Sprintf("%s:%d", f, lineNo))
-					pats = pats[:max(0, min(len(pats), maxDirectivePats, maxEmbedPatterns-patterns))]
-				}
-				patterns += len(pats)
-				if !test && !ascii(tl) {
-					// Unicode case folding (ſ, K, final sigma...) on macOS
-					// and Windows file systems is more than fold models.
-					skip("non-test //go:embed patterns with non-ASCII characters", fmt.Sprintf("%s:%d", f, lineNo))
-				}
-				for _, p := range pats {
-					ix.embeds[fold(path.Dir(f))] = append(ix.embeds[fold(path.Dir(f))], embedPat{safeFile(f), lineNo, strings.TrimPrefix(p, "all:"), test})
-				}
-			}
-			// Every line is searched for mentions, //go:embed lines too.
-			ix.tokens(line, wanted, f, lineNo, test, binary, tl)
-			if end == len(src) {
-				break
-			}
-			at, lineStart = end+1, end+1
-			lineNo++
-		}
-		_ = lineStart
-	}
-	for _, why := range slices.Sorted(maps.Keys(skipped)) {
-		fs := skipped[why]
-		shown := fs[:min(len(fs), maxSkippedListed)]
-		var safe []string
-		for _, f := range shown {
-			safe = append(safe, clipText(f))
-		}
-		note := fmt.Sprintf("not searched: %d files or lines %s (%s", len(fs), why, strings.Join(safe, ", "))
-		if len(fs) > len(shown) {
-			note += ", ..."
-		}
-		ix.notes = append(ix.notes, note+")")
-	}
-	return ix
-}
-
-// tokens records the wanted names among the tokens of one line (or of a
-// whole binary file), in one linear pass.
-func (ix *refIndex) tokens(line []byte, wanted map[string]bool, f string, lineNo int, test, binary bool, text string) {
-	seen := map[string]bool{}
-	for i := 0; i < len(line); {
-		if !isTokenByte(line[i]) {
-			i++
-			continue
-		}
-		j := i
-		for j < len(line) && isTokenByte(line[j]) {
-			j++
-		}
-		tok := line[i:j]
-		touches := (i > 0 && line[i-1] >= 0x80) || (j < len(line) && line[j] >= 0x80)
-		i = j
-		k := fold(string(tok[bytes.LastIndexByte(tok, '/')+1:]))
-		if !test && touches && !binary {
-			// A name spelled with non-ASCII characters that fold to ASCII
-			// ("ſecret.bin") splits into pieces: each piece touching a
-			// non-ASCII byte mentions every wanted name it is part of.
-			for w := range wanted {
-				if strings.Contains(w, k) && !seen[w] {
-					seen[w] = true
-					ix.mention(w, f, lineNo, test, binary, text)
-				}
-			}
-			continue
-		}
-		if !wanted[k] || seen[k] {
-			continue
-		}
-		seen[k] = true
-		ix.mention(k, f, lineNo, test, binary, text)
-	}
-}
-
-// mention records that file f mentions the wanted name k at lineNo.
-func (ix *refIndex) mention(k, f string, lineNo int, test, binary bool, text string) {
-	m := ix.mentions[k]
-	if m == nil {
-		m = &mentionList{}
-		ix.mentions[k] = m
-	}
-	mark, shown := "", clipText(text)
-	if test {
-		mark = " (test file)"
-	}
-	if binary {
-		mark, shown = " (inside this binary file)", "its bytes contain the name"
-	}
-	entry := fmt.Sprintf("%s:%d%s: %s", safeFile(f), lineNo, mark, shown)
-	switch {
-	case test:
-		if len(m.test) < maxRefs {
-			m.test = append(m.test, entry)
-		}
-	default:
-		if len(m.nonTest) < maxRefs {
-			m.nonTest = append(m.nonTest, entry)
-		}
-		if len(m.nonTestFiles) < maxNonTestFiles && !slices.Contains(m.nonTestFiles, f) {
-			m.nonTestFiles = append(m.nonTestFiles, f)
-		}
-	}
-}
-
-// refs is where the module refers to the file at rel: whether the linker
-// takes it (.syso), which //go:embed patterns match it (in a package at
-// or above its directory: embed patterns cannot use ".."), and which
-// files mention its name. inert is the gate's proof that the binary never
-// reaches the build: the search covered every file, the name is
-// searchable, it is not a .syso, no non-test //go:embed pattern matches
-// it, and no non-test file other than itself mentions it. why lists what
-// is missing from that proof.
-func (ix *refIndex) refs(rel string, links string) (text string, inert bool, why []string) {
-	var b strings.Builder
-	dir := path.Dir(rel)
-	if !ix.complete {
-		why = append(why, "the reference search did not cover every file")
-	}
-	if links != "" {
-		why = append(why, "the module has "+links+", which can link or include a file without naming it")
-	}
-	if compiledExts[path.Ext(rel)] {
-		why = append(why, "its extension is one the Go toolchain compiles or links")
-	}
-	if path.Ext(rel) == ".syso" {
-		why = append(why, "a .syso file is linked")
-		fmt.Fprintf(&b, "a .syso file is passed to the linker whenever its package directory (%s, %d non-test Go files) is built for a GOOS/GOARCH its name does not exclude: it is linked into the program\n", safeFile(dir), ix.goFiles[dir])
-	}
-	embeds := 0
-	for d := dir; ; d = path.Dir(d) {
-		r := rel
-		if d != "." {
-			r = strings.TrimPrefix(rel, d+"/")
-		}
-		for _, e := range ix.embeds[fold(d)] {
-			if embedMatches(e.pat, r) || (!e.test && !ascii(rel)) {
-				embeds++
-				test := ""
-				if e.test {
-					test = " (test file)"
-				} else if !slices.Contains(why, "a non-test //go:embed pattern matches it") {
-					why = append(why, "a non-test //go:embed pattern matches it")
-				}
-				fmt.Fprintf(&b, "embedded: %s:%d%s has //go:embed %s, which matches it\n", e.file, e.line, test, clipText(e.pat))
-			}
-		}
-		if d == "." {
-			break
-		}
-	}
-	base := path.Base(rel)
-	if !searchable(base) {
-		why = append(why, "its name has characters the search does not match")
-		b.WriteString("its name has characters the gate's search does not match, so mentions of it were not searched for\n")
-	}
-	m := ix.mentions[fold(base)]
-	if m == nil {
-		m = &mentionList{}
-	}
-	for _, f := range m.nonTestFiles {
-		if f != rel {
-			why = append(why, "a non-test file mentions its name")
-			break
-		}
-	}
-	for _, e := range m.nonTest {
-		b.WriteString("mentioned at " + e + "\n")
-	}
-	for _, e := range m.test {
-		b.WriteString("mentioned at " + e + "\n")
-	}
-	for _, l := range [][]string{m.nonTest, m.test} {
-		if len(l) == maxRefs {
-			fmt.Fprintf(&b, "(first %d mentions of this kind shown)\n", maxRefs)
-		}
-	}
-	if embeds == 0 && len(m.nonTest)+len(m.test) == 0 {
-		b.WriteString("no directive or mention found in the files searched\n")
-	}
-	for _, n := range ix.notes {
-		b.WriteString(n + "\n")
-	}
-	if len(why) == 0 {
-		b.WriteString("NO WAY TO THE BUILD FOUND: the gate found no way for it to reach the build, under these conditions: the search covered every file of the module; the module has no cgo, no C, C++, Objective-C, Fortran, SWIG or assembly source and no .syso; its extension is not one the toolchain compiles or links; no //go:embed pattern in non-test code matches it; and no non-test file mentions its name.\n")
-		return b.String(), true, nil
-	}
-	b.WriteString("possibly reaching the build: " + strings.Join(why, "; ") + "\n")
-	return b.String(), false, why
-}
-
 func clipText(s string) string {
 	if len(s) > 200 {
 		return s[:200] + "..."
 	}
 	return s
-}
-
-// embedMatch returns the first pattern of a //go:embed argument list that
-// embeds rel (relative to the directive's package directory): the pattern
-// matches rel or one of its parent directories, as the go command does.
-// Quoted patterns are unquoted; "all:" is dropped. Over-matching only
-// adds a line for the reviewer.
-func embedMatch(args, rel string) string {
-	pats, _ := parseGoEmbed(args)
-	for _, p := range pats {
-		p = strings.TrimPrefix(p, "all:")
-		if embedMatches(p, rel) {
-			return p
-		}
-	}
-	return ""
-}
-
-// embedMatches: pattern p matches rel or one of its parent directories.
-// ascii reports a string of ASCII bytes only.
-func ascii(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
-// fold is the case folding of a case-insensitive file system (macOS,
-// Windows), where //go:embed PAYLOAD.BIN embeds payload.bin: names,
-// patterns and mentions are compared folded. Over-matching is the safe
-// side.
-func fold(s string) string { return strings.ToLower(s) }
-
-func embedMatches(p, rel string) bool {
-	p, rel = fold(p), fold(rel)
-	for r := rel; r != "." && r != ""; r = path.Dir(r) {
-		if ok, err := path.Match(p, r); err == nil && ok {
-			return true
-		}
-	}
-	return false
 }
 
 // parseGoEmbed splits a //go:embed argument list exactly as go/build

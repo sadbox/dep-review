@@ -154,11 +154,11 @@ func TestBinaryContext(t *testing.T) {
 	}
 	out := string(h.render("m"))
 	for _, want := range []string{
-		"embedded: embed.go:5 has //go:embed assets/*.bin, which matches it",
+		"how it can reach the build (found by the gate): //go:embed assets/*.bin at embed.go:5 can match it",
 		"+ new-logo-bytes-and-more",
 		"- old-logo-bytes",
-		"mentioned at f_test.go:3 (test file)",
-		"is passed to the linker whenever its package directory (., 2 non-test Go files)",
+		"how it can reach the build (found by the gate): added or changed outside testdata/",
+		"how it can reach the build (found by the gate): a .syso is linked into its package",
 		"type: COFF object (amd64)",
 	} {
 		if !strings.Contains(out, want) {
@@ -175,23 +175,6 @@ func TestBlobContext(t *testing.T) {
 	for _, want := range []string{"string literal at b.go:3", "it decodes as base64", "type: ELF", "payload-string"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%.3000s", want, out)
-		}
-	}
-}
-
-func TestEmbedMatch(t *testing.T) {
-	tests := []struct {
-		args, rel, want string
-	}{
-		{" assets/*.bin", "assets/logo.bin", "assets/*.bin"},
-		{" assets", "assets/sub/logo.bin", "assets"},
-		{" all:assets", "assets/.hidden", "assets"},
-		{` "with space/x.bin" other`, "with space/x.bin", "with space/x.bin"},
-		{" other.txt", "assets/logo.bin", ""},
-	}
-	for _, tt := range tests {
-		if got := embedMatch(tt.args, tt.rel); got != tt.want {
-			t.Errorf("embedMatch(%q, %q) = %q, want %q", tt.args, tt.rel, got, tt.want)
 		}
 	}
 }

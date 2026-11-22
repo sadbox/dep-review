@@ -79,42 +79,37 @@ item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
 list with the evidence's, and merges only when every flagged item, and
 nothing else, is `benign`.
 
-The default is a person; review eligibility is an allowlist of two
-things.
+The default is a person, and only text can stay on the review route:
+valid UTF-8 with no control characters but tab, newline and carriage
+return, quoted in full. That is the whole new text of every file with a
+flagged Go item, and of every C, assembly or cgo file (always as text,
+controls and invisible letters shown as escapes), the whole declaration
+for an init callee, and a literal that decodes to such text (decoded again,
+up to three times, if the text looks encoded itself; for a person if that
+fails), when it fits an evidence file.
 
-1. **Text, quoted in full**: valid UTF-8 with no control characters but
-   tab, newline and carriage return. That is the whole new text of every
-   file with a flagged Go item, and of every C, assembly or cgo file (always
-   as text, controls shown as escapes), the whole declaration for an init
-   callee, and a literal that decodes to such text (decoded again, up to
-   three times, if the text looks encoded itself; for a person if that
-   fails), when it fits an evidence file.
-2. **A binary the gate finds no way into the build**, whatever its
-   content. That holds only under stated conditions: the reference search
-   covered every file of the module with nothing skipped; the module has
-   no cgo (`import "C"` or `#cgo` in any `.go` file), no C, C++,
-   Objective-C, Fortran, SWIG or assembly source and no `.syso` (any of
-   which can link or include a file without naming it); the file's
-   extension is not one the toolchain compiles or links; no `//go:embed`
-   pattern in non-test code matches it (patterns split as `go/build` does,
-   compared case-folded, as on macOS and Windows); and no non-test file
-   mentions its name. Matching is ASCII only: a non-ASCII character in a
-   non-test `//go:embed` pattern makes the search incomplete, a binary
-   path with one counts as matched by any non-test pattern of an ancestor
-   directory, and a token touching a non-ASCII byte in a non-test file
-   counts as a mention of every name it is part of. The evidence says
-   which conditions held.
-
-Everything else goes to a person, listed under `gomod.not-shown-in-full`:
-every binary that may reach the build (a `.syso`, an embedded file, a
-library or object file, a testdata binary the module can reach), however
-completely the gate renders it, and every literal that decodes to bytes
-that are not text. The gate still renders binaries (ELF, PE/COFF, Mach-O,
-tar, zip, gzip; parsed in the isolated child process), labelled "for the
-person deciding; the gate does not clear binaries by their content", so
-the person can triage quickly. Unparseable Go files, truncated evidence
-and a module with more flagged items than a review can take also go to a
-person. Module diffs do not detect renames.
+Every flagged binary goes to a person; the AI never clears one. A binary
+is flagged when it is added or changed outside `testdata/`; under
+`testdata/` (never built by itself) when the new tree can reach it; and,
+changed or not, when the new tree can reach it but the old tree could
+not ("newly reachable", so a new `//go:embed` or cgo line cannot pull an
+unchanged file into the build unseen). A file is reachable when a non-test
+`//go:embed` pattern in an ancestor directory could match it (split as
+`go/build` does; literal segments compared case-folded, glob segments as
+`path.Match`; a pattern with `[`, `\` or a non-ASCII byte, or one the gate
+cannot split, matches every file under its directory; a path with a
+non-ASCII byte is matched by any embed above it), when it is a `.syso`, or
+when the module has cgo, C, C++, Objective-C, Fortran, SWIG or assembly
+sources or a `.syso` and the file is under `testdata/` or a library or
+object file (`.a`, `.o`, `.so`, ...). The gate still renders every flagged
+binary and every literal that decodes to bytes that are not text (ELF,
+PE/COFF, Mach-O, tar, zip, gzip; parsed in the isolated child process),
+labelled "for the person deciding; the gate does not clear binaries by
+their content", together with how it can reach the build, so the person
+can triage quickly. Unparseable Go files, truncated evidence and a module
+with more flagged items than a review can take also go to a person, all
+listed under `gomod.not-shown-in-full` or their own code. Module diffs do
+not detect renames.
 
 ### GitHub workflow lockfiles
 

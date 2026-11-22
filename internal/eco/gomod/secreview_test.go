@@ -3,11 +3,9 @@ package gomod
 import (
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
 	"github.com/sadbox/dep-review/internal/eco/ecoutil/gittest"
@@ -101,58 +99,6 @@ func TestBlobDecodeCharged(t *testing.T) {
 	}
 }
 
-// TestRefIndexMemory (security review M1): only mentions of the flagged
-// binaries' names are kept, not every token of every line.
-func TestRefIndexMemory(t *testing.T) {
-	cur := map[string]string{"x.syso": "\x64\x86\x01\x00" + strings.Repeat("\x00", 40)}
-	id := 0
-	for f := range 8 {
-		var b strings.Builder
-		for b.Len() < 1<<20-600 {
-			for range 64 {
-				fmt.Fprintf(&b, "q/%05x ", id)
-				id++
-			}
-			b.WriteString("\n")
-		}
-		cur[fmt.Sprintf("d/f%d.txt", f)] = b.String()
-	}
-	tr := writeTree(t, cur)
-	runtime.GC()
-	var m0, m1 runtime.MemStats
-	runtime.ReadMemStats(&m0)
-	ix := indexRefs(tr, map[string]bool{"x.syso": true})
-	runtime.GC()
-	runtime.ReadMemStats(&m1)
-	if grew := int64(m1.HeapAlloc) - int64(m0.HeapAlloc); grew > 4<<20 {
-		t.Errorf("the index holds %d MiB for 8 MiB of text", grew>>20)
-	}
-	runtime.KeepAlive(ix)
-}
-
-// TestEmbedPatternsBounded (security review M1): many binaries against
-// huge //go:embed lines cost neither binaries x patterns nor unbounded
-// patterns, and a capped directive makes "embedded" conservative.
-func TestEmbedPatternsBounded(t *testing.T) {
-	cur := map[string]string{}
-	for i := range 190 {
-		cur[fmt.Sprintf("d/e/f/g/b%03d.bin", i)] = fmt.Sprintf("\x00\x01bin-%d", i)
-	}
-	pat := strings.Repeat("x/y/z ", (1<<20-100)/6)
-	for f := range 4 {
-		cur[fmt.Sprintf("p%d.go", f)] = "package p\n//go:embed " + pat + "\nvar X string\n"
-	}
-	start := time.Now()
-	h := CheckTrees(nil, writeTree(t, cur))
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("CheckTrees took %v", d)
-	}
-	out := string(h.render("m"))
-	if !strings.Contains(out, "//go:embed patterns past the limit") || !strings.Contains(out, "possibly reaching the build: the reference search did not cover every file") {
-		t.Errorf("capped patterns not reported:\n%.2000s", out)
-	}
-}
-
 // TestLinkedUnrendered (security review L1): a binary that reaches the
 // program and whose structure was not rendered goes to a person; one
 // used only by tests does not.
@@ -168,8 +114,8 @@ func TestLinkedUnrendered(t *testing.T) {
 		// Round 4: routing rests on the rendering alone, linked or not.
 		// Round 5: a binary proven never to reach the build stays on review
 		// whatever its rendering.
-		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, false},
-		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, false},
+		{"embedded by a test", map[string]string{"x.bin": broken, "p.go": "package p\n", "p_test.go": "package p\n\nimport _ \"embed\"\n\n//go:embed x.bin\nvar b []byte\n"}, true},
+		{"unreferenced", map[string]string{"x.bin": broken, "p.go": "package p\n"}, true},
 		{"mentioned by non-test code", map[string]string{"x.bin": broken, "p.go": "package p\n\nconst f = \"x.bin\"\n"}, true},
 		// Round 8: a .syso is never cleared by its rendering.
 		{"complete COFF .syso", map[string]string{"x.syso": string(coffObject(2, 64)), "p.go": "package p\n"}, true},
@@ -197,42 +143,6 @@ func TestLinkedUnrendered(t *testing.T) {
 	h.binaries(nil, tr, []string{"x.syso"}, nil)
 	if len(h.items(codeIncomplete)) == 0 {
 		t.Errorf("a linked binary whose parse budget was spent did not go to a person")
-	}
-}
-
-// TestRefSearchNotes (security review L2): skipped files are named, "not
-// found" says it covers only the files searched, test and non-test
-// mentions have their own caps, and an unmatchable name says so.
-func TestRefSearchNotes(t *testing.T) {
-	cur := map[string]string{
-		"logo.bin":   "\x00\x01logo",
-		"big.txt":    strings.Repeat("x ", 1<<20) + "logo.bin\n",
-		"other.bin":  "\x00\x02other",
-		"p.go":       "package p\n\nconst name = \"logo.bin\"\n",
-		"we,ird.bin": "\x00\x03weird",
-	}
-	for i := range maxRefs + 5 {
-		cur[fmt.Sprintf("t%02d_test.go", i)] = "package p\n\nconst f = \"logo.bin\"\n"
-	}
-	h := CheckTrees(nil, writeTree(t, cur))
-	logo := strings.Join(h.ctx[codeBinary]["logo.bin"], "")
-	for _, want := range []string{
-		"mentioned at p.go:3: const name = \"logo.bin\"",
-		fmt.Sprintf("(first %d mentions of this kind shown)", maxRefs),
-		// Large files are searched too (no per-file skip).
-		"mentioned at big.txt:1: ",
-		"possibly reaching the build: a non-test file mentions its name",
-	} {
-		if !strings.Contains(logo, want) {
-			t.Errorf("logo.bin: missing %q in:\n%s", want, logo)
-		}
-	}
-	if other := strings.Join(h.ctx[codeBinary]["other.bin"], ""); !strings.Contains(other, "no directive or mention found in the files searched") {
-		t.Errorf("other.bin:\n%s", other)
-	}
-	weird := strings.Join(h.ctx[codeBinary][safeFile("we,ird.bin")], "")
-	if !strings.Contains(weird, "mentions of it were not searched for") {
-		t.Errorf("we,ird.bin:\n%s", weird)
 	}
 }
 

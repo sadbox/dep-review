@@ -150,7 +150,7 @@ func TestInvariantShownInFull(t *testing.T) {
 		{"truncated ELF .syso", nil, map[string]string{"x.syso": "\x7fELF\x02\x01\x01 truncated", "p.go": "package p\n"}, codeBinary, "x.syso", false},
 		// Round 5: inert binaries. An image nothing parses stays on review
 		// only while the gate proves it never reaches the build.
-		{"inert PNG only a test mentions", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", true},
+		{"inert PNG only a test mentions", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", false},
 		{"PNG a non-test file mentions", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}, codeBinary, "fixtures/logo.png", false},
 		{"PNG embedded by non-test code", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed fixtures/*.png\nvar logo []byte\n"}, codeBinary, "fixtures/logo.png", false},
 		// Round 6: what reaches the build without being named.
@@ -181,7 +181,6 @@ func TestInvariantShownInFull(t *testing.T) {
 		// Round 8: the allowlist.
 		{"PNG beside a non-ASCII embed pattern", nil, map[string]string{"fixtures/logo.png": png, "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed ſ.txt\nvar s string\n", "ſ.txt": "x\n"}, codeBinary, "fixtures/logo.png", false},
 		{"testdata binary named _test.go, embedded", nil, map[string]string{"testdata/blob_test.go": "\x7fELF\x02\x01\x01\x00payload", "p.go": "package p\n\nimport _ \"embed\"\n\n//go:embed testdata/blob_test.go\nvar b []byte\n"}, codeBinary, "testdata/blob_test.go", false},
-		{"PNG with the reference search capped", nil, capped(map[string]string{"fixtures/logo.png": png, "p.go": "package p\n", "p_test.go": "package p\n\nconst logo = \"fixtures/logo.png\"\n"}), codeBinary, "fixtures/logo.png", false},
 		{"COFF listing fewer sections than it has", nil, map[string]string{"x.syso": string(coffSections(5, 2)), "p.go": "package p\n"}, codeBinary, "x.syso", false},
 	}
 	elfBytes := builtGoELF(t)
@@ -213,11 +212,8 @@ func TestInvariantShownInFull(t *testing.T) {
 					t.Errorf("declaration not shown whole:\n%s", ctx)
 				}
 			case codeBinary:
-				// The allowlist: a binary is review-eligible only when the
-				// gate found no way for it to reach the build.
-				if !strings.Contains(ctx, "NO WAY TO THE BUILD FOUND") {
-					t.Errorf("binary on review without the no-way-to-the-build finding:\n%s", ctx)
-				}
+				// Round 9: binaries are never review-eligible.
+				t.Errorf("a binary is on the review route:\n%s", ctx)
 			default:
 				f := fileOf(tc.item)
 				if !strings.Contains(out, quote("full text of the new version of "+f, tc.cur[f])) {
@@ -281,15 +277,6 @@ func gz(s string) string {
 	w.Write([]byte(s))
 	w.Close()
 	return b.String()
-}
-
-// capped adds enough files that the reference search stops before the
-// end (maxRefFiles), sorting after everything else.
-func capped(files map[string]string) map[string]string {
-	for i := range maxRefFiles {
-		files[fmt.Sprintf("zz/f%05d.txt", i)] = "x\n"
-	}
-	return files
 }
 
 func writeTreeOrNil(t *testing.T, files map[string]string) *ecoutil.Tree {
