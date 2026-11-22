@@ -94,12 +94,15 @@ func fetchTarballs(ctx context.Context, client *http.Client, tbs []tarball) (map
 	var mu sync.Mutex
 	var total int64
 	var firstErr error
-	sem := make(chan struct{}, 16)
-	var wg sync.WaitGroup
 	for _, tb := range tbs {
 		if !resolvedRe.MatchString(tb.url) {
 			return nil, notRebuildable("a locked package is not a registry.npmjs.org tarball")
 		}
+	}
+	// Four in flight: at most MaxTarballs plus 4 x MaxTarball held.
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for _, tb := range tbs {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(tb tarball) {

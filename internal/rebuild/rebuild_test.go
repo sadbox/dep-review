@@ -57,6 +57,9 @@ func TestScripts(t *testing.T) {
 		"overrides":          {`{"scripts":{"build":"x"},"overrides":{"a":"1.0.0"}}`, okLock},
 		"alias to a URL":     {`{"scripts":{"build":"x"},"dependencies":{"a":"npm:b@http://x/b.tgz"}}`, okLock},
 		"lock entry dep URL": {okPkg, strings.Replace(okLock, `"node_modules/x":{`, `"node_modules/x":{"dependencies":{"q":"https://evil.example/q.tgz"},`, 1)},
+		"local directory":    {`{"scripts":{"build":"x"},"dependencies":{"a":".."}}`, okLock},
+		"local tarball":      {`{"scripts":{"build":"x"},"dependencies":{"a":"x.TGZ"}}`, okLock},
+		"local tar.gz":       {`{"scripts":{"build":"x"},"dependencies":{"a":"x.tar.gz"}}`, okLock},
 		"top-level inBundle": {okPkg, strings.Replace(okLock, `"node_modules/x":{"version":"1.0.0","resolved":"https://registry.npmjs.org/x/-/x-1.0.0.tgz","integrity":"sha512-AAAA"}`, `"node_modules/x":{"version":"1.0.0","inBundle":true}`, 1)},
 		"inBundle resolved":  {okPkg, strings.Replace(okLock, `"inBundle":true}`, `"inBundle":true,"resolved":"https://evil.example/z.tgz"}`, 1)},
 	} {

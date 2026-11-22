@@ -233,6 +233,11 @@ var (
 // registrySpec reports whether a dependency spec can only be resolved
 // from the registry: a range or tag, or an npm: alias of one.
 func registrySpec(s string) bool {
+	// npm reads ".", "..", "./x" and "x.tgz" as a directory or a file.
+	l := strings.ToLower(strings.TrimSpace(s))
+	if strings.HasPrefix(l, ".") || strings.HasSuffix(l, ".tgz") || strings.HasSuffix(l, ".tar") || strings.HasSuffix(l, ".tar.gz") {
+		return false
+	}
 	if rest, ok := strings.CutPrefix(s, "npm:"); ok {
 		i := strings.LastIndex(rest, "@")
 		if i <= 0 {
