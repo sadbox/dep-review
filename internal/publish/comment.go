@@ -188,7 +188,11 @@ func renderComment(d commentData) string {
 		} else {
 			b.WriteString("\n#### Review\n\n| | |\n|---|---|\n")
 		}
-		fmt.Fprintf(&b, "| Verdict | `%s` |\n", v.Verdict)
+		if o.Triage {
+			fmt.Fprintf(&b, "| Triage verdict (does not decide) | `%s` |\n", v.Verdict)
+		} else {
+			fmt.Fprintf(&b, "| Verdict | `%s` |\n", v.Verdict)
+		}
 		flags := make([]string, len(v.Flags))
 		for i, f := range v.Flags {
 			flags[i] = code(f)

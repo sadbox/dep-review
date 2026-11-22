@@ -50,6 +50,10 @@ func TestTriageNeverMerges(t *testing.T) {
 			if tt.triaged && !strings.Contains(out, "links libc only") {
 				t.Errorf("per-item notes missing:\n%s", out)
 			}
+			// Round 11: a triage answer never reads like a deciding pass.
+			if tt.triaged && (strings.Contains(out, "| Verdict |") || !strings.Contains(out, "| Triage verdict (does not decide) |")) {
+				t.Errorf("triage verdict not labelled as such:\n%s", out)
+			}
 		})
 	}
 	// A refusal is never triage.

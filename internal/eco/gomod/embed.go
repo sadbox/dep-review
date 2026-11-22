@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sadbox/dep-review/internal/eco/ecoutil"
+	"github.com/sadbox/dep-review/internal/evidence"
 )
 
 // Exact //go:embed resolution. Every non-test //go:embed pattern is
@@ -174,6 +175,14 @@ func (td *treeDirs) walk(d string, all bool, files *[]string) error {
 	return nil
 }
 
+// nonASCIIPath: a path element of t is not ASCII.
+func nonASCIIPath(t *ecoutil.Tree) bool {
+	if t == nil {
+		return false
+	}
+	return slices.ContainsFunc(t.Files, func(f string) bool { return !ascii(f) })
+}
+
 // embedLines are the //go:embed patterns of one non-test Go file, and
 // lines the gate could not split.
 type embedLine struct {
@@ -236,6 +245,7 @@ func (e embedResult) embeddedBy(rel string) (why string, isNew bool) {
 func (r *report) embeds(old, cur *ecoutil.Tree) embedResult {
 	res := embedResult{embedded: map[string]bool{}, newly: map[string]string{}}
 	nd, od := indexDirs(cur), indexDirs(old)
+	aliased := nonASCIIPath(cur) || nonASCIIPath(old)
 	for _, f := range cur.Files {
 		if path.Ext(f) != ".go" || strings.HasSuffix(f, "_test.go") {
 			continue
@@ -246,15 +256,13 @@ func (r *report) embeds(old, cur *ecoutil.Tree) embedResult {
 		}
 		var oldPats []string
 		if old.Has(f) {
-			for _, l := range embedLinesOf(old.ReadFile(f)) {
-				oldPats = append(oldPats, l.pats...)
-			}
+			oldPats = oldEmbedPatterns(f, old.ReadFile(f), cur.ReadFile(f))
 		}
 		dir, item := path.Dir(f), safeFile(f)
 		for _, l := range lines {
 			where := fmt.Sprintf("%s:%d", item, l.line)
 			scope := dir
-			if !ascii(dir) {
+			if !ascii(dir) || aliased {
 				scope = "."
 			}
 			if l.err != nil {
@@ -265,7 +273,11 @@ func (r *report) embeds(old, cur *ecoutil.Tree) embedResult {
 			for _, p := range l.pats {
 				label := "//go:embed " + p + " at " + where
 				isNew := !slices.Contains(oldPats, p)
-				if why := modelled(dir, p); why != "" {
+				why := modelled(dir, p)
+				if aliased {
+					why = "the module has a path with a non-ASCII name, which a file system may fold or normalize into any directory"
+				}
+				if why != "" {
 					r.add(codeEmbed, item, false, quote("not resolved exactly ("+why+"); a person decides", label))
 					res.unresolved = append(res.unresolved, unresolvedEmbed{scope, label, isNew})
 					continue
@@ -286,7 +298,9 @@ func (r *report) embeds(old, cur *ecoutil.Tree) embedResult {
 						continue
 					}
 					data := cur.ReadFile(e)
-					if ecoutil.PlainText(data) {
+					// Anything not binary is quoted (visible escapes ESC, C1
+					// and invalid UTF-8); the rest is flagged in binaries.
+					if !evidence.IsBinary(data) {
 						r.add(codeEmbed, item, true, quote("newly embedded by", label)+"newly embedded: "+r.fileRef(e, data))
 						continue
 					}

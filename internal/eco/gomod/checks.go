@@ -484,6 +484,11 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock) *report {
 			if bytes.Equal(prev, data) {
 				continue
 			}
+			// A Go file whose constraints changed (a dropped //go:build
+			// ignore) enters the build with old text: check it as new.
+			if path.Ext(rel) == ".go" && !sameBuild(rel, prev, data) {
+				prev, hadOld = nil, false
+			}
 		}
 		testdata := slices.Contains(strings.Split(path.Dir(rel), "/"), "testdata")
 		ext := path.Ext(rel)
@@ -632,6 +637,17 @@ func (r *report) binaries(old, cur *ecoutil.Tree, bins, tdBins []string, emb emb
 	for _, rel := range append(slices.Clone(bins), tdBins...) {
 		changed[rel] = true
 	}
+	// Every newly embedded file embeds did not quote is flagged here,
+	// whatever its name or bytes: nothing it reports may fall through.
+	for _, rel := range slices.Sorted(maps.Keys(emb.newly)) {
+		if changed[rel] {
+			continue
+		}
+		r.reserve(codeBinary, safeFile(rel))
+		bins = append(bins, rel)
+		why[rel] = "unchanged, but newly reachable: " + emb.newly[rel]
+		changed[rel] = true
+	}
 	for _, rel := range cur.Files {
 		if changed[rel] || !isBinaryFile(rel, cur.ReadFile(rel)) {
 			continue
@@ -739,13 +755,13 @@ func identsIn(n ast.Node) []string {
 	return out
 }
 
-func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope) pkgIndex {
+func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(string) bool) pkgIndex {
 	ix := pkgIndex{decls: map[string][]declInfo{}}
 	if t == nil {
 		return ix
 	}
 	for _, rel := range t.Files {
-		if path.Dir(rel) != dir || path.Ext(rel) != ".go" || strings.HasSuffix(rel, "_test.go") {
+		if path.Dir(rel) != dir || path.Ext(rel) != ".go" || strings.HasSuffix(rel, "_test.go") || (keep != nil && !keep(rel)) {
 			continue
 		}
 		src := t.ReadFile(rel)
@@ -859,7 +875,10 @@ func recvTypeName(e ast.Expr) string {
 // (breadth first, so a shortest one) and the declarations under its name
 // on both sides, which is what the reviewer is shown.
 func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope) []calleeHit {
-	o, n := indexPackage(old, dir, shadow), indexPackage(cur, dir, shadow)
+	// The old side holds only files the new tree has and builds the same
+	// way: a renamed or newly unconstrained file's declarations are new.
+	keep := func(rel string) bool { return cur.Has(rel) && sameBuild(rel, old.ReadFile(rel), cur.ReadFile(rel)) }
+	o, n := indexPackage(old, dir, shadow, keep), indexPackage(cur, dir, shadow, nil)
 	type step struct {
 		name string
 		from *step     // nil at a root's direct reference
@@ -1105,22 +1124,43 @@ func hasText(ss []snippet, text string) bool {
 	return slices.ContainsFunc(ss, func(s snippet) bool { return s.text == text })
 }
 
-func facts(name string, src []byte, shadow *pkgScope) goFacts {
+// directivePrefixes are the directives checkGoFile compares.
+var directivePrefixes = []string{"//go:linkname", "//go:generate", "//go:embed", "//go:cgo_"}
+
+// facts reads one version of a file. The new version (old false) takes
+// directives from every line that looks like one (over-approximating);
+// the old version only from line comments of a file that parses (under-
+// approximating), so a directive-like line in an old string literal or
+// block comment cannot make a real new directive look unchanged.
+func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
 	f := goFacts{imports: map[string]int{}, blank: map[string]int{}, directives: map[string][]int{}, blobs: map[string]int{}}
 	if src == nil {
 		f.parsed = true
 		return f
 	}
-	for i, line := range strings.Split(string(src), "\n") {
-		t := strings.TrimSpace(line)
-		for _, d := range []string{"//go:linkname", "//go:generate", "//go:embed", "//go:cgo_"} {
-			if strings.HasPrefix(t, d) {
-				f.directives[t] = append(f.directives[t], i+1)
+	if !old {
+		for i, line := range strings.Split(string(src), "\n") {
+			t := strings.TrimSpace(line)
+			for _, d := range directivePrefixes {
+				if strings.HasPrefix(t, d) {
+					f.directives[t] = append(f.directives[t], i+1)
+				}
 			}
 		}
 	}
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, name, src, parser.ParseComments|parser.SkipObjectResolution)
+	if err == nil && old {
+		for _, cg := range file.Comments {
+			for _, c := range cg.List {
+				for _, d := range directivePrefixes {
+					if strings.HasPrefix(c.Text, d) {
+						f.directives[c.Text] = append(f.directives[c.Text], fset.Position(c.Pos()).Line)
+					}
+				}
+			}
+		}
+	}
 	if err == nil {
 		f.parsed = true
 		pkgs := map[string]string{} // file-scope name -> import path
@@ -1242,7 +1282,7 @@ func importDecl(file *ast.File, spec *ast.ImportSpec) *ast.GenDecl {
 }
 
 func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
-	o, n := facts(rel, prev, shadow), facts(rel, cur, shadow)
+	o, n := facts(rel, prev, shadow, true), facts(rel, cur, shadow, false)
 	f := safeFile(rel)
 	at := func(line int) string { return fmt.Sprintf("%s:%d", f, line) }
 	if !n.parsed {

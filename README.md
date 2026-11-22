@@ -111,8 +111,16 @@ What is flagged:
   (`path.Match` per segment, directories recursively without `.` and `_`
   names unless `all:`, literal segments case-folded as on macOS and
   Windows), and the matched sets are compared per embedding file and
-  pattern: an unchanged text file newly embedded is quoted in full under
-  the embed item, a binary goes to a person. A pattern with `[`, `\` or a
+  pattern: an unchanged file newly embedded is quoted in full under the
+  embed item if it is not binary (escapes show any control bytes), and
+  goes to a person otherwise. The old side is under-approximated: its
+  patterns come only from real `//go:embed` line comments of a file that
+  imports `embed` and parses, and count only if the file's build
+  constraints and GOOS/GOARCH suffix are unchanged and it was not
+  excluded (`//go:build ignore`). A Go file whose constraints change is
+  checked as a new file throughout (directives, init code, the
+  declarations init reaches). Any non-ASCII path element in either tree
+  makes every embed unresolved, for a person. A pattern with `[`, `\` or a
   non-ASCII byte, an embedding file in a directory with a non-ASCII name,
   a pattern the gate cannot split or resolve, or resolution past its work
   budget puts the embed item in front of a person (and counts every
