@@ -129,7 +129,12 @@ func (b *builtSet) everywhere(rel string) bool {
 //     feature levels, GOEXPERIMENT): which builds include it can change in
 //     ways the gate's configurations do not show;
 //   - a file no default configuration builds in cur.
-func newlyBuilt(old, cur *builtSet, rel string, identical bool) bool {
+//
+// siblingChanged: another .go file of rel's directory was added, removed
+// or changed. The -tags search looks at rel alone, so with a varying tag
+// a sibling's change (a package clause fixed under that tag) can bring an
+// identical file into a build unseen: such a file is not credited.
+func newlyBuilt(old, cur *builtSet, rel string, identical, siblingChanged bool) bool {
 	if cur.unresolved() || old.unresolved() {
 		return true
 	}
@@ -146,13 +151,38 @@ func newlyBuilt(old, cur *builtSet, rel string, identical bool) bool {
 	if cur.possibly(rel) != old.possibly(rel) {
 		return true
 	}
+	varying := cur.userTags[rel] || (old != nil && old.userTags[rel])
 	if identical {
-		return false
+		return varying && siblingChanged
 	}
-	if cur.userTags[rel] || (old != nil && old.userTags[rel]) {
+	if varying {
 		return true
 	}
 	return !cur.anywhere(rel)
+}
+
+// goDirsChanged are the directories in which a .go file was added,
+// removed or changed, with the changed files.
+func goDirsChanged(old, cur *ecoutil.Tree) map[string][]string {
+	out := map[string][]string{}
+	for _, f := range cur.Files {
+		if path.Ext(f) == ".go" && (!old.Has(f) || !bytes.Equal(old.ReadFile(f), cur.ReadFile(f))) {
+			out[path.Dir(f)] = append(out[path.Dir(f)], f)
+		}
+	}
+	if old != nil {
+		for _, f := range old.Files {
+			if path.Ext(f) == ".go" && !cur.Has(f) {
+				out[path.Dir(f)] = append(out[path.Dir(f)], f)
+			}
+		}
+	}
+	return out
+}
+
+// siblingChanged: a .go file of rel's directory other than rel changed.
+func siblingChanged(changed map[string][]string, rel string) bool {
+	return slices.ContainsFunc(changed[path.Dir(rel)], func(f string) bool { return f != rel })
 }
 
 // treeFS serves an ecoutil.Tree to go/build: only the tree's listed
@@ -364,13 +394,15 @@ func (w *work) spent() bool {
 }
 
 // platformTag: a tag one configuration fixes, the same for every
-// consumer building it: a GOOS or GOARCH value go/build knows (also one
-// without a dist port, such as zos), unix, cgo, gc. Every other tag varies
-// between consumers: -tags (purego, netgo, ignore, any tag with "_"),
-// go1.N (older and newer toolchains), gccgo, GOARCH feature levels
-// (amd64.v3: GOAMD64), goexperiment.* (GOEXPERIMENT).
+// consumer building it: exactly a GOOS or GOARCH value go/build knows
+// (also one without a dist port, such as zos; no "." or "_", which the
+// file-name probe would cut at), unix, cgo, gc. Every other tag varies
+// between consumers: -tags (purego, netgo, ignore, foo_windows,
+// windows.x), go1.N (older and newer toolchains), gccgo, GOARCH feature
+// levels (amd64.v3, arm.7, arm64.v9.0, ppc64le.power9, 386.sse2: GOAMD64,
+// GOARM, ...), goexperiment.* (GOEXPERIMENT).
 func platformTag(tag string) bool {
-	return platformTags[tag] || knownGOOSOrGOARCH(tag)
+	return platformTags[tag] || (!strings.ContainsAny(tag, "._") && knownGOOSOrGOARCH(tag))
 }
 
 var platformTags = func() map[string]bool {
@@ -467,8 +499,11 @@ func (tf *treeFS) possiblyBuilt(rel string, tags []string, old bool, w *work) bo
 	if len(tags) > maxTagSearch {
 		return true
 	}
-	for mask := 1; mask < 1<<len(tags); mask++ {
-		var set []string
+	// Every subset, the empty one included: with a set given, alone turns
+	// off every consulted tag the subset does not turn on (go1.27, a
+	// default GOEXPERIMENT, arm.7 included).
+	for mask := 0; mask < 1<<len(tags); mask++ {
+		set := []string{}
 		for i, tag := range tags {
 			if mask&(1<<i) != 0 {
 				set = append(set, tag)
@@ -487,11 +522,22 @@ func (tf *treeFS) possiblyBuilt(rel string, tags []string, old bool, w *work) bo
 	return false
 }
 
-// alone is the context for configuration c with -tags set, in which rel's
-// directory holds only rel.
+// alone is the context for configuration c, in which rel's directory
+// holds only rel. With set nil, it has the configuration's default tags.
+// With set given, the -tags search: exactly set is on beyond the fixed
+// tags (GOOS, GOARCH, unix, cgo) and gc; release and tool tags a
+// toolchain sets by default (go1.27, goexperiment.greenteagc, arm.7) are
+// off unless set turns them on, as an older toolchain, GOEXPERIMENT or
+// GOARM can make them.
 func (tf *treeFS) alone(c config, rel string, set []string) *build.Context {
 	ctxt := tf.context(c)
 	ctxt.BuildTags = set
+	if set != nil {
+		strip := func(l []string) []string {
+			return slices.DeleteFunc(slices.Clone(l), func(t string) bool { return !fixedTags[t] && t != "gc" })
+		}
+		ctxt.ReleaseTags, ctxt.ToolTags = strip(ctxt.ReleaseTags), strip(ctxt.ToolTags)
+	}
 	dir := path.Dir(rel)
 	only := []fs.FileInfo{tf.info[rel]}
 	read := ctxt.ReadDir

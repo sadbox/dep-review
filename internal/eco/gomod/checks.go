@@ -93,6 +93,10 @@ const (
 	codeBinary     = "gomod.binary-file"
 	codeAsm        = "gomod.assembly-changed"
 	codeParse      = "gomod.unparseable"
+	// codeNewlyBuilt is an old file that a build newly includes: its whole
+	// text, which no other item may show (its diff can be a constraint
+	// line, or nothing).
+	codeNewlyBuilt = "gomod.newly-built"
 	// codeIncomplete lists every review-routed item the gate did not
 	// positively show in full ("<code> <item>"). report computes it from
 	// what add was told; nothing adds to it directly.
@@ -434,6 +438,7 @@ var checkText = map[string]string{
 	codeInit:       "new or changed func init() (runs on import)",
 	codeVarInit:    "new or changed package-level var initializer that calls a function (runs on import)",
 	codeInitCallee: "package-local declaration reached from a func init or a calling var initializer changed (runs on import)",
+	codeNewlyBuilt: "file of the old version that a build newly includes (a constraint, file name or package clause changed, or a sibling's did): its whole text enters the build",
 	codeBlank:      `new blank import (import _ "...", imported only for its init side effects)`,
 	codeCSource:    "C/C++/Objective-C/Fortran/SWIG source added or changed (compiled by cgo); a person decides (the review is triage)",
 	codeCgo:        `cgo (import "C" or //go:cgo_ directives) in a new or changed file; a person decides (the review is triage)`,
@@ -495,6 +500,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 		h.add(codeParse, "(go/build budget)", false, quote("the gate could not analyze the module's build; every Go file is checked as new and a person decides", why))
 	}
 	isGo := func(rel string) bool { return path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") }
+	changedDirs := goDirsChanged(old, cur)
 	shadow := map[string]*pkgScope{} // package directory -> scope
 	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
 	var bins []string                // flagged binaries; their context is built last
@@ -509,8 +515,16 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			// before (a dropped //go:build ignore, a moved constraint, a
 			// package clause no longer "documentation") enters that build
 			// with its whole text: check it as new, changed or not.
-			switch nbuilt := isGo(rel) && newlyBuilt(ob, nb, rel, bytes.Equal(prev, data)); {
+			switch nbuilt := isGo(rel) && newlyBuilt(ob, nb, rel, bytes.Equal(prev, data), siblingChanged(changedDirs, rel)); {
 			case nbuilt:
+				// Its whole text: constructs alone do not show a body the
+				// build newly runs.
+				item := safeFile(rel)
+				if h.full(codeNewlyBuilt, item) {
+					h.skip(codeNewlyBuilt, item)
+				} else {
+					h.add(codeNewlyBuilt, item, true, "the old version of this file was not built where the new one is (or a build can newly include it); its whole text is the change to read\n", h.fileRef(rel, data))
+				}
 				prev, hadOld = nil, false
 			case bytes.Equal(prev, data):
 				continue
@@ -578,7 +592,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 		if shadow[dir] == nil {
 			shadow[dir] = packageScope(cur, dir, nb)
 		}
-		for _, c := range initCalleesChanged(old, cur, dir, shadow[dir], ob, nb) {
+		for _, c := range initCalleesChanged(old, cur, dir, shadow[dir], ob, nb, changedDirs) {
 			// The declarations' texts, old and new, are shown whole.
 			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), true, c.context())
 		}
@@ -900,13 +914,13 @@ func recvTypeName(e ast.Expr) string {
 // Each result carries the first path the walk found from a root to it
 // (breadth first, so a shortest one) and the declarations under its name
 // on both sides, which is what the reviewer is shown.
-func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope, ob, nb *builtSet) []calleeHit {
+func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope, ob, nb *builtSet, changedDirs map[string][]string) []calleeHit {
 	// The old side holds only files the new tree has and builds the same
 	// way: a renamed or newly unconstrained file's declarations are new.
 	// An old declaration is credited only from a file every configuration
 	// that builds the new file also built (go/build, newlyBuilt).
 	keep := func(rel string) bool {
-		return cur.Has(rel) && !newlyBuilt(ob, nb, rel, bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)))
+		return cur.Has(rel) && !newlyBuilt(ob, nb, rel, bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)), siblingChanged(changedDirs, rel))
 	}
 	o, n := indexPackage(old, dir, shadow, keep), indexPackage(cur, dir, shadow, nil)
 	type step struct {

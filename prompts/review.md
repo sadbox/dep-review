@@ -58,7 +58,10 @@ checks singled out because a dependency update can hide an attack there:
   every `//go:generate` directive in a changed file, and files a package
   newly embeds (the `gomod.go-embed` item is the package directory; the
   embedded file's text is quoted);
-- binary files and long encoded string literals.
+- binary files and long encoded string literals;
+- old files a build newly includes (`gomod.newly-built`: a constraint,
+  file name or package clause changed, or a sibling's did): read the whole
+  quoted text, which the module diff may not show.
 
 For each update with flagged items there is an evidence file ending in
 `.flagged.md`. It lists every item under a `## item` heading with its

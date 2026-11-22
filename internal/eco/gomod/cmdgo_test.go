@@ -186,8 +186,10 @@ func TestNewlyBuiltIsNew(t *testing.T) {
 func TestDefaultTagsNotNoise(t *testing.T) {
 	head := "//go:build go1.21 && !http2legacy\n\npackage p\n\n"
 	decls := "func helper() int { return 1 }\n\nvar v = helper()\n"
-	old := writeTree(t, map[string]string{"w.go": head + decls, "x.go": "package p\n\nfunc other() {}\n"})
-	cur := writeTree(t, map[string]string{"w.go": head + decls, "x.go": "package p\n\nfunc other() { _ = 1 }\n"})
+	// The change is in another directory: a changed sibling would cost
+	// w.go its credit (round 16, TestR12SiblingUnderUserTag).
+	old := writeTree(t, map[string]string{"w.go": head + decls, "o/x.go": "package o\n\nfunc other() {}\n"})
+	cur := writeTree(t, map[string]string{"w.go": head + decls, "o/x.go": "package o\n\nfunc other() { _ = 1 }\n"})
 	h := CheckTrees(old, cur)
 	if got := h.items(codeInitCallee); len(got) != 0 {
 		t.Errorf("unchanged callees in a release-tag file flagged: %q", got)
@@ -311,7 +313,8 @@ func TestPossiblyBuiltMatchesGoList(t *testing.T) {
 		"go1.99":                {"//go:build go1.99\n\npackage p\n", "go1.99"},
 		"linux && windows":      {"//go:build linux && windows\n\npackage p\n", ""},
 		"package documentation": {"package documentation\n", ""},
-		"!go1.1":                {"//go:build !go1.1\n\npackage p\n", ""},
+		// Round 16: a go1.0 toolchain builds it; go list cannot show that.
+		"!go1.1": {"//go:build !go1.1\n\npackage p\n", "(no go list check)"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := map[string]string{"p.go": tc.src, "q.go": "package p\n"}
@@ -323,7 +326,7 @@ func TestPossiblyBuiltMatchesGoList(t *testing.T) {
 			if got := nb.possibly("p.go"); got != (tc.tags != "") {
 				t.Errorf("possibly built = %v, want %v", got, tc.tags != "")
 			}
-			if tc.tags != "" {
+			if tc.tags != "" && !strings.HasPrefix(tc.tags, "(") {
 				if p := goListArgs(t, files, "-tags="+tc.tags); !slices.Contains(p.GoFiles, "p.go") {
 					t.Errorf("go list -tags=%s does not build it: %+v", tc.tags, p)
 				}
@@ -375,8 +378,8 @@ func TestIgnoreToPuregoIsNew(t *testing.T) {
 		t.Errorf("ignore -> purego credited old text: codes %q", h.codes())
 	}
 	defs := "//go:build ignore\n\npackage p\n\ntype cmsghdr struct{ n int }\n\nfunc init() { _ = cmsghdr{} }\n"
-	h = CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "defs_linux.go": defs}),
-		writeTree(t, map[string]string{"q.go": "package p\n\nvar Y = 2\n", "defs_linux.go": defs}))
+	h = CheckTrees(writeTree(t, map[string]string{"q.go": "package p\n", "defs_linux.go": defs, "o/o.go": "package o\n"}),
+		writeTree(t, map[string]string{"q.go": "package p\n", "defs_linux.go": defs, "o/o.go": "package o\n\nvar Y = 2\n"}))
 	if got := append(h.items(codeInit), h.items(codeInitCallee)...); len(got) != 0 {
 		t.Errorf("an unchanged ignore file is not credited: %q", got)
 	}

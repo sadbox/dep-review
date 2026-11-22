@@ -192,16 +192,22 @@ each gap was a way to bring old or unseen text into the build.
 What varies between consumers has no authoritative answer: tags set with
 `-tags` (`purego`, `netgo`, even `ignore`), `go1.N` (older and newer
 toolchains), `gccgo`, GOARCH feature levels (`GOAMD64`) and
-`goexperiment.*` (`GOEXPERIMENT`); only GOOS/GOARCH values, `unix`, `cgo`
-and `gc` are fixed by a platform. A changed file whose constraint
+`goexperiment.*` (`GOEXPERIMENT`); only exact GOOS/GOARCH values, `unix`,
+`cgo` and `gc` are fixed by a platform (`arm.7`, `arm64.v9.0`,
+`foo_windows` vary). A changed file whose constraint
 consults a varying tag in either tree (go/build's `AllTags` for the file)
 gets no old text credited, and nothing its `//go:embed` patterns match is
 credited. A file no default configuration builds counts as possibly built
-when go/build builds it, alone in its directory, with some set of the
-tags it consults; its embeds go to a person when its directory changes.
+when go/build builds it, alone in its directory, with exactly some subset
+of the tags it consults turned on (default release and tool tags such as
+`go1.27`, a default GOEXPERIMENT or `arm.7` off unless the subset turns
+them on); its embeds go to a person when its directory changes.
 A byte-identical file keeps its credit only when every configuration that
 builds it now built it before (a sibling's fixed package clause can bring
-it into a build). Past a work or time budget, nothing is credited and a
+it into a build), and, if it consults a varying tag, no other `.go` file
+of its directory changed. Every old file a build newly includes is quoted
+in full under `gomod.newly-built`: its diff can be a constraint line, or
+nothing. Past a work or time budget, nothing is credited and a
 person decides.
 
 An old `EmbedFiles` answer is credited only where every file the package
