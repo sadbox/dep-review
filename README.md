@@ -145,8 +145,9 @@ A Go module's diff is split per file, and each file's diff is its own
 evidence file. The parts have caps of their own: 2 MB each, 50 MB
 together. A gate-written `diffs.md` index lists every changed file with an
 ID. Every file is required reading unless the go command's own rules say
-no consumer build reads it: a `_test.go` file, or, with declared builds,
-a file none of them compiles. The verdict's `examined` must list every
+no consumer build reads it: a `_test.go` file that nothing embeds, in a
+module with no assembly or cgo that could include it, or, with declared
+builds, a file none of them compiles. The verdict's `examined` must list every
 required ID, or a person decides. More than 500 required files also goes
 to a person. So does a part the caps cut, and a diff git stopped reading.
 The flagged-items file uses the same caps. Other ecosystems keep the

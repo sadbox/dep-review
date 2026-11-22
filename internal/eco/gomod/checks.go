@@ -162,7 +162,10 @@ type report struct {
 	// may put on review.
 	lenient bool
 	// unbuilt are the files declared builds do not compile (declaredUnbuilt).
-	unbuilt  map[string]bool
+	unbuilt map[string]bool
+	// nb and cur are the new tree and its build analysis (testOnly).
+	nb       *builtSet
+	cur      *ecoutil.Tree
 	eligible map[[2]string]bool
 }
 
@@ -526,7 +529,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	var bins []string           // flagged binaries; their context is built last
 	var tdBins []string         // testdata binaries, flagged only if reachable
 	unbuilt := declaredUnbuilt(cur, nb)
-	h.unbuilt = unbuilt
+	h.unbuilt, h.nb, h.cur = unbuilt, nb, cur
 	for _, rel := range cur.Files {
 		if unbuilt[rel] {
 			// Declared builds (go_platforms) compile none of it.
@@ -1793,4 +1796,32 @@ func safeImportSpec(spec string) string {
 		return safeIdent(name) + " " + safeImport(p)
 	}
 	return safeImport(spec)
+}
+
+// testOnly reports that rel, a _test.go file, provably reaches no
+// consumer build: the build analysis resolved, go list embeds it in no
+// configuration, its package's embeds resolved, and the module has no
+// assembly or cgo text that could #include it.
+func (r *report) testOnly(rel string) bool {
+	nb := r.nb
+	if !strings.HasSuffix(rel, "_test.go") || nb == nil || nb.unresolved() || r.cur == nil {
+		return false
+	}
+	for _, files := range nb.embedFiles {
+		if files[rel] != nil {
+			return false
+		}
+	}
+	for d := range nb.embedFailed {
+		if d == "." || rel == d || strings.HasPrefix(rel, d+"/") {
+			return false
+		}
+	}
+	return !slices.ContainsFunc(r.cur.Files, func(f string) bool {
+		ext := path.Ext(f)
+		if ext == ".s" || ext == ".S" || ext == ".sx" || cgoSourceExts[ext] {
+			return true
+		}
+		return ext == ".go" && bytes.Contains(r.cur.ReadFile(f), []byte(`"C"`))
+	})
 }

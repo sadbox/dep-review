@@ -512,8 +512,8 @@ func flaggedUpdate(su model.Update) string {
 // writeDiff writes the module's diff as navigable evidence: one part per
 // changed file and a gate-written index of them (diffs.md). A file is
 // required reading unless the go command's own rules say no consumer
-// build reads it: a _test.go file, or (with declared builds) a file
-// declaredUnbuilt skips. h is the update's checks (nil: none ran, so
+// build reads it: a _test.go file nothing embeds or includes (testOnly),
+// or (with declared builds) a file declaredUnbuilt skips. h is the update's checks (nil: none ran, so
 // every file is required). n numbers the IDs after the fetch's earlier
 // ones.
 func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, key string, dirs [2]string, h *report, n int) ([]model.DiffFile, []model.Finding, error) {
@@ -550,8 +550,8 @@ func writeDiff(ctx context.Context, env fetch.Env, home string, u model.Update, 
 	for _, d := range diffs {
 		why := ""
 		switch {
-		case strings.HasSuffix(d.Path, "_test.go"):
-			why = "a _test.go file: only the module's own tests compile it"
+		case h != nil && h.testOnly(d.Path):
+			why = "a _test.go file nothing embeds or includes: only the module's own tests compile it"
 		case h != nil && h.unbuilt[d.Path]:
 			why = "no declared build (go_platforms, go_tags) compiles it"
 		}
