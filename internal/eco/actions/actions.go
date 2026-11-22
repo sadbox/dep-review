@@ -1366,14 +1366,33 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 	// First-party source diff: one part per file (navigable evidence),
 	// every one required. Each diff is git's for exactly that path, so the
 	// index's paths are the changed files'.
+	// git normalizes a pathspec even under :(literal) ("a/./b" is
+	// "a/b"), so a path with a ".", ".." or empty component could show
+	// another file's diff, or none: such a path goes to a person, as does
+	// a changed file whose diff comes back empty.
+	if len(firstParty) > model.MaxRequiredDiffs {
+		fs.add(model.RouteHuman, "actions.too-many-diffs", name, "%d first-party files changed; more than %d is too many to review", len(firstParty), model.MaxRequiredDiffs)
+		firstParty = nil
+	}
 	if len(firstParty) > 0 {
 		var diffs []ecoutil.FileDiff
+		var odd []string
 		for _, c := range firstParty {
+			if !plainPath(c.path) {
+				odd = append(odd, safePath(c.path))
+				continue
+			}
 			d, err := up.diff(ctx, p.oldRef, p.newRef, ":(literal)"+c.path)
 			if err != nil {
 				return err
 			}
+			if d == "" {
+				odd = append(odd, safePath(c.path))
+			}
 			diffs = append(diffs, ecoutil.FileDiff{Path: c.path, Body: []byte(d)})
+		}
+		if len(odd) > 0 {
+			fs.add(model.RouteHuman, "actions.diff-paths", name, "%d changed paths git cannot diff by name exactly (a \".\", \"..\" or empty component, or no diff for a changed file): %s", len(odd), strings.Join(odd[:min(len(odd), 10)], ", "))
 		}
 		nd := ecoutil.NavDiffs{
 			Eco: "actions", Key: p.label(), Update: name, What: "action",
@@ -1598,4 +1617,15 @@ func lfsPointers(ctx context.Context, g git, from, to string, changed []fileChan
 		}
 	}
 	return out, nil
+}
+
+// plainPath reports whether a repository path has no ".", ".." or empty
+// component, so a :(literal) pathspec names exactly it.
+func plainPath(p string) bool {
+	for _, e := range strings.Split(p, "/") {
+		if e == "" || e == "." || e == ".." {
+			return false
+		}
+	}
+	return true
 }
