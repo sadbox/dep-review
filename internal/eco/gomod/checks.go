@@ -535,10 +535,22 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	var tdBins []string         // testdata binaries, flagged only if reachable
 	unbuilt := declaredUnbuilt(cur, nb)
 	links := moduleLinks(cur) // what in the module can include a file by name
+	var inc includes
+	if links != "" {
+		inc = moduleIncludes(cur)
+	}
 	h.unbuilt, h.nb, h.cur = unbuilt, nb, cur
 	for _, rel := range cur.Files {
 		if unbuilt[rel] {
-			// Declared builds (go_platforms) compile none of it.
+			// Declared builds (go_platforms) compile none of it, but C or
+			// assembly may include it by name.
+			if links != "" && inc.may(rel) && (old == nil || !bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)) || !old.Has(rel)) {
+				var prev []byte
+				if old != nil && old.Has(rel) {
+					prev = old.ReadFile(rel)
+				}
+				h.sourceFacts(codeIncludable, rel, prev, cur.ReadFile(rel), old != nil && old.Has(rel))
+			}
 			continue
 		}
 		data := cur.ReadFile(rel)
@@ -587,7 +599,7 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 				// flagged, inside it goes through the testdata logic (a
 				// non-test //go:embed can reach it).
 				switch {
-				case !evidence.IsBinary(data) && links != "":
+				case !evidence.IsBinary(data) && links != "" && inc.may(rel):
 					// Never compiled as Go for a consumer, but assembly,
 					// C or cgo can include it by name.
 					h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
@@ -603,6 +615,10 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			scopes(dir)
 			goDirs[dir] = true
 			checkGoFile(h, rel, prev, data, oldShadow[dir], shadow[dir])
+			if links != "" && inc.may(rel) {
+				// A Go file that C can include is C too (a polyglot).
+				h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
+			}
 		case ext == ".s" || ext == ".S" || ext == ".sx":
 			h.sourceFacts(codeAsm, rel, prev, data, hadOld)
 		case cgoSourceExts[ext]:
@@ -623,6 +639,10 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			// (binaries decides: cgo, C, assembly or a .syso in the module,
 			// or a non-test //go:embed pattern that matches it).
 			tdBins = append(tdBins, rel)
+		case links != "" && rel == "go.sum" && !strictGoSum(data):
+			// cmd/go never reads a dependency's go.sum: only hash lines
+			// are plainly not includable code.
+			h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
 		case links != "" && rel != "go.mod" && rel != "go.sum":
 			// Any other text: assembly, C or cgo can #include (or .incbin)
 			// it under any name, so it can be compiled code.
@@ -634,6 +654,15 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 		for _, rel := range old.Files {
 			if path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") && !cur.Has(rel) {
 				goDirs[path.Dir(rel)] = true
+			}
+			// A deleted header (or any file an include may name) lets the
+			// same include find another file of that name.
+			if links != "" && !cur.Has(rel) && path.Ext(rel) != ".go" && rel != "go.mod" && rel != "go.sum" {
+				if item := safeFile(rel); !h.full(codeIncludable, item) {
+					h.add(codeIncludable, item, true, fmt.Sprintf("deleted (%d bytes): an include of its name may now find another file\n", len(old.ReadFile(rel))))
+				} else {
+					h.skip(codeIncludable, item)
+				}
 			}
 		}
 	}
