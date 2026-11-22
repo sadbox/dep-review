@@ -818,6 +818,30 @@ type pkgIndex struct {
 	roots []declInfo
 }
 
+// typeRefs are the identifiers a type declaration refers to: everything
+// but its own name and its struct types' field names.
+func typeRefs(s *ast.TypeSpec) []string {
+	skip := map[*ast.Ident]bool{s.Name: true}
+	ast.Inspect(s, func(n ast.Node) bool {
+		if st, ok := n.(*ast.StructType); ok && st.Fields != nil {
+			for _, f := range st.Fields.List {
+				for _, id := range f.Names {
+					skip[id] = true
+				}
+			}
+		}
+		return true
+	})
+	var out []string
+	ast.Inspect(s, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && !skip[id] {
+			out = append(out, id.Name)
+		}
+		return true
+	})
+	return out
+}
+
 func identsIn(n ast.Node) []string {
 	var out []string
 	ast.Inspect(n, func(n ast.Node) bool {
@@ -863,34 +887,39 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 				line: fset.Position(n.Pos()).Line,
 			}
 		}
-		add := func(key string, n ast.Node) declInfo {
-			d := info(n)
-			ix.decls[key] = append(ix.decls[key], d)
-			return d
+		// A function's own name is its definition, not a reference: a method
+		// Put reached through its type does not call every other Put of the
+		// package (nor does func init call a method init).
+		funcInfo := func(d *ast.FuncDecl) declInfo {
+			di := info(d)
+			di.refs = nil
+			if d.Recv != nil {
+				di.refs = append(di.refs, identsIn(d.Recv)...)
+			}
+			di.refs = append(di.refs, identsIn(d.Type)...)
+			if d.Body != nil {
+				di.refs = append(di.refs, identsIn(d.Body)...)
+			}
+			return di
 		}
 		for _, decl := range file.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
 				switch {
 				case d.Recv != nil:
-					add(d.Name.Name, d)
+					fi := funcInfo(d)
+					ix.decls[d.Name.Name] = append(ix.decls[d.Name.Name], fi)
 					if len(d.Recv.List) == 1 {
 						if typ := recvTypeName(d.Recv.List[0].Type); typ != "" {
-							ix.decls[typ] = append(ix.decls[typ], info(d))
+							ix.decls[typ] = append(ix.decls[typ], fi)
 						}
 					}
 				case d.Name.Name == "init":
-					di := info(d)
-					// The root's own name is not a reference: func init cannot
-					// be referred to, so "init" here never meant a method init.
-					di.refs = identsIn(d.Type)
-					if d.Body != nil {
-						di.refs = append(di.refs, identsIn(d.Body)...)
-					}
+					di := funcInfo(d)
 					di.label = "func init"
 					ix.roots = append(ix.roots, di)
 				default:
-					add(d.Name.Name, d)
+					ix.decls[d.Name.Name] = append(ix.decls[d.Name.Name], funcInfo(d))
 				}
 			case *ast.GenDecl:
 				for _, s := range d.Specs {
@@ -917,7 +946,14 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 							}
 						}
 					case *ast.TypeSpec:
-						add(s.Name.Name, s)
+						// A struct's field names are definitions, as is the
+						// type's own name: a call through a field shows its
+						// name at the call site. An interface's method names
+						// stay references (any method of that name can be
+						// called through it).
+						di := info(s)
+						di.refs = typeRefs(s)
+						ix.decls[s.Name.Name] = append(ix.decls[s.Name.Name], di)
 					}
 				}
 			}
