@@ -501,10 +501,17 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	}
 	isGo := func(rel string) bool { return path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") }
 	linkDirs := linkDirsNewlyBuilt(old, cur, ob, nb)
-	shadow := map[string]*pkgScope{} // package directory -> scope
-	goDirs := map[string]bool{}      // package directories with a changed non-test .go file
-	var bins []string                // flagged binaries; their context is built last
-	var tdBins []string              // testdata binaries, flagged only if reachable
+	// Package directory -> scope, per tree: each version of a file is
+	// read in the scope of its own tree.
+	shadow, oldShadow := map[string]*pkgScope{}, map[string]*pkgScope{}
+	scopes := func(dir string) {
+		if shadow[dir] == nil {
+			shadow[dir], oldShadow[dir] = packageScope(cur, dir, nb), packageScope(old, dir, ob)
+		}
+	}
+	goDirs := map[string]bool{} // package directories with a changed non-test .go file
+	var bins []string           // flagged binaries; their context is built last
+	var tdBins []string         // testdata binaries, flagged only if reachable
 	for _, rel := range cur.Files {
 		data := cur.ReadFile(rel)
 		var prev []byte
@@ -561,11 +568,9 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 				continue
 			}
 			dir := path.Dir(rel)
-			if _, ok := shadow[dir]; !ok {
-				shadow[dir] = packageScope(cur, dir, nb)
-			}
+			scopes(dir)
 			goDirs[dir] = true
-			checkGoFile(h, rel, prev, data, shadow[dir])
+			checkGoFile(h, rel, prev, data, oldShadow[dir], shadow[dir])
 		case ext == ".s" || ext == ".S" || ext == ".sx":
 			h.sourceFacts(codeAsm, rel, prev, data, hadOld)
 		case cgoSourceExts[ext]:
@@ -597,10 +602,8 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 		}
 	}
 	for _, dir := range slices.Sorted(maps.Keys(goDirs)) {
-		if shadow[dir] == nil {
-			shadow[dir] = packageScope(cur, dir, nb)
-		}
-		for _, c := range initCalleesChanged(old, cur, dir, shadow[dir], ob, nb) {
+		scopes(dir)
+		for _, c := range initCalleesChanged(old, cur, dir, oldShadow[dir], shadow[dir], ob, nb) {
 			// The declarations' texts, old and new, are shown whole.
 			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), true, c.context())
 		}
@@ -828,6 +831,7 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 				pkgs[name] = p
 			}
 		}
+		fs := newFileScope(shadow, file, pkgs)
 		info := func(n ast.Node) declInfo {
 			return declInfo{
 				text: string(src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]),
@@ -854,6 +858,12 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 					}
 				case d.Name.Name == "init":
 					di := info(d)
+					// The root's own name is not a reference: func init cannot
+					// be referred to, so "init" here never meant a method init.
+					di.refs = identsIn(d.Type)
+					if d.Body != nil {
+						di.refs = append(di.refs, identsIn(d.Body)...)
+					}
 					di.label = "func init"
 					ix.roots = append(ix.roots, di)
 				default:
@@ -866,7 +876,7 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 						di := info(s)
 						if d.Tok == token.VAR {
 							for _, v := range s.Values {
-								if mayCall(v, fileScope{shadow, file.Name.Name, pkgs, pkgs["."] != ""}) {
+								if mayCall(v, fs) {
 									di.root = true
 									var names []string
 									for _, n := range s.Names {
@@ -922,7 +932,7 @@ func recvTypeName(e ast.Expr) string {
 // Each result carries the first path the walk found from a root to it
 // (breadth first, so a shortest one) and the declarations under its name
 // on both sides, which is what the reviewer is shown.
-func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope, ob, nb *builtSet) []calleeHit {
+func initCalleesChanged(old, cur *ecoutil.Tree, dir string, oldShadow, shadow *pkgScope, ob, nb *builtSet) []calleeHit {
 	// The old side holds only files the new tree has and builds the same
 	// way: a renamed or newly unconstrained file's declarations are new.
 	// An old declaration is credited only from a file every configuration
@@ -930,7 +940,7 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, shadow *pkgScope, ob
 	keep := func(rel string) bool {
 		return cur.Has(rel) && !newlyBuilt(ob, nb, rel, bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)))
 	}
-	o, n := indexPackage(old, dir, shadow, keep), indexPackage(cur, dir, shadow, nil)
+	o, n := indexPackage(old, dir, oldShadow, keep), indexPackage(cur, dir, shadow, nil)
 	type step struct {
 		name string
 		from *step     // nil at a root's direct reference
@@ -1054,13 +1064,22 @@ type pkgScope struct {
 	// _GOOS/_GOARCH file name suffix). Only these make (*X)(v) a
 	// conversion; anything else is "unknown" and treated as a call.
 	types map[string]map[string]bool
+	// valueNames: names with a package-level func, var or const
+	// declaration in any .go file of the directory (test files, other
+	// package clauses and constrained files included). unparsed: some .go
+	// file there does not parse, so it may declare anything.
+	valueNames map[string]bool
+	unparsed   bool
 }
 
 // packageScope builds the pkgScope of directory dir. A file that does not
 // parse declares every builtin name and makes no name a type; a type
 // counts only when go/build builds its file in every configuration.
 func packageScope(t *ecoutil.Tree, dir string, b *builtSet) *pkgScope {
-	sc := &pkgScope{declared: map[string]bool{}, types: map[string]map[string]bool{}}
+	sc := &pkgScope{declared: map[string]bool{}, types: map[string]map[string]bool{}, valueNames: map[string]bool{}}
+	if t == nil {
+		return sc
+	}
 	nonType := map[string]bool{}
 	typeIn := map[string]map[string]bool{} // name -> package clauses with an unconstrained type decl
 	for _, rel := range t.Files {
@@ -1072,6 +1091,7 @@ func packageScope(t *ecoutil.Tree, dir string, b *builtSet) *pkgScope {
 			for b := range pureBuiltins {
 				sc.declared[b], nonType[b] = true, true
 			}
+			sc.unparsed = true
 			continue
 		}
 		compiled := b.everywhere(rel)
@@ -1080,6 +1100,7 @@ func packageScope(t *ecoutil.Tree, dir string, b *builtSet) *pkgScope {
 			case *ast.FuncDecl:
 				if d.Recv == nil {
 					sc.declared[d.Name.Name], nonType[d.Name.Name] = true, true
+					sc.valueNames[d.Name.Name] = true
 				}
 			case *ast.GenDecl:
 				for _, s := range d.Specs {
@@ -1087,6 +1108,7 @@ func packageScope(t *ecoutil.Tree, dir string, b *builtSet) *pkgScope {
 					case *ast.ValueSpec:
 						for _, n := range s.Names {
 							sc.declared[n.Name], nonType[n.Name] = true, true
+							sc.valueNames[n.Name] = true
 						}
 					case *ast.TypeSpec:
 						sc.declared[s.Name.Name] = true
@@ -1123,6 +1145,52 @@ type fileScope struct {
 	pkgName string            // the file's package clause
 	imports map[string]string // file-scope name -> import path
 	dotted  bool              // the file has a dot import
+	types   map[string]bool   // package-level types this file declares -> has type parameters
+}
+
+func newFileScope(pkg *pkgScope, file *ast.File, imports map[string]string) fileScope {
+	types := map[string]bool{}
+	for _, d := range file.Decls {
+		if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.TYPE {
+			for _, s := range g.Specs {
+				ts := s.(*ast.TypeSpec)
+				types[ts.Name.Name] = ts.TypeParams != nil
+			}
+		}
+	}
+	_, dotted := imports["."]
+	return fileScope{pkg, file.Name.Name, imports, dotted, types}
+}
+
+// ownType reports that name, in this file, always denotes a type this
+// file declares (generic: with type parameters). This is a Go scoping
+// rule, not a build question (README "Design rules"): a package-level
+// declaration of the name in any file built together with this one, or
+// one imported into this file, is a redeclaration and does not compile,
+// so wherever this file is compiled, name is its own type. The other
+// guards only ever make it a call: a func, var or const of that name
+// anywhere in the directory, a dot import, an import of that name, a
+// file that does not parse, the blank name.
+// ownTypeExpr: e, unparenthesized, is T or T[A, ...] with ownType.
+func (fs fileScope) ownTypeExpr(e ast.Expr) bool {
+	switch e := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		return fs.ownType(e.Name, false)
+	case *ast.IndexExpr:
+		id, ok := ast.Unparen(e.X).(*ast.Ident)
+		return ok && fs.ownType(id.Name, true)
+	case *ast.IndexListExpr:
+		id, ok := ast.Unparen(e.X).(*ast.Ident)
+		return ok && fs.ownType(id.Name, true)
+	}
+	return false
+}
+
+func (fs fileScope) ownType(name string, generic bool) bool {
+	g, ok := fs.types[name]
+	_, imported := fs.imports[name]
+	return ok && g == generic && name != "_" && !fs.dotted && !imported &&
+		fs.pkg != nil && !fs.pkg.valueNames[name] && !fs.pkg.unparsed
 }
 
 // goFacts is what the checks compare between the old and new file. The
@@ -1199,6 +1267,7 @@ func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
 			}
 		}
 		_, f.cgo = f.imports["C"]
+		fs := newFileScope(shadow, file, pkgs)
 		text := func(n ast.Node) snippet {
 			return snippet{string(src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]), fset.Position(n.Pos()).Line}
 		}
@@ -1215,7 +1284,7 @@ func facts(name string, src []byte, shadow *pkgScope, old bool) goFacts {
 				for _, s := range d.Specs {
 					vs := s.(*ast.ValueSpec)
 					for _, v := range vs.Values {
-						if mayCall(v, fileScope{shadow, file.Name.Name, pkgs, pkgs["."] != ""}) {
+						if mayCall(v, fs) {
 							f.varInits = append(f.varInits, text(vs))
 							break
 						}
@@ -1296,8 +1365,8 @@ func importDecl(file *ast.File, spec *ast.ImportSpec) *ast.GenDecl {
 	return nil
 }
 
-func checkGoFile(h *report, rel string, prev, cur []byte, shadow *pkgScope) {
-	o, n := facts(rel, prev, shadow, true), facts(rel, cur, shadow, false)
+func checkGoFile(h *report, rel string, prev, cur []byte, oldShadow, shadow *pkgScope) {
+	o, n := facts(rel, prev, oldShadow, true), facts(rel, cur, shadow, false)
 	f := safeFile(rel)
 	at := func(line int) string { return fmt.Sprintf("%s:%d", f, line) }
 	if !n.parsed {
@@ -1562,7 +1631,11 @@ func mayCall(e ast.Expr, fs fileScope) bool {
 func pureCall(fun ast.Expr, fs fileScope) bool {
 	switch fn := ast.Unparen(fun).(type) {
 	case *ast.Ident:
-		return pureBuiltins[fn.Name] && !fs.pkg.declared[fn.Name]
+		// T(v): a builtin, or a conversion to a type this file declares.
+		return pureBuiltins[fn.Name] && !fs.pkg.declared[fn.Name] || fs.ownType(fn.Name, false)
+	case *ast.IndexExpr, *ast.IndexListExpr:
+		// T[A](v): instantiating a generic type this file declares.
+		return fs.ownTypeExpr(fn)
 	case *ast.SelectorExpr:
 		x, ok := fn.X.(*ast.Ident)
 		return ok && fs.imports[x.Name] == x.Name && pureCalls[x.Name][fn.Sel.Name]
@@ -1574,7 +1647,10 @@ func pureCall(fun ast.Expr, fs fileScope) bool {
 		// a call. A dot import could supply a same-named non-type, and the
 		// gate cannot see what pkg.X in (*pkg.X)(v) is: both count as calls.
 		id, ok := fn.X.(*ast.Ident)
-		return ok && !fs.dotted && fs.pkg.types[fs.pkgName][id.Name]
+		if ok && !fs.dotted && fs.pkg.types[fs.pkgName][id.Name] {
+			return true
+		}
+		return fs.ownTypeExpr(fn.X)
 	}
 	return false
 }

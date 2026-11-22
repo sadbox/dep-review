@@ -222,6 +222,20 @@ no rule about where a directive may stand. A pattern with a backslash (an
 escape on Linux, a separator on Windows) or a byte a module file path
 cannot hold, other than the glob characters, goes to a person.
 
+One rule is the gate's own, because go/build has no answer for it: a
+package-level var initializer such as `var _ I = (*T)(nil)`, `T(nil)` or
+`G[int](nil)` is a conversion, not a call, when `T` or `G` is a type
+declared in that same file. That follows from Go's scoping: wherever the
+file compiles, any other package-level declaration of the name, in a
+sibling file or imported into this one, is a redeclaration error. So it
+holds under every build constraint, including files only a `-tags` or
+newer-toolchain build compiles (x/net's `http2` files at go1.27). It
+yields to every doubt: a func, var or const of that name in any `.go`
+file of the directory, a dot import, an import of that name, or a file
+that does not parse make it a call. A type declared in another file
+counts only when that file is built in every configuration. Each version
+of a file is classified in the scope of its own tree.
+
 Known limits:
 
 - go/build is compiled into the gate and `go list` is the runner's `go`
