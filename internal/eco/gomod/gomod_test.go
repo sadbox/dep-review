@@ -406,9 +406,10 @@ func TestFetchNetwork(t *testing.T) {
 		// x/image has assembly sources, so its changed testdata binary
 		// (lzw-hi-overflow.tiff.bz2, which nothing parses) is flagged and
 		// cannot be shown in full; x/sys changes assembly. Both are
-		// well-known modules whose upstream history verifies: reviewed
-		// (lenient.go). Without that it would be a person's.
-		{"towngear49", []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}, model.RouteReview},
+		// well-known modules whose upstream history verifies, so those are
+		// reviewed (lenient.go); but x/sys's windows/testdata/ev-signed-file.exe
+		// is a PE executable, a linker input by its bytes: a person decides.
+		{"towngear49", []model.Update{{Name: "golang.org/x/image", From: "0.47.0", To: "0.48.0"}}, model.RouteHuman},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {
