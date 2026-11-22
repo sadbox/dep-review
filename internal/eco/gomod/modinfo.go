@@ -3,6 +3,7 @@ package gomod
 import (
 	"go/parser"
 	"go/token"
+	"net/url"
 	"path"
 	"regexp"
 	"slices"
@@ -16,6 +17,8 @@ import (
 type modInfo struct {
 	path string          // the module path ("" when unknown)
 	dirs map[string]bool // every directory holding a non-test .go file
+	// fold: lower-cased directory -> the directories it folds from.
+	fold map[string][]string
 	// names: directory -> every name it may be imported under: each
 	// non-test file's package clause (whatever its build constraints),
 	// the directory's base name, and that without a major version.
@@ -30,15 +33,17 @@ type modInfo struct {
 	pushes map[string]map[string][]string
 }
 
-// linknameRe finds //go:linkname directives anywhere in a file (an
-// over-approximation of where the compiler reads them).
-var linknameRe = regexp.MustCompile(`//go:linkname[ \t]+(\S+)[ \t]+(\S+)`)
+// linknameRe finds a //go:linkname (or //go:linknamestd) directive
+// anywhere in a file, an over-approximation of where the compiler reads
+// one; the rest of its line is split as the compiler does
+// (strings.Fields: any Unicode space).
+var linknameRe = regexp.MustCompile(`//go:linkname\S*([^\n]*)`)
 
 // nonTestGo is a non-test Go source file.
 func nonTestGo(rel string) bool { return path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") }
 
 func newModInfo(t *ecoutil.Tree, modPath string) *modInfo {
-	m := &modInfo{path: modPath, dirs: map[string]bool{}, names: map[string][]string{}, deps: map[string]map[string]bool{}, pushes: map[string]map[string][]string{}}
+	m := &modInfo{path: modPath, dirs: map[string]bool{}, fold: map[string][]string{}, names: map[string][]string{}, deps: map[string]map[string]bool{}, pushes: map[string]map[string][]string{}}
 	if t == nil {
 		return m
 	}
@@ -47,6 +52,7 @@ func newModInfo(t *ecoutil.Tree, modPath string) *modInfo {
 			d := path.Dir(rel)
 			if !m.dirs[d] {
 				m.dirs[d] = true
+				m.fold[strings.ToLower(d)] = append(m.fold[strings.ToLower(d)], d)
 				base := path.Base(path.Join(m.path, d))
 				m.addName(d, base)
 				if majorRe.MatchString(base) {
@@ -81,11 +87,13 @@ func newModInfo(t *ecoutil.Tree, modPath string) *modInfo {
 		}
 		for _, l := range linkPulls(src) {
 			d, ok := m.dirOf(l.pkg)
-			if !ok || d == dir {
+			if !ok {
 				continue
 			}
-			edge(dir, d)
-			edge(d, dir)
+			if d != dir {
+				edge(dir, d)
+				edge(d, dir)
+			}
 			if m.pushes[d] == nil {
 				m.pushes[d] = map[string][]string{}
 			}
@@ -110,13 +118,7 @@ func (m *modInfo) dir(d string) (string, bool) {
 	if m.dirs[d] {
 		return d, true
 	}
-	var hit []string
-	for x := range m.dirs {
-		if strings.EqualFold(x, d) {
-			hit = append(hit, x)
-		}
-	}
-	if len(hit) == 1 {
+	if hit := m.fold[strings.ToLower(d)]; len(hit) == 1 {
 		return hit[0], true
 	}
 	return "", false
@@ -178,15 +180,24 @@ type linkPull struct{ local, pkg, name string }
 func linkPulls(src []byte) []linkPull {
 	var out []linkPull
 	for _, m := range linknameRe.FindAllSubmatch(src, -1) {
-		target := string(m[2])
+		f := strings.Fields(string(m[1]))
+		if len(f) < 2 {
+			continue
+		}
+		target := f[1]
 		slash := strings.LastIndex(target, "/")
 		i := strings.Index(target[slash+1:], ".")
 		if i <= 0 {
 			continue
 		}
 		i += slash + 1
+		pkg := target[:i]
+		// The linker escapes a dot in the last element ("go%2ex").
+		if u, err := url.PathUnescape(pkg); err == nil {
+			pkg = u
+		}
 		name := strings.NewReplacer("(*", "", "(", "", ")", "").Replace(target[i+1:])
-		out = append(out, linkPull{local: string(m[1]), pkg: target[:i], name: name})
+		out = append(out, linkPull{local: f[0], pkg: pkg, name: name})
 	}
 	return out
 }

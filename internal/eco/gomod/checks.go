@@ -915,7 +915,7 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 		// that package's ("dir:Name"): the import spec says which, and
 		// the package clause there what it is called. A dot import of
 		// one of the module's packages makes every name possibly its.
-		modDirs := map[string]string{}
+		modDirs := map[string][]string{} // a name may be several directories' package
 		var dotDirs []string
 		for _, imp := range file.Imports {
 			p, err := strconv.Unquote(imp.Path.Value)
@@ -933,11 +933,11 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 			case name == ".":
 				dotDirs = append(dotDirs, d)
 			case imp.Name != nil:
-				modDirs[name] = d
+				modDirs[name] = append(modDirs[name], d)
 			default:
 				// Unnamed: whichever name the package goes by.
 				for _, n := range m.names[d] {
-					modDirs[n] = d
+					modDirs[n] = append(modDirs[n], d)
 				}
 			}
 		}
@@ -956,8 +956,10 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 				ast.Inspect(n, func(n ast.Node) bool {
 					switch n := n.(type) {
 					case *ast.SelectorExpr:
-						if id, ok := n.X.(*ast.Ident); ok && modDirs[id.Name] != "" {
-							di.refs = append(di.refs, modDirs[id.Name]+":"+n.Sel.Name)
+						if id, ok := n.X.(*ast.Ident); ok {
+							for _, d := range modDirs[id.Name] {
+								di.refs = append(di.refs, d+":"+n.Sel.Name)
+							}
 						}
 					case *ast.Ident:
 						for _, d := range dotDirs {
@@ -1059,7 +1061,7 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 	// of the name, whichever file holds the directive).
 	for _, p := range pulls {
 		d, ok := m.dirOf(p.l.pkg)
-		if !ok || d == dir {
+		if !ok {
 			continue
 		}
 		for i := range ix.decls[p.l.local] {
