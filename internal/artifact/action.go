@@ -15,8 +15,9 @@ import (
 // downloads are an image's as well. Nothing of an image is read (spec
 // section 11, amendment 3), so a read of the repository would not be a
 // read of what runs. This file tells the two apart, for the directories
-// the pull request's workflows use the action from, and refuses whatever
-// it does not recognise (ErrActionKind).
+// the pull request's workflows use the action from (all of them, when
+// one of those holds a composite action), and refuses whatever it does
+// not recognise (ErrActionKind).
 //
 // There is no YAML parser here (spec section 6). The metadata file must
 // be in the plain block form and say what runs on one line of one shape,
@@ -61,19 +62,46 @@ var yamlBreaks = []struct{ text, name string }{
 // run only files of its own repository, or "". dirs are paths in the
 // repository, "." for its root. With none, which directory is used is not
 // known, and every directory that holds a metadata file counts.
+//
+// So does every one when a used directory holds a composite action (spec
+// section 11, amendment 77). Its steps can run another action of the
+// same repository at the same commit, by `uses: $/dir` or by `uses:
+// owner/repo/dir@<the same tag>`, and neither has an entry of its own in
+// actions.lock. The steps are not followed: whatever directory they name,
+// it is one of these. A node action runs no other action, and only the
+// used directories count.
 func actionProblem(t *tree, dirs []string) string {
 	if len(dirs) == 0 {
-		seen := map[string]bool{}
-		for p := range t.files {
-			if base := path.Base(p); (base == actionMetadata[0] || base == actionMetadata[1]) && !seen[path.Dir(p)] {
-				seen[path.Dir(p)] = true
-				dirs = append(dirs, path.Dir(p))
-			}
+		_, why := dirsProblem(t, everyAction(t))
+		return why
+	}
+	composite, why := dirsProblem(t, dirs)
+	if why == "" && composite {
+		_, why = dirsProblem(t, everyAction(t))
+	}
+	return why
+}
+
+// everyAction is every directory of t that holds a metadata file, in
+// order.
+func everyAction(t *tree) []string {
+	var dirs []string
+	seen := map[string]bool{}
+	for p := range t.files {
+		if base := path.Base(p); (base == actionMetadata[0] || base == actionMetadata[1]) && !seen[path.Dir(p)] {
+			seen[path.Dir(p)] = true
+			dirs = append(dirs, path.Dir(p))
 		}
-		if len(dirs) == 0 {
-			return "there is no action.yml or action.yaml anywhere in the repository"
-		}
-		sort.Strings(dirs)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+// dirsProblem is actionProblem for the directories dirs, and composite
+// says that one of them holds a composite action.
+func dirsProblem(t *tree, dirs []string) (composite bool, why string) {
+	if len(dirs) == 0 {
+		return false, "there is no action.yml or action.yaml anywhere in the repository"
 	}
 	for _, dir := range dirs {
 		found := false
@@ -85,27 +113,30 @@ func actionProblem(t *tree, dirs []string) string {
 			}
 			found = true
 			if f.size > maxMetadataBytes {
-				return fmt.Sprintf("%s is %d bytes, more than the gate reads of a metadata file", escapeLine(p), f.size)
+				return false, fmt.Sprintf("%s is %d bytes, more than the gate reads of a metadata file", escapeLine(p), f.size)
 			}
 			content, err := t.root.ReadFile(p)
 			if err != nil {
-				return fmt.Sprintf("%s could not be read: %v", escapeLine(p), err)
+				return false, fmt.Sprintf("%s could not be read: %v", escapeLine(p), err)
 			}
-			if why := metadataProblem(content); why != "" {
-				return escapeLine(p) + " " + why
+			is, why := metadataProblem(content)
+			if why != "" {
+				return false, escapeLine(p) + " " + why
 			}
+			composite = composite || is
 		}
 		if !found {
 			// The runner would build a Dockerfile in that directory, or
 			// fail. Neither is code the model was shown.
-			return fmt.Sprintf("there is no action.yml or action.yaml in %s, where a workflow uses the action from", escapeLine(dir))
+			return false, fmt.Sprintf("there is no action.yml or action.yaml in %s, where a workflow uses the action from", escapeLine(dir))
 		}
 	}
-	return ""
+	return composite, ""
 }
 
 // metadataProblem says why one metadata file does not show an action that
-// runs only its repository's files, or "".
+// runs only its repository's files, or "", and for a file it takes,
+// whether the action is a composite one.
 //
 // The file counts only in the plain block form (spec section 11,
 // amendment 68). In a YAML block mapping every key starts a line at the
@@ -115,25 +146,25 @@ func actionProblem(t *tree, dirs []string) string {
 // keys can then only be lines the gate counted: a decoy inside a block
 // scalar, a quoted scalar or a flow collection makes a count two, or
 // leaves the runner with no key.
-func metadataProblem(content []byte) string {
+func metadataProblem(content []byte) (composite bool, why string) {
 	if !isText(content) {
-		return "is not text"
+		return false, "is not text"
 	}
 	text := string(content)
 	// A composite action may run an image as a step, and a container
 	// action names one here.
 	if strings.Contains(text, "docker://") {
-		return "names a docker:// image"
+		return false, "names a docker:// image"
 	}
 	if strings.HasPrefix(text, "\uFEFF") {
-		return "starts with a byte order mark"
+		return false, "starts with a byte order mark"
 	}
 	if strings.Contains(strings.ReplaceAll(text, "\r\n", ""), "\r") {
-		return "has a bare CR, a line break YAML knows and the gate does not read"
+		return false, "has a bare CR, a line break YAML knows and the gate does not read"
 	}
 	for _, b := range yamlBreaks {
 		if strings.Contains(text, b.text) {
-			return "has " + b.name + ", a line break YAML knows and the gate does not read"
+			return false, "has " + b.name + ", a line break YAML knows and the gate does not read"
 		}
 	}
 	lines := strings.Split(text, "\n")
@@ -151,7 +182,7 @@ func metadataProblem(content []byte) string {
 		lines[i] = line
 		indent := len(line) - len(strings.TrimLeft(line, " \t"))
 		if strings.ContainsRune(line[:indent], '\t') {
-			return fmt.Sprintf("line %d has a tab in its indentation", i+1)
+			return false, fmt.Sprintf("line %d has a tab in its indentation", i+1)
 		}
 		if skip(line) {
 			continue
@@ -161,27 +192,27 @@ func metadataProblem(content []byte) string {
 			first, marked = false, true
 			continue
 		case first && indent > 0:
-			return fmt.Sprintf("line %d is indented, and the first line that is not blank or a comment must start in column 0", i+1)
+			return false, fmt.Sprintf("line %d is indented, and the first line that is not blank or a comment must start in column 0", i+1)
 		case marked && indent > 0:
-			return fmt.Sprintf("line %d is indented, and the first line after `---` must start in column 0", i+1)
+			return false, fmt.Sprintf("line %d is indented, and the first line after `---` must start in column 0", i+1)
 		}
 		first, marked = false, false
 		switch {
 		case indent > 0:
 			continue
 		case docMarkerRE.MatchString(line):
-			return fmt.Sprintf("line %d is a document marker, and the gate takes one document with at most `---` alone on its first line", i+1)
+			return false, fmt.Sprintf("line %d is a document marker, and the gate takes one document with at most `---` alone on its first line", i+1)
 		case !plainKeyRE.MatchString(line):
-			return fmt.Sprintf("line %d starts in column 0 and is neither a comment nor a plain key", i+1)
+			return false, fmt.Sprintf("line %d starts in column 0 and is neither a comment nor a plain key", i+1)
 		case strings.EqualFold(key(line), "runs"):
 			runs, runsAt = runs+1, i
 		}
 	}
 	if runs != 1 {
-		return fmt.Sprintf("has %d top-level `runs` keys, and the gate takes exactly one", runs)
+		return false, fmt.Sprintf("has %d top-level `runs` keys, and the gate takes exactly one", runs)
 	}
 	if !runsLineRE.MatchString(lines[runsAt]) {
-		return fmt.Sprintf("line %d is not `runs:` alone, with the block of what runs under it", runsAt+1)
+		return false, fmt.Sprintf("line %d is not `runs:` alone, with the block of what runs under it", runsAt+1)
 	}
 
 	// The runs block is the lines up to the next one in column 0, and its
@@ -206,7 +237,7 @@ func metadataProblem(content []byte) string {
 		case n == 0:
 			n = indent
 		case indent < n && inBlock:
-			return fmt.Sprintf("line %d is indented less than the first line of the `runs` block", i+1)
+			return false, fmt.Sprintf("line %d is indented less than the first line of the `runs` block", i+1)
 		}
 		if indent != n {
 			continue
@@ -216,17 +247,18 @@ func metadataProblem(content []byte) string {
 			continue
 		}
 		if !plainKeyRE.MatchString(body) {
-			return fmt.Sprintf("line %d is at the indent of the `runs` block and is neither a plain key nor a sequence entry", i+1)
+			return false, fmt.Sprintf("line %d is at the indent of the `runs` block and is neither a plain key nor a sequence entry", i+1)
 		}
 		if strings.EqualFold(key(body), "using") {
 			if !usingCodeRE.MatchString(body) {
-				return "has a `using` line that is not `using: nodeNN` or `using: composite` in the usual form"
+				return false, "has a `using` line that is not `using: nodeNN` or `using: composite` in the usual form"
 			}
 			using++
+			composite = strings.Trim(strings.Fields(body)[1], `'"`) == "composite"
 		}
 	}
 	if using != 1 {
-		return fmt.Sprintf("has %d `using` keys at the indent of the `runs` block, and the gate takes exactly one", using)
+		return false, fmt.Sprintf("has %d `using` keys at the indent of the `runs` block, and the gate takes exactly one", using)
 	}
-	return ""
+	return composite, ""
 }

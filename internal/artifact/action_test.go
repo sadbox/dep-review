@@ -26,6 +26,9 @@ const (
 	compositeAction = "name: scan\nruns:\n  using: \"composite\"\n  steps:\n    - run: echo hi\n      shell: bash\n"
 	imageAction     = "name: scan\ndescription: scan\nruns:\n  using: 'docker'\n  image: 'docker://ghcr.io/someorg/scan-action:%s'\n"
 	dockerfile      = "name: scan\nruns:\n  using: docker\n  image: Dockerfile\n  args:\n    - scan\n"
+	// selfStep is a composite action that runs actions of its own
+	// repository at the same commit, in both forms.
+	selfStep = "name: scan\nruns:\n  using: composite\n  steps:\n    - uses: $/inner\n    - uses: someorg/scan-action/inner@v2.3.1\n"
 )
 
 // A container action runs an image: by reference, or built from a
@@ -90,6 +93,31 @@ func TestContainerActionIsNotRead(t *testing.T) {
 		{"directory not known, and a container action somewhere", nil,
 			with(map[string]string{"action.yml": nodeAction, ".github/actions/pull/action.yml": dockerfile}), nil, "that is not `using: nodeNN`"},
 		{"directory not known, and no action anywhere", nil, code, nil, "no action.yml"},
+
+		// A composite action can run another action of its own repository
+		// at the same commit, which has no actions.lock entry of its own:
+		// `uses: $/dir`, or `uses: owner/repo/dir@<the same tag>`. Then
+		// every directory with a metadata file counts, as when the
+		// directory is not known (spec section 11, amendment 77). The
+		// verifier's two variants:
+		{"a composite action that runs an image action of its repository", with(map[string]string{"action.yml": selfStep, "inner/action.yml": fmt.Sprintf(imageAction, "2.3.0")}),
+			with(map[string]string{"action.yml": selfStep, "inner/action.yml": fmt.Sprintf(imageAction, "2.3.1")}), []string{"."}, "inner/action.yml names a docker:// image"},
+		{"a composite action that runs a Dockerfile action of its repository", with(map[string]string{"action.yml": selfStep, "inner/action.yml": dockerfile, "inner/Dockerfile": "FROM alpine:3.20\n"}),
+			with(map[string]string{"action.yml": selfStep, "inner/action.yml": dockerfile, "inner/Dockerfile": "FROM alpine:3.21\n"}), []string{"."}, "inner/action.yml has a `using` line"},
+		{"a composite action used from a directory, and a container action elsewhere", nil,
+			with(map[string]string{"action.yml": nodeAction, "lint/action.yml": compositeAction, "pull/action.yml": dockerfile}), []string{"lint"}, "pull/action.yml has a `using` line"},
+		// The same trees with a node action where the workflows use it: a
+		// node action runs no other action, and only the used directories
+		// count, as before.
+		{"a node action, and an image action in another directory", with(map[string]string{"action.yml": nodeAction, "inner/action.yml": fmt.Sprintf(imageAction, "2.3.0")}),
+			with(map[string]string{"action.yml": nodeAction, "dist/index.js": "run(2)\n", "inner/action.yml": fmt.Sprintf(imageAction, "2.3.1")}), []string{"."}, ""},
+		{"a node action, and a Dockerfile action in another directory", with(map[string]string{"action.yml": nodeAction, "inner/action.yml": dockerfile, "inner/Dockerfile": "FROM alpine:3.20\n"}),
+			with(map[string]string{"action.yml": nodeAction, "inner/action.yml": dockerfile, "inner/Dockerfile": "FROM alpine:3.21\n"}), []string{"."}, ""},
+		// A composite action alone in its repository, or beside actions of
+		// its own that run code, is read in full.
+		{"a composite action alone", with(map[string]string{"action.yml": compositeAction}), with(map[string]string{"action.yml": compositeAction, "x.sh": "echo\n"}), []string{"."}, ""},
+		{"a composite action beside a node action of its own", with(map[string]string{"action.yml": selfStep, "inner/action.yml": nodeAction}),
+			with(map[string]string{"action.yml": selfStep, "inner/action.yml": nodeAction, "dist/index.js": "run(2)\n"}), []string{"."}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -197,7 +225,7 @@ func TestMetadataForms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := metadataProblem([]byte(tt.content))
+			_, got := metadataProblem([]byte(tt.content))
 			if tt.refused == "" {
 				if got != "" {
 					t.Fatalf("metadataProblem = %q, want none", got)

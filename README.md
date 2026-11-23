@@ -232,7 +232,9 @@ Limits that send real pull requests to a person:
   `using: nodeNN` or `using: composite`, under a bare `runs:`, in a
   file written in YAML's plain block form (plain keys, no flow style,
   quoted keys, anchors, aliases or second document); a file that says it
-  any other way, or no file, goes to a person too.
+  any other way, or no file, goes to a person too. A composite action
+  can run other actions of its repository, so when one is used every
+  `action.yml` of the repository is held to this.
 - Docker images merge only from the list, and only when written as an
   official Docker Hub image by its bare name or as a gcr.io image. Any
   other spelling (`library/golang`, `grafana/grafana`, another registry)
