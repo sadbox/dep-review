@@ -34,6 +34,12 @@ const (
 	// goTimeout bounds one go command. Downloading a few large modules
 	// through the proxy takes well under a minute.
 	goTimeout = 10 * time.Minute
+	// maxGoOutput bounds a go command's standard output. The version list
+	// of the largest modules is a few hundred kilobytes.
+	maxGoOutput = 64 << 20
+	// maxGoErrors bounds what is kept of its standard error, which is
+	// only ever shown, cut shorter still, in the error of a failed run.
+	maxGoErrors = 4 << 10
 
 	sourceDownload = "go mod download -json (GOPROXY=https://proxy.golang.org, GOSUMDB=sum.golang.org, empty module cache)"
 	sourceList     = "go list -m -u -retracted -json and go list -m -versions -json (GOPROXY=https://proxy.golang.org)"
@@ -121,25 +127,64 @@ func (c goCommand) env() []string {
 	}
 }
 
-// run implements goTool. With this environment the go command starts no
-// process of its own, so ending it with the context ends everything.
+// run implements goTool.
+//
+// What the go command prints is as long as the proxy's answers about
+// modules a pull request names make it, so both of its streams are kept
+// up to a cap and a run that prints more on standard output fails: the
+// gate does not hold whatever it is sent, and does not read the first
+// part of an answer as the answer.
+//
+// The command runs in a process group of its own, and the whole group is
+// killed when the context ends. With this environment the go command is
+// not expected to start a process that outlives it, but one that did
+// (a toolchain helper, a credential or version control command a later
+// go release runs) would keep the output pipes open and the scratch
+// directory in use after the run had given up on it.
 func (c goCommand) run(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, goTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	cmd.Dir = filepath.Join(c.scratch, "work")
 	cmd.Env = c.env()
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
+	out := &cappedBuffer{max: maxGoOutput}
+	errb := &cappedBuffer{max: maxGoErrors}
+	cmd.Stdout, cmd.Stderr = out, errb
+	setGroup(cmd)
+	cmd.Cancel = func() error { killGroup(cmd); return nil }
 	cmd.WaitDelay = 10 * time.Second
 	err := cmd.Run()
 	switch {
 	case ctx.Err() != nil:
 		return nil, fmt.Errorf("go %s: %w", args[0], ctx.Err())
+	case out.over:
+		// Nothing of the output is handed back: download reads what a
+		// failed run printed, and a cut answer is not one.
+		return nil, fmt.Errorf("go %s: printed more than %d bytes", args[0], maxGoOutput)
 	case err != nil:
-		return out.Bytes(), fmt.Errorf("go %s: %w: %s", args[0], err, facts.Show(errb.String()))
+		return out.b, fmt.Errorf("go %s: %w: %s", args[0], err, facts.Show(string(errb.b)))
 	}
-	return out.Bytes(), nil
+	return out.b, nil
+}
+
+// cappedBuffer keeps the first max bytes written to it and notes when
+// there were more.
+type cappedBuffer struct {
+	b    []byte
+	max  int
+	over bool
+}
+
+// Write implements io.Writer. It never fails: a child that prints too
+// much is noticed afterwards, not left blocked on a full pipe.
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.max - len(c.b); len(p) > room {
+		c.b = append(c.b, p[:room]...)
+		c.over = true
+	} else {
+		c.b = append(c.b, p...)
+	}
+	return len(p), nil
 }
 
 // downloaded is one module version as "go mod download -json" reports it.

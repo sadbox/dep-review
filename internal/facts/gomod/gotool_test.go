@@ -340,3 +340,33 @@ func TestGoCommandTimeout(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
+
+func TestCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{max: 5}
+	for _, s := range []string{"abc", "de"} {
+		if n, err := b.Write([]byte(s)); n != len(s) || err != nil {
+			t.Fatalf("Write(%q) = %d, %v", s, n, err)
+		}
+	}
+	// Exactly the cap is not over it.
+	if string(b.b) != "abcde" || b.over {
+		t.Errorf("buffer = %q, over = %v", b.b, b.over)
+	}
+	// A write past the cap is taken and dropped, never refused: the
+	// writer is a child's pipe.
+	for _, s := range []string{"fg", "h"} {
+		if n, err := b.Write([]byte(s)); n != len(s) || err != nil {
+			t.Fatalf("Write(%q) = %d, %v", s, n, err)
+		}
+	}
+	if string(b.b) != "abcde" || !b.over {
+		t.Errorf("buffer = %q, over = %v", b.b, b.over)
+	}
+	// A write that straddles the cap keeps what fits.
+	c := &cappedBuffer{max: 5}
+	c.Write([]byte("abc"))
+	c.Write([]byte("defg"))
+	if string(c.b) != "abcde" || !c.over {
+		t.Errorf("buffer = %q, over = %v", c.b, c.over)
+	}
+}
