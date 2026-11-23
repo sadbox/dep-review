@@ -1,0 +1,18 @@
+{
+  "min_age_hours": 72,
+  "unread_age_days": 14,
+  "major_age_days": 14,
+  "new_name_age_days": 365,
+  "wait_deadline_days": 7,
+  "fast_path": true,
+  "fast_path_companions": "ride-along",
+  "listed": {
+    "go_modules": ["golang.org/x/", "google.golang.org/", "cloud.google.com/go",
+                   "github.com/aws/", "github.com/Azure/", "github.com/AzureAD/",
+                   "github.com/microsoft/", "github.com/microsoftgraph/",
+                   "go.opentelemetry.io/"],
+    "github_actions": ["actions/", "github/", "docker/"],
+    "docker": ["docker.io/library/", "gcr.io/distroless/"],
+    "npm": ["tailwindcss", "@tailwindcss/"]
+  }
+}
