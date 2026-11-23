@@ -200,6 +200,10 @@ Limits that send real pull requests to a person:
   is the one that goes to a person.
 - A Go, npm or Actions update whose registry did not answer when its
   pinned hash was checked (see the four states above).
+- An update that changes, adds or removes a file whose path has anything
+  but ASCII letters, digits and `._/@+-` in it (a space, a parenthesis,
+  another script). A path stands on lines the model is told the gate
+  wrote, so one that can read as a sentence is not written there.
 - An update in which nothing that changed can be shown to the model:
   only files that are not text changed (a prebuilt object, an image), or
   nothing of the change fits the chunk budget. No model is asked, so it

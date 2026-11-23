@@ -220,7 +220,7 @@ func TestChunksStayWithinLimits(t *testing.T) {
 		newFiles[name] = strings.Repeat(fmt.Sprintf("new line %d with require('x%d')\n", i, i), 7*i+1)
 	}
 	newFiles["long.js"] = strings.Repeat("0123456789", 300) + "\n"
-	newFiles["wide"+u(0x1F642)+".js"] = strings.Repeat(u(0x1F642), 500) + "\n"
+	newFiles["wide.js"] = strings.Repeat(u(0x1F642), 500) + "\n"
 	p, f := npmPair(t, oldFiles, newFiles)
 	r := newReader(t, f)
 	for _, lim := range []Limits{

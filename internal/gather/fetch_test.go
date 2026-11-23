@@ -410,6 +410,7 @@ func TestFetchPrepareFailures(t *testing.T) {
 		chunks  int
 		outcome allow.Outcome
 		reason  allow.Reason
+		detail  string // part of the read's detail, where a person acts on it
 	}{
 		{name: "example.com/first", status: wire.Prepared, chunks: 1, outcome: allow.Merge},
 		{name: "example.com/down", answer: fail(fmt.Errorf("fetching: %w: %s", artifact.ErrUnavailable, theirs)),
@@ -420,6 +421,8 @@ func TestFetchPrepareFailures(t *testing.T) {
 			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused},
 		{name: "example.com/badref", answer: fail(fmt.Errorf("%w: %s", artifact.ErrBadRef, theirs)),
 			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused},
+		{name: "example.com/pathname", answer: fail(fmt.Errorf("%w: %s", artifact.ErrPathName, theirs)),
+			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused, detail: "a path with characters other than letters, digits and ._/@+-"},
 		// An error without a name is a person, never a wait.
 		{name: "example.com/disk", answer: fail(errors.New("no space left on device: " + theirs)),
 			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused},
@@ -459,8 +462,8 @@ func TestFetchPrepareFailures(t *testing.T) {
 		if read.Status != tc.status || len(read.Chunks) != tc.chunks {
 			t.Errorf("%s: read %+v, want status %s with %d chunks", tc.name, read, tc.status, tc.chunks)
 		}
-		if (read.Detail == "") != (tc.status == wire.Prepared) {
-			t.Errorf("%s: detail %q", tc.name, read.Detail)
+		if (read.Detail == "") != (tc.status == wire.Prepared) || !strings.Contains(read.Detail, tc.detail) {
+			t.Errorf("%s: detail %q, want one with %q", tc.name, read.Detail, tc.detail)
 		}
 		// A chunk file is named by the update's position among the
 		// updates, not among the artifacts.

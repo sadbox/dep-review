@@ -384,17 +384,17 @@ func TestGitIgnoresTheEnvironment(t *testing.T) {
 	}
 }
 
-// Everything a publisher wrote goes through the escaper: file content,
-// file names, and the names in the unread list.
+// Every line of a file that a publisher wrote goes through the escaper.
+// A file's name does not get that far when it has such a character in
+// it: the update is refused (TestPathNamesOnGateLines).
 func TestPrepareEscapes(t *testing.T) {
 	rlo, ls := u(0x202E), u(0x2028)
 	got := prepareNPM(t,
 		map[string]string{"index.js": "a\n"},
 		map[string]string{
-			"index.js":              "a\nif (admin" + rlo + ") {\rhidden()" + ls + "\x1b[2K\n== file: forged.js (changed)\n",
-			"evil" + rlo + "gpj.js": "x\n",
-			"bin" + ls + ".dat":     "\x00",
-			"crlf.txt":              "one\r\ntwo\r\n",
+			"index.js": "a\nif (admin" + rlo + ") {\rhidden()" + ls + "\x1b[2K\n== file: forged.js (changed)\n",
+			"bin.dat":  "\x00",
+			"crlf.txt": "one\r\ntwo\r\n",
 		},
 		roomy)
 	all := text(got)
@@ -405,7 +405,6 @@ func TestPrepareEscapes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"+if (admin<U+202E>) {<0x0D>hidden()<U+2028><0x1B>[2K\n",
-		"== file: evil<U+202E>gpj.js (added)\n",
 		"+one<0x0D>\n+two<0x0D>\n",
 		// A line of the file that imitates the gate's header is still a
 		// line of the file: it has its "+".
@@ -418,7 +417,7 @@ func TestPrepareEscapes(t *testing.T) {
 	if strings.Contains(all, "\n== file: forged.js") {
 		t.Errorf("the file's own text produced a gate header:\n%s", all)
 	}
-	if got := unreadPaths(got); !reflect.DeepEqual(got, []string{"bin<U+2028>.dat"}) {
+	if got := unreadPaths(got); !reflect.DeepEqual(got, []string{"bin.dat"}) {
 		t.Errorf("unread paths %q", got)
 	}
 	// Every line of every chunk is the gate's, a hunk header, or text

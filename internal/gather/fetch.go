@@ -326,6 +326,9 @@ func (f Fetch) read(ctx context.Context, chunks string, i int, pair artifact.Pai
 		read.Detail = "the artifact's archive is not one the gate unpacks"
 	case errors.Is(err, artifact.ErrBadRef):
 		read.Detail = "the artifact's name, version or hash is not one the gate fetches"
+	case errors.Is(err, artifact.ErrPathName):
+		read.Detail = "a file that changed, was added or was removed has a path with characters other than letters, digits and ._/@+- ; " +
+			"the gate writes no such path into the text it shows the model, so nothing was read"
 	default:
 		// An error without a name is never guessed into a wait
 		// (internal/artifact). Failing the run for it would fail every

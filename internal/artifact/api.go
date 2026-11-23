@@ -99,7 +99,8 @@ A line that starts with "~" continues the line above it, which was too long to k
 
 // Unread is a changed or added file the model was not shown.
 type Unread struct {
-	// Path inside the artifact, escaped like chunk text.
+	// Path inside the artifact. Like every path the model is shown it is
+	// made of ASCII letters, digits and "._/@+-" (ErrPathName).
 	Path string `json:"path"`
 	// Size in bytes.
 	Size int64 `json:"size"`
@@ -168,6 +169,11 @@ var (
 	// clean path inside the archive, a repeated name, data after the end,
 	// too many entries or bytes). Nothing of it is read. Person.
 	ErrUnsafeArchive = errors.New("artifact: unsafe archive")
+	// ErrPathName means a file that changed, was added or was removed has
+	// a path with a character outside ASCII letters, digits and "._/@+-".
+	// A path stands on lines the model is told the gate wrote, and a
+	// publisher chooses it. Nothing is prepared. Person.
+	ErrPathName = errors.New("artifact: a changed file's path is not one the gate shows")
 	// ErrUnavailable means the registry was asked for the artifact and
 	// did not deliver it: no connection, a timeout, a 429 or a 5xx on
 	// every attempt. It says nothing about the artifact. Wait.

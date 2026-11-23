@@ -70,3 +70,23 @@ func plainASCII(c byte, lines bool) bool {
 func shownLetter(r rune) bool {
 	return (unicode.IsLetter(r) || unicode.IsDigit(r)) && !unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
 }
+
+// shownPath reports whether a file's path is one the gate writes into its
+// own lines ("== file: PATH (...)", the list of removed files) and into
+// the list of files not shown: ASCII letters, digits and "._/@+-", and
+// nothing else. The escaper makes any path safe to print. It does not
+// make it safe to read: a path with spaces and punctuation is a sentence,
+// on a line the model is told the gate wrote. An update that changes,
+// adds or removes a file with such a path is refused (ErrPathName).
+func shownPath(p string) bool {
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("._/@+-", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return p != ""
+}

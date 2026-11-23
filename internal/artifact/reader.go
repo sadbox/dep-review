@@ -230,6 +230,15 @@ func (r *reader) Prepare(ctx context.Context, p Pair, lim Limits) (Prepared, err
 		return Prepared{}, err
 	}
 	changed, removed := compare(oldTree, newTree)
+	// Before anything is laid out: every one of these paths would stand
+	// on a line of the gate's own, or in the list of files not shown.
+	for _, list := range [][]string{changed, removed} {
+		for _, path := range list {
+			if !shownPath(path) {
+				return Prepared{}, fmt.Errorf("%w: %s", ErrPathName, escapeLine(path))
+			}
+		}
+	}
 	sections, unread, err := readChanged(ctx, p.New.Kind, oldTree, newTree, changed, d, r.maxFile, r.maxText)
 	if err != nil {
 		return Prepared{}, err
