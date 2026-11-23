@@ -17,11 +17,12 @@ import (
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
-// failingStatuses is the fake with the next n status writes answered 502,
-// which GitHub can give and the client does not retry for a POST.
-func failingStatuses(f *fakeGitHub, n int) Config {
+// failingWrites is the fake with the next n writes to a path under
+// prefix answered 502, which GitHub can give and the client does not
+// retry for a write.
+func failingWrites(f *fakeGitHub, n int, prefix string) Config {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/o/r/statuses/") && n > 0 {
+		if r.Method != "GET" && strings.HasPrefix(r.URL.Path, prefix) && n > 0 {
 			n--
 			io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusBadGateway)
@@ -46,10 +47,12 @@ func vetoOfKeyA(t *testing.T) *wire.Verdicts {
 }
 
 // TestAVetoOutlivesAWriteThatFailed: a veto the model gave in a run whose
-// publish then could not write the status is in the marker that the run
+// publish then could not write the comment is in the marker that the run
 // that failed writes, on the schedule (Asked) and on an event (Failed).
 // Before, it was nowhere, the next ask sampled the model again, and one
-// clean answer merged (spec section 11, amendment 73).
+// clean answer merged (spec section 11, amendment 73). The reviewer's
+// reproduction failed the status write, after which Act now writes the
+// comment itself (amendment 74).
 func TestAVetoOutlivesAWriteThatFailed(t *testing.T) {
 	decide := func(t *testing.T, cfg Config, f wire.Facts, v *wire.Verdicts) Evaluation {
 		t.Helper()
@@ -71,11 +74,11 @@ func TestAVetoOutlivesAWriteThatFailed(t *testing.T) {
 				m.Asks, m.AskedAt, m.Cache = 0, time.Time{}, nil
 				f.comments[testPR][0].body = m.String() + "\n### dep-review: waiting\n"
 			}
-			cfg := failingStatuses(f, 1)
+			cfg := failingWrites(f, 1, "/repos/o/r/issues/")
 			cfg.Scheduled, cfg.ModelAsked = scheduled, true
 			cfg.Now = func() time.Time { return t0 }
 
-			// Run 1: the model vetoes keyA, and publish's status write fails.
+			// Run 1: the model vetoes keyA, and publish's comment write fails.
 			ev := decide(t, cfg, goodFacts(t), vetoOfKeyA(t))
 			if ev.Decision.Outcome != allow.Person {
 				t.Fatalf("run 1 decided %v", ev.Decision)

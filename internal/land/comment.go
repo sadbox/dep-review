@@ -106,7 +106,23 @@ type marker struct {
 	// over and nothing clears it: not a new head, not another reviewer
 	// fingerprint, not a run with no veto.
 	Forgot bool `json:"vetoes_forgotten"`
+	// Status is the dep-review status Act last set on Head, as it was
+	// written, or nil. Act does not set the same again (spec section 11,
+	// amendment 74): GitHub keeps at most 1000 statuses for a commit and
+	// context. It is Act's alone. Act records it only when its own write
+	// went through, and the runs that may have set another or none
+	// (Failed, Expired, Asked) give it up, so that the next status is set.
+	Status *lastStatus `json:"status"`
 }
+
+// lastStatus is a status as Act wrote it.
+type lastStatus struct {
+	State       string `json:"state"`
+	Description string `json:"description"`
+}
+
+// maxStatusDescription is the longest description GitHub takes.
+const maxStatusDescription = 140
 
 // cached is one remembered verdict: wire.Verdict without the fingerprint,
 // which the marker carries once.
@@ -121,7 +137,8 @@ type cached struct {
 // over. A run that decided replaces the verdicts and the first-seen times
 // with its own, which Decide made from old's (cacheEntries, dateUnseen).
 //
-// The count of scheduled asks is for one head: a new head starts at none.
+// The count of scheduled asks and the status set are for one head: a new
+// head starts with neither.
 func (old marker) next(outcome Action, head string) marker {
 	mk := marker{
 		Outcome: outcome, Head: head,
@@ -130,7 +147,7 @@ func (old marker) next(outcome Action, head string) marker {
 		Forgot: old.Forgot,
 	}
 	if old.Head == head {
-		mk.Asks, mk.AskedAt = old.Asks, old.AskedAt
+		mk.Asks, mk.AskedAt, mk.Status = old.Asks, old.AskedAt, old.Status
 	}
 	return mk
 }
@@ -262,14 +279,15 @@ var widest = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", -
 // fitted is the cache Decide keeps: cache as the largest marker that Act,
 // or a later run that only adds to the marker (Failed, Asked, Tell,
 // Expired), can write for this evaluation holds it. That marker has old's
-// lists with one more head in each, every time at its widest and the most
-// asks, so that what Decide believes is what is written and String has
+// lists with one more head in each, every time at its widest, the most
+// asks and the longest status, so that what Decide believes is what is written and String has
 // nothing left to cut. forgot is Forgot of that marker: old's, or a veto
 // given up here.
 func fitted(old marker, head, fingerprint string, firstSeen []seen, cache []cached) (kept []cached, forgot bool) {
 	m := old.next(ActionRefused, head)
 	m.Fingerprint, m.Cache, m.FirstSeen = fingerprint, cache, firstSeen
 	m.NotBefore, m.Deadline, m.Asks, m.AskedAt = widest, widest, maxAsks, widest
+	m.Status = &lastStatus{State: "failure", Description: strings.Repeat("x", maxStatusDescription)}
 	for _, list := range []*[]string{&m.Notified, &m.NotifiedFailed, &m.NotifiedUnread} {
 		*list = append(slices.Clone(*list), head)
 	}
@@ -302,6 +320,10 @@ func parseMarker(body string) (marker, bool) {
 	}
 	// An ask has a time, and a time is an ask's.
 	if m.Asks < 0 || m.Asks > maxAsks || (m.Asks > 0) == m.AskedAt.IsZero() {
+		return marker{}, false
+	}
+	if s := m.Status; s != nil && (!slices.Contains([]string{"pending", "success", "failure", "error"}, s.State) ||
+		s.Description == "" || len(s.Description) > maxStatusDescription) {
 		return marker{}, false
 	}
 	pins := map[string]bool{}

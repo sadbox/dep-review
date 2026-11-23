@@ -80,6 +80,12 @@ type Result struct {
 // call that would replace it failed. On an event's run publish then calls
 // Failed, which sets the status again.
 //
+// Any other final status is set only when its state or description is not
+// the one Act last set on the head (marker.Status), and one that cannot be
+// set (GitHub keeps 1000 statuses for a commit and context) stops neither
+// the comment nor the notification: its error is returned after them,
+// with the Result (spec section 11, amendment 74).
+//
 // A prepared read the model left without a verdict is a wait, and the
 // scheduled run asks again by itself (askDue), so one miss needs nobody.
 // The comment counts the scheduled runs that asked for this head. When
@@ -90,8 +96,9 @@ type Result struct {
 //
 // A failed notification is returned as an error after everything else was
 // written, and is not remembered as sent: the next scheduled run finds
-// the comment owing it and sends it (Schedule, Tell). It is the one error
-// that comes with a Result whose Action is set.
+// the comment owing it and sends it (Schedule, Tell). It and a status that
+// could not be set are the errors that come with a Result whose Action is
+// set.
 func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	if err := cfg.check(); err != nil {
 		return Result{}, err
@@ -129,6 +136,8 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 			merging = false
 		}
 	}
+	// merging stays what it is now: whether a success was set, and so
+	// whether a status after it is set whatever it says.
 	if merging {
 		if err := setStatus(ctx, cfg, pr.Head, "success", "every fact holds; asking GitHub to merge"); err != nil {
 			return Result{}, err
@@ -166,8 +175,14 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	}
 
 	state, description := status(res)
-	if err := setStatus(ctx, cfg, pr.Head, state, description); err != nil {
-		return Result{}, err
+	set, statusErr := ev.status, error(nil)
+	if now := (lastStatus{State: state, Description: description}); merging || set == nil || *set != now {
+		if statusErr = setStatus(ctx, cfg, pr.Head, state, description); statusErr == nil {
+			set = &now
+		} else if merging {
+			// The success is GitHub's status, and Failed sets another.
+			return Result{}, statusErr
+		}
 	}
 
 	prev, err := findComment(ctx, cfg, pr.Number)
@@ -182,7 +197,7 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	// from what the comment remembered: no veto and no time is lost here.
 	mk := old.next(res.Action, pr.Head)
 	mk.Fingerprint, mk.Cache, mk.FirstSeen = ev.fingerprint, ev.cache, ev.firstSeen
-	mk.Forgot = mk.Forgot || ev.forgot
+	mk.Forgot, mk.Status = mk.Forgot || ev.forgot, set
 	if res.Action == ActionWait {
 		mk.NotBefore, mk.Deadline = res.Decision.NotBefore, res.Decision.Deadline
 	}
@@ -204,9 +219,9 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	}
 
 	if err := upsertComment(ctx, cfg, pr.Number, prev, render(view{res: res, ev: ev, marker: mk, runURL: cfg.RunURL})); err != nil {
-		return Result{}, err
+		return Result{}, errors.Join(statusErr, err)
 	}
-	return res, notifyErr
+	return res, errors.Join(statusErr, notifyErr)
 }
 
 // unreadNoticeAfter is how many scheduled runs must have asked the model
@@ -228,6 +243,13 @@ const unreadNotice = " waits unread: the model has not answered for code the gat
 // (askDue). kept is the vetoes of the run's evaluation, when it got that
 // far, which the marker keeps too: a veto must not hang on the write that
 // failed (spec section 11, amendment 73).
+//
+// Publish calls it for every pull request of a scheduled run it could not
+// decide, and it counts an ask only when the model was asked
+// (Config.ModelAsked). Whatever it counts, it gives up the status Act last
+// set, which the run may have replaced before it failed (a success before
+// a merge call that got no answer): the next status is set (amendment 74).
+// It writes nothing when that leaves the marker as it was.
 func Asked(ctx context.Context, cfg Config, number int, head string, kept Vetoes) error {
 	if err := cfg.check(); err != nil {
 		return err
@@ -240,8 +262,15 @@ func Asked(ctx context.Context, cfg Config, number int, head string, kept Vetoes
 	if !ok || mk.Head != head {
 		return nil
 	}
-	mk.Asks, mk.AskedAt = min(mk.Asks+1, maxAsks), cfg.now()
+	before := mk.String()
+	if cfg.ModelAsked {
+		mk.Asks, mk.AskedAt = min(mk.Asks+1, maxAsks), cfg.now()
+	}
+	mk.Status = nil
 	kept.keep(&mk)
+	if mk.String() == before {
+		return nil
+	}
 	return remark(ctx, cfg, c, mk)
 }
 
@@ -297,12 +326,12 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string, kept
 		description = "the scheduled run could not evaluate this pull request; see the comment"
 		told = ": the scheduled run could not evaluate this pull request and does not try this head again. See the comment on the pull request." + runRef(cfg)
 	}
-	if err := setStatus(ctx, cfg, head, "error", description); err != nil {
-		return err
-	}
+	// A status that cannot be set does not keep the owner from being told
+	// (spec section 11, amendment 74).
+	statusErr := setStatus(ctx, cfg, head, "error", description)
 	prev, err := findComment(ctx, cfg, number)
 	if err != nil {
-		return err
+		return errors.Join(statusErr, err)
 	}
 	// What earlier runs read, when they first saw a pin, and whom they
 	// told, is still true. Which pins the pull request still has is for
@@ -313,6 +342,7 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string, kept
 	}
 	mk := old.next(ActionFailed, head)
 	kept.keep(&mk)
+	mk.Status = nil // Act's to remember
 	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number, told))
 
 	run := "this pull request's dep-review workflow run"
@@ -331,9 +361,9 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string, kept
 		"**Way out:** %s\n",
 		mk.String(), code(head), inline(what), wayOut)
 	if err := upsertComment(ctx, cfg, number, prev, body); err != nil {
-		return err
+		return errors.Join(statusErr, err)
 	}
-	return notifyErr
+	return errors.Join(statusErr, notifyErr)
 }
 
 // Expired makes a waiting pull request a person's when its wait deadline
@@ -371,10 +401,11 @@ func Expired(ctx context.Context, cfg Config, number int, head string) error {
 	if !ok || old.Outcome != ActionWait || old.Deadline.IsZero() || cfg.now().Before(old.Deadline) {
 		return nil
 	}
-	if err := setStatus(ctx, cfg, head, "failure", "needs a person: the wait deadline passed and the gate could not evaluate the pull request again"); err != nil {
-		return err
-	}
+	// A status that cannot be set does not keep the deadline from being
+	// written or the owner from being told (spec section 11, amendment 74).
+	statusErr := setStatus(ctx, cfg, head, "failure", "needs a person: the wait deadline passed and the gate could not evaluate the pull request again")
 	mk := old.next(ActionPerson, head)
+	mk.Status = nil // Act's to remember
 	notifyErr := notifyOnce(ctx, cfg, &mk.Notified, head, message(cfg, number,
 		" needs a person: its wait deadline has passed and the scheduled run could not evaluate it again. See the comment on the pull request."+runRef(cfg)))
 
@@ -389,9 +420,9 @@ func Expired(ctx context.Context, cfg Config, number int, head string) error {
 		"**Way out:** look at the update and merge or close the pull request by hand, or have Dependabot rebase or recreate it: a new head gets a run of its own.\n",
 		mk.String(), headlines[ActionPerson], stamp(old.Deadline), run)
 	if err := upsertComment(ctx, cfg, number, prev, body); err != nil {
-		return err
+		return errors.Join(statusErr, err)
 	}
-	return notifyErr
+	return errors.Join(statusErr, notifyErr)
 }
 
 // status is the commit status for a result, in the gate's own words: a

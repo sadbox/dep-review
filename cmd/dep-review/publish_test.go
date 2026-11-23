@@ -45,9 +45,9 @@ type fakeAPI struct {
 	// request that is Dependabot's alone, and the default branch's rules
 	// with a required check.
 	proof bool
-	// statusFails is how many status writes, from the next one, GitHub
-	// answers 502.
-	statusFails int
+	// commentFails is how many writes of the comment, from the next one,
+	// GitHub answers 502.
+	commentFails int
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,8 +59,8 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case f.proof && proofAnswers[call] != "":
 		io.WriteString(w, proofAnswers[call])
-	case strings.HasPrefix(call, "POST statuses/") && f.statusFails > 0:
-		f.statusFails--
+	case (call == "POST issues/7/comments" || call == "PATCH issues/comments/1") && f.commentFails > 0:
+		f.commentFails--
 		w.WriteHeader(http.StatusBadGateway)
 		io.WriteString(w, `{"message":"Server Error"}`)
 	case call == "GET pulls/7" && f.pull != "":
@@ -143,7 +143,7 @@ func TestPublishRefreshed(t *testing.T) {
 		{name: "the directory's name and its facts disagree", dir: "8", pull: pullJSON("open", "dependabot[bot]", testHead),
 			want: "facts are about #7"},
 		{name: "the facts claim an identity classify rejects", dir: "7", pull: pullJSON("open", "mallory", testHead),
-			want: "classify said", calls: "GET pulls/7"},
+			want: "classify said", calls: "GET pulls/7, GET issues/7/comments"},
 		{name: "classify rejects it and the facts say so: decided", dir: "7", facts: no, pull: pullJSON("open", "mallory", testHead),
 			// The decision is carried out: a person's. All it asks GitHub
 			// for is the pull request, the gate's comment (once to decide,
@@ -155,10 +155,10 @@ func TestPublishRefreshed(t *testing.T) {
 		// written, the comment still says wait, and the next run decides.
 		{name: "facts of an earlier attempt: not decided", dir: "7", pull: pullJSON("open", "mallory", testHead),
 			facts: func(f *wire.Facts) { no(f); f.GatheredAt = testGathered.Add(-land.MaxFactsAge) },
-			is:    land.ErrFactsStale, calls: "GET pulls/7, GET pulls/7"},
+			is:    land.ErrFactsStale, calls: "GET pulls/7, GET pulls/7, GET issues/7/comments"},
 		{name: "closed since: skipped", dir: "7", pull: pullJSON("closed", "dependabot[bot]", testHead), calls: "GET pulls/7"},
 		{name: "a newer head since: skipped", dir: "7", pull: pullJSON("open", "dependabot[bot]", strings.Repeat("4", 40)), calls: "GET pulls/7"},
-		{name: "the pull request cannot be read", dir: "7", want: "404", calls: "GET pulls/7"},
+		{name: "the pull request cannot be read", dir: "7", want: "404", calls: "GET pulls/7, GET issues/7/comments"},
 		{name: "not a pull request's directory", dir: "seven", want: "not a refreshed pull request's directory"},
 		// One pull request has one directory.
 		{name: "a number spelled another way", dir: "07", want: "not a refreshed pull request's directory"},
@@ -595,18 +595,18 @@ func vetoesOf(t *testing.T, written string) []string {
 }
 
 // A veto the model gave in a run whose publish then could not write the
-// status is in the marker of what publish writes for that run instead: the
+// comment is in the marker of what publish writes for that run instead: the
 // report of a run that could not decide on an event, the counted ask on
 // the schedule (spec section 11, amendment 73).
 func TestPublishKeepsAVetoItCouldNotWrite(t *testing.T) {
 	t.Run("on an event", func(t *testing.T) {
-		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), statusFails: 1}
+		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), commentFails: 1}
 		in := t.TempDir()
 		writeFacts(t, filepath.Join(in, "facts", "facts.json"), goodFacts())
 		writeFile(t, filepath.Join(in, "verdicts", "verdicts.json"), vetoVerdicts(t))
 		class := model.Classification{Repo: "o/r", PR: 7, HeadSHA: testHead, Kind: model.KindDependabot}
 		if err := publishEvent(context.Background(), api.config(t), in, class); err == nil || !strings.Contains(err.Error(), "502") {
-			t.Fatalf("err = %v, want the status write's", err)
+			t.Fatalf("err = %v, want the comment write's", err)
 		}
 		if !strings.Contains(api.comment, "### dep-review: the run failed") || !slices.Equal(vetoesOf(t, api.comment), []string{testKey}) {
 			t.Errorf("the comment after: %s", api.comment)
@@ -614,7 +614,7 @@ func TestPublishKeepsAVetoItCouldNotWrite(t *testing.T) {
 	})
 	t.Run("on the schedule", func(t *testing.T) {
 		const rest = "\n### dep-review: waiting\n\nthe comment's text\n"
-		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), proof: true, statusFails: 1,
+		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), proof: true, commentFails: 1,
 			comment: handMarker(`"outcome":"wait","head":"`+testHead+`"`) + rest}
 		in := t.TempDir()
 		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
@@ -624,7 +624,7 @@ func TestPublishKeepsAVetoItCouldNotWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := refreshed(context.Background(), api.config(t), in, entries[0], nil); err == nil || !strings.Contains(err.Error(), "502") {
-			t.Fatalf("err = %v, want the status write's (requests %v)", err, api.calls)
+			t.Fatalf("err = %v, want the comment write's (requests %v)", err, api.calls)
 		}
 		if asksOf(t, api.comment) != 1 || !strings.HasSuffix(api.comment, rest) || !slices.Equal(vetoesOf(t, api.comment), []string{testKey}) {
 			t.Errorf("the comment after: %s", api.comment)

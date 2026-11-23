@@ -147,6 +147,9 @@ type Evaluation struct {
 	firstSeen []seen    // the first evaluations worth remembering
 	branch    string    // the default branch
 	now       time.Time // the instant decided at
+	// status is the status Act last set on this head, as the comment
+	// remembers it, or nil (marker.Status).
+	status *lastStatus
 }
 
 // Decide loads and checks the facts file and the verdicts file, which the
@@ -214,6 +217,9 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 	old, err := memory(ctx, cfg, ev.PullRequest.Number)
 	if err != nil {
 		return Evaluation{}, err
+	}
+	if old.Head == ev.PullRequest.Head {
+		ev.status = old.Status
 	}
 	verdicts, ev.stood = answers(verdicts, old, ev.fingerprint, cfg.Scheduled)
 	ev.Facts = wire.Join(facts, verdicts, ev.fingerprint)

@@ -342,7 +342,9 @@ func TestAsked(t *testing.T) {
 
 	f := newFake(t)
 	f.comments[testPR] = []*fakeComment{{1, testBot, old.String() + rest}}
-	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA, Vetoes{}); err != nil {
+	cfg := f.config(t0, nil)
+	cfg.ModelAsked = true
+	if err := Asked(context.Background(), cfg, testPR, headA, Vetoes{}); err != nil {
 		t.Fatal(err)
 	}
 	body := f.gateComment(testPR)
@@ -375,5 +377,22 @@ func TestAsked(t *testing.T) {
 	f = newFake(t)
 	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA, Vetoes{}); err != nil || len(f.writes()) != 0 {
 		t.Errorf("no comment: %v, writes %+v; want nothing", err, f.writes())
+	}
+
+	// A run that asked nobody counts nothing. It gives up the status Act
+	// set, which the run may have replaced, and writes only for that
+	// (spec section 11, amendment 74).
+	for _, set := range []*lastStatus{nil, {State: "pending", Description: "waiting until 2026-11-25 11:00 UTC"}} {
+		f := newFake(t)
+		m := old
+		m.Status = set
+		f.comments[testPR] = []*fakeComment{{1, testBot, m.String() + rest}}
+		if err := Asked(context.Background(), f.config(t0, nil), testPR, headA, Vetoes{}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := parseMarker(f.gateComment(testPR))
+		if got.Asks != old.Asks || got.Status != nil || len(f.writes()) != map[bool]int{true: 0, false: 1}[set == nil] {
+			t.Errorf("with status %v: asks %d, status %v, writes %+v", set, got.Asks, got.Status, f.writes())
+		}
 	}
 }
