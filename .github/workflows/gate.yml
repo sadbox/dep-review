@@ -9,18 +9,20 @@
 #   - classify, fetch, refresh: no secrets, read-only token. fetch and
 #     refresh read what a pull request and its dependencies wrote, and
 #     never execute any of it.
-#   - review: the ONLY job with a model credential, and it holds nothing
-#     else: no access to the repository, only the OIDC token it exchanges
-#     for a short-lived Claude token. The model gets text in a request and
-#     no tools; its answer is a closed structure that can only veto. This
-#     job never runs on a schedule.
+#   - review and reread: the ONLY jobs with a model credential, and they
+#     hold nothing else: no access to the repository, only the OIDC token
+#     they exchange for a short-lived Claude token. The model gets text in
+#     a request and no tools; its answer is a closed structure that can
+#     only veto. review is an event's run's, reread a scheduled run's.
 #   - publish: the ONLY job with the gate app's token (environment
 #     `dep-review`, default branch only). No model, and no untrusted text
 #     in any shell. It decides from the facts (internal/allow) and merges
 #     only the head commit the facts name. The facts are believed only as
 #     far as the identity proof goes: classify's on an event, and on a
 #     schedule, where refresh both classifies and reads untrusted input,
-#     the proof run again in this job.
+#     the proof run again in this job. A verdict is believed only from a
+#     review job's own artifact or from the gate's own comment, which this
+#     job reads itself: never from fetch or refresh.
 name: dep-review gate
 
 on:
@@ -297,8 +299,7 @@ jobs:
   # against the facts file's hashes and sends them.
   review:
     needs: [build, fetch]
-    # Only for an event's run: the federation rule admits no other, and
-    # the scheduled path asks no model.
+    # Only for an event's run. A scheduled run asks in reread.
     if: github.event_name == 'workflow_run' && needs.fetch.outputs.review == 'true'
     runs-on: ubuntu-26.04
     # `dep-review review` stops asking after 100 minutes and writes what
@@ -372,9 +373,11 @@ jobs:
           retention-days: 7
 
   # The scheduled path: for every Dependabot PR the gate left waiting,
-  # the identity proof and the facts again, with the verdicts the gate's
-  # comment remembers. No model is asked and there is no credential to
-  # ask one with; publish then decides, as for an event.
+  # the identity proof and the facts again, and for reread the list of
+  # prepared reads the model is not to be asked about now: the ones the
+  # gate's comment remembers an answer for, and all of a PR whose next
+  # ask is not due. This job asks no model and has no credential to ask
+  # one with; publish decides, as for an event.
   refresh:
     needs: build
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -386,6 +389,8 @@ jobs:
     outputs:
       # true when there is a refreshed PR for publish to decide.
       publish: ${{ steps.refresh.outputs.publish }}
+      # true when a prepared read is left for the model.
+      review: ${{ steps.refresh.outputs.review }}
       # true when a waiting PR could not be refreshed. This job still
       # succeeds once it has uploaded the others, so publish reads the
       # outputs of a job that succeeded, and fails the run in its last step.
@@ -467,13 +472,104 @@ jobs:
           echo "no waiting PR could be refreshed; see the step above" >&2
           exit 1
 
+  # The scheduled run's review: the veto calls for the reads refresh
+  # prepared and left for the model. It is review again, for a directory
+  # of PRs: the same credential and nothing else, the same budget, and to
+  # it a chunk is bytes. What refresh says the comment remembers only
+  # tells this job what to skip. Its verdicts go to publish in an
+  # artifact of its own; refresh's artifact carries none.
+  reread:
+    needs: [build, refresh]
+    # Only for the schedule: the federation rule admits `workflow_run`
+    # and `schedule` and no other event, so a manual dispatch asks no
+    # model. This condition and that rule's list have to stay the same.
+    if: github.event_name == 'schedule' && needs.refresh.outputs.review == 'true'
+    runs-on: ubuntu-26.04
+    # `dep-review reread` stops asking after 100 minutes and writes what
+    # it has.
+    timeout-minutes: 120
+    outputs:
+      reverdicts_sums: ${{ steps.sums.outputs.sums }}
+    permissions:
+      # The federated model credential, and nothing else: no access to
+      # the repository. Artifacts of the same run need none.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: gate-bin
+          path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
+          chmod +x dep-review
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: refreshed
+          path: ${{ runner.temp }}/refreshed
+      - name: Verify the refreshed artifact
+        env:
+          SUMS: ${{ needs.refresh.outputs.refreshed_sums }}
+        run: |
+          cd "$RUNNER_TEMP/refreshed"
+          # The manifest is the one refresh summed, then every file is in it...
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          sha256sum --check --strict --quiet ./SHA256SUMS
+          # ...and nothing else is there.
+          diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
+      # With no verdict for a read (the model did not answer, the token
+      # exchange was denied, this step failed) the read counts as not
+      # done, the PR waits, and a later scheduled run asks again.
+      - name: Review
+        env:
+          RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
+          ORG_ID: ${{ inputs.anthropic_organization_id }}
+          WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
+          SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
+        run: |
+          "$RUNNER_TEMP/bin/dep-review" reread \
+            --refreshed "$RUNNER_TEMP/refreshed" \
+            --out "$RUNNER_TEMP/reverdicts" \
+            --federation-rule-id "$RULE_ID" \
+            --organization-id "$ORG_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --service-account-id "$SERVICE_ACCOUNT_ID"
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          # As for the refreshed artifact: the sums go into the artifact as
+          # SHA256SUMS and the job outputs that file's own sum. A run in
+          # which no PR got a verdicts file still uploads the manifest.
+          cd "$RUNNER_TEMP/reverdicts"
+          find . -type f -print0 | sort -z | xargs -0 -r sha256sum >"$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" ./SHA256SUMS
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            sha256sum ./SHA256SUMS
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: reverdicts
+          path: ${{ runner.temp }}/reverdicts
+          retention-days: 1
+
   publish:
-    needs: [build, classify, fetch, review, refresh]
+    needs: [build, classify, fetch, review, refresh, reread]
     # An event's run: whenever classify said the PR is one the gate
     # handles, also when fetch or review failed. A review that failed
     # leaves facts to decide on (its reads wait); a fetch that failed
     # leaves none, and then this job says so on the PR, which nothing else
-    # would. A scheduled run: when refresh uploaded something.
+    # would. A scheduled run: when refresh uploaded something, whatever
+    # became of reread; without its verdicts the reads it was to ask about
+    # wait.
     if: >-
       !cancelled() && needs.build.result == 'success' &&
       ((needs.classify.result == 'success' &&
@@ -495,7 +591,8 @@ jobs:
     # each, and its own timeout starts when it does. One that waits until
     # its facts are more than four hours old decides nothing and reports
     # the run (internal/land, MaxFactsAge): the timeouts of fetch, review
-    # and publish add up to 2 h 35 min of those.
+    # and publish add up to 2 h 35 min of those, and those of refresh,
+    # reread and publish to 2 h 45 min.
     concurrency:
       group: dep-review-publish
       cancel-in-progress: false
@@ -505,7 +602,7 @@ jobs:
       - uses: actions/download-artifact@v8.0.2
         with:
           path: ${{ runner.temp }}/in
-          pattern: "{gate-bin,classification,facts,verdicts,refreshed}"
+          pattern: "{gate-bin,classification,facts,verdicts,refreshed,reverdicts}"
       # gate-bin is an artifact of this run, and anything holding the
       # run's runtime token can replace one. Use it only if every file
       # matches the build job's checksums (a job output, not an artifact).
@@ -562,6 +659,21 @@ jobs:
           cd "$RUNNER_TEMP/in/refreshed"
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           sha256sum --check --strict --quiet ./SHA256SUMS
+          # ...and nothing else is there.
+          diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
+      - name: Verify the reverdicts artifact
+        env:
+          SUMS: ${{ needs.reread.outputs.reverdicts_sums }}
+        run: |
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/reverdicts"; exit; fi
+          # Sums without an artifact (the upload failed after the sums
+          # step) are no verdicts: every read reread was to ask about
+          # counts as not done.
+          if [ ! -e "$RUNNER_TEMP/in/reverdicts" ]; then echo "no reverdicts artifact; the reads wait"; exit; fi
+          cd "$RUNNER_TEMP/in/reverdicts"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          # An empty manifest is a run in which nobody was asked.
+          if [ -s ./SHA256SUMS ]; then sha256sum --check --strict --quiet ./SHA256SUMS; fi
           # ...and nothing else is there.
           diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
       - name: Gate app token (this repository only)

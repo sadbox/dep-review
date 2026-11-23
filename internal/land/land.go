@@ -60,9 +60,16 @@ type Config struct {
 	// values, or "". It is the status's target and a link in the comment
 	// and in a notification about the run itself.
 	RunURL string
-	// ModelAsked says this run had a review job: an event's run, never a
-	// scheduled one. Only then is a prepared read without a verdict the
-	// reviewer's failure, which Act tells the owner about.
+	// Scheduled says this is a scheduled run and not an event's. On a
+	// scheduled run the clean verdicts the gate's own comment remembers
+	// count for the reads this run has no answer for (answers), and the
+	// comment counts the runs that asked the model (marker.Asks). An
+	// event's run asks about every read itself and counts nothing.
+	Scheduled bool
+	// ModelAsked says the model was asked about this pull request in this
+	// run: on an event's run always (the review job ran, or should have),
+	// on a scheduled one when the second review job wrote a verdicts file
+	// for it.
 	ModelAsked bool
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
@@ -94,9 +101,10 @@ func (cfg Config) now() time.Time {
 // four hours. A run that goes as it should never meets it. From fetch
 // gathering to publish deciding is at most the timeouts of the fetch, the
 // review and the publish job in gate.yml (20, 120 and 15 minutes: 2 h 35
-// min; a scheduled run's refresh and publish have 45 minutes), which
-// leaves 1 h 25 min for runners to start and for the publishes queued
-// ahead. A test in cmd/dep-review holds the two together.
+// min; a scheduled run's refresh, reread and publish have 30, 120 and 15:
+// 2 h 45 min), which leaves 1 h 15 min for runners to start and for the
+// publishes queued ahead. A test in cmd/dep-review holds the two
+// together.
 //
 // What does meet it is a job run again by itself. GitHub's "re-run failed
 // jobs" and "re-run job" hand the jobs that are run again the artifacts
@@ -147,9 +155,12 @@ type Evaluation struct {
 // A prepared read's Read and Veto come from the verdicts file and from
 // what the gate's own comment remembers (answers, wire.Join): a veto the
 // comment remembers for the same content stands whatever the file says,
-// and a verdict that is missing, or was written under another reviewer
-// fingerprint, is Read none. A missing verdicts file is no verdicts. An
-// update's FirstSeen is the facts file's when a registry gave a time, and
+// on a scheduled run a clean verdict it remembers counts where the file
+// has no answer, and a verdict that is missing, or was written under
+// another reviewer fingerprint, is Read none. A missing verdicts file is
+// no verdicts. Nothing else is believed about a read: not what the job
+// that gathered the facts says the comment remembers. An update's
+// FirstSeen is the facts file's when a registry gave a time, and
 // otherwise this job's own (dateUnseen).
 //
 // An error means there is no decision: a file that does not decode, facts
@@ -203,7 +214,7 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 	if err != nil {
 		return Evaluation{}, err
 	}
-	verdicts, ev.stood = answers(verdicts, old, ev.fingerprint)
+	verdicts, ev.stood = answers(verdicts, old, ev.fingerprint, cfg.Scheduled)
 	ev.Facts = wire.Join(facts, verdicts, ev.fingerprint)
 	// Whatever the facts file says about required checks, this job asks
 	// GitHub itself, now.
@@ -242,12 +253,15 @@ func memory(ctx context.Context, cfg Config, number int) (marker, error) {
 
 // answers settles which verdict counts for each content key under the
 // reviewer's fingerprint: the one in this run's verdicts file, or the one
-// the gate's comment remembers (spec section 11, amendment 63).
+// the gate's comment remembers (spec section 11, amendments 63 and 64).
 //
-//	the comment remembers   this run's file says    counts
-//	a veto                  a veto                  this run's veto
-//	a veto                  anything else, nothing  the remembered veto
-//	no veto, or nothing     anything, nothing       this run's, as it is
+//	the comment remembers   this run's file says        counts
+//	a veto                  a veto                      this run's veto
+//	a veto                  anything else, nothing      the remembered veto
+//	no veto                 a veto, refused, no veto    this run's
+//	no veto                 no answer, nothing          the remembered one on a
+//	                                                    scheduled run; else this run's
+//	nothing                 anything, nothing           this run's, as it is
 //
 // So a veto stands. The model is not asked the same way twice (nothing
 // fixes its sampling), and an objection that one later answer could take
@@ -257,10 +271,15 @@ func memory(ctx context.Context, cfg Config, number int) (marker, error) {
 // under the one fingerprint it names, and under any other none of them is
 // looked at.
 //
+// A clean verdict is remembered for the scheduled run, which asks the
+// model only about what has no answer yet. An event's run asks about
+// every read, and an answer it did not get is not made up from an earlier
+// one (amendment 39).
+//
 // The result has one entry for each key, all under fingerprint; a verdict
 // of the file under another fingerprint is left out, as wire.Join would
 // not look at it. stood has the keys whose veto is the remembered one.
-func answers(file wire.Verdicts, old marker, fingerprint string) (merged wire.Verdicts, stood map[string]bool) {
+func answers(file wire.Verdicts, old marker, fingerprint string, scheduled bool) (merged wire.Verdicts, stood map[string]bool) {
 	merged = wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{}}
 	at := map[string]int{} // a key's place in merged
 	for _, v := range file.Verdicts {
@@ -275,22 +294,38 @@ func answers(file wire.Verdicts, old marker, fingerprint string) (merged wire.Ve
 		return merged, stood
 	}
 	for _, e := range old.Cache {
-		if e.Veto == nil {
-			continue
-		}
 		remembered := wire.Verdict{Key: e.Key, Fingerprint: fingerprint, Read: e.Read, Veto: e.Veto}
 		i, has := at[e.Key]
 		switch {
-		case !has:
-			merged.Verdicts = append(merged.Verdicts, remembered)
-		case merged.Verdicts[i].Veto == nil:
-			merged.Verdicts[i] = remembered
-		default:
+		case e.Veto == nil && !scheduled:
+			continue
+		case e.Veto == nil && has && merged.Verdicts[i].Read != allow.ReadNone:
+			continue // this run has an answer of its own
+		case e.Veto != nil && has && merged.Verdicts[i].Veto != nil:
 			continue // the model objects again, in this run's words
 		}
-		stood[e.Key] = true
+		if has {
+			merged.Verdicts[i] = remembered
+		} else {
+			at[e.Key] = len(merged.Verdicts)
+			merged.Verdicts = append(merged.Verdicts, remembered)
+		}
+		if e.Veto != nil {
+			stood[e.Key] = true
+		}
 	}
 	return merged, stood
+}
+
+// reviewer is the reviewer's fingerprint under the gate's built-in
+// settings: the one every verdict that counts in this build was written
+// under.
+func reviewer() (string, error) {
+	conf, err := config.Load()
+	if err != nil {
+		return "", err
+	}
+	return veto.FromConfig(conf).Fingerprint(), nil
 }
 
 // readFiles reads the facts file, which must be there, and the verdicts

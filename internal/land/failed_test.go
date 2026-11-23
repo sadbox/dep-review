@@ -77,7 +77,7 @@ func TestFailed(t *testing.T) {
 		t.Errorf("notifications %+v, want one: %+v", rec.got, want)
 	}
 
-	// The scheduled job asks no model and could not finish the run: it
+	// The owner was told how to run the gate again: the scheduled job
 	// does not take the pull request up.
 	if waiting, unread, err := Waiting(context.Background(), cfg); err != nil || len(waiting) != 0 || len(unread) != 0 {
 		t.Errorf("waiting: %+v, unread %v, %v", waiting, unread, err)
@@ -131,30 +131,38 @@ func TestFailedWritesNothing(t *testing.T) {
 	}
 }
 
-// TestReviewerSilent: on an event's run a prepared read the model left
-// without a verdict is a wait nothing ends before its deadline, since the
-// scheduled job asks no model. The owner is told once per head, and never
-// by a scheduled run.
+// TestReviewerSilent: a prepared read the model left without a verdict is
+// a wait, and the scheduled run asks again by itself. The owner is told
+// when the second scheduled run that asked also got no answer, once per
+// head, and not by an event's run (spec section 11, amendment 64).
 func TestReviewerSilent(t *testing.T) {
 	young := func(f *wire.Facts) { f.Facts.Updates[0].FirstSeen = allow.At(t0.Add(-time.Hour), "index.golang.org") }
+	// The kinds of run: an event's, a scheduled one in which the model was
+	// asked about this pull request, and a scheduled one in which it was
+	// not (no ask was due).
+	const event, asked, quiet = "event", "asked", "quiet"
 	tests := []struct {
 		name     string
-		asked    []bool // one run each: an event's (true) or a scheduled one
+		runs     []string
 		facts    func(*wire.Facts)
 		verdicts func(*testing.T) *wire.Verdicts // nil: a clean read
 		action   Action
 		unread   int // notifications about the reviewer
 		all      int // notifications of any kind
+		asks     int // what the marker counts in the end
 	}{
-		{name: "an event's run and no verdicts", asked: []bool{true, true}, verdicts: noVerdicts, action: ActionWait, unread: 1, all: 1},
-		{name: "then the schedule, then the run again", asked: []bool{true, false, true}, verdicts: noVerdicts, action: ActionWait, unread: 1, all: 1},
-		{name: "a scheduled run and no verdicts", asked: []bool{false, false}, verdicts: noVerdicts, action: ActionWait},
-		{name: "every read answered, waiting on age", asked: []bool{true}, facts: young, action: ActionWait},
-		{name: "nothing was prepared: the download failed, not the reviewer", asked: []bool{true}, verdicts: noVerdicts, action: ActionWait,
+		{name: "an event's run and no verdicts: the schedule will ask", runs: []string{event, event}, verdicts: noVerdicts, action: ActionWait},
+		{name: "one scheduled miss is not worth a notification", runs: []string{event, asked}, verdicts: noVerdicts, action: ActionWait, asks: 1},
+		{name: "the second scheduled miss is", runs: []string{event, asked, asked}, verdicts: noVerdicts, action: ActionWait, unread: 1, all: 1, asks: 2},
+		{name: "told once, however many more", runs: []string{event, asked, asked, asked, quiet, asked}, verdicts: noVerdicts, action: ActionWait, unread: 1, all: 1, asks: 4},
+		{name: "a scheduled run that did not ask counts nothing", runs: []string{event, quiet, quiet, quiet}, verdicts: noVerdicts, action: ActionWait},
+		{name: "an event's run starts the count again", runs: []string{asked, asked, event}, verdicts: noVerdicts, action: ActionWait, unread: 1, all: 1},
+		{name: "every read answered, waiting on age", runs: []string{event, asked, asked}, facts: young, action: ActionWait, asks: 2},
+		{name: "nothing was prepared: the download failed, not the reviewer", runs: []string{event, asked, asked}, verdicts: noVerdicts, action: ActionWait, asks: 2,
 			facts: func(f *wire.Facts) {
 				f.Facts.Updates[0].Prepared = wire.Read{Status: wire.Unavailable, Detail: "the artifact could not be downloaded"}
 			}},
-		{name: "unread and a person's for something else: told that", asked: []bool{true}, verdicts: noVerdicts, action: ActionPerson, all: 1,
+		{name: "unread and a person's for something else: told that", runs: []string{event, asked, asked}, verdicts: noVerdicts, action: ActionPerson, all: 1, asks: 2,
 			facts: func(f *wire.Facts) {
 				f.Facts.Updates[0].Bound = allow.No("h1:abc pinned, h1:xyz served", "go mod download")
 			}},
@@ -171,15 +179,15 @@ func TestReviewerSilent(t *testing.T) {
 				verdicts = tc.verdicts(t)
 			}
 			rec := &recorder{}
-			for _, asked := range tc.asked {
+			for _, run := range tc.runs {
 				cfg := f.config(t0, rec)
-				cfg.RunURL, cfg.ModelAsked = testRun, asked
+				cfg.RunURL, cfg.Scheduled, cfg.ModelAsked = testRun, run != event, run != quiet
 				res, err := publish(t, cfg, files(t, facts, verdicts))
 				if err != nil || res.Action != tc.action {
 					t.Fatalf("result %+v, %v; want %s", res, err, tc.action)
 				}
 			}
-			want := message(Config{Repo: testRepo}, testPR, " waits unread: the model did not answer for code the gate prepared, and the scheduled job asks no model. Re-run all jobs: "+testRun)
+			want := message(Config{Repo: testRepo}, testPR, unreadNotice+" The run: "+testRun)
 			unread := 0
 			for _, m := range rec.got {
 				if m == want {
@@ -189,8 +197,12 @@ func TestReviewerSilent(t *testing.T) {
 			if unread != tc.unread || len(rec.got) != tc.all {
 				t.Errorf("%d notifications about the reviewer of %d, want %d of %d: %+v", unread, len(rec.got), tc.unread, tc.all, rec.got)
 			}
-			if m, _ := parseMarker(f.gateComment(testPR)); len(m.NotifiedUnread) != tc.unread {
+			m, _ := parseMarker(f.gateComment(testPR))
+			if len(m.NotifiedUnread) != tc.unread {
 				t.Errorf("the marker remembers %v, want %d heads", m.NotifiedUnread, tc.unread)
+			}
+			if m.Asks != tc.asks || (m.Asks > 0) != m.AskedAt.Equal(t0) {
+				t.Errorf("the marker counts %d asks, the last at %s; want %d", m.Asks, m.AskedAt, tc.asks)
 			}
 		})
 	}

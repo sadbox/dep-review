@@ -57,7 +57,7 @@ func TestJobs(t *testing.T) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if got, want := strings.Join(names, " "), "build classify fetch publish refresh review"; got != want {
+	if got, want := strings.Join(names, " "), "build classify fetch publish refresh reread review"; got != want {
 		t.Fatalf("jobs %q, want %q", got, want)
 	}
 }
@@ -90,9 +90,9 @@ func permissionsOf(t *testing.T, name, job string) string {
 }
 
 // Every job states its permissions, and they are exactly these. The
-// workflow's own default is none. review holds the OIDC token and has no
-// access to the repository; publish gets nothing from the job token (it
-// uses the app's).
+// workflow's own default is none. review and reread hold the OIDC token
+// and have no access to the repository; publish gets nothing from the job
+// token (it uses the app's).
 func TestPermissions(t *testing.T) {
 	if !strings.Contains(readGate(t), "\npermissions: {}\n") {
 		t.Error("the workflow's default permissions are not {}")
@@ -103,6 +103,7 @@ func TestPermissions(t *testing.T) {
 		"fetch":    "contents: read, pull-requests: read",
 		"refresh":  "contents: read, pull-requests: read",
 		"review":   "id-token: write",
+		"reread":   "id-token: write",
 		"publish":  "{}",
 	}
 	for name, job := range gateJobs(t) {
@@ -147,7 +148,7 @@ func TestFactsAgeCoversARun(t *testing.T) {
 	const queue = time.Hour
 	for path, run := range map[string]time.Duration{
 		"an event's run":  timeout("fetch") + timeout("review") + timeout("publish"),
-		"a scheduled run": timeout("refresh") + timeout("publish"),
+		"a scheduled run": timeout("refresh") + timeout("reread") + timeout("publish"),
 	} {
 		if land.MaxFactsAge < run+queue {
 			t.Errorf("%s may take %s from gathering to deciding, and publish refuses facts older than %s: less than an hour is left for queues",
@@ -161,8 +162,9 @@ func TestFactsAgeCoversARun(t *testing.T) {
 
 // publish is the only job with the gate app's token, a secret or an
 // environment. The jobs that read what a pull request, a dependency, a
-// registry or the model wrote (classify, fetch, refresh, review) hold no
-// secret at all, and review not even the job's token for the repository.
+// registry or the model wrote (classify, fetch, refresh, review, reread)
+// hold no secret at all, and the two that ask the model not even the
+// job's token for the repository.
 func TestOnlyPublishHoldsSecrets(t *testing.T) {
 	jobs := gateJobs(t)
 	for name, job := range jobs {
@@ -172,9 +174,11 @@ func TestOnlyPublishHoldsSecrets(t *testing.T) {
 			}
 		}
 	}
-	for _, token := range []string{"github.token", "GH_TOKEN", "actions/checkout"} {
-		if strings.Contains(jobs["review"], token) {
-			t.Errorf("review uses %q: it needs nothing of the repository", token)
+	for _, name := range []string{"review", "reread"} {
+		for _, token := range []string{"github.token", "GH_TOKEN", "actions/checkout"} {
+			if strings.Contains(jobs[name], token) {
+				t.Errorf("%s uses %q: it needs nothing of the repository", name, token)
+			}
 		}
 	}
 	// publish's GH_TOKEN is the app's, and the job token is used nowhere
@@ -184,34 +188,49 @@ func TestOnlyPublishHoldsSecrets(t *testing.T) {
 	}
 }
 
-// The model is asked on an event's run only. review is the one job with
-// the OIDC token, its condition names the event and cannot be forced with
-// always(), and none of the scheduled path's jobs has that permission.
-func TestScheduledPathHasNoModel(t *testing.T) {
+// The model is asked by two jobs and no other: review on an event's run
+// and reread on a scheduled one. They alone have the OIDC token. Each
+// condition names its one event and cannot be forced with always(). The
+// two events are the ones the federation rule admits; a manual dispatch
+// runs neither.
+func TestOnlyTheReviewJobsAskTheModel(t *testing.T) {
 	jobs := gateJobs(t)
 	for name, job := range jobs {
-		if has := strings.Contains(job, "id-token"); has != (name == "review") {
+		asks := name == "review" || name == "reread"
+		if has := strings.Contains(job, "id-token"); has != asks {
 			t.Errorf("%s: mentions id-token: %v", name, has)
 		}
+		if has := strings.Contains(job, "anthropic") || strings.Contains(job, "federation"); has != asks {
+			t.Errorf("%s: is handed the federation IDs: %v", name, has)
+		}
 	}
-	review := jobs["review"]
-	if !strings.Contains(review, "\n    if: github.event_name == 'workflow_run' && needs.fetch.outputs.review == 'true'\n") {
-		t.Error("review's condition does not restrict it to a workflow_run event")
+	for name, want := range map[string]struct{ cond, needs string }{
+		"review": {"github.event_name == 'workflow_run' && needs.fetch.outputs.review == 'true'", "[build, fetch]"},
+		"reread": {"github.event_name == 'schedule' && needs.refresh.outputs.review == 'true'", "[build, refresh]"},
+	} {
+		job := jobs[name]
+		if !strings.Contains(job, "\n    if: "+want.cond+"\n") {
+			t.Errorf("%s's condition is not %q", name, want.cond)
+		}
+		if strings.Contains(job, "always()") || strings.Contains(job, "cancelled()") || strings.Contains(job, "failure()") {
+			t.Errorf("%s's condition has a status function, which would run it when a job it needs was skipped", name)
+		}
+		if !strings.Contains(job, "\n    needs: "+want.needs+"\n") {
+			t.Errorf("%s does not need %s", name, want.needs)
+		}
 	}
-	if strings.Contains(review, "always()") || strings.Contains(review, "cancelled()") || strings.Contains(review, "failure()") {
-		t.Error("review's condition has a status function, which would run it when a job it needs was skipped")
-	}
-	if !strings.Contains(review, "\n    needs: [build, fetch]\n") {
-		t.Error("review does not need fetch")
-	}
-	// The scheduled path is build, refresh and publish. refresh runs for
-	// nothing else, and runs no model command.
+	// The scheduled path is build, refresh, reread and publish. refresh
+	// runs for nothing else, asks no model, and says whether a read is
+	// left for one.
 	refresh := jobs["refresh"]
 	if !strings.Contains(refresh, "\n    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'\n") {
 		t.Error("refresh's condition is not the schedule")
 	}
-	if strings.Contains(refresh, `dep-review" review`) || strings.Contains(refresh, "anthropic") {
+	if strings.Contains(refresh, `dep-review" review`) || strings.Contains(refresh, `dep-review" reread`) {
 		t.Error("refresh asks the model")
+	}
+	if !strings.Contains(refresh, "      review: ${{ steps.refresh.outputs.review }}\n") {
+		t.Error("refresh does not say whether a read is left for the model")
 	}
 	// The event's jobs do not run on a schedule.
 	if !strings.Contains(jobs["classify"], "\n    if: github.event_name == 'workflow_run'\n") {
@@ -219,6 +238,58 @@ func TestScheduledPathHasNoModel(t *testing.T) {
 	}
 	if !strings.Contains(jobs["fetch"], "\n    needs: [build, classify]\n") {
 		t.Error("fetch does not need classify")
+	}
+}
+
+// The scheduled review job is the event's review job over again: the
+// OIDC token and nothing else, the federation IDs through env, no token
+// for the repository, and the refreshed artifact used only after it was
+// checked against refresh's checksum. No job that parses what a pull
+// request wrote (classify, fetch, refresh) holds a secret or the OIDC
+// token, and neither review job is handed a verdict by one of them: what
+// refresh says the comment remembers is a list of reads to skip, in a
+// file publish never opens.
+func TestScheduledReviewJob(t *testing.T) {
+	jobs := gateJobs(t)
+	reread := jobs["reread"]
+	if got := permissionsOf(t, "reread", reread); got != "id-token: write" {
+		t.Errorf("reread has permissions %q, want the OIDC token and nothing else", got)
+	}
+	for _, bad := range []string{"secrets.", "environment:", "vars.", "github.token", "GH_TOKEN", "actions/checkout", "app_slug", "app-slug", "setup-go", "setup-node"} {
+		if strings.Contains(reread, bad) {
+			t.Errorf("reread has %q", bad)
+		}
+	}
+	step := stepOf(t, reread, "Review")
+	for _, want := range []string{
+		"RULE_ID: ${{ inputs.anthropic_federation_rule_id }}", "ORG_ID: ${{ inputs.anthropic_organization_id }}",
+		`--refreshed "$RUNNER_TEMP/refreshed"`, `--out "$RUNNER_TEMP/reverdicts"`, `--federation-rule-id "$RULE_ID"`,
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("reread's review step lacks %q", want)
+		}
+	}
+	// Its timeout is review's: a read is asked about whole, so a read
+	// that fits an event's run has to fit a scheduled one.
+	timeoutRE := regexp.MustCompile(`(?m)^    timeout-minutes: ([0-9]+)$`)
+	if a, b := timeoutRE.FindString(reread), timeoutRE.FindString(jobs["review"]); a == "" || a != b {
+		t.Errorf("reread has %q and review %q", a, b)
+	}
+	for _, name := range []string{"classify", "fetch", "refresh"} {
+		for _, bad := range []string{"id-token", "secrets.", "environment:", "vars.", "anthropic"} {
+			if strings.Contains(jobs[name], bad) {
+				t.Errorf("%s parses what a pull request wrote and has %q", name, bad)
+			}
+		}
+	}
+	// publish takes the scheduled verdicts from reread's artifact, checked
+	// against reread's own checksum, and runs whatever became of reread.
+	publish := jobs["publish"]
+	if !strings.Contains(stepOf(t, publish, "Verify the reverdicts artifact"), "SUMS: ${{ needs.reread.outputs.reverdicts_sums }}") {
+		t.Error("publish does not check the scheduled verdicts against reread's sums")
+	}
+	if strings.Contains(publish, "needs.reread.result") {
+		t.Error("publish's condition depends on how reread ended: a reread that failed leaves facts to decide on")
 	}
 }
 
@@ -315,8 +386,8 @@ func TestGateBinVerified(t *testing.T) {
 			t.Errorf("%s does not run `dep-review %s`", name, name)
 		}
 	}
-	if n != 5 {
-		t.Errorf("%d jobs use gate-bin, want 5 (classify, fetch, review, refresh, publish)", n)
+	if n != 6 {
+		t.Errorf("%d jobs use gate-bin, want 6 (classify, fetch, review, refresh, reread, publish)", n)
 	}
 }
 
@@ -366,7 +437,8 @@ func TestArtifactsVerified(t *testing.T) {
 		{"classification", "classify", []string{"fetch", "publish"}},
 		{"facts", "fetch", []string{"review", "publish"}},
 		{"verdicts", "review", []string{"publish"}},
-		{"refreshed", "refresh", []string{"publish"}},
+		{"refreshed", "refresh", []string{"reread", "publish"}},
+		{"reverdicts", "reread", []string{"publish"}},
 	} {
 		p := jobs[a.producer]
 		out := a.name + "_sums: ${{ steps.sums.outputs.sums }}"
@@ -415,18 +487,24 @@ func TestArtifactsVerified(t *testing.T) {
 		}
 	}
 	// The manifest refresh puts beside the pull requests' directories is
-	// the one file publish skips there (sumsFile).
+	// the one file publish and reread skip there (sumsFile), and both
+	// check every file against it. reread's own artifact has one too.
 	if !strings.Contains(jobs["refresh"], `mv "$RUNNER_TEMP/`+sumsFile+`" ./`+sumsFile+"\n") ||
-		!strings.Contains(stepOf(t, jobs["publish"], "Verify the refreshed artifact"), "sha256sum --check --strict --quiet ./"+sumsFile+"\n") {
-		t.Errorf("refresh does not write, or publish does not check, the manifest %s", sumsFile)
+		!strings.Contains(stepOf(t, jobs["publish"], "Verify the refreshed artifact"), "sha256sum --check --strict --quiet ./"+sumsFile+"\n") ||
+		!strings.Contains(stepOf(t, jobs["reread"], "Verify the refreshed artifact"), "sha256sum --check --strict --quiet ./"+sumsFile+"\n") {
+		t.Errorf("refresh does not write, or publish or reread does not check, the manifest %s", sumsFile)
+	}
+	if !strings.Contains(jobs["reread"], `mv "$RUNNER_TEMP/`+sumsFile+`" ./`+sumsFile+"\n") ||
+		!strings.Contains(stepOf(t, jobs["publish"], "Verify the reverdicts artifact"), "sha256sum --check --strict --quiet ./"+sumsFile) {
+		t.Errorf("reread does not write, or publish does not check, the manifest %s", sumsFile)
 	}
 	// publish downloads these artifacts and no other.
-	if !strings.Contains(jobs["publish"], `pattern: "{gate-bin,classification,facts,verdicts,refreshed}"`) {
+	if !strings.Contains(jobs["publish"], `pattern: "{gate-bin,classification,facts,verdicts,refreshed,reverdicts}"`) {
 		t.Error("publish's download pattern changed; so must this test")
 	}
 	// An artifact with no sums from its producer must not be there at
 	// all: publish runs when jobs before it were skipped or failed.
-	for _, name := range []string{"classification", "facts", "verdicts", "refreshed"} {
+	for _, name := range []string{"classification", "facts", "verdicts", "refreshed", "reverdicts"} {
 		if !strings.Contains(jobs["publish"], `if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/`+name+`"; exit; fi`) {
 			t.Errorf("publish accepts a %s artifact without sums", name)
 		}
@@ -455,7 +533,7 @@ func stepOf(t *testing.T, job, name string) string {
 // told how those jobs ended.
 func TestPublishRunsOnBothPaths(t *testing.T) {
 	publish := gateJobs(t)["publish"]
-	if !strings.Contains(publish, "\n    needs: [build, classify, fetch, review, refresh]\n") {
+	if !strings.Contains(publish, "\n    needs: [build, classify, fetch, review, refresh, reread]\n") {
 		t.Error("publish does not wait for every other job")
 	}
 	const cond = `
@@ -574,7 +652,7 @@ func TestAppSlugPassed(t *testing.T) {
 	if job := jobs["refresh"]; !strings.Contains(job, "APP_SLUG: ${{ inputs.app_slug }}") || !strings.Contains(job, `--app-slug "$APP_SLUG"`) {
 		t.Error("refresh does not get the app's slug from the input")
 	}
-	for _, name := range []string{"classify", "fetch", "review"} {
+	for _, name := range []string{"classify", "fetch", "review", "reread"} {
 		if job := jobs[name]; job == "" || strings.Contains(job, "app_slug") || strings.Contains(job, "app-slug") {
 			t.Errorf("%s is told the gate app's name, or is not a job", name)
 		}

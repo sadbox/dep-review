@@ -47,58 +47,72 @@ func TestAnswers(t *testing.T) {
 		return marker{Fingerprint: fingerprint, Cache: []cached{{Key: keyA, Read: allow.ReadPartial, Veto: veto}}}
 	}
 	stands := &wire.Verdict{Key: keyA, Fingerprint: reviewer, Read: allow.ReadPartial, Veto: old}
+	recalled := &wire.Verdict{Key: keyA, Fingerprint: reviewer, Read: allow.ReadPartial}
 	for _, tc := range []struct {
-		name  string
-		old   marker
-		file  *wire.Verdict // nil: the file has no entry for the key
-		want  *wire.Verdict // nil: no entry
-		stood bool
+		name string
+		old  marker
+		file *wire.Verdict // nil: the file has no entry for the key
+		// want is the entry that counts on an event's run, and scheduled
+		// the one on a scheduled run; nil: no entry.
+		want, scheduled *wire.Verdict
+		stood           bool
 	}{
-		{"a remembered veto, and this run says nothing", remembered(reviewer, old), nil, stands, true},
-		{"a remembered veto, and this run got no answer", remembered(reviewer, old), this(allow.ReadNone, nil), stands, true},
-		{"a remembered veto, and the reviewer will not take the read now", remembered(reviewer, old), this(allow.ReadRefused, nil), stands, true},
-		{"a remembered veto, and this run says no veto", remembered(reviewer, old), this(allow.ReadFull, nil), stands, true},
-		{"a remembered veto, and this run objects again", remembered(reviewer, old), this(allow.ReadFull, now), this(allow.ReadFull, now), false},
+		{"a remembered veto, and this run says nothing", remembered(reviewer, old), nil, stands, stands, true},
+		{"a remembered veto, and this run got no answer", remembered(reviewer, old), this(allow.ReadNone, nil), stands, stands, true},
+		{"a remembered veto, and the reviewer will not take the read now", remembered(reviewer, old), this(allow.ReadRefused, nil), stands, stands, true},
+		{"a remembered veto, and this run says no veto", remembered(reviewer, old), this(allow.ReadFull, nil), stands, stands, true},
+		{"a remembered veto, and this run objects again", remembered(reviewer, old), this(allow.ReadFull, now), this(allow.ReadFull, now), this(allow.ReadFull, now), false},
 
-		{"a remembered clean read, and this run objects", remembered(reviewer, nil), this(allow.ReadFull, now), this(allow.ReadFull, now), false},
-		{"a remembered clean read, and this run says no veto", remembered(reviewer, nil), this(allow.ReadFull, nil), this(allow.ReadFull, nil), false},
-		{"a remembered clean read, and the reviewer will not take the read now", remembered(reviewer, nil), this(allow.ReadRefused, nil), this(allow.ReadRefused, nil), false},
+		{"a remembered clean read, and this run objects", remembered(reviewer, nil), this(allow.ReadFull, now), this(allow.ReadFull, now), this(allow.ReadFull, now), false},
+		{"a remembered clean read, and this run says no veto", remembered(reviewer, nil), this(allow.ReadFull, nil), this(allow.ReadFull, nil), this(allow.ReadFull, nil), false},
+		{"a remembered clean read, and the reviewer will not take the read now", remembered(reviewer, nil), this(allow.ReadRefused, nil), this(allow.ReadRefused, nil), this(allow.ReadRefused, nil), false},
 		// An event's run asks the model, and a clean answer of an earlier
-		// run does not stand in for the one it did not get.
-		{"a remembered clean read, and this run got no answer", remembered(reviewer, nil), this(allow.ReadNone, nil), this(allow.ReadNone, nil), false},
-		{"a remembered clean read, and this run says nothing", remembered(reviewer, nil), nil, nil, false},
+		// run does not stand in for the one it did not get. The scheduled
+		// run does not ask about a read that has an answer, and takes the
+		// remembered one.
+		{"a remembered clean read, and this run got no answer", remembered(reviewer, nil), this(allow.ReadNone, nil), this(allow.ReadNone, nil), recalled, false},
+		{"a remembered clean read, and this run says nothing", remembered(reviewer, nil), nil, nil, recalled, false},
 
-		{"nothing remembered, and this run objects", marker{}, this(allow.ReadFull, now), this(allow.ReadFull, now), false},
-		{"nothing remembered, and this run says no veto", marker{}, this(allow.ReadFull, nil), this(allow.ReadFull, nil), false},
-		{"nothing remembered, and this run says nothing", marker{}, nil, nil, false},
+		{"nothing remembered, and this run objects", marker{}, this(allow.ReadFull, now), this(allow.ReadFull, now), this(allow.ReadFull, now), false},
+		{"nothing remembered, and this run says no veto", marker{}, this(allow.ReadFull, nil), this(allow.ReadFull, nil), this(allow.ReadFull, nil), false},
+		{"nothing remembered, and this run got no answer", marker{}, this(allow.ReadNone, nil), this(allow.ReadNone, nil), this(allow.ReadNone, nil), false},
+		{"nothing remembered, and this run says nothing", marker{}, nil, nil, nil, false},
 
 		// Another prompt or model is another question: what gets past a
-		// veto besides a person and other content.
-		{"a veto remembered under another fingerprint", remembered(other, old), this(allow.ReadFull, nil), this(allow.ReadFull, nil), false},
-		{"a veto remembered under another fingerprint, and this run says nothing", remembered(other, old), nil, nil, false},
+		// veto besides a person and other content, and what a clean
+		// verdict does not outlive either.
+		{"a veto remembered under another fingerprint", remembered(other, old), this(allow.ReadFull, nil), this(allow.ReadFull, nil), this(allow.ReadFull, nil), false},
+		{"a veto remembered under another fingerprint, and this run says nothing", remembered(other, old), nil, nil, nil, false},
+		{"a clean read remembered under another fingerprint", remembered(other, nil), nil, nil, nil, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			file := wire.Verdicts{Version: wire.Version}
-			if tc.file != nil {
-				file.Verdicts = append(file.Verdicts, *tc.file)
+		for _, scheduled := range []bool{false, true} {
+			name, want := tc.name+", on an event", tc.want
+			if scheduled {
+				name, want = tc.name+", on the schedule", tc.scheduled
 			}
-			// A verdict under another fingerprint is nobody's answer here.
-			file.Verdicts = append(file.Verdicts, wire.Verdict{Key: keyB, Fingerprint: other, Read: allow.ReadFull})
-			got, stood := answers(file, tc.old, reviewer)
-			var want []wire.Verdict
-			if tc.want != nil {
-				want = append(want, *tc.want)
-			}
-			if !reflect.DeepEqual(append([]wire.Verdict(nil), got.Verdicts...), want) {
-				t.Errorf("verdicts %+v, want %+v", got.Verdicts, want)
-			}
-			if stood[keyA] != tc.stood || len(stood) > 1 {
-				t.Errorf("stood %v, want the key in it: %t", stood, tc.stood)
-			}
-			if _, err := wire.EncodeVerdicts(got); err != nil {
-				t.Errorf("the result is not a verdicts file: %v", err)
-			}
-		})
+			t.Run(name, func(t *testing.T) {
+				file := wire.Verdicts{Version: wire.Version}
+				if tc.file != nil {
+					file.Verdicts = append(file.Verdicts, *tc.file)
+				}
+				// A verdict under another fingerprint is nobody's answer here.
+				file.Verdicts = append(file.Verdicts, wire.Verdict{Key: keyB, Fingerprint: other, Read: allow.ReadFull})
+				got, stood := answers(file, tc.old, reviewer, scheduled)
+				var wanted []wire.Verdict
+				if want != nil {
+					wanted = append(wanted, *want)
+				}
+				if !reflect.DeepEqual(append([]wire.Verdict(nil), got.Verdicts...), wanted) {
+					t.Errorf("verdicts %+v, want %+v", got.Verdicts, wanted)
+				}
+				if stood[keyA] != tc.stood || len(stood) > 1 {
+					t.Errorf("stood %v, want the key in it: %t", stood, tc.stood)
+				}
+				if _, err := wire.EncodeVerdicts(got); err != nil {
+					t.Errorf("the result is not a verdicts file: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -167,20 +181,25 @@ func TestVetoStands(t *testing.T) {
 		})
 	}
 
-	// The scheduled job hands publish what its own reading of the comment
-	// says. Whatever that file holds, the veto in the comment stands.
-	t.Run("on the schedule, with a verdicts file that says no veto", func(t *testing.T) {
-		f := newFake(t)
-		facts := goodFacts(t)
-		if res, err := publish(t, f.config(t0, nil), files(t, facts, vetoed("exfiltration", allow.ReadFull)(t))); err != nil || res.Action != ActionPerson {
-			t.Fatalf("the veto: %+v, %v", res, err)
-		}
-		moveTo(f, &facts, headB)
-		res, err := publish(t, f.config(t0, nil), files(t, facts, clean(t)))
-		if err != nil || res.Action != ActionPerson || f.count("PUT", "/merge") != 0 {
-			t.Fatalf("%+v, %v with %d merge calls", res, err, f.count("PUT", "/merge"))
-		}
-	})
+	// On the schedule too: whatever the second review job's file holds,
+	// and with no file at all, the veto in the comment stands.
+	for name, verdicts := range map[string]func(*testing.T) *wire.Verdicts{"that says no veto": clean, "that is not there": noVerdicts} {
+		t.Run("on the schedule, with a verdicts file "+name, func(t *testing.T) {
+			f := newFake(t)
+			facts := goodFacts(t)
+			if res, err := publish(t, f.config(t0, nil), files(t, facts, vetoed("exfiltration", allow.ReadFull)(t))); err != nil || res.Action != ActionPerson {
+				t.Fatalf("the veto: %+v, %v", res, err)
+			}
+			moveTo(f, &facts, headB)
+			cfg := f.config(t0, nil)
+			cfg.Scheduled = true
+			res, err := publish(t, cfg, files(t, facts, verdicts(t)))
+			if err != nil || res.Action != ActionPerson || f.count("PUT", "/merge") != 0 {
+				t.Fatalf("%+v, %v with %d merge calls", res, err, f.count("PUT", "/merge"))
+			}
+			remembersVeto(t, f, "after the scheduled run", keyA)
+		})
+	}
 
 	// A run that failed in between keeps the veto too.
 	t.Run("across a run that could not decide", func(t *testing.T) {

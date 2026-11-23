@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -31,9 +32,12 @@ const (
 	// for.
 	maxNotified = 20
 	// maxCached is how many verdicts the marker remembers. One that does
-	// not fit is a read the scheduled job has no answer for: it waits for
-	// an event's run to ask the model, and is a person's at the deadline.
+	// not fit is a read the scheduled job has no answer for, and asks the
+	// model about again.
 	maxCached = 100
+	// maxAsks bounds the marker's count of scheduled asks. The gaps
+	// between asks double (askDue), so a real count stays far below it.
+	maxAsks = 64
 	// A cached veto keeps this much of what the model wrote: enough for
 	// the person reading the next comment, small enough for the marker.
 	maxCachedQuotes = 3
@@ -45,11 +49,11 @@ const (
 // marker is what the gate's comment remembers between runs, in a hidden
 // first line. None of it is an approval: Outcome tells the scheduled job
 // which pull requests to evaluate again, Notified keeps a re-run from
-// notifying twice, Cache is the model's answers for the scheduled job,
-// which asks no model, and FirstSeen is the gate's own clock for a pin no
-// registry dates. One thing in it does decide, and only against a merge:
-// a veto in Cache stands for the same content in every later run
-// (answers).
+// notifying twice, Cache is the model's answers, which the scheduled job
+// does not ask for twice, Asks spaces out its asking for the ones still
+// missing, and FirstSeen is the gate's own clock for a pin no registry
+// dates. One thing in it does decide, and only against a merge: a veto
+// in Cache stands for the same content in every later run (answers).
 //
 // Whoever writes a marker starts from the one that is there (next), so
 // that no run forgets a veto, a first-seen time or whom it told.
@@ -84,6 +88,14 @@ type marker struct {
 	// request that no registry had a time for (dateUnseen). A marker
 	// written before the gate remembered these has none.
 	FirstSeen []seen `json:"first_seen"`
+	// Asks is how many scheduled runs asked the model about this pull
+	// request at Head since the gate last wrote for Head without counting
+	// (an event's run, or the first scheduled look at a head), and AskedAt
+	// is when the last of them did. Whether the model answered does not
+	// matter: a read that was answered is not asked about again, and one
+	// that was not is asked about after a gap that doubles (askDue).
+	Asks    int       `json:"asks"`
+	AskedAt time.Time `json:"asked_at"`
 }
 
 // cached is one remembered verdict: wire.Verdict without the fingerprint,
@@ -98,12 +110,44 @@ type cached struct {
 // the run's, and what the gate remembers whatever a run decides is carried
 // over. A run that decided replaces the verdicts and the first-seen times
 // with its own, which Decide made from old's (cacheEntries, dateUnseen).
+//
+// The count of scheduled asks is for one head: a new head starts at none.
 func (old marker) next(outcome Action, head string) marker {
-	return marker{
+	mk := marker{
 		Outcome: outcome, Head: head,
 		Notified: old.Notified, NotifiedFailed: old.NotifiedFailed, NotifiedUnread: old.NotifiedUnread,
 		Fingerprint: old.Fingerprint, Cache: old.Cache, FirstSeen: old.FirstSeen,
 	}
+	if old.Head == head {
+		mk.Asks, mk.AskedAt = old.Asks, old.AskedAt
+	}
+	return mk
+}
+
+// askGap is how long after the first scheduled ask for a head the model
+// is asked again about a read that still has no answer; every ask after
+// that waits twice as long as the one before: 30 minutes, 1 hour, 2
+// hours. That is nine asks in the first five and a half days, inside the
+// wait deadline of seven, where an ask at every half-hourly run would be
+// 336. A reviewer that is down for an hour costs a pull request little
+// time, and one that never answers costs little money.
+const askGap = 30 * time.Minute
+
+// askDue reports whether a scheduled run at now may ask the model about a
+// pull request at head. Only one whose marker this version wrote for that
+// very head: a head the gate has not written for is first evaluated with
+// no model, which gives the count a place to be kept before anything is
+// spent. Then the first ask is due at once, and each later one after the
+// doubling gap.
+func (m marker) askDue(head string, now time.Time) bool {
+	switch {
+	case m.Head != head:
+		return false
+	case m.Asks == 0:
+		return true
+	}
+	// 2^16 half-hours are years: the shift is capped so it cannot wrap.
+	return !now.Before(m.AskedAt.Add(askGap << min(m.Asks-1, 16)))
 }
 
 // markerRE is the marker line. The payload is base64 of JSON, because a
@@ -149,6 +193,10 @@ func parseMarker(body string) (marker, bool) {
 		return marker{}, false
 	}
 	if !gh.ValidSHA(m.Head) || len(m.Cache) > maxCached || len(m.FirstSeen) > maxFirstSeen {
+		return marker{}, false
+	}
+	// An ask has a time, and a time is an ask's.
+	if m.Asks < 0 || m.Asks > maxAsks || (m.Asks > 0) == m.AskedAt.IsZero() {
 		return marker{}, false
 	}
 	pins := map[string]bool{}
@@ -268,6 +316,17 @@ func findComment(ctx context.Context, cfg Config, number int) (*comment, error) 
 		}
 	}
 	return nil, nil
+}
+
+// remark writes mk in place of the marker line of the gate's comment c
+// and leaves the rest of the comment as it is: for a run that has
+// something to remember and nothing new to say.
+func remark(ctx context.Context, cfg Config, c *comment, mk marker) error {
+	loc := markerRE.FindStringIndex(c.Body)
+	if loc == nil {
+		return errors.New("land: the gate's comment has no marker to rewrite")
+	}
+	return cfg.GitHub.Patch(ctx, fmt.Sprintf("repos/%s/issues/comments/%d", cfg.Repo, c.ID), map[string]string{"body": mk.String() + c.Body[loc[1]:]}, nil)
 }
 
 // upsertComment writes body to the gate's comment, creating it when prev

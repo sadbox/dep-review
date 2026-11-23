@@ -111,6 +111,8 @@ func TestPublishRefreshed(t *testing.T) {
 		{name: "a newer head since: skipped", dir: "7", pull: pullJSON("open", "dependabot[bot]", strings.Repeat("4", 40)), calls: "GET pulls/7"},
 		{name: "the pull request cannot be read", dir: "7", want: "404", calls: "GET pulls/7"},
 		{name: "not a pull request's directory", dir: "seven", want: "not a refreshed pull request's directory"},
+		// One pull request has one directory.
+		{name: "a number spelled another way", dir: "07", want: "not a refreshed pull request's directory"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,7 +127,7 @@ func TestPublishRefreshed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = refreshed(context.Background(), api.config(t), filepath.Join(in, "refreshed"), entries[0], nil)
+			err = refreshed(context.Background(), api.config(t), in, entries[0], nil)
 			switch {
 			case tc.want == "" && tc.is == nil && err != nil,
 				tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)),

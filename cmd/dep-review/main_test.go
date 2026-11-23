@@ -57,6 +57,7 @@ func TestRequiredFlags(t *testing.T) {
 		"review":   {"--facts", "f", "--out", "o"},
 		"publish":  {"--in", "i"},
 		"refresh":  {"--repo-dir", "r", "--out", "o", "--app-slug", "gate"},
+		"reread":   {"--refreshed", "r", "--out", "o"},
 	}
 	for cmd, run := range commands {
 		args, ok := complete[cmd]

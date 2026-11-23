@@ -10,6 +10,10 @@
 //     (Join) and hands the result to allow.Decide. It holds the token
 //     that can merge.
 //
+// On a schedule the refresh job stands where fetch does and the second
+// review job, reread, where review does; refresh also writes, for reread
+// alone, which reads need not be asked about (AnsweredFile).
+//
 // The files are the only thing a later job believes about an earlier one,
 // so the contract is strict on purpose. Every file is one JSON object of
 // known members only, in exact case and without duplicates, within fixed
@@ -44,6 +48,15 @@ import (
 const (
 	FactsFile    = "facts.json"
 	VerdictsFile = "verdicts.json"
+	// AnsweredFile is the scheduled run's skip list, which the refresh
+	// job writes beside a pull request's facts for the second review job:
+	// the content keys of the prepared reads the model is not to be
+	// asked about in this run, because the gate's comment remembers an
+	// answer or because no ask is due. It has the verdicts file's form,
+	// with every entry Read none, so it says of no read that anyone read
+	// it. Publish does not open it: the job that writes it parses what a
+	// pull request wrote.
+	AnsweredFile = "answered.json"
 	// ChunksDir is the directory that holds the chunk files and nothing
 	// else. It may be absent when no update has a chunk (an artifact
 	// upload drops an empty directory).
@@ -262,8 +275,9 @@ type Verdicts struct {
 
 // Verdict is the reviewer's answer for one prepared read. It is about a
 // read's content, not about a pull request or a head commit, which is
-// what lets the scheduled job, which asks no model, decide on a stored
-// one.
+// what lets the gate's comment remember one for a later run: the
+// scheduled run does not ask about the same content twice, and a veto
+// stands across rebases.
 type Verdict struct {
 	// Key is the content key of the read that was reviewed.
 	Key string `json:"key"`

@@ -59,12 +59,17 @@ comments to bring a pull request up to date.
 A run that cannot decide is not silent. When the fetch job leaves no
 facts, or deciding fails, publish still runs: it sets the status to
 `error`, writes the comment ("the run failed", with the workflow run to
-re-run) and notifies once per head commit. When the review job fails or
-leaves a prepared read without a verdict, the pull request waits as
-before and the owner is told once, because the scheduled run asks no
-model and would not end that wait. A classify job that fails leaves only
-the failed workflow run: nothing is written on a pull request that was
-not classified.
+re-run) and notifies once per head commit. A classify job that fails
+leaves only the failed workflow run: nothing is written on a pull
+request that was not classified.
+
+When the model leaves a prepared read without a verdict (it did not
+answer, the review job failed, the token exchange was denied), the pull
+request waits and the scheduled run asks again by itself: at its next
+run, then 30 minutes after that ask, then after 1 hour, 2 hours and so
+on, each gap twice the one before, until the wait deadline. One miss
+needs nobody. When the second scheduled ask also gets no answer the
+owner is told once per head commit, and the gate goes on asking.
 
 To run the gate again, re-run all jobs of the workflow run, which is
 what the comment and the notification say. Publish decides only on facts
@@ -73,8 +78,9 @@ GitHub's "re-run failed jobs" hands a job that runs again the artifacts
 of the first attempt, so a publish or review job run again by itself
 would decide on what the registries said then with the clock of now.
 Such a run is reported as one that could not decide. The 4 hours are the
-timeouts of fetch, review and publish (2 h 35 min) and the time a job
-may wait for a runner or for the publishes ahead of it.
+timeouts of fetch, review and publish (2 h 35 min; a scheduled run's
+refresh, reread and publish have 2 h 45 min) and the time a job may wait
+for a runner or for the publishes ahead of it.
 
 Waiting for an age has no deadline. Waiting for a retry (a model read, a
 source that did not answer, a superseded Docker digest, required checks)
@@ -392,10 +398,14 @@ PR opened or pushed to
 schedule → gate.yml
             build
             refresh   for every PR left waiting: the identity      (read-only token)
-                      proof and the facts again, with the verdicts
-                      the gate's comment remembers; no model
-            publish   the identity proof once more, then decide,   (gate app)
-                      comment, status, merge
+                      proof and the facts again, and which reads
+                      the model need not be asked about now
+            reread    one tool-less model request per chunk of     (OIDC token only)
+                      a read that has no answer yet; not on a
+                      manual dispatch
+            publish   the identity proof once more, then decide    (gate app)
+                      on the facts, reread's verdicts and what
+                      its own comment remembers
 ```
 
 Publish jobs run one at a time in a repository and wait for each other
@@ -404,10 +414,13 @@ same moment. fetch and refresh run npm from a pinned Node major, not the
 runner image's.
 
 A verdict is remembered in the gate's comment by a hash of what was read
-and of the question (prompt, answer schema, model, effort). That is for
-the scheduled run, which has no model and decides on what was read
-before. An event's run (a push, a rebase, a re-run) always asks the
-model, whatever the comment remembers.
+and of the question (prompt, answer schema, model, effort). The
+scheduled run asks the model only about a read the comment has no
+answer for, and only when an ask is due; for the rest it decides on what
+was read before. An event's run (a push, a rebase, a re-run) always asks
+the model about every read, whatever the comment remembers. A verdict
+remembered under an older prompt or model is no answer: the scheduled
+run asks again.
 
 A veto is remembered for good. Once the model has objected to an
 update's code, that veto stands for the same code under the same
@@ -444,9 +457,14 @@ other code (a new version) and a changed prompt or model.
 6. Pin actions by tag and onboard the workflows to
    `.github/workflows/actions.lock` if Actions updates should merge.
 7. Give the Anthropic workspace a workload identity federation rule that
-   admits the review job: the repository's immutable OIDC subject, event
-   `workflow_run`, and a `job_workflow_ref` of this repository's
-   `gate.yml`. The workflow uses no API key.
+   admits the two review jobs: the repository's immutable OIDC subject,
+   the default branch as `ref`, an event that is `workflow_run` or
+   `schedule` (`claims.event_name in ["workflow_run", "schedule"]`), and
+   a `job_workflow_ref` of this repository's `gate.yml`. No other event:
+   the gate asks no model on a manual dispatch. The workflow uses no API
+   key. While the rule does not admit `schedule`, a scheduled ask is
+   denied, counts as a miss and is tried again later; nothing merges
+   unread.
 8. For npm, optionally turn install scripts off (next section).
 
 ### npm: turning install scripts off
@@ -528,10 +546,11 @@ and it then gets no status, comment or notification.
   every artifact it uses against sha256 sums that their producers passed
   as job outputs.
 - **Secrets.** classify, fetch and refresh hold a read-only token and no
-  secret. review holds only the OIDC token it exchanges for a short-lived
-  Claude token, and no access to the repository; the model gets text in a
-  request and has no tools. publish alone holds the gate app's token, in
-  the `dep-review` environment, and parses no untrusted text in a shell.
+  secret. review and reread hold only the OIDC token they exchange for a
+  short-lived Claude token, and no access to the repository; the model
+  gets text in a request and has no tools. publish alone holds the gate
+  app's token, in the `dep-review` environment, and parses no untrusted
+  text in a shell.
 - **What a job can assert.** The model can only veto: no answer of its
   makes a decision more permissive than "no veto", and none takes back a
   veto the gate's comment remembers. The facts file has no
@@ -551,11 +570,15 @@ and it then gets no status, comment or notification.
   with a length cap; it reaches logs only through a logger that escapes
   control characters and workflow commands. Notifications and commit
   statuses carry only the gate's own words.
-- **The scheduled path** has no model and no credential to ask one with.
-  Its one unprivileged job runs both the identity proof and the fetch, so
-  publish takes neither on its word: it runs the proof again itself for
-  every refreshed pull request and believes the facts only as far as that
-  goes.
+- **The scheduled path.** refresh runs both the identity proof and the
+  fetch in one unprivileged job, so publish takes neither on its word:
+  it runs the proof again itself for every refreshed pull request and
+  believes the facts only as far as that goes. refresh also reads the
+  gate's comment, and its copy of what the comment remembers goes to
+  reread only, as a list of reads to skip in which no entry says a read
+  was read. publish takes a verdict from reread's own artifact or from
+  the comment, which it reads itself. A wrong list makes the model answer
+  twice or leaves a read waiting; it cannot make a read count.
 - **One app per owner.** The gate app's private key sits in the
   `dep-review` environment of every repository the app is installed on.
   Anyone who can get a workflow change onto one such repository's default

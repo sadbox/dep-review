@@ -23,6 +23,15 @@ type Review struct {
 	// Fingerprint is the reviewer's (veto.Config.Fingerprint). Every
 	// verdict Run writes carries it.
 	Fingerprint string
+	// Answered, when not nil, makes this the scheduled run's review: a
+	// prepared read whose content key is in it is not put before the
+	// reviewer and gets no entry, and when the reviewer was not called at
+	// all no verdicts file is written, so that a file means the model was
+	// asked. It is a list of what to skip and never a source of verdicts:
+	// publish finds the answers to the skipped reads in the gate's own
+	// comment, or the reads wait. An event's review leaves it nil and
+	// asks about every read (spec section 11, amendments 39 and 64).
+	Answered map[string]bool
 	// Logf, when set, receives one line for each read: reviewed, or why
 	// not. Error text is quoted.
 	Logf func(format string, args ...any)
@@ -30,7 +39,9 @@ type Review struct {
 
 // Run reads the facts directory the fetch job wrote, gets a verdict for
 // every prepared read, once for each content key, and writes the verdicts
-// file into out, which it creates.
+// file into out, which it creates. With a skip list (Answered) it asks
+// only about the reads that are not on it, and writes no file when it
+// asked about none.
 //
 // The directory is believed only as far as internal/wire verified it;
 // anything else is an error, before the reviewer sees a byte and with no
@@ -71,10 +82,11 @@ func (r Review) Run(ctx context.Context, dir, out string) (wire.Verdicts, error)
 
 	verdicts := wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{}}
 	done := map[string]bool{}
+	asked := false
 	for i, u := range f.Facts.Updates {
 		// Two updates with the same read have one verdict: the file holds
 		// one entry for each key.
-		if u.Prepared.Status != wire.Prepared || done[u.Prepared.Key] {
+		if u.Prepared.Status != wire.Prepared || done[u.Prepared.Key] || r.Answered[u.Prepared.Key] {
 			continue
 		}
 		if ctx.Err() != nil {
@@ -84,11 +96,17 @@ func (r Review) Run(ctx context.Context, dir, out string) (wire.Verdicts, error)
 		// The key is the facts file's and the fingerprint this reviewer's,
 		// whatever the reviewer's answer carries.
 		v := wire.Verdict{Key: u.Prepared.Key, Fingerprint: r.Fingerprint}
+		asked = true
 		if v.Read, v.Veto, err = r.review(ctx, chunks, f, i); err != nil {
 			return wire.Verdicts{}, err
 		}
 		done[v.Key] = true
 		verdicts.Verdicts = append(verdicts.Verdicts, v)
+	}
+	if r.Answered != nil && !asked {
+		// The scheduled run: nobody was asked, and a file would say that
+		// somebody was.
+		return verdicts, ctx.Err()
 	}
 
 	b, err = wire.EncodeVerdicts(verdicts)

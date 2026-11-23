@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -30,7 +29,10 @@ const (
 	factsArtifact          = "facts"
 	verdictsArtifact       = "verdicts"
 	refreshedArtifact      = "refreshed"
-	classificationFile     = "classification.json"
+	// reverdictsArtifact is the scheduled run's verdicts: a directory for
+	// each pull request the second review job asked the model about.
+	reverdictsArtifact = "reverdicts"
+	classificationFile = "classification.json"
 	// sumsFile is the checksum manifest gate.yml's refresh job puts
 	// beside the pull requests' directories, and its publish job has
 	// checked by the time this command runs.
@@ -46,7 +48,7 @@ const (
 // event's run FETCH_RESULT and REVIEW_RESULT are how those jobs ended.
 func runPublish(args []string) error {
 	fl := newFlagSet("publish")
-	in := fl.String("in", "", "directory holding the artifacts, each in a directory of its name: classification, facts and verdicts from an event's run, or refreshed from a scheduled one (required)")
+	in := fl.String("in", "", "directory holding the artifacts, each in a directory of its name: classification, facts and verdicts from an event's run, or refreshed and reverdicts from a scheduled one (required)")
 	ignoreList := fl.String("ignore-ecosystems", "", ignoreUsage)
 	if err := fl.Parse(args); err != nil {
 		return err
@@ -162,7 +164,7 @@ func publishRefreshed(ctx context.Context, cfg land.Config, in string, ignore ma
 			continue
 		}
 		total++
-		if err := refreshed(ctx, cfg, filepath.Join(in, refreshedArtifact), e, ignore); err != nil {
+		if err := refreshed(ctx, cfg, in, e, ignore); err != nil {
 			failed++
 			log.Printf("publish: %s: %v", e.Name(), err)
 		}
@@ -173,18 +175,27 @@ func publishRefreshed(ctx context.Context, cfg land.Config, in string, ignore ma
 	return nil
 }
 
-// refreshed decides one pull request of a scheduled run. The refresh job
-// ran the identity proof and read what the pull request and its
-// dependencies wrote in one process, so its word for the identity is not
-// taken: the proof is run again here, and the facts are believed only as
-// far as it goes (checkFacts), as on an event.
-func refreshed(ctx context.Context, cfg land.Config, dir string, e fs.DirEntry, ignore map[model.Ecosystem]bool) error {
-	// The refresh job names a directory by its pull request's number.
-	number, err := strconv.Atoi(e.Name())
-	if err != nil || number < 1 || !e.IsDir() {
-		return errors.New("not a refreshed pull request's directory")
+// refreshed decides one pull request of a scheduled run, from its
+// directory e of the refreshed artifact under in. The refresh job ran the
+// identity proof and read what the pull request and its dependencies
+// wrote in one process, so its word for the identity is not taken: the
+// proof is run again here, and the facts are believed only as far as it
+// goes (checkFacts), as on an event.
+//
+// Its word for a verdict is not taken either. The verdicts are the ones
+// the second review job wrote in this run, in an artifact of its own, and
+// the ones the gate's comment remembers, which internal/land reads with
+// this job's token. The skip list the refresh job wrote for the review
+// job is not opened.
+func refreshed(ctx context.Context, cfg land.Config, in string, e fs.DirEntry, ignore map[model.Ecosystem]bool) error {
+	number, err := refreshedNumber(e)
+	if err != nil {
+		return err
 	}
-	w := decidable{facts: filepath.Join(dir, e.Name(), wire.FactsFile), verdicts: filepath.Join(dir, e.Name(), wire.VerdictsFile)}
+	w := decidable{
+		facts:    filepath.Join(in, refreshedArtifact, e.Name(), wire.FactsFile),
+		verdicts: filepath.Join(in, reverdictsArtifact, e.Name(), wire.VerdictsFile),
+	}
 	facts, err := readFacts(w.facts)
 	if err != nil {
 		return err
@@ -205,7 +216,23 @@ func refreshed(ctx context.Context, cfg land.Config, dir string, e fs.DirEntry, 
 	if err := checkFacts(class, facts); err != nil {
 		return err
 	}
-	_, err = decide(ctx, cfg, w)
+	cfg.Scheduled = true
+	// The review job writes a file for a pull request only when it put a
+	// read of it before the model, answered or not.
+	if _, err := os.Stat(w.verdicts); err == nil {
+		cfg.ModelAsked = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	written, err := decide(ctx, cfg, w)
+	if err != nil && !written && cfg.ModelAsked {
+		// Nothing was written, so nothing counted the ask. It is counted
+		// all the same, or a pull request that cannot be decided would be
+		// asked about at every run.
+		if aerr := land.Asked(ctx, cfg, number, facts.PullRequest.Head); aerr != nil {
+			log.Printf("publish: #%d: the ask could not be counted: %v", number, aerr)
+		}
+	}
 	return err
 }
 

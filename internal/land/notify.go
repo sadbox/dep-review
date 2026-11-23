@@ -67,6 +67,14 @@ func runLink(cfg Config) string {
 	return ": " + cfg.RunURL
 }
 
+// runRef ends a notification that names this run only as where to look.
+func runRef(cfg Config) string {
+	if cfg.RunURL == "" {
+		return ""
+	}
+	return " The run: " + cfg.RunURL
+}
+
 // notifyOnce sends m unless sent, a list the gate's comment keeps, has
 // head already, and adds head once m is delivered. A notification that
 // failed is an error and is not remembered: the next run sends it.

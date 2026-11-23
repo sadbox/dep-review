@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"time"
 
@@ -26,53 +27,23 @@ func runReview(args []string) error {
 	fl := newFlagSet("review")
 	facts := fl.String("facts", "", "the fetch job's directory: the facts file and the chunks (required)")
 	out := fl.String("out", "", "directory to write the verdicts file into (required)")
-	rule := fl.String("federation-rule-id", "", "workload identity federation rule (fdrl_...). Without it the API key in "+veto.APIKeyEnv+" is used, which is for local evaluation only")
-	org := fl.String("organization-id", "", "Anthropic organization ID, with --federation-rule-id")
-	ws := fl.String("workspace-id", "", "workspace (wrkspc_...), optional")
-	svac := fl.String("service-account-id", "", "service account (svac_...), optional")
+	model := modelFlags(fl)
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
 	if *facts == "" || *out == "" || fl.NArg() > 0 {
 		return errors.New("review: --facts and --out are required")
 	}
-	// The built-in settings, which are the ones the fetch job prepared
-	// the reads under. This job has no access to the repository, and
-	// needs none.
-	conf, err := config.Load()
+	client, fingerprint, err := model.reviewer()
 	if err != nil {
 		return err
 	}
-	settings := veto.FromConfig(conf)
-
-	var creds veto.Credentials
-	if *rule != "" {
-		federated, err := veto.NewFederated(veto.Federation{
-			IdentityToken:    veto.GitHubOIDCFromEnv().Token,
-			RuleID:           *rule,
-			OrganizationID:   *org,
-			WorkspaceID:      *ws,
-			ServiceAccountID: *svac,
-		}, settings.BaseURL, nil)
-		if err != nil {
-			return err
-		}
-		federated.Logf = log.Printf
-		creds = federated
-	} else if creds, err = veto.APIKeyFromEnv(); err != nil {
-		return err
-	}
-	client, err := veto.New(settings, creds, nil)
-	if err != nil {
-		return err
-	}
-	client.Logf = log.Printf
 
 	ctx, cancel := context.WithTimeout(context.Background(), reviewTimeout)
 	defer cancel()
 	verdicts, err := gather.Review{
 		Reviewer:    client,
-		Fingerprint: settings.Fingerprint(),
+		Fingerprint: fingerprint,
 		Logf:        log.Printf,
 	}.Run(ctx, *facts, *out)
 	if errors.Is(err, context.DeadlineExceeded) && verdicts.Version != 0 {
@@ -86,4 +57,54 @@ func runReview(args []string) error {
 	}
 	log.Printf("review: %d verdicts written", len(verdicts.Verdicts))
 	return nil
+}
+
+// modelFlagSet is the flags of the two commands that ask the model.
+type modelFlagSet struct {
+	rule, org, ws, svac *string
+}
+
+func modelFlags(fl *flag.FlagSet) modelFlagSet {
+	return modelFlagSet{
+		rule: fl.String("federation-rule-id", "", "workload identity federation rule (fdrl_...). Without it the API key in "+veto.APIKeyEnv+" is used, which is for local evaluation only"),
+		org:  fl.String("organization-id", "", "Anthropic organization ID, with --federation-rule-id"),
+		ws:   fl.String("workspace-id", "", "workspace (wrkspc_...), optional"),
+		svac: fl.String("service-account-id", "", "service account (svac_...), optional"),
+	}
+}
+
+// reviewer is the client that asks the model, and its fingerprint, under
+// the built-in settings, which are the ones the reads were prepared
+// under. A job that asks has no access to the repository, and needs
+// none.
+func (m modelFlagSet) reviewer() (*veto.Client, string, error) {
+	conf, err := config.Load()
+	if err != nil {
+		return nil, "", err
+	}
+	settings := veto.FromConfig(conf)
+
+	var creds veto.Credentials
+	if *m.rule != "" {
+		federated, err := veto.NewFederated(veto.Federation{
+			IdentityToken:    veto.GitHubOIDCFromEnv().Token,
+			RuleID:           *m.rule,
+			OrganizationID:   *m.org,
+			WorkspaceID:      *m.ws,
+			ServiceAccountID: *m.svac,
+		}, settings.BaseURL, nil)
+		if err != nil {
+			return nil, "", err
+		}
+		federated.Logf = log.Printf
+		creds = federated
+	} else if creds, err = veto.APIKeyFromEnv(); err != nil {
+		return nil, "", err
+	}
+	client, err := veto.New(settings, creds, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	client.Logf = log.Printf
+	return client, settings.Fingerprint(), nil
 }

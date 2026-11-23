@@ -281,6 +281,54 @@ func TestReviewOncePerKey(t *testing.T) {
 	wantOutcome(t, allow.Decide(wire.Join(f, got, finger), defaults(t).Policy(), now), allow.Merge, "")
 }
 
+// The scheduled run's review has a skip list: a read on it is not put
+// before the reviewer and gets no entry, and a run that asked about
+// nothing writes no file, so that a file means the model was asked (spec
+// section 11, amendment 64). A skipped read is not thereby read: what
+// publish makes of it is what the gate's own comment remembers.
+func TestReviewSkipsWhatWasAnswered(t *testing.T) {
+	dir, f := fetched(t, nil, "example.com/a", "example.com/b", "example.com/c")
+	keyOf := func(i int) string { return f.Facts.Updates[i].Prepared.Key }
+
+	reviewer := &fakeReviewer{}
+	got := reviewed(t, Review{Reviewer: reviewer, Fingerprint: finger, Answered: map[string]bool{keyOf(0): true, keyOf(2): true}}, dir)
+	if len(reviewer.requests) != 1 || reviewer.requests[0].Read.Pair.Name != "example.com/b" {
+		t.Fatalf("requests %+v, want one, for the read that is not on the list", reviewer.requests)
+	}
+	if len(got.Verdicts) != 1 || got.Verdicts[0].Key != keyOf(1) {
+		t.Fatalf("verdicts %+v, want one, for the read that was asked about", got.Verdicts)
+	}
+	// The two skipped reads have no verdict here: on these verdicts alone
+	// the pull request waits for them.
+	d := allow.Decide(wire.Join(f, got, finger), defaults(t).Policy(), now)
+	wantOutcome(t, d, allow.Wait, allow.ReasonReadPending)
+
+	// Everything on the list: nobody is asked and no file is written.
+	reviewer = &fakeReviewer{}
+	out := filepath.Join(t.TempDir(), "verdicts")
+	all := map[string]bool{keyOf(0): true, keyOf(1): true, keyOf(2): true}
+	if _, err := (Review{Reviewer: reviewer, Fingerprint: finger, Answered: all}).Run(context.Background(), dir, out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, wire.VerdictsFile)); !errors.Is(err, os.ErrNotExist) || len(reviewer.requests) != 0 {
+		t.Errorf("a verdicts file (%v) or %d requests although every read was on the skip list", err, len(reviewer.requests))
+	}
+
+	// An empty list is still the scheduled run's: every read is asked
+	// about and the file is written. And the directory is checked as on
+	// an event before anything is skipped or sent.
+	reviewer = &fakeReviewer{}
+	if got := reviewed(t, Review{Reviewer: reviewer, Fingerprint: finger, Answered: map[string]bool{}}, dir); len(got.Verdicts) != 3 || len(reviewer.requests) != 3 {
+		t.Errorf("an empty skip list: %d verdicts from %d requests, want 3 and 3", len(got.Verdicts), len(reviewer.requests))
+	}
+	if err := os.WriteFile(filepath.Join(dir, wire.ChunksDir, "extra.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Review{Reviewer: reviewer, Fingerprint: finger, Answered: all}).Run(context.Background(), dir, filepath.Join(t.TempDir(), "v")); err == nil {
+		t.Error("a directory with a file too many was accepted because nothing was to be asked")
+	}
+}
+
 // The facts directory is believed only as far as internal/wire verified
 // it. One file too many, or one byte changed, and the reviewer is not
 // asked and no verdicts file is written.

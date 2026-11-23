@@ -1,7 +1,7 @@
 // Command dep-review is the gate, one subcommand for each job of
 // .github/workflows/gate.yml that runs it: classify, fetch, review,
-// publish and refresh. A subcommand reads its flags, its files and the
-// job's environment and calls the package that does the work
+// publish, refresh and reread. A subcommand reads its flags, its files
+// and the job's environment and calls the package that does the work
 // (internal/classify, internal/gather, internal/land). One more
 // subcommand, replay, is no job's: it measures a policy offline
 // (internal/replay). See README.md.
@@ -24,6 +24,7 @@ var commands = map[string]func([]string) error{
 	"review":   runReview,
 	"publish":  runPublish,
 	"refresh":  runRefresh,
+	"reread":   runReread,
 }
 
 // tools are the subcommands no job runs.
@@ -37,7 +38,7 @@ func main() {
 	// logLine: one line, no control characters, no workflow commands.
 	log.SetOutput(lineWriter{os.Stderr})
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review|publish|refresh|replay [flags]")
+		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review|publish|refresh|reread|replay [flags]")
 		os.Exit(2)
 	}
 	run, ok := commands[os.Args[1]]

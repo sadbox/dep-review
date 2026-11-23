@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/gh"
@@ -78,12 +79,13 @@ type Result struct {
 // call that would replace it failed. On an event's run publish then calls
 // Failed, which sets the status again.
 //
-// On an event's run (Config.ModelAsked) a wait with a prepared read the
-// model left without a verdict is also notified, once per head: the
-// scheduled job asks no model, so only a person running the gate again
-// ends that wait before its deadline. All of its jobs: the review job run
-// again by itself would hand publish the first attempt's facts, which it
-// does not decide on once they are older than MaxFactsAge.
+// A prepared read the model left without a verdict is a wait, and the
+// scheduled run asks again by itself (askDue), so one miss needs nobody.
+// The comment counts the scheduled runs that asked for this head. When
+// the second of them also leaves a prepared read unanswered, the owner is
+// told, once per head: the reviewer is not answering, and the gate goes
+// on asking until the wait deadline. An event's run counts nothing and
+// sends no such notice.
 //
 // A failed notification is returned as an error after everything else was
 // written, and is not remembered as sent: the next run sends it. It is
@@ -171,19 +173,60 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	if res.Action == ActionWait {
 		mk.NotBefore, mk.Deadline = res.Decision.NotBefore, res.Decision.Deadline
 	}
+	switch {
+	case !cfg.Scheduled:
+		// An event's run asked about every read itself. What the schedule
+		// counts for this head starts again, so its first ask is not put
+		// off for an outage that an earlier run sat through.
+		mk.Asks, mk.AskedAt = 0, time.Time{}
+	case cfg.ModelAsked:
+		mk.Asks, mk.AskedAt = min(mk.Asks+1, maxAsks), ev.now
+	}
 	var notifyErr error
 	if msg, ok := notification(cfg, pr, res); ok {
 		notifyErr = notifyOnce(ctx, cfg, &mk.Notified, pr.Head, msg)
 	}
-	if cfg.ModelAsked && res.Action == ActionWait && unanswered(ev) {
-		notifyErr = errors.Join(notifyErr, notifyOnce(ctx, cfg, &mk.NotifiedUnread, pr.Head, message(cfg, pr.Number,
-			" waits unread: the model did not answer for code the gate prepared, and the scheduled job asks no model. Re-run all jobs"+runLink(cfg))))
+	if cfg.Scheduled && mk.Asks >= unreadNoticeAfter && res.Action == ActionWait && unanswered(ev) {
+		notifyErr = errors.Join(notifyErr, notifyOnce(ctx, cfg, &mk.NotifiedUnread, pr.Head, message(cfg, pr.Number, unreadNotice+runRef(cfg))))
 	}
 
 	if err := upsertComment(ctx, cfg, pr.Number, prev, render(view{res: res, ev: ev, marker: mk, runURL: cfg.RunURL})); err != nil {
 		return Result{}, err
 	}
 	return res, notifyErr
+}
+
+// unreadNoticeAfter is how many scheduled runs must have asked the model
+// for a head, with a prepared read still unanswered, before the owner is
+// told. One miss is a blip that the next ask ends. Two, half an hour
+// apart, is a reviewer that is down or a rule that denies the token.
+const unreadNoticeAfter = 2
+
+// unreadNotice is that notification's sentence.
+const unreadNotice = " waits unread: the model has not answered for code the gate prepared, in two scheduled runs that asked it. " +
+	"The gate keeps asking, after twice as long each time, until the wait deadline. Nothing needs doing unless the reviewer is down for good."
+
+// Asked counts one scheduled ask for a pull request that the run then
+// could not decide: the model was asked, so the next ask has to wait its
+// turn like any other, or a pull request that fails at every run would be
+// asked about at every run. It rewrites the marker line of the gate's
+// comment and nothing else. A comment whose marker is not for head has no
+// count to add to, and is left alone: no model is asked for such a head
+// (askDue).
+func Asked(ctx context.Context, cfg Config, number int, head string) error {
+	if err := cfg.check(); err != nil {
+		return err
+	}
+	c, err := findComment(ctx, cfg, number)
+	if err != nil || c == nil {
+		return err
+	}
+	mk, ok := parseMarker(c.Body)
+	if !ok || mk.Head != head {
+		return nil
+	}
+	mk.Asks, mk.AskedAt = min(mk.Asks+1, maxAsks), cfg.now()
+	return remark(ctx, cfg, c, mk)
 }
 
 // unanswered reports whether fetch prepared a read that has no verdict.
@@ -205,8 +248,8 @@ func unanswered(ev Evaluation) bool {
 // It sets the dep-review status to error, replaces the gate's comment by
 // one that says the run failed and how to run it again, and notifies once
 // per head, remembered apart from a decision's notification. The marker's
-// outcome is ActionFailed, which the scheduled job does not pick up: it
-// asks no model, and could not finish what this run did not.
+// outcome is ActionFailed, which the scheduled job does not pick up: the
+// owner has been told how to run the gate again.
 //
 // The way out it names is always to run all jobs again, never the failed
 // ones: a job that is not run again keeps what it made in the first

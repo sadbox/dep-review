@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -82,11 +80,13 @@ func TestWaiting(t *testing.T) {
 		if r.Number != want.number || r.Head != want.head || r.PastDeadline != want.past {
 			t.Errorf("entry %d: #%d at %s, past its deadline %t; want #%d at %s, %t", i, r.Number, r.Head, r.PastDeadline, want.number, want.head, want.past)
 		}
-		if len(r.Verdicts.Verdicts) != 1 || r.Verdicts.Verdicts[0] != (wire.Verdict{Key: keyA, Fingerprint: reviewer, Read: allow.ReadFull}) {
-			t.Errorf("#%d: cached verdicts %+v", r.Number, r.Verdicts)
+		if !slices.Equal(r.Answered, []string{keyA}) {
+			t.Errorf("#%d: answered reads %v, want the one the comment remembers", r.Number, r.Answered)
 		}
-		if _, err := wire.EncodeVerdicts(r.Verdicts); err != nil {
-			t.Errorf("#%d: the cached verdicts are not a verdicts file: %v", r.Number, err)
+		// The model is asked only for the head the comment was written
+		// for: #1 was rebased since, and is evaluated without it first.
+		if r.Ask != (r.Head == headA) {
+			t.Errorf("#%d at %s: an ask is due: %t", r.Number, r.Head, r.Ask)
 		}
 	}
 	if w := f.writes(); len(w) != 0 {
@@ -96,8 +96,9 @@ func TestWaiting(t *testing.T) {
 
 // TestScheduledReevaluation is the whole of a wait: publish says wait and
 // remembers the verdict; the scheduled job finds the pull request, and a
-// later publish, on a fresh facts file and the remembered verdict, merges.
-// Nothing but allow.Decide's answer to the fresh facts makes it merge.
+// later publish, on a fresh facts file and what its own comment remembers,
+// merges. Nothing but allow.Decide's answer to the fresh facts makes it
+// merge, and nothing the refresh job could write stands in for a verdict.
 func TestScheduledReevaluation(t *testing.T) {
 	f := newFake(t)
 	f.open = "[" + pullJSON(testPR, "open", headA, "main", "clean", false) + "]"
@@ -111,39 +112,37 @@ func TestScheduledReevaluation(t *testing.T) {
 
 	// Too early: the scheduled run decides again and still waits.
 	later := t0.Add(24 * time.Hour)
-	again := func(f *fakeGitHub, now time.Time, change func(*wire.Facts)) Result {
+	again := func(f *fakeGitHub, now time.Time, scheduled bool, change func(*wire.Facts)) Result {
 		t.Helper()
 		before := len(f.writes())
 		waiting, unread, err := Waiting(context.Background(), f.config(now, nil))
 		if err != nil || len(unread) != 0 || len(waiting) != 1 || waiting[0].Number != testPR || waiting[0].PastDeadline {
 			t.Fatalf("waiting: %+v, unread %v, %v", waiting, unread, err)
 		}
+		// The read has an answer, so there is nothing to ask the model.
+		if !slices.Equal(waiting[0].Answered, []string{keyA}) {
+			t.Fatalf("answered reads %v, want the one the comment remembers", waiting[0].Answered)
+		}
 		if len(f.writes()) != before {
 			t.Fatal("Waiting wrote something")
 		}
-		// The workflow's three steps: fetch again, write the remembered
-		// verdicts as the verdicts file, publish.
+		// The workflow's steps: fetch again, ask the model about nothing,
+		// publish. There is no verdicts file.
 		fresh := goodFacts(t)
 		fresh.GatheredAt = now
 		fresh.Facts.Updates[0].FirstSeen = facts.Facts.Updates[0].FirstSeen
 		if change != nil {
 			change(&fresh)
 		}
-		dir := files(t, fresh, nil)
-		b, err := wire.EncodeVerdicts(waiting[0].Verdicts)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, wire.VerdictsFile), b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		res, err := publish(t, f.config(now, nil), dir)
+		cfg := f.config(now, nil)
+		cfg.Scheduled = scheduled
+		res, err := publish(t, cfg, files(t, fresh, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
 		return res
 	}
-	if res := again(f, later, nil); res.Action != ActionWait || f.count("PUT", "/merge") != 0 {
+	if res := again(f, later, true, nil); res.Action != ActionWait || f.count("PUT", "/merge") != 0 {
 		t.Fatalf("a day later: %+v, want a wait and no merge call", res)
 	}
 
@@ -153,15 +152,26 @@ func TestScheduledReevaluation(t *testing.T) {
 	pulled := func(f *wire.Facts) { f.Facts.Updates[0].Clean = allow.No("retracted", "go list -m -retracted") }
 	// This happens in a copy of the repository, so that the pull request
 	// here can go on to merge.
-	copied := newFake(t)
-	copied.open, copied.comments = f.open, map[int][]*fakeComment{testPR: {{1, testBot, f.gateComment(testPR)}}}
-	if res := again(copied, due, pulled); res.Action != ActionPerson || res.Decision.Reasons[0] != allow.ReasonNotClean || copied.count("PUT", "/merge") != 0 {
+	copyOf := func() *fakeGitHub {
+		c := newFake(t)
+		c.open, c.comments = f.open, map[int][]*fakeComment{testPR: {{1, testBot, f.gateComment(testPR)}}}
+		return c
+	}
+	copied := copyOf()
+	if res := again(copied, due, true, pulled); res.Action != ActionPerson || res.Decision.Reasons[0] != allow.ReasonNotClean || copied.count("PUT", "/merge") != 0 {
 		t.Fatalf("pulled version: %+v, want a person and no merge call", res)
+	}
+
+	// An event's run that got no answer is not helped by the memory: it
+	// asks the model itself (spec section 11, amendment 39).
+	copied = copyOf()
+	if res := again(copied, due, false, nil); res.Action != ActionWait || res.Decision.Reasons[0] != allow.ReasonReadPending || copied.count("PUT", "/merge") != 0 {
+		t.Fatalf("an event's run without verdicts: %+v, want a wait for the read", res)
 	}
 
 	// Old enough and still clean: merged, with the remembered verdict and
 	// no model call.
-	if res := again(f, due, nil); res.Action != ActionMerged || f.count("PUT", "/merge") != 1 {
+	if res := again(f, due, true, nil); res.Action != ActionMerged || f.count("PUT", "/merge") != 1 {
 		t.Fatalf("when due: %+v, want a merge", res)
 	}
 	if posts := f.count("POST", "/issues/7/comments"); posts != 1 {
@@ -201,5 +211,101 @@ func TestPushover(t *testing.T) {
 	code, calls = http.StatusBadRequest, 0
 	if err := p.Notify(context.Background(), m); err == nil || calls != 1 {
 		t.Errorf("error %v after %d calls, want an error after 1", err, calls)
+	}
+}
+
+// TestAskDue: when a scheduled run may ask the model about a pull request
+// (spec section 11, amendment 64). Only for the head the gate's comment
+// was written for, at once the first time, and then after a gap that
+// doubles: nine asks fit before the wait deadline, not 336.
+func TestAskDue(t *testing.T) {
+	at := func(asks int, asked time.Time) marker {
+		return marker{Outcome: ActionWait, Head: headA, Asks: asks, AskedAt: asked}
+	}
+	for _, tc := range []struct {
+		name string
+		m    marker
+		head string
+		now  time.Time
+		want bool
+	}{
+		{"never asked", at(0, time.Time{}), headA, t0, true},
+		{"a marker for another head", at(0, time.Time{}), headB, t0, false},
+		{"asked once, 29 minutes ago", at(1, t0), headA, t0.Add(29 * time.Minute), false},
+		{"asked once, 30 minutes ago", at(1, t0), headA, t0.Add(30 * time.Minute), true},
+		{"asked twice, 59 minutes ago", at(2, t0), headA, t0.Add(59 * time.Minute), false},
+		{"asked twice, an hour ago", at(2, t0), headA, t0.Add(time.Hour), true},
+		{"asked three times, two hours ago", at(3, t0), headA, t0.Add(2 * time.Hour), true},
+		{"asked nine times, five days ago", at(9, t0), headA, t0.Add(5 * 24 * time.Hour), false},
+		{"asked nine times, 128 hours ago", at(9, t0), headA, t0.Add(128 * time.Hour), true},
+		// A count no run makes: the gap does not wrap around to "now".
+		{"asked as often as a marker can say", at(maxAsks, t0), headA, t0.Add(365 * 24 * time.Hour), false},
+	} {
+		if got := tc.m.askDue(tc.head, tc.now); got != tc.want {
+			t.Errorf("%s: due %t, want %t", tc.name, got, tc.want)
+		}
+	}
+
+	// With every ask unanswered, the asks of one head up to the wait
+	// deadline, at the half-hourly schedule's ticks.
+	conf, _ := defaults(t)
+	m, asks := at(0, time.Time{}), 0
+	for now := t0; now.Before(t0.Add(conf.Policy().WaitDeadline)); now = now.Add(30 * time.Minute) {
+		if m.askDue(headA, now) {
+			asks++
+			m.Asks, m.AskedAt = m.Asks+1, now
+		}
+	}
+	if asks != 9 {
+		t.Errorf("%d asks before the wait deadline, want 9", asks)
+	}
+}
+
+// TestAsked: a scheduled run that asked the model and then could not
+// decide still counts the ask, by rewriting the marker line alone. What
+// the comment remembers and says is left as it is.
+func TestAsked(t *testing.T) {
+	_, reviewer := defaults(t)
+	veto := &allow.Veto{Category: "exfiltration", Quotes: []string{"x"}}
+	old := marker{Outcome: ActionWait, Head: headA, NotBefore: t0.Add(time.Hour), Deadline: t0.Add(48 * time.Hour),
+		Notified: []string{headB}, Fingerprint: reviewer, Cache: []cached{{Key: keyA, Read: allow.ReadFull, Veto: veto}},
+		FirstSeen: []seen{{Pin: keyB, At: t0}}, Asks: 1, AskedAt: t0.Add(-time.Hour)}
+	const rest = "\n### dep-review: waiting\n\nthe comment's text\n"
+
+	f := newFake(t)
+	f.comments[testPR] = []*fakeComment{{1, testBot, old.String() + rest}}
+	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA); err != nil {
+		t.Fatal(err)
+	}
+	body := f.gateComment(testPR)
+	got, ok := parseMarker(body)
+	want := old
+	want.Asks, want.AskedAt = 2, t0
+	if !ok || got.String() != want.String() || !strings.HasSuffix(body, rest) {
+		t.Errorf("after the ask: marker %+v (parsed %t), want %+v; the comment:\n%s", got, ok, want, body)
+	}
+	if w := f.writes(); len(w) != 1 || w[0].method != "PATCH" {
+		t.Errorf("writes %+v, want the comment rewritten and nothing else", w)
+	}
+
+	// No model is asked for a head the comment was not written for, so
+	// there is no count to add to; nor in a comment nobody can read.
+	for name, body := range map[string]string{
+		"a marker for another head": old.String() + rest,
+		"no marker":                 "<!-- dep-review:v1 -->" + rest,
+	} {
+		f := newFake(t)
+		f.comments[testPR] = []*fakeComment{{1, testBot, body}}
+		head := headB
+		if name == "no marker" {
+			head = headA
+		}
+		if err := Asked(context.Background(), f.config(t0, nil), testPR, head); err != nil || len(f.writes()) != 0 {
+			t.Errorf("%s: %v, writes %+v; want nothing", name, err, f.writes())
+		}
+	}
+	f = newFake(t)
+	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA); err != nil || len(f.writes()) != 0 {
+		t.Errorf("no comment: %v, writes %+v; want nothing", err, f.writes())
 	}
 }
