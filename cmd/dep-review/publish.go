@@ -333,6 +333,15 @@ func decideRefreshed(ctx context.Context, cfg land.Config, w decidable, facts wi
 	if err := checkFacts(class, facts); err != nil {
 		return kept, false, err
 	}
+	if class.Kind == model.KindDependabotUnverified {
+		// This job's proof says no, and that is the decision's Identity
+		// whatever the refresh job's could not finish (spec section 11,
+		// amendment 75).
+		cfg.Unverified = class.Reason
+		if cfg.Unverified == "" {
+			cfg.Unverified = "publish's proof does not show the pull request to be Dependabot's alone"
+		}
+	}
 	return decide(ctx, cfg, w)
 }
 

@@ -45,6 +45,9 @@ type fakeAPI struct {
 	// request that is Dependabot's alone, and the default branch's rules
 	// with a required check.
 	proof bool
+	// unruled, with proof, has no rule on the pull request's branch: by the
+	// proof, a pull request that is not Dependabot's alone.
+	unruled bool
 	// commentFails is how many writes of the comment, from the next one,
 	// GitHub answers 502.
 	commentFails int
@@ -57,6 +60,8 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call := r.Method + " " + strings.TrimPrefix(r.URL.Path, "/repos/o/r/")
 	f.calls = append(f.calls, call)
 	switch {
+	case f.proof && f.unruled && call == branchRules:
+		io.WriteString(w, "[]")
 	case f.proof && proofAnswers[call] != "":
 		io.WriteString(w, proofAnswers[call])
 	case (call == "POST issues/7/comments" || call == "PATCH issues/comments/1") && f.commentFails > 0:
@@ -91,6 +96,9 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// branchRules is the read of the rules on #7's branch.
+const branchRules = "GET rules/branches/dependabot/go_modules/example.com/m-1.0.1"
+
 // proofAnswers are fakeAPI's answers with proof set: one commit by
 // Dependabot that GitHub signed, the branch's creation by Dependabot, an
 // empty timeline, the rules that keep everyone else off the branch, and a
@@ -100,7 +108,7 @@ var proofAnswers = map[string]string{
 	"GET activity":            `[{"before":"0000000000000000000000000000000000000000","after":"` + testHead + `","activity_type":"branch_creation","actor":{"login":"dependabot[bot]"}}]`,
 	"GET issues/7/timeline":   `[]`,
 	"GET rules/branches/main": `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
-	"GET rules/branches/dependabot/go_modules/example.com/m-1.0.1": `[{"type":"creation"},{"type":"update"},{"type":"deletion"}]`,
+	branchRules:               `[{"type":"creation"},{"type":"update"},{"type":"deletion"}]`,
 }
 
 // config is internal/land's configuration against the fake.
@@ -234,6 +242,43 @@ func TestPublishRefreshed(t *testing.T) {
 			t.Errorf("requests %q, want the open pull requests", got)
 		}
 	})
+}
+
+// Publish's own proof can only take away. When it says the pull request is
+// not Dependabot's alone, that is the decision's Identity, whatever the
+// refresh job's proof could not finish: a person's for the identity, not
+// a wait (spec section 11, amendment 75).
+func TestPublishRefreshedProofSaysNo(t *testing.T) {
+	for name, identity := range map[string]allow.Fact{
+		"the refresh job's proof was unfinished": allow.Unavailable("the branch's rules could not be read: GitHub did not answer (HTTP 502)", "classify"),
+		"the refresh job's proof said no too":    allow.No("no active rule restricts creating, updating and deleting this dependabot/ branch", "classify"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), proof: true, unruled: true}
+			in := t.TempDir()
+			facts := goodFacts()
+			facts.Facts.Identity = identity
+			// Young enough to wait, so that only Identity can make it a
+			// person's.
+			facts.Facts.Opened = testGathered.Add(-time.Hour)
+			facts.Facts.Updates[0].FirstSeen = allow.At(testGathered.Add(-time.Hour), "test")
+			writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), facts)
+			entries, err := os.ReadDir(filepath.Join(in, "refreshed"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := refreshed(context.Background(), api.config(t), in, entries[0], nil); err != nil {
+				t.Fatalf("err = %v (requests %v)", err, api.calls)
+			}
+			if !slices.Contains(api.calls, "GET "+strings.TrimPrefix(branchRules, "GET ")) {
+				t.Errorf("the proof did not get to the branch's rules: %v", api.calls)
+			}
+			written := strings.Join(api.bodies, "\n")
+			if !strings.Contains(written, `"state":"failure"`) || !strings.Contains(written, "needs a person: identity") {
+				t.Errorf("wrote %s", written)
+			}
+		})
+	}
 }
 
 // handMarker is a marker line as internal/land writes it, for a comment

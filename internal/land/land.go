@@ -71,6 +71,12 @@ type Config struct {
 	// on a scheduled one when the second review job wrote a verdicts file
 	// for it.
 	ModelAsked bool
+	// Unverified is the reason of publish's own identity proof when it says
+	// the pull request is not Dependabot's alone, or "". Decide takes it as
+	// a "no" for Identity whatever the facts file says, since the proof of
+	// the job that gathered the facts may not have finished (spec section
+	// 11, amendment 75). It can only take away.
+	Unverified string
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -230,6 +236,9 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 		// Identity includes "the base is the default branch". It was true
 		// when classify looked; it is not now.
 		ev.Facts.Identity = ev.Facts.Identity.And(allow.No("the pull request's base is no longer the default branch", "GitHub pull request, read by publish"))
+	}
+	if cfg.Unverified != "" {
+		ev.Facts.Identity = ev.Facts.Identity.And(allow.No(cfg.Unverified, "classify, run by publish"))
 	}
 	if err := ctx.Err(); err != nil {
 		// A context that ended reads as "GitHub did not answer" above.

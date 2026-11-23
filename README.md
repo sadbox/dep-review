@@ -613,7 +613,9 @@ and it then gets no status, comment or notification.
 - **The scheduled path.** refresh runs both the identity proof and the
   fetch in one unprivileged job, so publish takes neither on its word:
   it runs the proof again itself for every refreshed pull request and
-  believes the facts only as far as that goes. refresh also reads the
+  believes the facts only as far as that goes; when its proof says the
+  pull request is not Dependabot's alone, that is the decision's
+  Identity whatever the facts say. refresh also reads the
   gate's comment, and its copy of what the comment remembers goes to
   reread only, as a list of reads to skip in which no entry says a read
   was read. publish takes a verdict from reread's own artifact or from
