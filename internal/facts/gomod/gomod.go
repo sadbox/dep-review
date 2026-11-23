@@ -135,7 +135,8 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 		u.Clean = cleanFact(up, u.Listed.Holds(), d, downloadedOK, info, infoOK, versions, versionsOK, adv)
 
 		// The commit time go list reports only chooses where the reading
-		// of the index starts; the publisher sets it.
+		// of the index starts, and only when the proxy's own time for the
+		// version leads nowhere (seenFact); the publisher sets it.
 		switch {
 		case infoOK && info.Error == nil && info.Time != nil:
 			u.FirstSeen = seenFact(ctx, ix, up.name, up.to, *info.Time, now)
@@ -399,10 +400,33 @@ func cleanFact(up update, listedModule bool, d downloaded, downloadedOK bool, in
 	return clean
 }
 
-// seenFact looks a version up in the index, starting a little before its
-// commit time.
+// seenFact looks a version up in the index. It starts where the proxy
+// says it stored the version (index.stored) and, when that leads to no
+// line for the version, a little before the commit time, which was the
+// only start before (spec section 11, amendment 61): a tag cut long after
+// its commit is cached that much later, and no page budget reaches it
+// from the commit. From either start the time is the index's own, on its
+// line for exactly this module and version, and an index that does not
+// answer is waited for. When neither start finds the version the text
+// ends with what became of the first, so that a proxy that stops sending
+// the header shows in the gate's comment.
 func seenFact(ctx context.Context, ix *index, name, version string, commit, now time.Time) allow.TimeFact {
-	seen, why, down := ix.firstSeen(ctx, name, version, commit.Add(-indexStartMargin))
+	var (
+		seen time.Time
+		why  string
+		down bool
+	)
+	pointer := "the proxy gave no Last-Modified to start at"
+	if at, ok := ix.stored(ctx, name, version); ok {
+		seen, why, down = ix.firstSeen(ctx, name, version, at.Add(-indexStoredMargin), indexPagesAtStored)
+		pointer = "nor from the proxy's Last-Modified, " + at.UTC().Format(time.RFC3339)
+	}
+	if seen.IsZero() && !down {
+		seen, why, down = ix.firstSeen(ctx, name, version, commit.Add(-indexStartMargin), ix.perVersion)
+		if seen.IsZero() && !down {
+			why += "; " + pointer
+		}
+	}
 	switch {
 	case down:
 		return allow.UnavailableTime(why, sourceIndex)

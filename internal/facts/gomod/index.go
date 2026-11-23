@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/mod/module"
+
 	"github.com/sadbox/dep-review/internal/facts"
 )
 
@@ -21,9 +23,12 @@ import (
 // each with the proxy's own clock at that moment. That is the first-seen
 // time the gate wants: a version's commit time is whatever the publisher
 // wrote into the commit. The feed has no lookup by module and is read
-// forward from a point in time, so the commit time chooses where to
-// start: a publisher who lies about it makes the version impossible to
-// find, which goes to a person, and never makes it look older.
+// forward from a point in time. Two things say where to start, and
+// neither is ever the answer: the time the proxy says it stored the
+// version at (stored), and failing that the commit time. A start that is
+// wrong makes the version impossible to find, which leaves it to the
+// publish job's own clock, and never makes it look older: the time is the
+// one on the feed's own line for exactly that module and version.
 
 const (
 	// defaultIndexURL is the feed.
@@ -31,24 +36,37 @@ const (
 	// indexPageLimit is the most lines the index returns for one request.
 	// It answers 400 to a larger limit.
 	indexPageLimit = 2000
-	// indexPagesPerVersion is how far the gatherer reads forward for one
-	// version before it gives up. In November 2026 the index grew by
-	// 2000 lines every 40 to 55 minutes, and 50 pages reached 30 hours
-	// past their start. A tag the proxy first served later than that
-	// after its commit is not found, and the growth of the index only
-	// shortens the window.
+	// indexPagesPerVersion is how far the gatherer reads forward from a
+	// version's commit time before it gives up. In November 2026 the
+	// index grew by 2000 lines every 40 to 55 minutes, and 50 pages
+	// reached 30 hours past their start. A tag the proxy first served
+	// later than that after its commit is not found this way, and the
+	// growth of the index only shortens the window.
 	indexPagesPerVersion = 50
+	// indexPagesAtStored is how far it reads forward from the time the
+	// proxy says it stored the version at. The line is at that second or
+	// nowhere near: on 58 of 58 versions checked on 2026-11-23 it was
+	// among the first five lines, and at most 64 lines shared one second.
+	indexPagesAtStored = 2
 	// indexPagesPerRun bounds all the reading of one Gather. A version
-	// that is not found already sends the pull request to a person, so
-	// there is no point in reading on for long after that.
+	// that is not found is dated by the publish job's own clock, which
+	// is never too early, so there is no point in reading on for long.
 	indexPagesPerRun = 150
 	// indexStartMargin is how far before the commit time the reading
 	// starts, for a committer whose clock runs a little fast.
 	indexStartMargin = 10 * time.Minute
+	// indexStoredMargin is how far before the proxy's time the reading
+	// starts: the header has whole seconds, and nothing says whether it
+	// was cut or rounded to them.
+	indexStoredMargin = time.Second
 	// indexRequestTimeout bounds one request, whatever the client allows.
 	indexRequestTimeout = time.Minute
 	// maxIndexPage bounds one response. A full page is about 250 KB.
 	maxIndexPage = 8 << 20
+	// proxyURL is where the go command gets a module version's files.
+	proxyURL = "https://proxy.golang.org/"
+	// maxModFile is how much of a go.mod is read off the connection.
+	maxModFile = 1 << 20
 
 	sourceIndex = "index.golang.org (when proxy.golang.org first cached the version)"
 )
@@ -60,8 +78,8 @@ type index struct {
 	// recorded with a smaller limit.
 	url   string
 	limit int
-	// perVersion and left are the page budgets: for one lookup, and what
-	// remains for this run.
+	// perVersion and left are the page budgets: for one lookup from a
+	// commit time, and what remains for this run.
 	perVersion int
 	left       int
 	// pages is every page this run has fetched, by its since. Modules that
@@ -83,23 +101,64 @@ type indexEntry struct {
 // know.
 var errIndexDown = errors.New("the index did not answer")
 
+// stored asks proxy.golang.org for path@version's go.mod, the request the
+// go command makes, and returns the time in the answer's Last-Modified
+// header. On every version it was checked for, that was the second the
+// index dates the version at (spec section 11, amendment 61). Nothing
+// documents it, so it is only ever where to start reading the index: no
+// header, one that is not a time, any status but 200 and a proxy that
+// does not answer all return false, and none of them is waited for.
+func (ix *index) stored(ctx context.Context, path, version string) (time.Time, bool) {
+	escapedPath, err := module.EscapePath(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	escapedVersion, err := module.EscapeVersion(version)
+	if err != nil {
+		return time.Time{}, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, indexRequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxyURL+escapedPath+"/@v/"+escapedVersion+".mod", nil)
+	if err != nil {
+		return time.Time{}, false
+	}
+	resp, err := ix.client.Do(req)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer resp.Body.Close()
+	// The go.mod itself is not looked at; reading it leaves the
+	// connection fit for the next request.
+	io.Copy(io.Discard, io.LimitReader(resp.Body, maxModFile))
+	if resp.StatusCode != http.StatusOK {
+		return time.Time{}, false
+	}
+	at, err := http.ParseTime(resp.Header.Get("Last-Modified"))
+	return at, err == nil
+}
+
 // firstSeen returns when the proxy first cached path@version, reading
-// the index forward from since. When the version is not found, or the
-// index cannot be read, the time is zero and why says what happened; down
-// is then set when the index was asked and did not answer, so that asking
-// again may find the version.
-func (ix *index) firstSeen(ctx context.Context, path, version string, since time.Time) (seen time.Time, why string, down bool) {
+// the index forward from since for at most pages pages. When the version
+// is not found, or the index cannot be read, the time is zero and why
+// says what happened; down is then set when the index was asked and did
+// not answer, so that asking again may find the version.
+func (ix *index) firstSeen(ctx context.Context, path, version string, since time.Time, pages int) (seen time.Time, why string, down bool) {
 	start := since
 	for page := 1; ; page++ {
-		if page > ix.perVersion {
+		if page > pages {
 			return time.Time{}, fmt.Sprintf("not in the %d index pages after %s (read up to %s)",
-				ix.perVersion, start.UTC().Format(time.RFC3339), since.UTC().Format(time.RFC3339)), false
+				pages, start.UTC().Format(time.RFC3339), since.UTC().Format(time.RFC3339)), false
 		}
 		key := since.UTC().Format(time.RFC3339Nano)
 		entries, fetched := ix.pages[key]
 		if !fetched {
-			if ix.left <= 0 {
+			if ix.left <= 0 && page == 1 {
 				return time.Time{}, "not looked up: this run's index budget was spent on other versions", false
+			}
+			if ix.left <= 0 {
+				return time.Time{}, fmt.Sprintf("not in the %d index pages after %s (read up to %s) that were read before this run's index budget was spent",
+					page-1, start.UTC().Format(time.RFC3339), since.UTC().Format(time.RFC3339)), false
 			}
 			ix.left--
 			var err error

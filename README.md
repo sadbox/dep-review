@@ -153,13 +153,16 @@ version it adds today is new today. A rebase keeps the pin's time;
 another version or hash starts again.
 
 For Go the registry's clock has a limit of its own. The index has no
-lookup by module: it is read forward from the version's commit time, 50
-pages for one version and 150 for one run. A tag that was cut days after
-its commit is not in those pages, and each such version costs 50 of the
-run's 150, so in a grouped pull request the updates looked up after them
-can get no lookup at all. All of these are dated from the gate's first
-evaluation and wait their age from there. A fully read security fix
-needs no age and is not held up.
+lookup by module: it is read forward from a point in time. The gate
+starts where proxy.golang.org says it stored the version (the
+`Last-Modified` header of its answer for the version's `.mod` file),
+which is where the index has it; the date is the one on the index's own
+line. When the header is missing or leads to no line, the index is read
+from the version's commit time, 50 pages for one version, and a tag that
+was cut days after its commit is not in those pages. One run reads 150
+pages in all. A version found neither way is dated from the gate's first
+evaluation and waits its age from there. A fully read security fix needs
+no age and is not held up.
 
 ## Ecosystems
 

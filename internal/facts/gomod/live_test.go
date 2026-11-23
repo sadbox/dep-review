@@ -154,10 +154,11 @@ func TestLiveRetraction(t *testing.T) {
 // TestLiveIndexNotFound is part of the other experiment of section 10.
 // The commit golang.org/x/mod v0.2.0 points at is dated
 // 2020-01-02T17:33:45Z, and the index has no line for that version in the
-// 100,000 lines (50 pages) that follow. Why was not established; a tag
-// made well after its commit would look like this. Whatever the reason,
-// a version that is not found must come back unknown, with no time, and
-// never with the commit time.
+// 100,000 lines (50 pages) that follow: the tag was cut eight days after
+// its commit (TestLiveStored). A version that is not found from its
+// commit time must come back unknown, with no time, and never with the
+// commit time. The proxy is left out of this one (a client that reaches
+// only the index), so the reading is the one from the commit time.
 func TestLiveIndexNotFound(t *testing.T) {
 	live(t)
 	ctx := context.Background()
@@ -169,13 +170,47 @@ func TestLiveIndexNotFound(t *testing.T) {
 	if info.Time == nil {
 		t.Fatalf("no commit time: %+v", info)
 	}
-	ix := &index{client: &http.Client{Timeout: time.Minute}, url: defaultIndexURL, limit: indexPageLimit, perVersion: 3, left: 3}
+	real := &http.Client{Timeout: time.Minute}
+	indexOnly := &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "index.golang.org" {
+			return respond(req, http.StatusNotFound, "not asked in this test"), nil
+		}
+		return real.Do(req)
+	})}
+	ix := &index{client: indexOnly, url: defaultIndexURL, limit: indexPageLimit, perVersion: 3, left: 3}
 	got := seenFact(ctx, ix, "golang.org/x/mod", "v0.2.0", *info.Time, time.Now())
 	t.Logf("commit time %s; FirstSeen = %+v", info.Time.Format(time.RFC3339), got)
 	if got.Known() {
 		t.Errorf("found within 3 pages: %+v; the experiment's premise no longer holds", got)
 	}
-	if got.OK || !got.Time.IsZero() || !strings.HasPrefix(got.Value, "not established:") {
-		t.Errorf("FirstSeen = %+v, want it not established, with no time", got)
+	if got.OK || !got.Time.IsZero() || !strings.HasPrefix(got.Value, "not established:") || ix.left != 0 {
+		t.Errorf("FirstSeen = %+v with %d pages left, want it not established, with no time, after all 3 pages", got, ix.left)
+	}
+}
+
+// TestLiveStored is the experiment behind amendment 61, on the same
+// version: the Last-Modified header of the real proxy's answer for its
+// go.mod is the second the real index dates it at, and the reader finds
+// the version on the first page it reads from there, at the real page
+// size. The date is the index's own. If this fails, the proxy has
+// stopped sending the header or it no longer means this, and every
+// lookup is back to reading from the commit time.
+func TestLiveStored(t *testing.T) {
+	live(t)
+	ctx := context.Background()
+	const path, version = "golang.org/x/mod", "v0.2.0"
+	ix := &index{client: &http.Client{Timeout: time.Minute}, url: defaultIndexURL, limit: indexPageLimit, perVersion: 3, left: 3}
+	at, ok := ix.stored(ctx, path, version)
+	t.Logf("the proxy's Last-Modified: %v (%v)", at, ok)
+	if !ok || !at.Equal(ts("2020-01-10T18:01:31Z")) {
+		t.Fatalf("stored = %v, %v; want 2020-01-10T18:01:31Z", at, ok)
+	}
+	got := seenFact(ctx, ix, path, version, ts(lateCommit), time.Now())
+	t.Logf("FirstSeen = %+v, %d pages left", got, ix.left)
+	if !got.Known() || !got.Time.Equal(ts(lateSeen)) || got.Source != sourceIndex {
+		t.Errorf("FirstSeen = %+v, want the index's %s", got, lateSeen)
+	}
+	if ix.left != 2 {
+		t.Errorf("%d of 3 pages left, want 2: the version is on the first page read", ix.left)
 	}
 }

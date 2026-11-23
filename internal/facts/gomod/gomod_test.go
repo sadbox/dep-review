@@ -1197,9 +1197,11 @@ func TestNameCreated(t *testing.T) {
 	})
 
 	t.Run("the earliest version is not found, the next one is tried", func(t *testing.T) {
-		// Without v0.1.0's commit time the lookup moves on to v0.2.0 and
-		// v0.3.0, whose index pages were not recorded: nothing is found,
-		// and the reason names the last version tried.
+		// Without v0.1.0's commit time the lookup moves on to v0.2.0,
+		// which is not in the two pages read from its commit time (the
+		// tag was cut eight days later), and to v0.3.0, whose index page
+		// was not recorded: nothing is found, and the reason names the
+		// last version tried.
 		ix, fixtures := newIndex(t)
 		tool := goFixtures(t)
 		delete(tool.files, earliest)
@@ -1210,8 +1212,8 @@ func TestNameCreated(t *testing.T) {
 		if err != nil || got.Known() || !strings.Contains(got.Value, "not established: v0.3.0: the index could not be read") {
 			t.Errorf("got %+v, %v", got, err)
 		}
-		if len(fixtures.requests) != 2 {
-			t.Errorf("index requests: %v", fixtures.requests)
+		if want := "2020-01-02T17:23:45Z 2020-01-02T18:39:43.096551Z 2020-04-29T17:18:58Z"; strings.Join(fixtures.requests, " ") != want {
+			t.Errorf("index requests: %v, want %s", fixtures.requests, want)
 		}
 	})
 
