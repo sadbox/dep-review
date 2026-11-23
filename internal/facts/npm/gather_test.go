@@ -335,6 +335,9 @@ func TestGatherShapeNo(t *testing.T) {
 		{"rehash", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
 		{"flagflip", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
 		{"binflip", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
+		// npm reads the flag without a word and would follow the
+		// npm-shrinkwrap.json in the new tarball for what is below it.
+		{"shrinkwrap", nil, "chart.js@4.4.7 is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap)"},
 		{"lockscripts", nil, "head: the lock entry node_modules/date-fns has a member npm does not write, scripts"},
 		{"casekeys", nil, "head: the lock entry node_modules/chart.js has a member npm does not write, Integrity"},
 		{"outofsync", nil, `head: npm ls failed: "{\"code\":\"ELSPROBLEMS\",`},

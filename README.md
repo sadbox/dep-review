@@ -137,7 +137,7 @@ needs no age and is not held up.
 | Ecosystem | Shape and change set | Bound | FirstSeen | Read |
 |---|---|---|---|---|
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
-| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install steps: npm's NoRegress holds only once they were |
+| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install steps: npm's NoRegress holds only once they were |
 | GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
 | Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`, GCR `timeUploadedMs` | nothing |
 
@@ -168,6 +168,9 @@ Limits that send real pull requests to a person:
   its version (its `bin`, `os`, `cpu`, `libc` or dependency ranges, like
   its source and hash). Only `dev`, `optional`, `devOptional`, `peer`,
   `deprecated`, `license`, `funding` and `engines` may differ there.
+- An npm update to a version whose lock entry has `hasShrinkwrap`: the
+  package ships an `npm-shrinkwrap.json`, npm installs what is below it
+  as that file says, scripts included, and the gate does not read it.
 - An npm update whose lock at the base commit npm itself reports a
   problem for (a missing or invalid entry, as two lock edits merged
   without a rebase leave behind). The pull request that repairs the lock

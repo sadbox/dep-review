@@ -343,6 +343,37 @@ func TestReadLock(t *testing.T) {
 	if _, ok := lock.Root["dependencies"]; !ok {
 		t.Errorf("Root = %v, want the root entry", lock.Root)
 	}
+
+	// An entry that has the member is taken to bring a shrinkwrap,
+	// whatever the member's value: npm writes it only as true, and what it
+	// makes of any other value is not the gate's to guess.
+	lock, problem = readLock([]byte(`{"lockfileVersion":3,"packages":{"":{},` +
+		`"node_modules/a":{"version":"1.0.0","hasShrinkwrap":true},` +
+		`"node_modules/b":{"version":"1.0.0","hasShrinkwrap":false},` +
+		`"node_modules/c":{"version":"1.0.0","hasInstallScript":true}}}`))
+	if problem != "" {
+		t.Fatal(problem)
+	}
+	if got := strings.Join(slices.Sorted(maps.Keys(lock.Shrinkwrap)), " "); got != "node_modules/a node_modules/b" {
+		t.Errorf("Shrinkwrap = %q, want the two entries that have the member", got)
+	}
+}
+
+// readTree takes the shrinkwrap flag from the gate's reading of the lock
+// and puts it on the node at that lock path.
+func TestReadTreeShrinkwrap(t *testing.T) {
+	nodes, problems := recordedTree(t, "shrinkwrap", "head")
+	if len(problems) != 0 {
+		t.Fatalf("problems: %q", problems)
+	}
+	for p, n := range nodes {
+		if want := p == "node_modules/chart.js"; n.HasShrinkwrap != want {
+			t.Errorf("%s: HasShrinkwrap = %v, want %v", p, n.HasShrinkwrap, want)
+		}
+	}
+	if n := nodes["node_modules/chart.js"]; !strings.Contains(n.Fixed, "hasShrinkwrap=true\n") {
+		t.Errorf("chart.js Fixed = %q, want the flag among the members that must not differ", n.Fixed)
+	}
 }
 
 // The lock's own set of members is closed, and one table says which of

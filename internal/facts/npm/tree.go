@@ -51,6 +51,13 @@ type node struct {
 	// HasInstallScript is the lock's flag. npm ci only looks for install
 	// scripts in a package whose entry has it.
 	HasInstallScript bool
+	// HasShrinkwrap: the entry has a "hasShrinkwrap" member, whatever its
+	// value (npm writes it only as true). The package's tarball then
+	// holds an npm-shrinkwrap.json, and npm ci takes what is installed
+	// below the package from that file and not from the entries of the
+	// lock the gate read: it ran a postinstall that only the shrinkwrap's
+	// entry for a dependency had (seen with npm 11.20.0).
+	HasShrinkwrap bool
 	// Fixed is the lock's own text of every member of the entry that may
 	// not differ between base and head on an entry that keeps its version
 	// (entryKeys): all but the few that move for a reason outside the
@@ -131,6 +138,7 @@ func readTree(side string, out lsOutput, lock lockFile) (map[string]node, []stri
 				Integrity:        n.Integrity,
 				InBundle:         n.InBundle,
 				HasInstallScript: n.HasInstallScript,
+				HasShrinkwrap:    lock.Shrinkwrap[rel],
 				Fixed:            lock.Fixed[rel],
 			}
 			// npm prints a package once for every dependent. The repeats
@@ -208,7 +216,8 @@ var entryKeys = map[string]bool{
 	"inBundle":         true,
 	"hasInstallScript": true,
 	// The package brings a lock of its own, which npm follows for what is
-	// below it.
+	// below it. Holding it equal is enough only for a version the base
+	// lock has; on a version that is new, diffTrees refuses it.
 	"hasShrinkwrap":      true,
 	"bundleDependencies": true,
 	// Not known to be inert for a dependency, so it must not change.
@@ -253,6 +262,10 @@ type lockFile struct {
 	// Fixed has every key of "packages" other than the root's "", with
 	// the entry's members that entryKeys marks, in the lock's own words.
 	Fixed map[string]string
+	// Shrinkwrap has the keys of "packages" whose entry has a
+	// "hasShrinkwrap" member (node.HasShrinkwrap). It is the gate's own
+	// reading of the lock, like Fixed, not npm's.
+	Shrinkwrap map[string]bool
 	// Root is the root entry, packages[""]: the lock's copy of
 	// package.json's dependency ranges.
 	Root map[string]any
@@ -268,7 +281,7 @@ func readLock(data []byte) (lockFile, string) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return lockFile{}, "package-lock.json is not JSON the gate can read: " + quote(err.Error())
 	}
-	lf := lockFile{Fixed: map[string]string{}}
+	lf := lockFile{Fixed: map[string]string{}, Shrinkwrap: map[string]bool{}}
 	// npm reads a version 1 lock without a word, and a yarn.lock is not
 	// JSON at all. Only the exact numbers 2 and 3 pass.
 	switch string(raw.LockfileVersion) {
@@ -312,6 +325,9 @@ func readLock(data []byte) (lockFile, string) {
 			fixed.WriteString(name + "=" + string(value) + "\n")
 		}
 		lf.Fixed[key] = fixed.String()
+		if _, has := members["hasShrinkwrap"]; has {
+			lf.Shrinkwrap[key] = true
+		}
 	}
 	return lf, ""
 }

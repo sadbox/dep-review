@@ -22,6 +22,14 @@ func reg(lockPath, name, version string) node {
 	}
 }
 
+// shrinkwrapped is n as the lock has it when the entry has a
+// "hasShrinkwrap" member: the flag, and the member in Fixed.
+func shrinkwrapped(n node) node {
+	n.HasShrinkwrap = true
+	n.Fixed = "hasShrinkwrap=true\n" + n.Fixed
+	return n
+}
+
 func tree(nodes ...node) map[string]node {
 	out := map[string]node{}
 	for _, n := range nodes {
@@ -163,6 +171,75 @@ func TestDiffTrees(t *testing.T) {
 				return n
 			}()),
 			problem: "a@1.0.0 at node_modules/a keeps its version",
+		},
+		{
+			// npm ci installs what is below such a package as the
+			// npm-shrinkwrap.json in its tarball says, and ran a
+			// postinstall that only that file's entry for a dependency
+			// had. Nothing the gate reads is that file.
+			name:    "a new version that brings a shrinkwrap",
+			base:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/a/node_modules/b", "b", "1.0.0")),
+			head:    tree(shrinkwrapped(reg("node_modules/a", "a", "1.0.1")), reg("node_modules/a/node_modules/b", "b", "1.0.0")),
+			problem: "a@1.0.1 is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap)",
+		},
+		{
+			name:    "a new version that brings a shrinkwrap, as the old one did",
+			base:    tree(shrinkwrapped(reg("node_modules/a", "a", "1.0.0"))),
+			head:    tree(shrinkwrapped(reg("node_modules/a", "a", "1.0.1"))),
+			problem: "a@1.0.1 is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap)",
+		},
+		{
+			name:    "one of two copies of a new version brings a shrinkwrap",
+			base:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "1.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.1"), shrinkwrapped(reg("node_modules/x/node_modules/a", "a", "1.0.1"))),
+			problem: "a@1.0.1 is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap)",
+		},
+		{
+			name:    "a new name that brings a shrinkwrap",
+			base:    tree(reg("node_modules/a", "a", "1.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.0"), shrinkwrapped(reg("node_modules/n", "n", "0.1.0"))),
+			problem: "n@0.1.0 is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap)",
+		},
+		{
+			// The version is the base lock's, and so are its integrity and
+			// its flag: the shrinkwrap in that tarball is the one that is
+			// installed today.
+			name: "a version that keeps its shrinkwrap while another package moves",
+			base: tree(shrinkwrapped(reg("node_modules/a", "a", "1.0.0")), reg("node_modules/b", "b", "2.0.0")),
+			head: tree(shrinkwrapped(reg("node_modules/a", "a", "1.0.0")), reg("node_modules/b", "b", "2.0.1")),
+			want: "b 2.0.0->2.0.1",
+		},
+		{
+			name:    "an established version gains the shrinkwrap flag",
+			base:    tree(reg("node_modules/a", "a", "1.0.0")),
+			head:    tree(shrinkwrapped(reg("node_modules/a", "a", "1.0.0"))),
+			problem: "a@1.0.0 at node_modules/a keeps its version",
+		},
+		{
+			// A bundled entry under a bundler that moves is compared with
+			// nothing, so this one flag is refused there.
+			name:    "a bundled entry that brings a shrinkwrap, under a bundler that moves",
+			base:    tree(reg("node_modules/w", "w", "1.0.0"), bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")),
+			head:    tree(reg("node_modules/w", "w", "1.0.1"), shrinkwrapped(bundledIn("node_modules/w/node_modules/t", "t", "2.0.0"))),
+			problem: "the bundled node_modules/w/node_modules/t is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap), inside w@1.0.1",
+		},
+		{
+			name:    "a bundled entry that brings a shrinkwrap, under a new name",
+			base:    tree(reg("node_modules/a", "a", "1.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/w", "w", "1.0.0"), shrinkwrapped(bundledIn("node_modules/w/node_modules/t", "t", "2.0.0"))),
+			problem: "the bundled node_modules/w/node_modules/t is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap), inside w@1.0.0",
+		},
+		{
+			name: "a bundled entry that keeps its shrinkwrap inside a package that does not change",
+			base: tree(reg("node_modules/w", "w", "1.0.0"), shrinkwrapped(bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")), reg("node_modules/b", "b", "2.0.0")),
+			head: tree(reg("node_modules/w", "w", "1.0.0"), shrinkwrapped(bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")), reg("node_modules/b", "b", "2.0.1")),
+			want: "b 2.0.0->2.0.1",
+		},
+		{
+			name:    "a bundled entry gains the shrinkwrap flag inside a package that does not change",
+			base:    tree(reg("node_modules/w", "w", "1.0.0"), bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")),
+			head:    tree(reg("node_modules/w", "w", "1.0.0"), shrinkwrapped(bundledIn("node_modules/w/node_modules/t", "t", "2.0.0"))),
+			problem: "the bundled node_modules/w/node_modules/t changes inside w@1.0.0",
 		},
 		{
 			name: "a bundler moves with what it bundles",

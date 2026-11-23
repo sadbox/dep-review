@@ -55,6 +55,7 @@ var caseNotes = map[string]string{
 	"rehash":      "plain, head lock gives date-fns 4.1.0 another hash",
 	"flagflip":    "plain, head lock sets hasInstallScript on date-fns 4.1.0",
 	"binflip":     "plain, head lock gives date-fns 4.1.0 a bin, an executable for npm to link",
+	"shrinkwrap":  "plain, head lock sets hasShrinkwrap on chart.js 4.4.7, the version it moves to",
 	"offregistry": "plain, head lock resolves chart.js 4.4.7 on another host",
 	"gitsource":   "plain, head lock resolves chart.js 4.4.7 from git, with no hash",
 	"lockscripts": "plain, head lock entry for date-fns carries a scripts object",

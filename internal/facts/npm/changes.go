@@ -217,7 +217,10 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 	// it gets no Bound, no age and no read of its own. It may change only
 	// together with its bundler, and it names no source: npm writes none
 	// for it, and what npm would install for one that has a source is
-	// not something the gate guesses.
+	// not something the gate guesses. Nor is what npm does with a bundled
+	// package that is marked as bringing an npm-shrinkwrap.json: under a
+	// bundler the base lock has, the entry is the base lock's or Shape
+	// does not hold, and under any other it is refused.
 	for _, p := range slices.Sorted(maps.Keys(head)) {
 		n := head[p]
 		if !n.InBundle {
@@ -230,8 +233,12 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 		case n.Resolved != "" || n.Integrity != "":
 			problems = append(problems, fmt.Sprintf("%s is marked as bundled and has a source or a hash of its own", show(p)))
 		default:
-			if _, established := baseCopies[pkg{owner.Name, owner.Version}]; established && base[p] != n {
+			_, established := baseCopies[pkg{owner.Name, owner.Version}]
+			switch {
+			case established && base[p] != n:
 				problems = append(problems, fmt.Sprintf("the bundled %s changes inside %s@%s, whose version does not", show(p), show(owner.Name), show(owner.Version)))
+			case !established && n.HasShrinkwrap:
+				problems = append(problems, fmt.Sprintf("the bundled %s is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap), inside %s@%s, which the base lock does not have", show(p), show(owner.Name), show(owner.Version)))
 			}
 		}
 	}
@@ -277,6 +284,20 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 			continue
 		}
 		u := update{Name: k.name, To: k.version, New: headCopies[k]}
+		// A version the base lock does not have, with a lock of its own in
+		// its tarball: npm ci installs what is below the package as that
+		// npm-shrinkwrap.json says, and takes each entry there for the
+		// dependency's package.json, "scripts" included. The closed set of
+		// members (entryKeys) and the install-script checks read the
+		// repository's lock, the registry and the package's own files;
+		// none of them reads that file, so they would hold for an install
+		// they did not look at. A version the base lock has keeps its
+		// shrinkwrap with its integrity and is held to its flag above.
+		// This holds for a new name as for a new version.
+		if slices.ContainsFunc(u.New, func(c node) bool { return c.HasShrinkwrap }) {
+			problems = append(problems, fmt.Sprintf("%s@%s is marked as bringing an npm-shrinkwrap.json (hasShrinkwrap): npm installs what is below it as that file says, and the gate does not read it", show(k.name), show(k.version)))
+			continue
+		}
 		if !baseNames[k.name] {
 			u.NewName = true
 			updates = append(updates, u)
