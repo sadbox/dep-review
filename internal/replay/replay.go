@@ -21,13 +21,19 @@
 //   - every update was read in full (for Docker there is nothing to
 //     read), and nothing was vetoed.
 //
-// So the outcome is an upper bound on what the gate would merge: a pull
-// request that goes to a person here goes to a person in the gate, and
-// one that merges here merges only if the registries, the advisory
-// database and the model agree. The replay never sees a hash that does
-// not match, a retracted or young version, a new install script, a tag
-// off its branch, an action pinned without an actions.lock entry, a read
-// that was partial, or a veto.
+// So, given a NameCreated, the pull requests that do not go to a person
+// here are an upper bound on those that would not in the gate: one that
+// goes to a person here goes to a person there, and one that does not
+// still needs the registries, the advisory database and the model to
+// agree. The replay never sees a hash that does not match, a retracted
+// version, a new install script, a tag off its branch, an action pinned
+// without an actions.lock entry, a read that was partial, or a veto.
+//
+// Two things are not bounded that way. With no NameCreated the stand-in
+// is the unfavourable one: a new, unlisted name is a person here and
+// might not be in the gate. And when a pull request merges can only be
+// later here than in the gate: a registry's clock is earlier than the
+// pull request, and a security fix would not wait.
 package replay
 
 import (

@@ -177,13 +177,15 @@ base and at the head ([internal/replay](internal/replay/replay.go) has the
 form, `internal/replay/testdata` an example). The replay runs the real
 reading of those files and the real decision. Everything a registry,
 GitHub or the model would be asked is taken to be favourable, and a
-version is taken to be as old as its pull request, so the result is an
-upper bound on what would merge: run it with the built-in policy and with
-the changed one, and compare who goes to a person. `--policy` takes a
-complete file in the form of `defaults.json`, and unlike a repository's
-file it may also be narrower than the built-in one. Without
-`--name-created` the age of a new name is unknown, which is person. npm
-records need a local npm; nothing else is run and no network is used.
+version is taken to be as old as its pull request. Run it with the
+built-in policy and with the changed one, and compare who goes to a
+person. `--policy` takes a complete file in the form of `defaults.json`,
+and unlike a repository's file it may also be narrower than the built-in
+one. `--name-created` is the one stand-in with a choice: without it the
+age of a new name is unknown, which is person. With it, the pull requests
+that do not go to a person are an upper bound on those that would not in
+the gate. npm records need a local npm; nothing else is run and no
+network is used.
 
 ## Jobs
 
