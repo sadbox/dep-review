@@ -120,8 +120,12 @@ type Inspect func(old, new fs.FS) allow.Fact
 // Prepared is everything the model is to read for one update.
 type Prepared struct {
 	Pair Pair `json:"pair"`
-	// Chunks is the text, in order. It can be empty when nothing readable
-	// changed.
+	// Chunks is the text, in order. It is empty when nothing readable
+	// changed. With State allow.ReadFull that is two artifacts that hold
+	// the same files: a file that changed or was added is in Chunks or in
+	// Unread, and removed files have a note in Chunks or make the read
+	// partial. With allow.ReadPartial something changed and none of it is
+	// text for the model.
 	Chunks []Chunk `json:"chunks"`
 	// Unread lists the changed or added files that are not in Chunks:
 	// files that are not text, and files the budget left out.

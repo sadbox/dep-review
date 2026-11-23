@@ -123,8 +123,10 @@ type PRFacts struct {
 // Update is allow.UpdateFacts without Read and Veto, which fetch cannot
 // know and must not be able to write, and with Hash and Prepared, which
 // allow.Decide does not take: a facts file that says "read": "full" does
-// not decode. Whether code was read comes from the verdicts file alone
-// (Join).
+// not decode. Whether a model read code comes from the verdicts file
+// alone (Join). The one read that counts without a verdict is of two
+// artifacts that hold the same files (Identical): no model was asked,
+// and the status says so.
 type Update struct {
 	Name string `json:"name"`
 	From string `json:"from"`
@@ -160,13 +162,20 @@ type Update struct {
 // ReadStatus is how fetch's attempt to prepare an update's read ended.
 type ReadStatus string
 
-// The four ways it ends. Join turns each into a read state; none of them
-// is "read".
+// The five ways it ends. Join turns each into a read state; none of them
+// says that a model read anything.
 const (
-	// Prepared: the artifacts were fetched, verified and diffed. Key,
-	// State, Unread and Chunks describe the result. What the read comes
-	// to is the verdict's to say.
+	// Prepared: the artifacts were fetched, verified and diffed, and there
+	// is text to put before the model. Key, State, Unread and Chunks
+	// describe the result. What the read comes to is the verdict's to
+	// say.
 	Prepared ReadStatus = "prepared"
+	// Identical: the artifacts were fetched and verified, and the old and
+	// the new one hold the same files: nothing changed, was added or was
+	// removed. There is nothing to read, and no model is asked. Read is
+	// full, on the fetch job's word, which is also all that stands behind
+	// the text of a prepared read (spec section 11, amendment 53).
+	Identical ReadStatus = "identical"
 	// Nothing: there is nothing to read and nothing was fetched. That is
 	// every Docker update, and an update of another ecosystem whose
 	// gatherer named no artifact (its Bound does not hold, or the old
@@ -201,8 +210,8 @@ type Read struct {
 	State allow.ReadState `json:"state"`
 	// Unread lists the changed files that are not in the chunks.
 	Unread []artifact.Unread `json:"unread"`
-	// Chunks lists the chunk files, in order. It is empty when nothing
-	// readable changed.
+	// Chunks lists the chunk files, in order: at least one. A read with
+	// nothing to put before the model is not Prepared.
 	Chunks []ChunkFile `json:"chunks"`
 }
 
@@ -286,6 +295,8 @@ type Verdict struct {
 //   - Docker is not-applicable, whatever was prepared. Nothing of an
 //     image is read.
 //   - Refused is refused. Unavailable is none.
+//   - Identical is full, with no verdict looked for: the two artifacts
+//     hold the same files, and no model was asked about nothing.
 //   - Nothing, outside Docker, leaves Read unset, which allow.Decide
 //     answers with person: no artifact was verified, so nothing was read.
 //   - Prepared takes the one verdict with the read's Key and the caller's
@@ -297,7 +308,9 @@ type Verdict struct {
 //
 // Nothing in a verdict can make a decision more permissive than these
 // rules allow: a verdict for another key is not looked at, and the best
-// any verdict gives is the state fetch prepared with no veto.
+// any verdict gives is the state fetch prepared with no veto. And no read
+// a model was not asked about counts as one it answered: only Prepared
+// takes a verdict, and a Prepared read has text.
 func Join(f Facts, v Verdicts, fingerprint string) allow.PRFacts {
 	type question struct{ key, fingerprint string }
 	answers := make(map[question]Verdict, len(v.Verdicts))
@@ -328,6 +341,8 @@ func Join(f Facts, v Verdicts, fingerprint string) allow.PRFacts {
 			joined.Read = allow.ReadRefused
 		case u.Prepared.Status == Unavailable:
 			joined.Read = allow.ReadNone
+		case u.Prepared.Status == Identical:
+			joined.Read = allow.ReadFull
 		case u.Prepared.Status == Prepared:
 			joined.Read = allow.ReadNone
 			verdict, ok := answers[question{u.Prepared.Key, fingerprint}]
@@ -472,7 +487,7 @@ func (r Read) check(update int) error {
 	}
 	switch r.Status {
 	case Prepared:
-	case Nothing, Unavailable, Refused:
+	case Nothing, Unavailable, Refused, Identical:
 		if r.Key != "" || r.State != "" || len(r.Unread) != 0 || len(r.Chunks) != 0 {
 			return fmt.Errorf("status %q with a key, a state, unread files or chunks", r.Status)
 		}
@@ -492,6 +507,10 @@ func (r Read) check(update int) error {
 		return fmt.Errorf("state %q with %d unread files", r.State, len(r.Unread))
 	case len(r.Unread) > maxUnread:
 		return fmt.Errorf("%d unread files, more than %d", len(r.Unread), maxUnread)
+	case len(r.Chunks) == 0:
+		// Nothing a model could be asked about. The review job would have
+		// nothing to send, and a verdict for it would be nobody's answer.
+		return errors.New("a prepared read with no chunk")
 	case len(r.Chunks) > maxChunks:
 		return fmt.Errorf("%d chunks, more than %d", len(r.Chunks), maxChunks)
 	}

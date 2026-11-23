@@ -136,6 +136,33 @@ func TestPrepareNothingChanged(t *testing.T) {
 	}
 }
 
+// What a read with no chunk means, which the fetch job builds on (spec
+// section 11, amendment 53): full only for two artifacts that hold the
+// same files. A file that went away is a chunk, and a change that is not
+// text is a read in part with nothing in it.
+func TestPrepareNoChunkMeans(t *testing.T) {
+	t.Run("a file was removed and nothing else: the note is a chunk", func(t *testing.T) {
+		got := prepareNPM(t, map[string]string{"index.js": "a\n", "old.js": "b\n"}, map[string]string{"index.js": "a\n"}, roomy)
+		if got.State != allow.ReadFull || len(got.Chunks) != 1 || !strings.Contains(text(got), "== removed: 1 files") {
+			t.Errorf("state %q, chunks %q; want full and the note about the removed file", got.State, text(got))
+		}
+	})
+	t.Run("only a file that is not text changed: no chunk, and not full", func(t *testing.T) {
+		got := prepareNPM(t,
+			map[string]string{"index.js": "a\n", "prebuilt/addon.node": "\x7fELF\x00old"},
+			map[string]string{"index.js": "a\n", "prebuilt/addon.node": "\x7fELF\x00new"}, roomy)
+		if got.State != allow.ReadPartial || len(got.Chunks) != 0 || !reflect.DeepEqual(unreadPaths(got), []string{"prebuilt/addon.node"}) {
+			t.Errorf("state %q, %d chunks, unread %v; want partial, no chunk and the one file unread", got.State, len(got.Chunks), unreadPaths(got))
+		}
+	})
+	t.Run("a file became empty: its header is a chunk", func(t *testing.T) {
+		got := prepareNPM(t, map[string]string{"index.js": "a\n", "x": "\x00"}, map[string]string{"index.js": "a\n", "x": ""}, roomy)
+		if got.State != allow.ReadFull || len(got.Chunks) != 1 {
+			t.Errorf("state %q, %d chunks; want full and one chunk", got.State, len(got.Chunks))
+		}
+	})
+}
+
 // A file that is not text is listed as unread, with its size and hash,
 // whatever its name says and however little of it is not text. It is
 // never dropped without a trace, and never shown.

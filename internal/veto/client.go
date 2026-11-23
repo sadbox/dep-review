@@ -124,10 +124,9 @@ func (c *Client) logf(format string, args ...any) {
 // ends the review: no later answer could change it, and a later failure
 // must not lose it.
 //
-// A read with no chunks (nothing readable changed) makes no request and
-// returns NoVeto with the request's Read.State: there is nothing a model
-// could object to, and how long such an update must wait is
-// allow.Decide's rule for that state.
+// A read with no chunks is ErrUnusable: no request is made, and a verdict
+// is the model's answer or nothing. The fetch job does not hand such a
+// read on (spec section 11, amendment 53).
 //
 // ctx bounds the whole review. Without a deadline the worst case is
 // max_chunks times attempts times the request timeout, so the caller

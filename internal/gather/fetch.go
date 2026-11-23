@@ -289,6 +289,18 @@ func (f Fetch) read(ctx context.Context, chunks string, i int, pair artifact.Pai
 		// The run is over. Whatever Prepare returned, nothing says the
 		// update could not be read.
 		return wire.Read{}, allow.Fact{}, ctx.Err()
+	case err == nil && len(prepared.Chunks) == 0 && prepared.State == allow.ReadFull:
+		// The reader found no file that changed, was added or was removed
+		// (artifact.Prepared). No model is asked about nothing, and the
+		// record says that this is why there is no verdict.
+		const same = "the old and the new artifact hold the same files: there is nothing to read, and no model is asked"
+		return wire.Read{Status: wire.Identical, Detail: same}, prepared.Inspected, nil
+	case err == nil && len(prepared.Chunks) == 0:
+		// Something changed, and none of it is text for the model. A read
+		// nobody was asked about is not a read in part: the update is a
+		// person's.
+		const none = "nothing that changed is text the model is shown: every changed file is not text or did not fit, so no model was asked and nothing was read"
+		return wire.Read{Status: wire.Refused, Detail: none}, prepared.Inspected, nil
 	case err == nil:
 		read = wire.Read{Status: wire.Prepared, Key: prepared.Key, State: prepared.State, Unread: prepared.Unread}
 		for j, c := range prepared.Chunks {

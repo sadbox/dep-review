@@ -97,7 +97,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own) |
 | NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone, while the files those commands and a `binding.gyp` run are not compared, since the model reads them; provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version (Go and npm only: never an image, and never an action, whose tag can be moved after the advisory was reviewed) |
-| Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker) |
+| Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker). Two artifacts that hold the same files are full with no model asked, and the comment says so |
 | Veto | none, or a category and the lines the model quoted |
 
 A fact is in one of four states, and only the first contributes to a
@@ -200,6 +200,10 @@ Limits that send real pull requests to a person:
   is the one that goes to a person.
 - A Go, npm or Actions update whose registry did not answer when its
   pinned hash was checked (see the four states above).
+- An update in which nothing that changed can be shown to the model:
+  only files that are not text changed (a prebuilt object, an image), or
+  nothing of the change fits the chunk budget. No model is asked, so it
+  is not a read in part.
 - The gate runs on github.com only.
 - A pre-release is never an increase. A Go pseudo-version (a commit, not
   a release) is one only for a listed module, and can then merge like a
@@ -364,7 +368,8 @@ and it then gets no status, comment or notification.
   tag still resolves to the pinned digest after 72 hours merges unseen.
 - Code the model was not shown. Files that are not text, and text beyond
   the chunk budget, are listed as unread; such an update is only partly
-  read and still merges, after `unread_age_days`. For a bundled file over
+  read and still merges, after `unread_age_days`, as long as the model
+  was shown at least some of the change. For a bundled file over
   256 KB only the lines that occur nowhere in the old file are shown.
 - A forged npm provenance statement: the gate reads the statement the
   registry serves and does not verify its signature.
@@ -395,11 +400,13 @@ and it then gets no status, comment or notification.
   the `dep-review` environment, and parses no untrusted text in a shell.
 - **What a job can assert.** The model can only veto: no answer of its
   makes a decision more permissive than "no veto". The facts file has no
-  member that says an update was read; that comes only from the verdicts
-  file, matched by content hash. publish believes the facts only about
-  the pull request and head that classify proved: the classify job on an
-  event, its own run of the proof on a schedule. The policy file never
-  comes from the pull request.
+  member that says a model read an update; that comes only from the
+  verdicts file, matched by content hash. The one read that counts
+  without a verdict is of two artifacts that hold the same files, where
+  there is nothing to show a model and the facts file says so. publish
+  believes the facts only about the pull request and head that classify
+  proved: the classify job on an event, its own run of the proof on a
+  schedule. The policy file never comes from the pull request.
 - **Third-party text.** Everything a registry, a dependency or the model
   wrote reaches the comment only through one sanitiser, in code spans,
   with a length cap; it reaches logs only through a logger that escapes

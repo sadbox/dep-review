@@ -169,8 +169,8 @@ func newAnswerSchema() answerSchema {
 }
 
 // checkRead refuses a prepared read this client must not send: one that
-// is over the configured budget, or one whose name, versions or text
-// cannot stand in the request. Nothing is repaired or cut to fit, because
+// has no text or is over the configured budget, or one whose name,
+// versions or text cannot stand in the request. Nothing is repaired or cut to fit, because
 // the verdict is stored under the read's key and must be about exactly
 // that read. Review returns what this function says as ErrUnusable.
 //
@@ -188,6 +188,10 @@ func checkRead(conf config.Config, p artifact.Prepared) error {
 	// From is empty for a new name.
 	if p.Pair.From != "" && !headerSafe(p.Pair.From) {
 		return errors.New("update from is longer than 256 bytes or not printable ASCII")
+	}
+	if len(p.Chunks) == 0 {
+		// Review would ask nothing and answer "no veto" for it.
+		return errors.New("no chunk: there is nothing to ask the model about")
 	}
 	if len(p.Chunks) > conf.MaxChunks {
 		return fmt.Errorf("%d chunks, more than max_chunks (%d)", len(p.Chunks), conf.MaxChunks)

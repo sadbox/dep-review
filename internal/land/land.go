@@ -158,11 +158,11 @@ type Evaluation struct {
 // publish job gets from two different jobs, and asks allow.Decide. It
 // writes nothing.
 //
-// An update's Read and Veto come from the verdicts file alone (wire.Join):
-// a verdict that is missing, or was written under another reviewer
-// fingerprint, is Read none. A missing verdicts file is no verdicts. An
-// update's FirstSeen is the facts file's when a registry gave a time, and
-// otherwise this job's own (dateUnseen).
+// A prepared read's Read and Veto come from the verdicts file alone
+// (wire.Join): a verdict that is missing, or was written under another
+// reviewer fingerprint, is Read none. A missing verdicts file is no
+// verdicts. An update's FirstSeen is the facts file's when a registry
+// gave a time, and otherwise this job's own (dateUnseen).
 //
 // An error means there is no decision: a file that does not decode, facts
 // for another repository, gathered under other settings (ErrConfigChanged)

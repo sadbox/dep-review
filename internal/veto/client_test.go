@@ -584,8 +584,9 @@ func TestReviewRefusesBadReads(t *testing.T) {
 	})
 }
 
-// With no chunks there is nothing to ask: no request, and the read's own
-// state comes back with no veto.
+// With no chunks there is nothing to ask, and a verdict is the model's
+// answer or nothing: the read is not usable, whatever state it claims,
+// and no request is made (spec section 11, amendment 53).
 func TestReviewNothingToRead(t *testing.T) {
 	for _, state := range []allow.ReadState{allow.ReadFull, allow.ReadPartial} {
 		t.Run(string(state), func(t *testing.T) {
@@ -597,11 +598,11 @@ func TestReviewNothingToRead(t *testing.T) {
 				p.Unread = []artifact.Unread{{Path: "prebuilt/addon.node", Size: 1 << 20, SHA256: strings.Repeat("1a", 32)}}
 			}
 			v, err := c.Review(context.Background(), Request{Read: p})
-			if err != nil {
-				t.Fatalf("Review: %v", err)
+			if !errors.Is(err, ErrUnusable) || !strings.Contains(err.Error(), "no chunk") {
+				t.Fatalf("Review: %+v, %v; want ErrUnusable for a read with no chunk", v, err)
 			}
-			if v.Answer != NoVeto || v.Read != state || v.Key != p.Key || v.Category != "" {
-				t.Errorf("verdict = %+v", v)
+			if v.Answer != "" || v.Read != "" {
+				t.Errorf("a verdict nobody gave: %+v", v)
 			}
 			if n := len(f.recordedRequests()); n != 0 {
 				t.Errorf("%d requests, want 0", n)

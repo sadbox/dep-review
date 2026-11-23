@@ -480,7 +480,7 @@ func TestFirstSeenOfManyPins(t *testing.T) {
 	update := func(name, from string, seenAt allow.TimeFact) wire.Update {
 		u := goodUpdate(name)
 		u.From, u.FirstSeen = from, seenAt
-		w := wire.NewUpdate(u, wire.Read{Status: wire.Prepared, Key: keyA, State: allow.ReadFull, Chunks: []wire.ChunkFile{}})
+		w := wire.NewUpdate(u, wire.Read{Status: wire.Identical})
 		w.Hash = "h1:" + name
 		return w
 	}

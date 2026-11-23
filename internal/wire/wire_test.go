@@ -367,6 +367,14 @@ func TestFactsCheck(t *testing.T) {
 		{"nothing with chunks", func(f *Facts) {
 			f.Facts.Updates[4].Prepared.Chunks = []ChunkFile{NewChunkFile(4, 0, "x")}
 		}, `status "nothing" with a key`},
+		{"identical with a key", func(f *Facts) { f.Facts.Updates[4].Prepared = Read{Status: Identical, Key: keyA} }, `status "identical" with a key`},
+		{"a prepared read with no chunk", func(f *Facts) { f.Facts.Updates[0].Prepared.Chunks = nil }, "a prepared read with no chunk"},
+		{"an image whose artifacts are the same", func(f *Facts) {
+			f.Facts.Ecosystem = allow.Docker
+			for i := range f.Facts.Updates {
+				f.Facts.Updates[i].Prepared = Read{Status: Identical}
+			}
+		}, `status "identical" for an image`},
 		{"a detail that is a document", func(f *Facts) { f.Facts.Updates[2].Prepared.Detail = strings.Repeat("x", maxDetailBytes+1) }, "detail is 501 bytes"},
 		{"an image with a prepared read", func(f *Facts) { f.Facts.Ecosystem = allow.Docker }, `status "prepared" for an image`},
 	}
@@ -512,8 +520,11 @@ func TestJoin(t *testing.T) {
 			[]Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadFull}}, allow.ReadFull, nil},
 		{"read in part, no veto", allow.GoModules, prepared(0, keyA, allow.ReadPartial, 1),
 			[]Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadPartial}}, allow.ReadPartial, nil},
-		{"nothing readable changed, and the reviewer said so", allow.NPM, prepared(0, keyA, allow.ReadFull, 0),
-			[]Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadFull}}, allow.ReadFull, nil},
+		// Two artifacts that hold the same files: nothing to read, no
+		// model asked, and no verdict looked for.
+		{"the two artifacts hold the same files", allow.GoModules, Read{Status: Identical, Detail: "the same files"}, nil, allow.ReadFull, nil},
+		{"the same files, whatever a verdict says", allow.GoModules, Read{Status: Identical},
+			[]Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadPartial, Veto: veto}}, allow.ReadFull, nil},
 		{"a veto", allow.GoModules, prepared(0, keyA, allow.ReadFull, 2),
 			[]Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadPartial, Veto: veto}}, allow.ReadPartial, veto},
 		{"the model refused", allow.GoModules, prepared(0, keyA, allow.ReadFull, 1),
@@ -553,6 +564,14 @@ func TestJoin(t *testing.T) {
 		{"an image is never read", allow.Docker, Read{Status: Nothing}, nil, allow.ReadNotApplicable, nil},
 		{"an image is never read, whatever a verdict says", allow.Docker, Read{Status: Nothing},
 			[]Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadFull, Veto: veto}}, allow.ReadNotApplicable, nil},
+	}
+	// A prepared read has text: one without a chunk is nothing a model was
+	// asked about, and no verdict may stand for it. The facts file does
+	// not carry it (spec section 11, amendment 53).
+	for _, state := range []allow.ReadState{allow.ReadFull, allow.ReadPartial} {
+		if err := goodFacts(prepared(0, keyA, state, 0)).check(); err == nil || !strings.Contains(err.Error(), "a prepared read with no chunk") {
+			t.Errorf("a prepared %s read with no chunk: %v", state, err)
+		}
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -610,6 +629,7 @@ func TestJoin(t *testing.T) {
 		{"artifact refused", decide(allow.GoModules, Read{Status: Refused}), allow.Person},
 		{"artifact unavailable", decide(allow.GoModules, Read{Status: Unavailable}), allow.Wait},
 		{"no artifact named", decide(allow.GoModules, Read{Status: Nothing}), allow.Person},
+		{"the same files in both artifacts", decide(allow.GoModules, Read{Status: Identical}), allow.Merge},
 		{"a listed image", decide(allow.Docker, Read{Status: Nothing}), allow.Merge},
 	} {
 		if tc.got != tc.want {
@@ -641,7 +661,9 @@ func TestJoinNeverGrants(t *testing.T) {
 		// Three updates with reads of every kind.
 		var reads []Read
 		for u := 0; u < 3; u++ {
-			switch r.IntN(6) {
+			switch r.IntN(7) {
+			case 6:
+				reads = append(reads, Read{Status: Identical})
 			case 0:
 				reads = append(reads, Read{Status: Refused})
 			case 1:
@@ -693,8 +715,13 @@ func TestJoinNeverGrants(t *testing.T) {
 		}
 		for u, update := range joined.Updates {
 			p := f.Facts.Updates[u].Prepared
-			if update.Read == allow.ReadFull && (p.Status != Prepared || p.State != allow.ReadFull) {
+			// Full is a full read answered cleanly, or two artifacts that
+			// hold the same files, which no verdict has a say in.
+			if update.Read == allow.ReadFull && p.Status != Identical && (p.Status != Prepared || p.State != allow.ReadFull) {
 				t.Fatalf("update %d was prepared %+v and is read in full", u, p)
+			}
+			if p.Status == Identical && (update.Read != allow.ReadFull || update.Veto != nil) {
+				t.Fatalf("update %d has the same files in both artifacts and is %q with veto %+v", u, update.Read, update.Veto)
 			}
 			if update.Read == allow.ReadPartial && p.Status != Prepared {
 				t.Fatalf("update %d was not prepared and is read in part", u)

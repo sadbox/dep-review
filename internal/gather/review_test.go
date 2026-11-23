@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/artifact"
@@ -200,12 +201,14 @@ func (n noRequests) RoundTrip(req *http.Request) (*http.Response, error) {
 	return nil, errors.New("no request was expected")
 }
 
-// A read with no chunks is a whole read: the two artifacts differ in
-// nothing a model reads. That is the usual update of a module such as
+// Two artifacts that hold the same files are a whole read that nobody
+// reads. That is the usual update of a module such as
 // google.golang.org/genproto/googleapis/rpc, whose pseudo-version follows
 // its repository's head while the module itself seldom changes (spec
-// section 11, amendment 40). The real reviewer records a full read with
-// no veto for it and asks no model, and the update merges like any other.
+// section 11, amendment 40). The facts file says so in the read's status,
+// the review job is not started for it and writes no verdict that a
+// model did not give, and the update merges like any other (amendment
+// 53).
 func TestReviewNothingChanged(t *testing.T) {
 	u := goodUpdate(t, allow.GoModules, "google.golang.org/genproto/googleapis/rpc")
 	u.From, u.To = "v0.0.0-20260917231906-eeb232e0883d", "v0.0.0-20261118221215-c8830f628b3f"
@@ -216,21 +219,49 @@ func TestReviewNothingChanged(t *testing.T) {
 	j.preparer.answers[u.Name] = func(p artifact.Pair) (artifact.Prepared, error) { return preparedRead(p), nil }
 	dir, f := j.run(t)
 	read := f.Facts.Updates[0].Prepared
-	if read.Status != wire.Prepared || read.State != allow.ReadFull || len(read.Chunks) != 0 || len(chunkFiles(t, dir)) != 0 {
-		t.Fatalf("the read fetch prepared: %+v", read)
+	if read.Status != wire.Identical || !strings.Contains(read.Detail, "no model is asked") || read.Key != "" || len(read.Chunks) != 0 || len(chunkFiles(t, dir)) != 0 {
+		t.Fatalf("the read fetch recorded: %+v", read)
 	}
 
+	// The review job, were it started all the same, asks nobody and
+	// records nothing for the read.
 	settings := veto.FromConfig(defaults(t))
 	client, err := veto.New(settings, veto.APIKey("test-key"), &http.Client{Transport: noRequests{t}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := reviewed(t, Review{Reviewer: client, Fingerprint: settings.Fingerprint(), Logf: t.Logf}, dir)
-	want := wire.Verdict{Key: read.Key, Fingerprint: settings.Fingerprint(), Read: allow.ReadFull}
-	if len(got.Verdicts) != 1 || !reflect.DeepEqual(got.Verdicts[0], want) {
-		t.Fatalf("verdicts %+v, want %+v", got.Verdicts, want)
+	if len(got.Verdicts) != 0 {
+		t.Fatalf("verdicts %+v, want none: no model was asked", got.Verdicts)
 	}
 	wantOutcome(t, allow.Decide(wire.Join(f, got, settings.Fingerprint()), defaults(t).Policy(), now), allow.Merge, "")
+	// Nor does it wait for a review job: with no verdicts file at all the
+	// answer is the same.
+	wantOutcome(t, decide(t, f, nil), allow.Merge, "")
+}
+
+// Something changed and none of it is text: a prebuilt object, an image,
+// a file past the budget. No model can be asked about it, so it is not a
+// read in part that merges once it is old enough: the gate refuses the
+// read and a person looks (spec section 11, amendment 53).
+func TestFetchNothingReadable(t *testing.T) {
+	j := newJob(t, model.GoModules, goodUpdate(t, allow.GoModules, "example.com/m"))
+	j.preparer.answers["example.com/m"] = func(p artifact.Pair) (artifact.Prepared, error) {
+		out := preparedRead(p)
+		out.State = allow.ReadPartial
+		out.Unread = []artifact.Unread{{Path: "pkg/rsrc.syso", Size: 20, SHA256: strings.Repeat("1a", 32)}}
+		return out, nil
+	}
+	dir, f := j.run(t)
+	read := f.Facts.Updates[0].Prepared
+	if read.Status != wire.Refused || !strings.Contains(read.Detail, "no model was asked") || len(chunkFiles(t, dir)) != 0 {
+		t.Fatalf("the read fetch recorded: %+v", read)
+	}
+	// Whatever a verdicts file says for it, and however old the version.
+	for _, verdicts := range [][]wire.Verdict{nil, {{Key: strings.Repeat("7", 64), Fingerprint: finger, Read: allow.ReadPartial}}} {
+		d := allow.Decide(wire.Join(f, wire.Verdicts{Version: wire.Version, Verdicts: verdicts}, finger), defaults(t).Policy(), now.Add(365*24*time.Hour))
+		wantOutcome(t, d, allow.Person, allow.ReasonReadRefused)
+	}
 }
 
 // Two updates with the same read have one verdict, asked for once.

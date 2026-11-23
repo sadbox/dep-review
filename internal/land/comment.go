@@ -333,9 +333,9 @@ func lead(v view) string {
 	head := code(v.ev.PullRequest.Head)
 	switch v.res.Action {
 	case ActionMerged:
-		return "**Merged** at head " + head + ". Every fact below holds, the model raised no veto, and GitHub's required checks allowed the merge.\n"
+		return "**Merged** at head " + head + ". Every fact below holds, " + modelSaid(v) + ", and GitHub's required checks allowed the merge.\n"
 	case ActionRefused:
-		return "**GitHub refused the merge.** Every fact below holds and the model raised no veto, so the gate asked GitHub to merge head " + head +
+		return "**GitHub refused the merge.** Every fact below holds and " + modelSaid(v) + ", so the gate asked GitHub to merge head " + head +
 			". GitHub answered: " + code(v.res.Note) + "\n\n**Way out:** look at the pull request's merge box, then merge by hand or have Dependabot recreate the pull request. The gate does not try this head again.\n"
 	}
 	if len(d.Reasons) == 0 {
@@ -375,6 +375,18 @@ func lead(v view) string {
 	}
 	fmt.Fprintf(&b, "\n**Way out:** %s\n", r.Hint())
 	return b.String()
+}
+
+// modelSaid is the clause about the model in the lead of a decision to
+// merge. The model raised no veto only where it was asked: an image, and
+// two artifacts that hold the same files, are put before nobody.
+func modelSaid(v view) string {
+	for _, u := range v.ev.file.Facts.Updates {
+		if u.Prepared.Status == wire.Prepared {
+			return "the model raised no veto"
+		}
+	}
+	return "no model was asked, because there was no changed code to show one"
 }
 
 // A fact's four states, as the tables show them.
@@ -514,28 +526,34 @@ func updateRows(v view, i int) []row {
 		rows = append(rows, factRow("Superseded", u.Superseded))
 	}
 
-	// Read: the state allow.Decide was given, and what fetch prepared.
-	read, prepared := string(u.Read), "nothing was prepared"
+	// Read: the state allow.Decide was given, and what fetch prepared. The
+	// state is the verdicts file's only for a prepared read, which is the
+	// one read a model is asked about; every other is the facts file's
+	// alone, and its detail says what happened.
+	read, prepared, source := string(u.Read), "nothing was prepared", "the facts file"
 	if read == "" {
 		read = "not recorded"
 	}
+	asked := false // a model was asked about this read
 	if i < len(v.ev.file.Facts.Updates) {
 		p := v.ev.file.Facts.Updates[i].Prepared
 		prepared = string(p.Status)
 		switch {
 		case p.Status == wire.Prepared:
 			prepared = fmt.Sprintf("chunks prepared: %d; changed files not shown: %d", len(p.Chunks), len(p.Unread))
+			source, asked = "the verdicts file", true
 		case p.Detail != "":
 			prepared += ": " + p.Detail
 		}
 	}
-	rows = append(rows, row{"Read", code(read), code(prepared), code("the verdicts file")})
+	rows = append(rows, row{"Read", code(read), code(prepared), code(source)})
 
 	// Veto: the category, then each quoted line in a span of its own. With
 	// no veto there is a row only when the model answered: "none" beside a
-	// read that never happened would say more than is known.
+	// read that never happened, or one no model was asked about (two
+	// artifacts that hold the same files), would say more than is known.
 	switch {
-	case u.Veto == nil && (u.Read == allow.ReadFull || u.Read == allow.ReadPartial):
+	case u.Veto == nil && asked && (u.Read == allow.ReadFull || u.Read == allow.ReadPartial):
 		rows = append(rows, row{"Veto", code("none"), "", code("the model")})
 	case u.Veto != nil:
 		cells := []string{code(u.Veto.Category)}

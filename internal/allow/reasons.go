@@ -170,7 +170,7 @@ var reasonTable = []reasonText{
 		"Whether the update's code was read is not recorded.",
 		rerun},
 	{ReasonReadRefused, Person,
-		"The gate would not read this update's code: what it downloaded did not match the hash the pull request pins, the archive was unsafe to unpack, or the prepared text was not usable.",
+		"The gate would not read this update's code: what it downloaded did not match the hash the pull request pins, the archive was unsafe to unpack, nothing that changed is text a model can be shown, or the prepared text was not usable.",
 		"Do not merge without knowing why. Re-running gives the same answer while the registry serves the same bytes; look at the update by hand."},
 	{ReasonMajorUnlisted, Person,
 		"A major update of a name that is not on the list, and that the repository's own manifest does not show to be a dependency of a dependency.",
