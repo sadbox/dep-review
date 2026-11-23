@@ -79,7 +79,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | Listed | the name is on the owner's list |
 | NewName | the name is absent at base |
 | Increase | `to` is a plain release above `from` (Go: a listed module may also move to a higher pseudo-version) |
-| Major | the leading version component changed |
+| Major | the leading version component changed (for an image, the tag's: a refresh under an unchanged tag is never a major, also when the tag is `latest` or another name that is not a version and nothing could be compared) |
 | Indirect | the repository's own manifest shows it does not declare the dependency: `// indirect` in `go.mod`, or in none of the root package's dependency maps in `package-lock.json` (Go and npm only) |
 | Bound | the pinned hash, commit or digest is what the registry reports now |
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |

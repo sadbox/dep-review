@@ -42,6 +42,18 @@ func versionOf(tag string) (version, suffix string, ok bool) {
 // rebuilt the image under that tag. It is an increase with no change of
 // version. Otherwise both tags must be versions with the same number of
 // components and the identical suffix, and the head's must be greater.
+//
+// Major is about the tag, the only version an image shows. For a refresh
+// it is "no" whatever the tag is, and that is a limit (spec section 11,
+// amendment 50): a tag that is not a version (latest, lts, nonroot) can
+// be moved from one major of the software to the next without changing,
+// and nothing here could see it, because nothing of an image is read.
+// Such a refresh waits min_age like any other and not major_age. The
+// value says so, so the comment does not claim a comparison that was not
+// made. Calling every such refresh a major was weighed and left to the
+// owner: where the tag has no version because the repository's name
+// carries it (gcr.io/distroless/static-debian12:nonroot), it would make
+// every refresh wait 14 days for a major that cannot happen.
 func compareTags(from, to string) (increase, major allow.Fact) {
 	notComparable := func(why string) (allow.Fact, allow.Fact) {
 		return allow.No(why, shapeSource),
@@ -51,8 +63,12 @@ func compareTags(from, to string) (increase, major allow.Fact) {
 		return notComparable("an image pinned without a tag has no version to compare")
 	}
 	if from == to {
+		unchanged := "the tag did not change"
+		if _, _, ok := versionOf(to); !ok {
+			unchanged += fmt.Sprintf("; %s is not of the form N[.N[.N]][-suffix], so whether the image behind it moved to another major was not compared", to)
+		}
 		return allow.Yes(fmt.Sprintf("same tag %s, new digest", to), shapeSource),
-			allow.No("the tag did not change", shapeSource)
+			allow.No(unchanged, shapeSource)
 	}
 	old, oldSuffix, ok := versionOf(from)
 	if !ok {

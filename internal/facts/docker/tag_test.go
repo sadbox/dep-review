@@ -96,6 +96,45 @@ func TestCompareTags(t *testing.T) {
 	}
 }
 
+// A refresh under the same tag is never called a major (spec section 11,
+// amendment 50). For a tag that is a version that is a comparison; for
+// one that is not, nothing was compared, and the value has to say so: a
+// tag such as latest can go from one major to the next without changing.
+func TestSameTagMajorSaysWhatWasCompared(t *testing.T) {
+	const notCompared = "so whether the image behind it moved to another major was not compared"
+	tests := []struct {
+		tag      string
+		compared bool
+	}{
+		{"1.27-bookworm", true},
+		{"1.27.3", true},
+		{"26", true},
+		{"22-bookworm-slim", true},
+		{"latest", false},
+		{"lts", false},
+		{"nonroot", false},
+		{"alpine", false},
+		{"bookworm-20261110-slim", false},
+		// A leading zero is not a number to x/mod/semver.
+		{"24.04", false},
+	}
+	for _, tc := range tests {
+		increase, major := compareTags(tc.tag, tc.tag)
+		if !increase.Holds() || major.OK || !major.Gathered() {
+			t.Errorf("%s: increase %+v, major %+v; want an increase that is not a major", tc.tag, increase, major)
+		}
+		if !strings.HasPrefix(major.Value, "the tag did not change") {
+			t.Errorf("%s: major says %q", tc.tag, major.Value)
+		}
+		if got := !strings.Contains(major.Value, notCompared); got != tc.compared {
+			t.Errorf("%s: major says %q; compared = %v, want %v", tc.tag, major.Value, got, tc.compared)
+		}
+		if !tc.compared && !strings.Contains(major.Value, tc.tag+" is not of the form N[.N[.N]][-suffix]") {
+			t.Errorf("%s: major says %q, want it to name the tag", tc.tag, major.Value)
+		}
+	}
+}
+
 func TestVersionOf(t *testing.T) {
 	tests := []struct {
 		tag     string
