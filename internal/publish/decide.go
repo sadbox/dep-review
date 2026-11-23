@@ -77,17 +77,43 @@ func worse(a, b model.Route) model.Route {
 	return a
 }
 
+// rebuiltVerified reports, per update, whether the rebuild job's result
+// bound to its plan (rebuildOutcome) is verified.
+func rebuiltVerified(ev *model.Evidence, results []model.RebuildResult) func(string) bool {
+	ok := map[string]bool{}
+	bad := map[string]bool{}
+	for _, p := range ev.Rebuilds {
+		if outcome, _, _ := rebuildOutcome(p, results); outcome == model.RebuildVerified {
+			ok[p.Update] = true
+		} else {
+			bad[p.Update] = true // every plan of the update must verify
+		}
+	}
+	return func(u string) bool { return u != "" && ok[u] && !bad[u] }
+}
+
 // effectiveRoute recomputes the route from the evidence's own updates and
-// findings and takes the worse of that and what fetch recorded.
-func effectiveRoute(ev *model.Evidence) (model.Route, []string) {
-	findings := make([]model.Finding, len(ev.Findings))
-	copy(findings, ev.Findings)
+// findings and takes the worse of that and what fetch recorded. A verified
+// rebuild relaxes its update's IfRebuilt findings to review; then fetch's
+// floor is RouteIfRebuilt.
+func effectiveRoute(ev *model.Evidence, results []model.RebuildResult) (model.Route, []string) {
+	findings := model.Relaxed(ev.Findings, rebuiltVerified(ev, results))
+	floor := ev.Route
+	for i := range findings {
+		if findings[i].Route != ev.Findings[i].Route {
+			floor = ev.RouteIfRebuilt
+			if _, ok := knownRoute[floor]; !ok || floor == model.RouteAuto {
+				floor = model.RouteReview
+			}
+			break
+		}
+	}
 	for i := range findings {
 		if _, ok := knownRoute[findings[i].Route]; !ok {
 			findings[i].Route = model.RouteRefuse
 		}
 	}
-	r := worse(ev.Route, policy.Combine(ev.Updates, findings, ev.Truncated))
+	r := worse(floor, policy.Combine(ev.Updates, findings, ev.Truncated))
 	var codes []string
 	seen := map[string]bool{}
 	for _, f := range findings {
@@ -127,7 +153,7 @@ func Decide(in Inputs) Outcome {
 	}
 	ev := in.Evidence
 	if ev != nil && ev.Route == model.RouteRefuse {
-		_, codes := effectiveRoute(ev)
+		_, codes := effectiveRoute(ev, in.Rebuild)
 		return human(model.RouteRefuse, "the gate refused this pull request"+codeList(codes), codes)
 	}
 	if fr := jobResult(in.FetchResult); fr != "success" || ev == nil {
@@ -140,7 +166,7 @@ func Decide(in Inputs) Outcome {
 	if ev.Classification.HeadSHA != c.HeadSHA || ev.Classification.PR != c.PR || ev.Classification.Repo != c.Repo {
 		return human("", "the evidence is for a different pull request or head", nil)
 	}
-	route, codes := effectiveRoute(ev)
+	route, codes := effectiveRoute(ev, in.Rebuild)
 	switch route {
 	case model.RouteAuto:
 		return Outcome{Decision: model.DecisionMerge, Route: route, State: StateSuccess,

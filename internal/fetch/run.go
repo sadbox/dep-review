@@ -84,6 +84,7 @@ func Run(ctx context.Context, env Env, reg Registry, ev EvidenceDir) (model.Evid
 		out.Flagged = []model.FlaggedItem{}
 	}
 	out.Route = policy.Combine(out.Updates, out.Findings, out.Truncated)
+	out.RouteIfRebuilt = policy.Combine(out.Updates, model.Relaxed(out.Findings, func(string) bool { return true }), out.Truncated)
 	out.Triage = policy.Triage(out.Updates, out.Findings, out.Truncated)
 	if err := ev.WriteEvidence(out); err != nil {
 		return model.Evidence{}, err

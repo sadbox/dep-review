@@ -364,16 +364,20 @@ capabilities, a read-only root and an unprivileged user.
    directories, read with caps: regular files only, inside those
    directories, each named once.
 
-The result (`verified`, `differs`, `failed`, or `not run`) is shown in the
-comment, and no route depends on it. A match shows that the committed
-bundle is what the source, lockfile and build script produce, not that
-they are benign. A build-only package (a compiler or bundler plugin) is
-in no diff the reviewer reads, and a build may copy any file of the tree.
-A gVisor escape would also let a build forge the result, which is
-harmless while it decides nothing. Whether a verified rebuild should ever
-relax `actions.dist-residual` is an open decision: if it does, only when
-no build-only locked package changed, and with the residual still
-required reading.
+The result (`verified`, `differs`, `failed`, or `not run`) is shown in
+the comment. A match shows that the committed bundle is what the source,
+lockfile and build script produce, not that they are benign, so it
+changes one route only. An `actions.dist-residual` (bundle bytes nothing
+changed explains) goes to review instead of a person when the rebuild of
+that update verified and no build-only locked package changed: one that
+no bundle contains, so it is in no diff the reviewer reads (fetch marks
+such a finding `if_rebuilt`; publish relaxes it only for a verified
+result bound to the update's plan, every plan of the update verified).
+The residual stays in `dist.txt` for the reviewer, and the review's
+verdict and accounting decide as for any other review. A build may still
+copy any file of the tree, which the first-party diff shows. A gVisor
+escape could forge a result; at worst that puts the PR on review, never
+past it.
 
 ## Design rules
 

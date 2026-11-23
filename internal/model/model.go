@@ -151,6 +151,24 @@ type Finding struct {
 	// as triage for the person deciding (policy.Triage): it never lets a
 	// PR merge.
 	Triage bool `json:"triage,omitempty"`
+	// IfRebuilt marks a person-routed finding that the rebuild job's
+	// verified result for its update (a RebuildPlan with the same Update)
+	// sends to review instead (publish, relaxRebuilt). Fetch sets it only
+	// where a match shows what the finding doubts.
+	IfRebuilt bool `json:"if_rebuilt,omitempty"`
+}
+
+// Relaxed is fs with every IfRebuilt finding of an update in verified
+// routed to review (a copy).
+func Relaxed(fs []Finding, verified func(update string) bool) []Finding {
+	out := make([]Finding, len(fs))
+	copy(out, fs)
+	for i := range out {
+		if out[i].IfRebuilt && out[i].Route == RouteHuman && verified(out[i].Update) {
+			out[i].Route = RouteReview
+		}
+	}
+	return out
 }
 
 // Evidence is fetch's output: the real change set, findings, and the files
@@ -185,6 +203,9 @@ type Evidence struct {
 	// rebuilds from source (gate.yml, job rebuild): the reference its
 	// results are checked against.
 	Rebuilds []RebuildPlan `json:"rebuilds,omitempty"`
+	// RouteIfRebuilt is Route with every IfRebuilt finding on review: the
+	// route when every rebuild verifies. The review job runs for it.
+	RouteIfRebuilt Route `json:"route_if_rebuilt,omitempty"`
 	// Triage: the route is human only because of findings marked Triage,
 	// so the review still runs, and its answer is shown to the person
 	// deciding. It never merges.

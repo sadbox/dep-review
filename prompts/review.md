@@ -45,6 +45,10 @@ For every update in `evidence.json`:
    or a space. Escapes such as `<0x0D>` (a lone carriage return) or
    `<U+2028>` stand for characters some languages treat as a line break:
    code after one may run.
+   For a GitHub Action whose `actions.dist-residual` is on review, the
+   gate rebuilt the bundle from source and got the committed bytes: read
+   the residual in its `dist.txt` all the same, and judge whether the
+   first-party source and the bundled packages' diffs explain it.
 2. Look for supply-chain signals: new or changed network endpoints, HTTP
    calls, DNS lookups, process execution, reads of environment variables or
    credential files the library has no business touching, encoded or

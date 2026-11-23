@@ -150,3 +150,62 @@ func TestSchemaInSync(t *testing.T) {
 		t.Errorf("verdict enum differs from schema")
 	}
 }
+
+// A verified rebuild sends its update's IfRebuilt findings, and nothing
+// else, to review; the review's verdict then decides as usual.
+func TestRebuildRelaxes(t *testing.T) {
+	pass := []byte(`{"verdict":"pass","flags":[],"summary":"ok","items":[],"examined":[]}`)
+	c := strings.Repeat("a", 40)
+	act := []model.Update{{Ecosystem: model.GitHubActions, Directory: "/", Name: "o/act", From: "1.0.0", To: "1.1.0", Type: model.Minor, Direct: true}}
+	plan := model.RebuildPlan{Update: "o/act", Repo: "o/act", Commit: c, Dirs: []string{"dist"}}
+	residual := model.Finding{Code: "actions.dist-residual", Route: model.RouteHuman, Update: "o/act", IfRebuilt: true}
+	result := func(outcome string) model.RebuildResult {
+		return model.RebuildResult{Update: "o/act", Repo: "o/act", Commit: c, Dirs: []string{"dist"}, Outcome: outcome}
+	}
+	ev := func(fs ...model.Finding) *model.Evidence {
+		e := evidence(model.RouteHuman, act, fs...)
+		e.Rebuilds = []model.RebuildPlan{plan}
+		e.RouteIfRebuilt = model.RouteReview
+		return e
+	}
+	in := func(e *model.Evidence, rs ...model.RebuildResult) Inputs {
+		return Inputs{Class: class(), FetchResult: "success", Evidence: e, ReviewResult: "success", Verdict: pass, Rebuild: rs}
+	}
+	if o := Decide(in(ev(residual), result(model.RebuildVerified))); o.Decision != model.DecisionMerge || o.Route != model.RouteReview {
+		t.Errorf("verified: %+v", o)
+	}
+	other := result(model.RebuildVerified)
+	other.Commit = strings.Repeat("b", 40)
+	elsewhere := residual
+	elsewhere.Update = "o/other"
+	plain := residual
+	plain.IfRebuilt = false
+	for name, c := range map[string]Inputs{
+		"differs":                   in(ev(residual), result(model.RebuildDiffers)),
+		"failed":                    in(ev(residual), result(model.RebuildFailed)),
+		"no result":                 in(ev(residual)),
+		"result for another commit": in(ev(residual), other),
+		"finding of another update": in(ev(elsewhere), result(model.RebuildVerified)),
+		"finding not marked":        in(ev(plain), result(model.RebuildVerified)),
+		"another human finding":     in(ev(residual, model.Finding{Code: "actions.lockfile-downgrade", Route: model.RouteHuman, Update: "o/act"}), result(model.RebuildVerified)),
+	} {
+		if o := Decide(c); o.Decision != model.DecisionHuman || o.Route != model.RouteHuman {
+			t.Errorf("%s: %+v", name, o)
+		}
+	}
+	// Every plan of the update must verify.
+	two := ev(residual)
+	two.Rebuilds = append(two.Rebuilds, model.RebuildPlan{Update: "o/act", Repo: "o/act", Commit: c, Dirs: []string{"lib"}})
+	if o := Decide(in(two, result(model.RebuildVerified))); o.Decision != model.DecisionHuman {
+		t.Errorf("one of two plans verified: %+v", o)
+	}
+	// A refuse is never relaxed, and the review still has to pass.
+	if o := Decide(in(ev(residual, model.Finding{Code: "x", Route: model.RouteRefuse}), result(model.RebuildVerified))); o.Decision != model.DecisionHuman {
+		t.Errorf("refuse: %+v", o)
+	}
+	fail := in(ev(residual), result(model.RebuildVerified))
+	fail.Verdict = []byte(`{"verdict":"unsure","flags":[],"summary":"?","items":[],"examined":[]}`)
+	if o := Decide(fail); o.Decision != model.DecisionHuman {
+		t.Errorf("unsure verdict: %+v", o)
+	}
+}
