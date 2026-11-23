@@ -55,9 +55,6 @@ type Fetch struct {
 const (
 	classifySource = "classify"
 	changesSource  = "git: the paths that differ between the merge base and the head"
-	// openedSource is the spec's name for the first-seen fallback (section
-	// 11, amendment 4).
-	openedSource = "pull request opened"
 )
 
 // Run gathers the pull request's facts, prepares what the model is to
@@ -170,9 +167,7 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 	}
 	pr.Identity = classified.And(asked.base)
 	pr.ChecksConfigured = asked.checks
-	if asked.opened.Known() {
-		pr.Opened = asked.opened.Time
-	}
+	pr.Opened = asked.opened
 	// Only an answer stops the gathering. With GitHub merely not
 	// answering, a Shape left ungathered here would be person, where the
 	// outage alone is a wait.
@@ -203,7 +198,6 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 		GitHub:     f.GitHub,
 		Advisories: f.Advisories,
 		Now:        f.Now,
-		Opened:     pr.Opened,
 	})
 	if err != nil {
 		return fmt.Errorf("gather: %s: %w", pr.Ecosystem, err)
@@ -213,10 +207,20 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 		return errors.New("gather: the npm gatherer did not say what the registry and the lock show of NoRegress for every update")
 	}
 
+	// An artifact belongs to the update with the same name and versions.
+	type update struct{ name, from, to string }
+	pairs := map[update]artifact.Pair{}
+	for _, p := range res.Artifacts {
+		pairs[update{p.Name, p.From, p.To}] = p
+	}
 	pr.Updates = make([]wire.Update, len(res.Updates))
 	for i, u := range res.Updates {
-		u.FirstSeen = firstSeen(u.FirstSeen, asked.opened)
+		// FirstSeen stays what the gatherer made of the registry's clock.
+		// Where that is no time, publish dates the pin itself (spec section
+		// 11, amendment 38), and tells one pin from another by the hash
+		// Bound was established for.
 		pr.Updates[i] = wire.NewUpdate(u, wire.Read{Status: wire.Nothing})
+		pr.Updates[i].Hash = pairs[update{u.Name, u.From, u.To}].New.Hash
 	}
 	// Before anything is downloaded: a change set of more updates than
 	// the file carries is not prepared one read at a time first.
@@ -225,12 +229,6 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 		return tooMuch(file, chunks)
 	}
 
-	// An artifact belongs to the update with the same name and versions.
-	type update struct{ name, from, to string }
-	pairs := map[update]artifact.Pair{}
-	for _, p := range res.Artifacts {
-		pairs[update{p.Name, p.From, p.To}] = p
-	}
 	// The same budget the review job's client is built with, so that a
 	// read is prepared within what the reviewer accepts.
 	lim := veto.FromConfig(f.Config).Limits()
@@ -268,30 +266,6 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 		}
 	}
 	return nil
-}
-
-// firstSeen is the first-seen fallback (spec section 11, amendment 4).
-// Where the registry's clock gave no time, because it did not answer, has
-// none, or has one the publisher can set, the time the pull request was
-// opened stands in: the pinned artifact existed when Dependabot proposed
-// it, and no publisher sets that time. What the registry's clock said is
-// kept in the Value.
-func firstSeen(got, opened allow.TimeFact) allow.TimeFact {
-	switch {
-	case got.Known():
-		return got
-	case opened.Known():
-		t := allow.At(opened.Time, openedSource)
-		if got.Value != "" {
-			t.Value += "; the registry's clock: " + got.Value
-		}
-		return t
-	case opened.Unavailable && opened.Source != "" && !got.Unavailable:
-		// GitHub did not answer, and its answer is what would settle
-		// this. That is a wait, not the person a missing time is.
-		return opened
-	}
-	return got
 }
 
 // read prepares the read of update number i and writes its chunk files.

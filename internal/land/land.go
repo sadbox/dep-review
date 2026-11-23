@@ -1,9 +1,9 @@
 // Package land is the publish job and the scheduled re-evaluation, as
 // library code. Decide reads the two files the earlier jobs wrote, adds
 // what only this job can observe (the default branch's required checks,
-// whether the pull request is still what the facts describe), loads the
-// policy from the default branch and asks allow.Decide. Act carries the
-// answer out.
+// whether the pull request is still what the facts describe, when it
+// first evaluated a pin no registry dates), loads the policy from the
+// default branch and asks allow.Decide. Act carries the answer out.
 //
 // Nothing in this package decides. An outcome is allow.Decide's, or
 // allow.ChecksRefused's after GitHub refused a merge; what this package
@@ -11,8 +11,9 @@
 // "GitHub refused" (reported, never retried as if it were a wait) or "the
 // run failed" (Failed). The gate does not judge CI: GitHub's rules answer
 // the merge call. And there is no stored approval: the comment remembers
-// the last outcome and the model's verdicts by content key, and a merge
-// always follows a fresh allow.Decide on freshly gathered facts.
+// the last outcome, the model's verdicts by content key and when a pin
+// was first evaluated, and a merge always follows a fresh allow.Decide on
+// freshly gathered facts.
 package land
 
 import (
@@ -110,6 +111,7 @@ type Evaluation struct {
 	file        wire.Facts // for the comment: the prepared reads, the time gathered
 	fingerprint string     // the reviewer's, under the current settings
 	cache       []cached   // the verdicts worth remembering
+	firstSeen   []seen     // the first evaluations worth remembering
 	branch      string     // the default branch
 	now         time.Time  // the instant decided at
 }
@@ -120,12 +122,14 @@ type Evaluation struct {
 //
 // An update's Read and Veto come from the verdicts file alone (wire.Join):
 // a verdict that is missing, or was written under another reviewer
-// fingerprint, is Read none. A missing verdicts file is no verdicts.
+// fingerprint, is Read none. A missing verdicts file is no verdicts. An
+// update's FirstSeen is the facts file's when a registry gave a time, and
+// otherwise this job's own (dateUnseen).
 //
 // An error means there is no decision: a file that does not decode, facts
 // for another repository or gathered under other settings
 // (ErrConfigChanged), or GitHub not answering for something that is not a
-// fact (the pull request, the policy file).
+// fact (the pull request, the policy file, the gate's comment).
 func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Evaluation, error) {
 	if err := cfg.check(); err != nil {
 		return Evaluation{}, err
@@ -179,6 +183,11 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 	}
 	if err := ctx.Err(); err != nil {
 		// A context that ended reads as "GitHub did not answer" above.
+		return Evaluation{}, err
+	}
+	// The one fact this job makes from its own clock, for the updates no
+	// registry dates. allow.Decide is given the result like any other fact.
+	if err := dateUnseen(ctx, cfg, &ev); err != nil {
 		return Evaluation{}, err
 	}
 

@@ -114,7 +114,7 @@ func jsonNames(t reflect.Type, into map[string]bool) {
 // be able to say. A field added to allow shows up here as a failure, not
 // as a fact that silently never reaches allow.Decide.
 func TestMirrorsAllow(t *testing.T) {
-	mirror := func(what string, from, to reflect.Type, dropped map[string]bool, added string) {
+	mirror := func(what string, from, to reflect.Type, dropped map[string]bool, added ...string) {
 		t.Helper()
 		seen := map[string]bool{}
 		for i := 0; i < from.NumField(); i++ {
@@ -137,13 +137,14 @@ func TestMirrorsAllow(t *testing.T) {
 			}
 		}
 		for i := 0; i < to.NumField(); i++ {
-			if name := to.Field(i).Name; !seen[name] && name != added {
+			if name := to.Field(i).Name; !seen[name] && !slices.Contains(added, name) {
 				t.Errorf("%s has %s, which allow does not", what, name)
 			}
 		}
 	}
-	mirror("wire.PRFacts", reflect.TypeOf(allow.PRFacts{}), reflect.TypeOf(PRFacts{}), nil, "")
-	mirror("wire.Update", reflect.TypeOf(allow.UpdateFacts{}), reflect.TypeOf(Update{}), map[string]bool{"Read": true, "Veto": true}, "Prepared")
+	mirror("wire.PRFacts", reflect.TypeOf(allow.PRFacts{}), reflect.TypeOf(PRFacts{}), nil)
+	// Hash and Prepared are the two things an update has for publish alone.
+	mirror("wire.Update", reflect.TypeOf(allow.UpdateFacts{}), reflect.TypeOf(Update{}), map[string]bool{"Read": true, "Veto": true}, "Hash", "Prepared")
 
 	// Nothing a facts file can hold is called read or veto, at any depth.
 	names := map[string]bool{}
@@ -190,6 +191,7 @@ func TestEveryFactSurvives(t *testing.T) {
 
 	f := goodFacts()
 	f.Facts.Updates = []Update{NewUpdate(u, Read{Status: Nothing})}
+	f.Facts.Updates[0].Hash = "h1:abc="
 	b, err := EncodeFacts(f)
 	if err != nil {
 		t.Fatal(err)
@@ -200,6 +202,9 @@ func TestEveryFactSurvives(t *testing.T) {
 	decoded, err := DecodeFacts(b)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := decoded.Facts.Updates[0].Hash; got != "h1:abc=" {
+		t.Errorf("the update's hash came back as %q", got)
 	}
 	// Written again, the decoded file is the same bytes. (An empty list
 	// comes back as an empty list where a nil one went in, so the structs
@@ -299,6 +304,8 @@ func TestFactsCheck(t *testing.T) {
 		{"a SHA-256 head", func(f *Facts) { f.PullRequest.Head = strings.Repeat("d", 64) }, ""},
 		{"an ecosystem with no rule", func(f *Facts) { f.Facts.Ecosystem = "uv" }, ""},
 		{"opened unknown", func(f *Facts) { f.Facts.Opened = time.Time{} }, ""},
+		{"a hash", func(f *Facts) { f.Facts.Updates[0].Hash = "sha512-" + strings.Repeat("A", 86) + "==" }, ""},
+		{"a hash too long to be one", func(f *Facts) { f.Facts.Updates[0].Hash = strings.Repeat("a", maxHashBytes+1) }, "hash is 201 bytes"},
 
 		{"another version", func(f *Facts) { f.Version = 2 }, "version 2"},
 		{"no version", func(f *Facts) { f.Version = 0 }, "version 0"},

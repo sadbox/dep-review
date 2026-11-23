@@ -82,7 +82,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | Major | the leading version component changed |
 | Indirect | the repository's own manifest shows it does not declare the dependency: `// indirect` in `go.mod`, or in none of the root package's dependency maps in `package-lock.json` (Go and npm only) |
 | Bound | the pinned hash, commit or digest is what the registry reports now |
-| FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the pull request was opened |
+| FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |
 | NameCreated | when the package name first appeared (new names only) |
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have |
 | NoRegress | no new or changed install script; npm: in the tarball the install scripts, `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone; provenance not lost; Actions: the new commit descends from the old one |
@@ -111,6 +111,13 @@ With every fact holding, an update needs an age, measured from FirstSeen:
 In a pull request that carries a fully read security fix, the other
 updates that are known, not new, not major and fully read need no age
 either (`fast_path_companions: ride-along`).
+
+Where a registry has no such clock (an Action release that is not
+immutable, most of all), the age runs from the gate's first evaluation of
+the pin, not from the day the pull request was opened: Dependabot
+rewrites a grouped pull request in place, and a version it adds today is
+new today. A rebase keeps the pin's time; another version or hash starts
+again.
 
 ## Ecosystems
 

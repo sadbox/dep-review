@@ -89,7 +89,7 @@ func TestFetchByEcosystem(t *testing.T) {
 			}
 			in := j.gatherer.inputs[0]
 			if in.Repo != testRepo || in.Base != mergeSHA || in.Head != headSHA || len(in.Files) != 1 ||
-				in.HTTP != j.fetch.HTTP || in.GitHub != j.fetch.GitHub || !in.Opened.Equal(created) || !in.Now().Equal(now) {
+				in.HTTP != j.fetch.HTTP || in.GitHub != j.fetch.GitHub || !in.Now().Equal(now) {
 				t.Errorf("the gatherer was given %+v", in)
 			}
 			if !reflect.DeepEqual(in.Policy, defaults(t).Policy()) {
@@ -313,88 +313,41 @@ func TestFetchPullRequestFacts(t *testing.T) {
 	}
 }
 
-// The first-seen fallback of spec section 11, amendment 4.
-func TestFirstSeen(t *testing.T) {
-	clock := allow.At(now.Add(-100*time.Hour), "registry clock")
-	wasOpened := allow.At(created, "GitHub: repos/o/r/pulls/9 created_at")
-	gitHubDown := allow.UnavailableTime("the pull request could not be read: GitHub did not answer", "GitHub: repos/o/r/pulls/9")
-	noOpened := allow.TimeFact{Value: "the pull request could not be read (HTTP 404)"}
-	fallback := func(why string) allow.TimeFact {
-		f := allow.At(created, "pull request opened")
-		if why != "" {
-			f.Value += "; the registry's clock: " + why
-		}
-		return f
-	}
-	for _, tc := range []struct {
-		name        string
-		got, opened allow.TimeFact
-		want        allow.TimeFact
-	}{
-		{"a clock that answered is kept", clock, wasOpened, clock},
-		{"a clock that answered is kept without the pull request", clock, noOpened, clock},
-		{"a clock that did not answer", allow.UnavailableTime("index.golang.org: 503", "index.golang.org"), wasOpened,
-			fallback("index.golang.org: 503")},
-		{"a clock the publisher can set", allow.TimeFact{Value: "release v7.0.1 is not immutable", Source: "GitHub: releases/tags/v7.0.1"}, wasOpened,
-			fallback("release v7.0.1 is not immutable")},
-		{"a gap in the index", allow.TimeFact{Value: "unknown: not in the index", Source: "index.golang.org"}, wasOpened,
-			fallback("unknown: not in the index")},
-		{"nothing gathered", allow.TimeFact{}, wasOpened, fallback("")},
-		// Without the pull request's time there is no fallback. Where
-		// GitHub's answer would settle it, that is a wait.
-		{"no clock and GitHub down", allow.TimeFact{Value: "release v7.0.1 is not immutable", Source: "GitHub"}, gitHubDown, gitHubDown},
-		{"clock down and GitHub down", allow.UnavailableTime("503", "index.golang.org"), gitHubDown, allow.UnavailableTime("503", "index.golang.org")},
-		{"no clock and no pull request time", allow.TimeFact{Value: "not immutable", Source: "GitHub"}, noOpened,
-			allow.TimeFact{Value: "not immutable", Source: "GitHub"}},
-		{"clock down and no pull request time", allow.UnavailableTime("503", "index"), noOpened, allow.UnavailableTime("503", "index")},
-	} {
-		if got := firstSeen(tc.got, tc.opened); got != tc.want {
-			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
-		}
-	}
-}
-
-// The fallback as the facts file shows it, and what it decides: only
-// FirstSeen is replaced, and the time is the pull request's.
-func TestFetchFirstSeenFallback(t *testing.T) {
+// Fetch does not date an update itself (spec section 11, amendment 38):
+// a first-seen time the registry did not give stays as the gatherer left
+// it, whatever the pull request's creation time is, and publish dates the
+// pin. What fetch adds is the hash that tells one pin from another.
+func TestFetchLeavesFirstSeenAndNamesTheHash(t *testing.T) {
 	known := goodUpdate(t, allow.GoModules, "example.com/known")
 	gap := goodUpdate(t, allow.GoModules, "example.com/gap")
 	gap.FirstSeen = allow.TimeFact{Value: "unknown: not in the index", Source: "index.golang.org"}
-	// A new name's creation time has no fallback.
-	gap.NameCreated = allow.TimeFact{Value: "unknown: not in the index", Source: "index.golang.org"}
+	down := goodUpdate(t, allow.GoModules, "example.com/down")
+	down.FirstSeen = allow.UnavailableTime("index.golang.org: 503", "index.golang.org")
+	// An update the gatherer named no artifact for: its Bound does not hold.
+	unbound := goodUpdate(t, allow.GoModules, "example.com/unbound")
+	unbound.Bound = allow.No("go.sum pins another hash", "go mod download")
 
-	j := newJob(t, model.GoModules, known, gap)
+	j := newJob(t, model.GoModules, known, gap, down, unbound)
+	j.gatherer.res.Artifacts = j.gatherer.res.Artifacts[:3]
 	_, f := j.run(t)
-	if got := f.Facts.Updates[0].FirstSeen; got != known.FirstSeen {
-		t.Errorf("a known time was replaced: %+v", got)
+	for i, want := range []allow.UpdateFacts{known, gap, down, unbound} {
+		if got := f.Facts.Updates[i].FirstSeen; got != want.FirstSeen {
+			t.Errorf("%s: first seen %+v, want what the gatherer returned, %+v", want.Name, got, want.FirstSeen)
+		}
 	}
-	got := f.Facts.Updates[1]
-	if !got.FirstSeen.Known() || !got.FirstSeen.Time.Equal(created) || got.FirstSeen.Source != "pull request opened" {
-		t.Errorf("first seen %+v, want the pull request's creation time", got.FirstSeen)
+	for i, want := range []string{"new", "new", "new", ""} {
+		if got := f.Facts.Updates[i].Hash; got != want {
+			t.Errorf("%s: hash %q, want %q", f.Facts.Updates[i].Name, got, want)
+		}
 	}
-	if got.NameCreated != gap.NameCreated {
-		t.Errorf("name created %+v", got.NameCreated)
-	}
-	// Opened 195.5 hours ago, which is more than the 72 a full read needs.
-	wantOutcome(t, decide(t, f, cleanVerdicts(f)), allow.Merge, "")
-
-	// With GitHub down there is no time to fall back to, and the update
-	// waits for it instead of going to a person. (allow.Decide needs one
-	// known time in the pull request to run its deadline from; the other
-	// update has one.)
-	j = newJob(t, model.GoModules, known, gap)
-	j.api.pullStatus = http.StatusServiceUnavailable
-	_, f = j.run(t)
-	if got := f.Facts.Updates[1].FirstSeen; got.Known() || !got.Unavailable || got.Source == "" {
-		t.Errorf("first seen %+v, want unavailable", got)
-	}
-	wantOutcome(t, decide(t, f, cleanVerdicts(f)), allow.Wait, allow.ReasonSourceUnavailable)
-
-	// A pull request that cannot be read at all leaves the time unknown.
-	j = newJob(t, model.GoModules, gap)
-	j.api.pullStatus = http.StatusNotFound
-	_, f = j.run(t)
+	// Without publish's clock a time nobody established is still a person's.
 	wantOutcome(t, decide(t, f, cleanVerdicts(f)), allow.Person, allow.ReasonFirstSeenUnknown)
+
+	// An image names no artifact: its digest is in To.
+	j = newJob(t, model.Docker, goodUpdate(t, allow.Docker, listedName[allow.Docker]))
+	if _, f = j.run(t); f.Facts.Updates[0].Hash != "" {
+		t.Errorf("an image's hash is %q", f.Facts.Updates[0].Hash)
+	}
 }
 
 // One read that cannot be prepared is recorded for its update and costs

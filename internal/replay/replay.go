@@ -13,9 +13,12 @@
 //     and ChecksConfigured holds;
 //   - Bound, Clean and NoRegress hold, and no update is a security fix,
 //     wherever the gatherer did not settle the fact from the files;
-//   - FirstSeen is the time the pull request was created, which is the
-//     gate's own fallback clock (docs/v0.2-spec.md, section 11,
-//     amendment 4);
+//   - FirstSeen is the time the pull request was created. It stands in
+//     for both clocks the gate counts from: a registry's, which is
+//     earlier, and, for an update no registry dates, the gate's own first
+//     evaluation of the pin (docs/v0.2-spec.md, section 11, amendment
+//     38), which is later, and later still when Dependabot has rewritten
+//     the pull request to another pin since;
 //   - NameCreated, for a new name that is not listed, is Options.NameCreated,
 //     or not established when that is the zero time;
 //   - every update was read in full (for Docker there is nothing to
@@ -31,9 +34,12 @@
 //
 // Two things are not bounded that way. With no NameCreated the stand-in
 // is the unfavourable one: a new, unlisted name is a person here and
-// might not be in the gate. And when a pull request merges can only be
-// later here than in the gate: a registry's clock is earlier than the
-// pull request, and a security fix would not wait.
+// might not be in the gate. And the moment a pull request merges at is
+// off in both directions: a registry's clock is earlier than the pull
+// request and a security fix would not wait, so there the gate merges
+// sooner; the gate's own clock for an update no registry dates starts
+// after the pull request was created, so there it merges later. Print
+// says under the totals what the ages are counted from.
 package replay
 
 import (
@@ -126,9 +132,13 @@ type Result struct {
 const (
 	standIn      = "replay stand-in"
 	recordSource = "the record"
-	// openedSource is the gate's own name for its first-seen fallback.
-	openedSource = "pull request opened"
+	// createdSource is the Source of the stand-in for FirstSeen.
+	createdSource = "replay stand-in: the pull request's creation time"
 )
+
+// firstSeenNote is the line Print ends with: what the ages it printed are
+// counted from.
+const firstSeenNote = "Every version is taken to be as old as its pull request. The gate counts from the registry's clock, or from its own first evaluation of the pin where the registry has none."
 
 // Run replays every *.json file in dir, in the order of their names.
 //
@@ -300,7 +310,7 @@ func withStandIns(u allow.UpdateFacts, rec Record, opt Options) allow.UpdateFact
 	if u.SecurityFix == (allow.Fact{}) {
 		u.SecurityFix = allow.No("taken not to be a security fix", standIn)
 	}
-	u.FirstSeen = allow.At(rec.Created, openedSource)
+	u.FirstSeen = allow.At(rec.Created, createdSource)
 	if !opt.NameCreated.IsZero() && u.NewName.Holds() && !u.Listed.Holds() {
 		u.NameCreated = allow.At(opt.NameCreated, standIn)
 	}
@@ -311,8 +321,8 @@ func withStandIns(u allow.UpdateFacts, rec Record, opt Options) allow.UpdateFact
 	return u
 }
 
-// Print writes one line for each result and then the totals for each
-// ecosystem.
+// Print writes one line for each result, then the totals for each
+// ecosystem, then firstSeenNote.
 //
 // A line has five tab-separated fields: the name, the ecosystem, the
 // outcome, the reasons (comma-separated, "-" for a merge) and a detail.
@@ -371,7 +381,10 @@ func Print(w io.Writer, results []Result) error {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(w, row, "all", all.total, all.merge, all.wait, all.person)
+	if _, err := fmt.Fprintf(w, row, "all", all.total, all.merge, all.wait, all.person); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "\n%s\n", firstSeenNote)
 	return err
 }
 

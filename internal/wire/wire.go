@@ -76,6 +76,9 @@ const (
 	// maxDetailBytes bounds the gate's own sentence about a read that was
 	// not prepared.
 	maxDetailBytes = 500
+	// maxHashBytes bounds an update's Hash. The longest the gate knows is
+	// an npm sha512 integrity, of 95 bytes.
+	maxHashBytes = 200
 )
 
 // PullRequest names the pull request, and the one head commit, that a
@@ -117,9 +120,10 @@ type PRFacts struct {
 }
 
 // Update is allow.UpdateFacts without Read and Veto, which fetch cannot
-// know and must not be able to write, and with Prepared in their place:
-// a facts file that says "read": "full" does not decode. Whether code
-// was read comes from the verdicts file alone (Join).
+// know and must not be able to write, and with Hash and Prepared, which
+// allow.Decide does not take: a facts file that says "read": "full" does
+// not decode. Whether code was read comes from the verdicts file alone
+// (Join).
 type Update struct {
 	Name string `json:"name"`
 	From string `json:"from"`
@@ -138,6 +142,15 @@ type Update struct {
 	NoRegress   allow.Fact     `json:"no_regress"`
 	SecurityFix allow.Fact     `json:"security_fix"`
 	Superseded  allow.Fact     `json:"superseded"`
+
+	// Hash is the hash Bound was established for (artifact.Pair.New.Hash:
+	// go.sum's h1 of the module zip, the lock's integrity, the action's
+	// commit), and empty where the gatherer named no artifact: Bound does
+	// not hold, or the update is an image, whose To carries the digest.
+	// allow.Decide never sees it. Publish tells one pin from another by it
+	// when it remembers when it first saw one (spec section 11, amendment
+	// 38).
+	Hash string `json:"hash"`
 
 	// Prepared is what fetch has for the model to read.
 	Prepared Read `json:"prepared"`
@@ -438,6 +451,9 @@ func (f Facts) check() error {
 		return fmt.Errorf("%d updates, more than %d", len(f.Facts.Updates), maxUpdates)
 	}
 	for i, u := range f.Facts.Updates {
+		if len(u.Hash) > maxHashBytes {
+			return fmt.Errorf("update %d: hash is %d bytes, more than %d", i, len(u.Hash), maxHashBytes)
+		}
 		if err := u.Prepared.check(i); err != nil {
 			return fmt.Errorf("update %d: prepared: %w", i, err)
 		}

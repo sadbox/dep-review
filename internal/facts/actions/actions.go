@@ -278,8 +278,8 @@ func releaseFact(p pin, rel releaseAnswer) allow.Fact {
 // immutable can be deleted and published again under the same tag with a
 // new time, so its published_at proves nothing about when this commit
 // became public. The fact is then unknown, with the release as its
-// Source, and the fetch command falls back to the time the pull request
-// was opened.
+// Source, and the publish job dates the pin from its own first
+// evaluation of it (spec section 11, amendment 38).
 func firstSeen(p pin, rel releaseAnswer) allow.TimeFact {
 	source := "GitHub: repos/" + p.name + "/releases/tags/" + p.to
 	switch {

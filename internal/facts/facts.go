@@ -39,13 +39,11 @@ type File struct {
 
 // Input is what every gatherer receives.
 type Input struct {
-	// Repo, Base, Head and Opened describe the pull request. No gatherer
-	// reads them: the first-seen fallback (amendment 4) is the fetch
-	// command's.
-	Repo   string
-	Base   string
-	Head   string
-	Opened time.Time
+	// Repo, Base and Head describe the pull request. No gatherer reads
+	// them.
+	Repo string
+	Base string
+	Head string
 	// Files is every path that differs between the merge base and the
 	// head, not only the ones this ecosystem expects: Shape is about there
 	// being no others. It comes from git, never from the pull request's

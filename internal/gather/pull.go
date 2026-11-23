@@ -21,8 +21,9 @@ type pull struct {
 	// checks is the ChecksConfigured fact: an active rule on the default
 	// branch requires at least one status check that is not the gate's own.
 	checks allow.Fact
-	// opened is when GitHub created the pull request.
-	opened allow.TimeFact
+	// opened is when GitHub created the pull request, and the zero time
+	// when that is not known. Only the wait deadline counts from it.
+	opened time.Time
 }
 
 // branchRE is the shape of a default branch name the gate puts in a
@@ -62,24 +63,16 @@ func askPull(ctx context.Context, c *gh.Client, repo string, number int) (pull, 
 		return pull{
 			base:   allow.Unavailable(why, source),
 			checks: allow.Unavailable(why+", so the default branch is not known", source),
-			opened: allow.UnavailableTime(why, source),
 		}, nil
 	case err != nil:
 		why := notRead("the pull request", err)
 		return pull{
 			base:   allow.Fact{Value: why},
 			checks: allow.Fact{Value: "not asked: " + why},
-			opened: allow.TimeFact{Value: why},
 		}, nil
 	}
 
-	var p pull
-	if answer.CreatedAt.IsZero() {
-		p.opened = allow.TimeFact{Value: "the pull request has no created_at"}
-	} else {
-		p.opened = allow.At(answer.CreatedAt, source+" created_at")
-	}
-
+	p := pull{opened: answer.CreatedAt}
 	base := answer.Base.Repo
 	switch {
 	case base == nil || !strings.EqualFold(base.FullName, repo) || base.DefaultBranch == "":

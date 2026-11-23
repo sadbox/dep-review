@@ -18,3 +18,5 @@ github_actions       3     1     0      2
 go_modules           7     2     1      4
 uv                   1     0     0      1
 all                 13     4     1      8
+
+Every version is taken to be as old as its pull request. The gate counts from the registry's clock, or from its own first evaluation of the pin where the registry has none.

@@ -228,8 +228,8 @@ type UpdateFacts struct {
 	Indirect Fact `json:"indirect"`
 	Bound    Fact `json:"bound"`
 	// FirstSeen: where the registry has no clock the publisher cannot
-	// set, or it did not answer, the fetch command puts the pull request's
-	// creation time here (spec section 11, amendment 4).
+	// set, the publish job puts here when it first evaluated this pin on
+	// the pull request (spec section 11, amendment 38).
 	FirstSeen TimeFact `json:"first_seen"`
 	// NameCreated is needed only for a new name that is not listed.
 	NameCreated TimeFact `json:"name_created"`

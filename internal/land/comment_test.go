@@ -258,6 +258,7 @@ func TestMarkerRoundTrip(t *testing.T) {
 			{Key: keyA, Read: allow.ReadFull},
 			{Key: keyB, Read: allow.ReadPartial, Veto: &allow.Veto{Category: "obfuscation", Quotes: []string{"--> <!-- `x` | @dependabot merge"}, Notes: "-->"}},
 		},
+		FirstSeen: []seen{{Pin: keyA, At: t0.Add(-time.Hour)}, {Pin: keyB, At: t0.Add(123456789 * time.Nanosecond)}},
 	}
 	line := m.String()
 	if !regexp.MustCompile(`^<!-- dep-review:v2 [A-Za-z0-9_-]+ -->$`).MatchString(line) {
@@ -302,8 +303,8 @@ func TestMarkerRejected(t *testing.T) {
 			fields[k] = v
 		}
 		var parts []string
-		for _, k := range []string{"outcome", "head", "not_before", "deadline", "notified", "notified_failed", "notified_unread", "fingerprint", "cache"} {
-			// The two newer lists are left out unless a case sets one: a
+		for _, k := range []string{"outcome", "head", "not_before", "deadline", "notified", "notified_failed", "notified_unread", "fingerprint", "cache", "first_seen"} {
+			// The three newer lists are left out unless a case sets one: a
 			// marker written before they existed still parses.
 			if v, ok := fields[k]; ok {
 				parts = append(parts, `"`+k+`":`+v)
@@ -339,7 +340,14 @@ func TestMarkerRejected(t *testing.T) {
 		"a veto without an answer":      encode(base(`cache=[{"key":"` + keyA + `","read":"none","veto":{"category":"x","quotes":[],"notes":""}}]`)),
 		"a category that is not a word": encode(base(`cache=[{"key":"` + keyA + `","read":"full","veto":{"category":"No Veto","quotes":[],"notes":""}}]`)),
 		"one key twice":                 encode(base(`cache=[{"key":"` + keyA + `","read":"full","veto":null},{"key":"` + keyA + `","read":"partial","veto":null}]`)),
+		"a pin that is not one":         encode(base(`first_seen=[{"pin":"golang.org/x/net","at":"2026-11-22T12:00:00Z"}]`)),
+		"a pin without a time":          encode(base(`first_seen=[{"pin":"` + keyA + `","at":"0001-01-01T00:00:00Z"}]`)),
+		"one pin twice":                 encode(base(`first_seen=[{"pin":"` + keyA + `","at":"2026-11-22T12:00:00Z"},{"pin":"` + keyA + `","at":"2026-11-01T12:00:00Z"}]`)),
+		"too many pins":                 encode(base(`first_seen=[` + strings.Repeat(`{"pin":"`+keyA+`","at":"2026-11-22T12:00:00Z"},`, maxFirstSeen) + `{"pin":"` + keyB + `","at":"2026-11-22T12:00:00Z"}]`)),
 		"too long":                      "<!-- dep-review:v2 " + strings.Repeat("A", maxMarkerBytes+1) + " -->",
+	}
+	if m, ok := parseMarker(encode(base(`first_seen=[{"pin":"` + keyA + `","at":"2026-11-22T12:00:00Z"}]`))); !ok || len(m.FirstSeen) != 1 || !m.FirstSeen[0].At.Equal(t0) {
+		t.Errorf("a marker with a first-seen time: %+v (parsed: %t)", m, ok)
 	}
 	for name, body := range bad {
 		if m, ok := parseMarker(body); ok {

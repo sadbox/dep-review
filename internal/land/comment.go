@@ -44,8 +44,9 @@ const (
 // marker is what the gate's comment remembers between runs, in a hidden
 // first line. None of it is an approval: Outcome tells the scheduled job
 // which pull requests to evaluate again, Notified keeps a re-run from
-// notifying twice, and Cache spares a model call for content that was
-// already read.
+// notifying twice, Cache is the model's answers for the scheduled job,
+// which asks no model, and FirstSeen is the gate's own clock for a pin no
+// registry dates.
 //
 // It is believed only in a comment whose author is the gate app
 // (findComment). A person who can write to the repository can edit that
@@ -73,6 +74,10 @@ type marker struct {
 	Fingerprint string `json:"fingerprint"`
 	// Cache is the verdicts worth keeping, by content key.
 	Cache []cached `json:"cache"`
+	// FirstSeen is when publish first evaluated each pin of the pull
+	// request that no registry had a time for (dateUnseen). A marker
+	// written before the gate remembered these has none.
+	FirstSeen []seen `json:"first_seen"`
 }
 
 // cached is one remembered verdict: wire.Verdict without the fingerprint,
@@ -124,8 +129,17 @@ func parseMarker(body string) (marker, bool) {
 	default:
 		return marker{}, false
 	}
-	if !gh.ValidSHA(m.Head) || len(m.Cache) > maxCached {
+	if !gh.ValidSHA(m.Head) || len(m.Cache) > maxCached || len(m.FirstSeen) > maxFirstSeen {
 		return marker{}, false
+	}
+	pins := map[string]bool{}
+	for _, s := range m.FirstSeen {
+		// Two times for one pin: which one counts must not be a matter of
+		// order.
+		if !pinRE.MatchString(s.Pin) || s.At.IsZero() || pins[s.Pin] {
+			return marker{}, false
+		}
+		pins[s.Pin] = true
 	}
 	for _, list := range [][]string{m.Notified, m.NotifiedFailed, m.NotifiedUnread} {
 		if len(list) > maxNotified || slices.ContainsFunc(list, func(head string) bool { return !gh.ValidSHA(head) }) {

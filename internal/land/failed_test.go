@@ -27,6 +27,7 @@ func TestFailed(t *testing.T) {
 	f.comments[testPR] = []*fakeComment{{1, testBot, marker{
 		Outcome: ActionWait, Head: headA, Deadline: t0.Add(time.Hour), Notified: []string{headB},
 		Fingerprint: reviewer, Cache: []cached{{Key: keyA, Read: allow.ReadFull}},
+		FirstSeen: []seen{{Pin: keyB, At: t0.Add(-time.Hour)}},
 	}.String() + "\n### dep-review: waiting\n"}}
 
 	// The notifier is down for the first run: the comment and the status
@@ -55,6 +56,10 @@ func TestFailed(t *testing.T) {
 	if !ok || m.Outcome != ActionFailed || m.Head != headA || !slices.Equal(m.Notified, []string{headB}) ||
 		!slices.Equal(m.NotifiedFailed, []string{headA}) || m.Fingerprint != reviewer || len(m.Cache) != 1 {
 		t.Errorf("marker %+v (parsed: %t)", m, ok)
+	}
+	// A failed run does not start a pin's clock again.
+	if len(m.FirstSeen) != 1 || m.FirstSeen[0].Pin != keyB || !m.FirstSeen[0].At.Equal(t0.Add(-time.Hour)) {
+		t.Errorf("the marker remembers %+v, want the time it had", m.FirstSeen)
 	}
 	for _, want := range []string{"### dep-review: the run failed", "for head `" + headA + "`", testWhat + " 'x' \u00a6 \u2039b\u203a ### not a heading\n",
 		"open the [workflow run](" + testRun + ") and re-run the failed jobs"} {

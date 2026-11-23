@@ -131,7 +131,7 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	mk := marker{Outcome: res.Action, Head: pr.Head, Fingerprint: ev.fingerprint, Cache: ev.cache}
+	mk := marker{Outcome: res.Action, Head: pr.Head, Fingerprint: ev.fingerprint, Cache: ev.cache, FirstSeen: ev.firstSeen}
 	if res.Action == ActionWait {
 		mk.NotBefore, mk.Deadline = res.Decision.NotBefore, res.Decision.Deadline
 	}
@@ -199,10 +199,12 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 	}
 	mk := marker{Outcome: ActionFailed, Head: head}
 	if prev != nil {
-		// What earlier runs read, and whom they told, is still true.
+		// What earlier runs read, when they first saw a pin, and whom
+		// they told, is still true. Which pins the pull request still has
+		// is for the next run that decides to say.
 		old, _ := parseMarker(prev.Body)
 		mk.Notified, mk.NotifiedFailed, mk.NotifiedUnread = old.Notified, old.NotifiedFailed, old.NotifiedUnread
-		mk.Fingerprint, mk.Cache = old.Fingerprint, old.Cache
+		mk.Fingerprint, mk.Cache, mk.FirstSeen = old.Fingerprint, old.Cache, old.FirstSeen
 	}
 	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number,
 		": the gate's run failed before it could decide. Re-run the failed jobs"+runLink(cfg)))
