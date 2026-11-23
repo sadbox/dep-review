@@ -84,7 +84,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | Bound | the pinned hash, commit or digest is what the registry reports now |
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |
 | NameCreated | when the package name first appeared (new names only) |
-| Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have |
+| Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own) |
 | NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone, while the files those commands and a `binding.gyp` run are not compared, since the model reads them; provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version |
 | Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker) |

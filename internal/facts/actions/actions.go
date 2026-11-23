@@ -132,15 +132,9 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 	if err != nil {
 		return err
 	}
-	// The checker puts whatever it learned, or failed to learn, into its
-	// facts. Its error is the context's; from any other checker it leaves
-	// the facts blank, which is person.
-	advice, advErr := adv.Check(ctx, advisory.Query{Ecosystem: allow.GitHubActions, Name: p.name, From: p.from, To: p.to})
-	if ctx.Err() != nil {
-		return fmt.Errorf("actions: advisories for %s: %w", p.name, ctx.Err())
-	}
-	if advErr != nil {
-		advice = advisory.Result{}
+	advice, err := askAdvisories(ctx, adv, p, p.name)
+	if err != nil {
+		return err
 	}
 
 	// Each fact is its conditions combined with allow.Fact.And: a "no"
@@ -150,11 +144,41 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 	u.Bound = tagged.And(repoFact(p, repo))
 	u.NoRegress = aheadFact(p, ahead).And(branch).And(tagged)
 	u.Clean = releaseFact(p, rel).And(facts.AdvisoryClean(advice))
+	// An action in a directory of its repository has a name of its own in
+	// the advisory database (owner/repo/path), and an advisory can be
+	// filed under that name alone. The pin is the repository's, so the
+	// question above is about owner/repo; each directory a workflow line
+	// uses the action from is asked about as well, and Clean holds only
+	// when every answer is clean. These answers can only take Clean away:
+	// SecurityFix stays the repository's.
+	for _, sub := range p.subPaths {
+		inDir, err := askAdvisories(ctx, adv, p, p.name+sub)
+		if err != nil {
+			return err
+		}
+		u.Clean = u.Clean.And(facts.AdvisoryClean(inDir))
+	}
 	u.FirstSeen = firstSeen(p, rel)
 	// As the checker returned it: unavailable or never gathered when it
 	// could not tell.
 	u.SecurityFix = advice.SecurityFix
 	return nil
+}
+
+// askAdvisories asks the advisory database about the pin under one name:
+// the repository's, or that of an action in one of its directories. The
+// checker puts whatever it learned, or failed to learn, into its facts.
+// The error is the context's; any other error from a checker leaves the
+// facts blank, which is person.
+func askAdvisories(ctx context.Context, adv advisory.Checker, p pin, name string) (advisory.Result, error) {
+	advice, err := adv.Check(ctx, advisory.Query{Ecosystem: allow.GitHubActions, Name: name, From: p.from, To: p.to})
+	if ctx.Err() != nil {
+		return advisory.Result{}, fmt.Errorf("actions: advisories for %s: %w", name, ctx.Err())
+	}
+	if err != nil {
+		return advisory.Result{}, nil
+	}
+	return advice, nil
 }
 
 // increase is the Increase fact: both versions are plain releases and the

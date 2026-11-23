@@ -3,6 +3,7 @@ package actions
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -128,6 +129,16 @@ type pin struct {
 	ownerID, repoID int64
 	// where is the first changed line that names the pin, "path:line".
 	where string
+	// subPaths is every directory of the repository that a changed
+	// workflow line uses the action from ("/upload-sarif" for
+	// github/codeql-action/upload-sarif), each once, sorted. It is nil
+	// when the lines name the repository itself, and for an entry no
+	// workflow line names: actions.lock records a repository and a
+	// commit, never a directory. The tag, the commit and the code the
+	// model reads are the repository's whatever the directory; the one
+	// thing that can be about the directory alone is an advisory filed
+	// under its own name, which is why it is kept.
+	subPaths []string
 }
 
 // usesLine is one parsed pin line of a workflow.
@@ -189,8 +200,9 @@ type lockListChange struct {
 type tagChange struct {
 	where string
 	// path is the workflow file the line is in.
-	path           string
-	name, from, to string
+	path string
+	// subPath is the directory after owner/repo, "" when there is none.
+	name, subPath, from, to string
 }
 
 // changes is everything the changed lines say, before the files are
@@ -265,7 +277,7 @@ func (ch *changes) readUses(path string, base, head []string) string {
 			// again. Only a tag pin has an actions.lock entry to give them.
 			return where + ": the line pins a commit; only a tag pin that actions.lock records is read"
 		}
-		ch.tags = append(ch.tags, tagChange{where: where, path: path, name: b.name, from: b.version, to: h.version})
+		ch.tags = append(ch.tags, tagChange{where: where, path: path, name: b.name, subPath: b.subPath, from: b.version, to: h.version})
 	}
 	return ""
 }
@@ -464,11 +476,17 @@ func (ch *changes) pins() ([]pin, string) {
 	}
 
 	// add records a pin once. A tag-keyed and a commit-keyed entry may
-	// record the same move; they must then agree.
+	// record the same move; they must then agree. Lines that use one
+	// action from different directories are one pin too, and the pin
+	// keeps every directory (subPath, "" for none).
 	var pins []pin
-	add := func(e *lockEntry, name, where string) string {
+	add := func(e *lockEntry, name, subPath, where string) string {
 		p := pin{name: name, from: e.from, to: e.to, oldCommit: e.oldCommit, newCommit: e.newCommit, ownerID: e.ownerID, repoID: e.repoID, where: where}
-		for _, q := range pins {
+		if subPath != "" {
+			p.subPaths = []string{subPath}
+		}
+		for i := range pins {
+			q := &pins[i]
 			if q.name != p.name || q.from != p.from || q.to != p.to {
 				continue
 			}
@@ -477,6 +495,10 @@ func (ch *changes) pins() ([]pin, string) {
 			}
 			if q.ownerID != p.ownerID || q.repoID != p.repoID {
 				return where + ": two actions.lock entries record different IDs for the same action"
+			}
+			if subPath != "" && !slices.Contains(q.subPaths, subPath) {
+				q.subPaths = append(q.subPaths, subPath)
+				slices.Sort(q.subPaths)
 			}
 			return ""
 		}
@@ -518,7 +540,7 @@ func (ch *changes) pins() ([]pin, string) {
 			return nil, t.where + ": this workflow's own list in actions.lock does not move to the tag the line names"
 		}
 		found.used = true
-		if problem := add(found, t.name, t.where); problem != "" {
+		if problem := add(found, t.name, t.subPath, t.where); problem != "" {
 			return nil, problem
 		}
 	}
@@ -534,7 +556,7 @@ func (ch *changes) pins() ([]pin, string) {
 		}
 		// A commit-keyed entry is an action that a bumped action uses,
 		// moved in place. It is an update like any other.
-		if problem := add(e, e.old.name, e.where); problem != "" {
+		if problem := add(e, e.old.name, "", e.where); problem != "" {
 			return nil, problem
 		}
 	}

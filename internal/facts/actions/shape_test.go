@@ -282,6 +282,37 @@ func TestReadChangeSetAccepts(t *testing.T) {
 			want: []pin{with(setupGoLocked, ciPath+":9")},
 		},
 		{
+			// The pin is the repository's; the directory is kept for the
+			// one question that can be about it alone, the advisory lookup.
+			name: "an action used from a directory of its repository",
+			files: func(t *testing.T) []facts.File {
+				fs := setupGoBump(t)
+				fs[1].Base = []byte(edit(t, string(fs[1].Base), "actions/setup-go@", "actions/setup-go/sub/dir@"))
+				fs[1].Head = []byte(edit(t, string(fs[1].Head), "actions/setup-go@", "actions/setup-go/sub/dir@"))
+				return fs
+			},
+			want: []pin{withSubPaths(with(setupGoLocked, ciPath+":9"), "/sub/dir")},
+		},
+		{
+			// One move, whichever directories it is used from: one pin
+			// that keeps them all, each once and in order.
+			name: "one action used from two directories and by its own name",
+			files: func(t *testing.T) []facts.File {
+				steps := func(tag string) string {
+					return "    steps:\n" +
+						"      - uses: actions/setup-go/b@" + tag + "\n" +
+						"      - uses: actions/setup-go@" + tag + "\n" +
+						"      - uses: actions/setup-go/a@" + tag + "\n" +
+						"      - uses: actions/setup-go/b@" + tag + "\n"
+				}
+				return []facts.File{
+					file(lockPath, lockText, bumpSetupGo(t, lockText)),
+					file(ciPath, steps("v7.0.0"), steps("v7.1.0")),
+				}
+			},
+			want: []pin{withSubPaths(with(setupGoLocked, ciPath+":2"), "/a", "/b")},
+		},
+		{
 			// A downgrade is a shape: the Increase fact refuses it, not the
 			// reader.
 			name: "a downgrade",
@@ -306,6 +337,12 @@ func TestReadChangeSetAccepts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withSubPaths returns p used from the given directories.
+func withSubPaths(p pin, subPaths ...string) pin {
+	p.subPaths = subPaths
+	return p
 }
 
 // with returns p named at where.

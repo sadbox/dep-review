@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -590,6 +591,98 @@ func TestGatherRefuses(t *testing.T) {
 			// An update that is not bound gives the model nothing to read.
 			if !u.Bound.Holds() && len(res.Artifacts) != 0 {
 				t.Errorf("Artifacts = %+v for an update that is not bound", res.Artifacts)
+			}
+		})
+	}
+}
+
+// inDirectory is files with the workflow's line using the action from a
+// directory of its repository: owner/repo/sub@tag. The lockfile records
+// the repository, and is left as it is.
+func inDirectory(t *testing.T, files []facts.File, name, sub string) []facts.File {
+	t.Helper()
+	for i, f := range files {
+		if f.Path == ciPath {
+			files[i] = file(ciPath, edit(t, string(f.Base), name+"@", name+sub+"@"), edit(t, string(f.Head), name+"@", name+sub+"@"))
+		}
+	}
+	return files
+}
+
+// An action in a directory has a name of its own in the advisory
+// database, and an advisory can be filed under that name alone. The pin,
+// the facts about it and the code the model reads are the repository's;
+// the database is asked under both names, and an answer under the
+// directory's name takes Clean away like one under the repository's.
+func TestGatherAsksAboutAnActionInADirectory(t *testing.T) {
+	const repo, dir = "actions/setup-go", "actions/setup-go/sub"
+	clean := noAdvisories().result
+	unavailable := allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories")
+	tests := []struct {
+		name string
+		// under is what the checker answers for the directory's name; the
+		// repository's name always gets a clean answer.
+		under advisory.Result
+		check func(t *testing.T, u allow.UpdateFacts)
+	}{
+		{"nothing under either name", clean, func(t *testing.T, u allow.UpdateFacts) {
+			mustHold(t, "Clean", u.Clean)
+		}},
+		{"a malware advisory under the directory's name alone", advisory.Result{
+			SecurityFix:   allow.No("none", "advisories"),
+			NoMalware:     allow.No("GHSA-xxxx-xxxx-xxxx", "advisories for "+dir),
+			NoNewAdvisory: allow.Yes("none", "advisories"),
+		}, func(t *testing.T, u allow.UpdateFacts) {
+			mustBeNo(t, "Clean", u.Clean, "GHSA-xxxx-xxxx-xxxx")
+		}},
+		{"a new advisory under the directory's name alone", advisory.Result{
+			SecurityFix:   allow.No("none", "advisories"),
+			NoMalware:     allow.Yes("none", "advisories"),
+			NoNewAdvisory: allow.No("GHSA-yyyy-yyyy-yyyy", "advisories for "+dir),
+		}, func(t *testing.T, u allow.UpdateFacts) {
+			mustBeNo(t, "Clean", u.Clean, "GHSA-yyyy-yyyy-yyyy")
+		}},
+		{"the database did not answer for the directory's name", advisory.Result{SecurityFix: unavailable, NoMalware: unavailable, NoNewAdvisory: unavailable},
+			func(t *testing.T, u allow.UpdateFacts) {
+				mustBeUnavailable(t, "Clean", u.Clean, "did not answer")
+			}},
+		{"the checker could not tell for the directory's name", advisory.Result{}, func(t *testing.T, u allow.UpdateFacts) {
+			mustBeUnknown(t, "Clean", u.Clean, "not established: malware advisories were not checked")
+		}},
+		// What the directory's name is said to fix grants nothing: the
+		// repository's answer is the update's SecurityFix.
+		{"a security fix under the directory's name alone", advisory.Result{
+			SecurityFix:   allow.Yes("GHSA-zzzz-zzzz-zzzz", "advisories for "+dir),
+			NoMalware:     allow.Yes("none", "advisories"),
+			NoNewAdvisory: allow.Yes("none", "advisories"),
+		}, func(t *testing.T, u allow.UpdateFacts) {
+			mustHold(t, "Clean", u.Clean)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adv := &advisories{result: clean, byName: map[string]advisory.Result{dir: tt.under}}
+			res, _ := run(t, inDirectory(t, setupGoLockedBump(), repo, "/sub"), nil, adv)
+			u := one(t, res)
+			tt.check(t, u)
+
+			// Everything else is the repository's, as for a line that names
+			// no directory.
+			if u.Name != repo {
+				t.Errorf("update is named %q, want the repository", u.Name)
+			}
+			mustHold(t, "Bound", u.Bound)
+			mustHold(t, "NoRegress", u.NoRegress)
+			mustBeNo(t, "SecurityFix", u.SecurityFix, "no advisory names this update as the fix")
+			if len(res.Artifacts) != 1 || res.Artifacts[0].Name != repo {
+				t.Errorf("Artifacts = %+v, want the repository's tarball", res.Artifacts)
+			}
+			want := []advisory.Query{
+				{Ecosystem: allow.GitHubActions, Name: repo, From: "v7.0.0", To: "v7.1.0"},
+				{Ecosystem: allow.GitHubActions, Name: dir, From: "v7.0.0", To: "v7.1.0"},
+			}
+			if !slices.Equal(adv.asked, want) {
+				t.Errorf("advisory queries %+v, want %+v", adv.asked, want)
 			}
 		})
 	}

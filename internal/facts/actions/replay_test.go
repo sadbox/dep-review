@@ -105,12 +105,18 @@ func (r *replay) client() *gh.Client {
 // advisories is a fixed advisory.Checker.
 type advisories struct {
 	result advisory.Result
+	// byName is the answer for a query under one name, where it is not
+	// result.
+	byName map[string]advisory.Result
 	err    error
 	asked  []advisory.Query
 }
 
 func (a *advisories) Check(_ context.Context, q advisory.Query) (advisory.Result, error) {
 	a.asked = append(a.asked, q)
+	if r, ok := a.byName[q.Name]; ok {
+		return r, a.err
+	}
 	return a.result, a.err
 }
 
