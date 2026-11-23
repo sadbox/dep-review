@@ -340,11 +340,25 @@ func purl(name, version string) string {
 	return "pkg:npm/" + strings.Replace(name, "@", "%40", 1) + "@" + version
 }
 
-// maxPackageJSON bounds one package.json or binding.gyp of a tarball.
+// maxPackageJSON bounds one package.json, binding.gyp or .gypi file of a
+// tarball.
 const maxPackageJSON = 8 << 20
 
 // tarballSource is the Source of InspectTarballs' fact.
-const tarballSource = "every package.json and binding.gyp in the verified tarballs"
+const tarballSource = "every package.json, binding.gyp and .gypi file in the verified tarballs"
+
+// gypFile reports whether a file of this name is one a package is built
+// from when it is installed: a binding.gyp, or a .gypi file. gyp reads a
+// .gypi exactly as it reads a binding.gyp (a command in it runs while the
+// file is loaded), a binding.gyp includes one by path, and node-gyp
+// includes a config.gypi and a common.gypi beside a binding.gyp without
+// being told to (node-gyp 12.4.0, lib/configure.js).
+func gypFile(name string) bool {
+	return name == "binding.gyp" || strings.HasSuffix(name, ".gypi")
+}
+
+// gypWhy ends the problem a gyp file is.
+const gypWhy = "it is a file a package is built from when it is installed"
 
 // InspectTarballs is the tarballs' own word on the install step, and the
 // one a publisher cannot keep out of sight: npm runs what the files say.
@@ -362,19 +376,29 @@ const tarballSource = "every package.json and binding.gyp in the verified tarbal
 // "gypfile": false, beside a binding.gyp is how a build starts that no
 // script was added for.
 //
-// What is compared is what package.json and binding.gyp say, and nothing
-// they point at: not the file a script's command runs, not a file a
-// binding.gyp includes or one of its actions runs. Those are in the diff
-// the model reads, like every other file that changed, and a rule that
-// refused them would refuse every update of a package that has an
-// install step. The Value says so.
+// A .gypi file is held to the same equality as a binding.gyp, wherever it
+// is (spec section 11, amendment 58): one in the new tarball must be the
+// old tarball's, byte for byte, and one the old tarball has must still be
+// there. It belongs to no package.json. Which binding.gyp includes it is
+// written in that binding.gyp, which the gate does not parse, so one that
+// is gone counts wherever it was; a binding.gyp that is gone together
+// with its package.json, or that had none beside it, leaves nothing to
+// build in that directory, and does not.
 //
-// Every package.json and binding.gyp is looked at, wherever it is. That
-// covers bundled dependencies, which are installed from inside this
-// tarball and appear in no other source (spec section 11, amendment 5),
-// and it is deliberately more than npm runs: a package.json in a test
-// fixture counts too. Nothing here decides which directories npm treats
-// as packages.
+// What is compared is what package.json, binding.gyp and the .gypi files
+// say, and nothing else they point at: not the file a script's command
+// runs, not a file one of a binding.gyp's actions runs, and not a file it
+// includes under any other name. Those are in the diff the model reads,
+// like every other file that changed, and a rule that refused them would
+// refuse every update of a package that has an install step. The Value
+// says so.
+//
+// Every package.json, binding.gyp and .gypi file is looked at, wherever
+// it is. That covers bundled dependencies, which are installed from
+// inside this tarball and appear in no other source (spec section 11,
+// amendment 5), and it is deliberately more than npm runs: a package.json
+// in a test fixture counts too. Nothing here decides which directories
+// npm treats as packages.
 //
 // It is an artifact.Inspect. oldPkg and newPkg are the extracted
 // packages, each the directory that holds the package's own package.json;
@@ -392,11 +416,11 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		switch d.Name() {
-		case "package.json":
+		switch name := d.Name(); {
+		case name == "package.json":
 			manifests++
 			problem, err = manifestProblem(oldPkg, newPkg, p)
-		case "binding.gyp":
+		case gypFile(name):
 			gyps++
 			problem, err = gypProblem(oldPkg, newPkg, p)
 		}
@@ -405,6 +429,9 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 		}
 		return err
 	})
+	if err == nil && problem == "" && oldPkg != nil {
+		problem, err = gypiGone(oldPkg, newPkg)
+	}
 	switch {
 	case err != nil:
 		// The trees are the gate's own extraction of verified bytes. One
@@ -413,11 +440,29 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 	case problem != "":
 		return allow.No(problem, tarballSource)
 	}
-	return allow.Yes(fmt.Sprintf("no install hook command, gypfile or binding.gyp is new, changed or gone in %d package.json (%d binding.gyp present); the files these run were not compared", manifests, gyps), tarballSource)
+	return allow.Yes(fmt.Sprintf("no install hook command, gypfile, binding.gyp or .gypi file is new, changed or gone in %d package.json (%d binding.gyp and .gypi files present); the other files these run were not compared", manifests, gyps), tarballSource)
 }
 
-// gypProblem says how the binding.gyp at p is not the old tarball's, and
-// is empty when it is.
+// gypiGone names a .gypi file the old tarball has and the new one does
+// not, and is empty when there is none. The walk over the new tarball
+// does not meet a file that is gone.
+func gypiGone(oldPkg, newPkg fs.FS) (string, error) {
+	var problem string
+	err := fs.WalkDir(oldPkg, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".gypi") {
+			return err
+		}
+		if _, has, err := readSmall(newPkg, p); err != nil || has {
+			return err
+		}
+		problem = show(p) + " is gone: " + gypWhy
+		return fs.SkipAll
+	})
+	return problem, err
+}
+
+// gypProblem says how the binding.gyp or .gypi file at p is not the old
+// tarball's, and is empty when it is.
 func gypProblem(oldPkg, newPkg fs.FS, p string) (string, error) {
 	is, _, err := readSmall(newPkg, p)
 	if err != nil {
@@ -428,9 +473,9 @@ func gypProblem(oldPkg, newPkg fs.FS, p string) (string, error) {
 	case err != nil:
 		return "", err
 	case !had:
-		return show(p) + " is new: npm builds a package that has a binding.gyp when it is installed", nil
+		return show(p) + " is new: " + gypWhy, nil
 	case !bytes.Equal(was, is):
-		return show(p) + " changes: it is what a package is built from when it is installed", nil
+		return show(p) + " changes: " + gypWhy, nil
 	}
 	return "", nil
 }
@@ -510,8 +555,8 @@ func installInputs(data []byte) (hooks map[string]string, gypfile string, err er
 }
 
 // readSmall reads one file of an extracted tarball and reports whether it
-// is there. A nil tree has nothing. A file too large to be a package.json
-// or a binding.gyp anyone wrote is an error.
+// is there. A nil tree has nothing. A file too large to be a package.json,
+// a binding.gyp or a .gypi file anyone wrote is an error.
 func readSmall(tree fs.FS, name string) ([]byte, bool, error) {
 	if tree == nil {
 		return nil, false, nil

@@ -95,7 +95,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |
 | NameCreated | when the package name first appeared (new names only) |
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own) |
-| NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone, while the files those commands and a `binding.gyp` run are not compared, since the model reads them; provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
+| NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json`, and every `.gypi` file, are the old tarball's, none new, changed or gone, while the other files those commands and a `binding.gyp` run are not compared, since the model reads them; provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version (Go and npm only: never an image, and never an action, whose tag can be moved after the advisory was reviewed) |
 | Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker). Two artifacts that hold the same files are full with no model asked, and the comment says so |
 | Veto | none, or a category and the lines the model quoted |
@@ -160,7 +160,7 @@ needs no age and is not held up.
 | Ecosystem | Shape and change set | Bound | FirstSeen | Read |
 |---|---|---|---|---|
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
-| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install steps: npm's NoRegress holds only once they were |
+| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json`, `binding.gyp` and `.gypi` files are also checked for install steps: npm's NoRegress holds only once they were |
 | GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included, for an action that runs its repository's own files (`using: nodeNN` or `composite` where the workflows use it from) |
 | Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`; for a gcr.io image the gate's first evaluation of the pin | nothing |
 
@@ -192,8 +192,8 @@ Limits that send real pull requests to a person:
 - A Go update that removes a requirement (a move from `example.com/m/v2`
   to `/v3` does) or changes the `toolchain` line.
 - An npm update whose tarball adds, changes or drops an install script, a
-  `gypfile` or a `binding.gyp`, or whose lock has an entry with a member
-  npm 9 to 11 do not write.
+  `gypfile`, a `binding.gyp` or a `.gypi` file, or whose lock has an
+  entry with a member npm 9 to 11 do not write.
 - An npm update whose lock changes what it says of a package that keeps
   its version (its `bin`, `os`, `cpu`, `libc` or dependency ranges, like
   its source and hash). Only `dev`, `optional`, `devOptional`, `peer`,

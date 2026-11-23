@@ -267,7 +267,7 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 			// and what was found in the tarballs, so it holds only when
 			// they were looked at.
 			if inspected == (allow.Fact{}) {
-				inspected = allow.Fact{Value: "the package.json and binding.gyp files in the tarballs were not looked at"}
+				inspected = allow.Fact{Value: "the package.json, binding.gyp and .gypi files in the tarballs were not looked at"}
 			}
 			u.NoRegress = res.NoRegressSoFar[i].And(inspected)
 		}
