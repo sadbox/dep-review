@@ -194,6 +194,98 @@ func TestReadTreeProblems(t *testing.T) {
 	})
 }
 
+// npm names the packages of a broken tree by absolute path. The problem
+// that quotes npm becomes the Shape fact's Value, which is shown on the
+// pull request, so the run's scratch directory is taken out of it.
+func TestReadTreeHidesTheScratchDirectory(t *testing.T) {
+	// A directory of the length a runner has, which is most of the 160
+	// bytes a quoted text keeps.
+	const (
+		scratch = "/var/folders/zz/0123456789abcdefghijklmnopqrstuv/T/dep-review-npm-1234567890"
+		project = scratch + "/project"
+		lockKey = "node_modules/@example/plugin/node_modules/widget"
+	)
+	failed := func(projectPath, mention string) lsOutput {
+		return lsOutput{Exit: 1, Scratch: scratch, Stdout: []byte(`{"name":"app","version":"1.0.0","path":"` + projectPath + `",` +
+			`"problems":["invalid: widget@1.0.0 ` + mention + `/` + lockKey + `"],` +
+			`"error":{"code":"ELSPROBLEMS","summary":"invalid: widget@1.0.0 ` + mention + `/` + lockKey + `","detail":"see ` + scratch + `/home/cache/_logs"}}`)}
+	}
+	tests := []struct {
+		name string
+		out  lsOutput
+	}{
+		{"npm prints the directory as the gate made it", failed(project, project)},
+		// A temporary directory behind a symbolic link has two names, and
+		// npm may print the other one for the root and for every path.
+		{"npm prints another spelling of the directory", failed("/private"+project, "/private"+project)},
+		{"npm prints one spelling for the root and the other in its message", failed("/private"+project, project)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, problems := readTree("base", tt.out, lockFile{})
+			joined := strings.Join(problems, "\n")
+			for _, trace := range []string{"dep-review-npm", "/var/folders", "/private", "0123456789abcdef"} {
+				if strings.Contains(joined, trace) {
+					t.Errorf("problems name the scratch directory (%s): %q", trace, problems)
+				}
+			}
+			// What is left is the lock's own key, whole: the path no
+			// longer pushes it past the cut.
+			for _, want := range []string{
+				`base: npm ls failed: "{\"code\":\"ELSPROBLEMS\",\"summary\":\"invalid: widget@1.0.0 ` + lockKey + `\",`,
+				`base: npm reports problems with the lock: "[\"invalid: widget@1.0.0 ` + lockKey + `\"]"`,
+			} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("problems = %q, want one with %q", problems, want)
+				}
+			}
+		})
+	}
+
+	// npm's home is in the scratch directory too, beside the project.
+	t.Run("a path beside the project", func(t *testing.T) {
+		out := lsOutput{Exit: 1, Scratch: scratch, Stdout: []byte(`{"error":{"code":"EACCES","summary":"open ` + scratch + `/home/cache/x"}}`)}
+		_, problems := readTree("head", out, lockFile{})
+		if got := strings.Join(problems, "\n"); !strings.Contains(got, `open (scratch)/home/cache/x`) || strings.Contains(got, "dep-review-npm") {
+			t.Errorf("problems = %q", problems)
+		}
+	})
+
+	// Recorded output has no scratch directory of this run. The root's
+	// own path still says where the project was.
+	t.Run("recorded output", func(t *testing.T) {
+		rec := readRecorded(t, "outofsync", "head")
+		_, problems := readTree("head", lsOutput{Stdout: rec.Stdout, Exit: rec.Exit}, lockFile{})
+		const want = `head: npm ls failed: "{\"code\":\"ELSPROBLEMS\",\"summary\":\"invalid: chart.js@4.4.5 node_modules/chart.js\",`
+		if got := strings.Join(problems, "\n"); !strings.Contains(got, want) || strings.Contains(got, scratchPath) {
+			t.Errorf("problems = %q, want one with %q and none with %s", problems, want, scratchPath)
+		}
+	})
+}
+
+func TestHideScratch(t *testing.T) {
+	const scratch, project = "/tmp/dep-review-npm-1", "/tmp/dep-review-npm-1/project"
+	tests := []struct{ text, scratch, project, want string }{
+		{"extraneous: x@1.0.0 " + project + "/node_modules/x", scratch, project, "extraneous: x@1.0.0 node_modules/x"},
+		{"invalid: app@1.0.0 " + project, scratch, project, "invalid: app@1.0.0 (scratch)/project"},
+		{"open " + scratch + "/home/cache/x", scratch, project, "open (scratch)/home/cache/x"},
+		// One of the two names is enough to find the paths below the
+		// project that carry it.
+		{"extraneous: x@1.0.0 " + project + "/node_modules/x", scratch, "", "extraneous: x@1.0.0 node_modules/x"},
+		{"extraneous: x@1.0.0 " + project + "/node_modules/x", "", project, "extraneous: x@1.0.0 node_modules/x"},
+		{"extraneous: x@1.0.0 /private" + project + "/node_modules/x", scratch, "/private" + project, "extraneous: x@1.0.0 node_modules/x"},
+		// Neither is known, or what npm printed for the root is no
+		// absolute path: nothing is taken out.
+		{"extraneous: x@1.0.0 " + project + "/node_modules/x", "", "", "extraneous: x@1.0.0 " + project + "/node_modules/x"},
+		{"a/b: invalid a/b", "", "a", "a/b: invalid a/b"},
+	}
+	for _, tc := range tests {
+		if got := hideScratch(tc.text, tc.scratch, tc.project); got != tc.want {
+			t.Errorf("hideScratch(%q, %q, %q) = %q, want %q", tc.text, tc.scratch, tc.project, got, tc.want)
+		}
+	}
+}
+
 func TestReadLock(t *testing.T) {
 	tests := []struct {
 		name string

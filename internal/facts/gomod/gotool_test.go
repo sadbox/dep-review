@@ -54,6 +54,9 @@ type fakeTool struct {
 	calls []string
 }
 
+// scratchDir is the directory in the recorded output's file paths.
+func (f *fakeTool) scratchDir() string { return "/scratch" }
+
 func (f *fakeTool) run(ctx context.Context, args ...string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -149,6 +152,28 @@ func TestDownload(t *testing.T) {
 		}
 	})
 
+	// The go command's reason can name a file of its module cache, which
+	// is in the scratch directory: x/mod/zip words a zip it will not
+	// unpack as "unzip <file>: ...". The reason is shown on the pull
+	// request, without the directory.
+	t.Run("a reason that names a file in the scratch directory", func(t *testing.T) {
+		line := "mod download -json -- example.com/m@v1.0.0"
+		tool := &fakeTool{t: t, errs: map[string]error{line: exit1}, inline: map[string]string{line: `{"Path":"example.com/m","Version":"v1.0.0",` +
+			`"Error":"example.com/m@v1.0.0: unzip /scratch/gopath/pkg/mod/cache/download/example.com/m/@v/v1.0.0.zip: malformed file path"}`}}
+		got, err := download(ctx, tool, []module.Version{mv("example.com/m", "v1.0.0")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		const want = "example.com/m@v1.0.0: unzip (scratch)/gopath/pkg/mod/cache/download/example.com/m/@v/v1.0.0.zip: malformed file path"
+		if d := got[mv("example.com/m", "v1.0.0")]; d.Error != want {
+			t.Errorf("Error = %q, want %q", d.Error, want)
+		}
+		f := goFailure("go mod download failed", got[mv("example.com/m", "v1.0.0")].Error, sourceDownload)
+		if f.OK || f.Value != "go mod download failed: "+want {
+			t.Errorf("the fact made from it = %+v", f)
+		}
+	})
+
 	t.Run("a module reported twice is not reported", func(t *testing.T) {
 		line := "mod download -json -- golang.org/x/text@v0.3.3"
 		one := `{"Path":"golang.org/x/text","Version":"v0.3.3","Sum":"` + hText033 + `","GoModSum":"` + hText033Mod + `"}`
@@ -220,6 +245,20 @@ func TestList(t *testing.T) {
 		}
 		if l := got[mv(fsnotify, "")]; l.Error == nil || !strings.Contains(l.Error.Err, "loading module retractions") || len(l.Versions) != 0 {
 			t.Errorf("got %+v", l)
+		}
+	})
+
+	t.Run("a reason that names a file in the scratch directory", func(t *testing.T) {
+		line := "list -m -e -u -retracted -json -- example.com/m@v1.0.0"
+		tool := &fakeTool{t: t, inline: map[string]string{line: `{"Path":"example.com/m","Version":"v1.0.0",` +
+			`"Error":{"Err":"example.com/m@v1.0.0: open /scratch/gopath/pkg/mod/cache/download/example.com/m/@v/v1.0.0.info: permission denied"}}`}}
+		got, err := list(ctx, tool, []string{"-u", "-retracted"}, []module.Version{mv("example.com/m", "v1.0.0")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		const want = "example.com/m@v1.0.0: open (scratch)/gopath/pkg/mod/cache/download/example.com/m/@v/v1.0.0.info: permission denied"
+		if l := got[mv("example.com/m", "v1.0.0")]; l.Error == nil || l.Error.Err != want {
+			t.Errorf("Error = %+v, want %q", l.Error, want)
 		}
 	})
 

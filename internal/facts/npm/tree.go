@@ -5,8 +5,11 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/sadbox/dep-review/internal/facts"
 )
 
 // lsNode is one package in npm's printed tree. Only the fields the
@@ -74,13 +77,13 @@ func readTree(side string, out lsOutput, lock lockFile) (map[string]node, []stri
 		// npm's own error object ("code": "ELSPROBLEMS", and a summary),
 		// on one line.
 		_ = root.Error.Compact()
-		add("npm ls failed: %s", quote(string(root.Error)))
+		add("npm ls failed: %s", quote(hideScratch(string(root.Error), out.Scratch, root.Path)))
 	}
 	if out.Exit != 0 {
 		add("npm ls exited with status %d", out.Exit)
 	}
 	if present(root.Problems) {
-		add("npm reports problems with the lock: %s", quote(string(root.Problems)))
+		add("npm reports problems with the lock: %s", quote(hideScratch(string(root.Problems), out.Scratch, root.Path)))
 	}
 	if root.Path == "" {
 		add("npm ls printed no project path")
@@ -141,6 +144,28 @@ func readTree(side string, out lsOutput, lock lockFile) (map[string]node, []stri
 	}
 	walk(&root)
 	return nodes, problems
+}
+
+// hideScratch returns text npm printed without the directory the run was
+// made in (facts.HideScratch says why). npm names the packages of a tree
+// it has a problem with by the absolute path each would be installed in,
+// and the path alone used up most of what the Shape fact's Value keeps of
+// npm's words.
+//
+// A path below the project directory is left as what follows it, which
+// is the lock's own key for the package ("node_modules/a"). The project
+// directory has two spellings that need not be the same string: the one
+// the gate made it under (projectDir in scratch) and the one npm prints
+// for the root (project). Any other mention of the scratch directory,
+// such as npm's home, becomes facts.ScratchName.
+func hideScratch(text, scratch, project string) string {
+	if filepath.IsAbs(project) {
+		text = strings.ReplaceAll(text, project+"/", "")
+	}
+	if filepath.IsAbs(scratch) {
+		text = strings.ReplaceAll(text, filepath.Join(scratch, projectDir)+"/", "")
+	}
+	return facts.HideScratch(text, scratch)
 }
 
 // entryKeys is the closed set of members a lock entry may have, and what

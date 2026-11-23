@@ -23,6 +23,33 @@ func TestShow(t *testing.T) {
 	}
 }
 
+// A tool's words are shown without the directory the gate ran it in.
+func TestHideScratch(t *testing.T) {
+	const dir = "/tmp/dep-review-gomod-123"
+	tests := []struct{ text, dir, want string }{
+		{"unzip " + dir + "/gopath/pkg/mod/cache/download/example.com/m/@v/v1.0.0.zip: malformed file path", dir,
+			"unzip (scratch)/gopath/pkg/mod/cache/download/example.com/m/@v/v1.0.0.zip: malformed file path"},
+		{"open " + dir + ": permission denied; mkdir " + dir + "/work: permission denied", dir, "open (scratch): permission denied; mkdir (scratch)/work: permission denied"},
+		{"reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 404 Not Found", dir, "reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 404 Not Found"},
+		{"", dir, ""},
+		// No directory, or something that is no directory of the gate's:
+		// the text stands as it is, and above all an empty name does not
+		// put the placeholder between every two characters.
+		{"unzip /tmp/x.zip: malformed", "", "unzip /tmp/x.zip: malformed"},
+		{"a relative work dir", "work", "a relative work dir"},
+	}
+	for _, tc := range tests {
+		if got := HideScratch(tc.text, tc.dir); got != tc.want {
+			t.Errorf("HideScratch(%q, %q) = %q, want %q", tc.text, tc.dir, got, tc.want)
+		}
+	}
+	// It is called before Show, whose cut would leave half a path.
+	long := "unzip " + dir + "/" + strings.Repeat("a", 300) + ".zip: malformed"
+	if got := Show(HideScratch(long, dir)); strings.Contains(got, "dep-review-gomod") || !strings.HasPrefix(got, "unzip (scratch)/aaa") {
+		t.Errorf("Show(HideScratch(...)) = %q", got)
+	}
+}
+
 // The states a gatherer words its facts in: only an unreachable source is
 // a wait. Everything else that is not an answer has no Source, which
 // allow.Decide sends to a person.

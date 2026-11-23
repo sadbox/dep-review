@@ -168,6 +168,28 @@ func TestRealNPMBundledEntryWithASource(t *testing.T) {
 	}
 }
 
+// The real npm names the package the head lock is out of sync about by
+// its path in the scratch directory. The Shape fact says which package,
+// and not where on this machine the gate worked.
+func TestRealNPMShapeDoesNotNameTheScratchDirectory(t *testing.T) {
+	realTool(t)
+	res, err := Gatherer{}.Changes(context.Background(), loadCase(t, "outofsync").files(""), testPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `head: npm ls failed: "{\"code\":\"ELSPROBLEMS\",\"summary\":\"invalid: chart.js@4.4.5 node_modules/chart.js\",`
+	if res.Shape.OK || !strings.Contains(res.Shape.Value, want) {
+		t.Errorf("Shape = %+v, want a no with %q", res.Shape, want)
+	}
+	tmp := os.TempDir()
+	if real, err := filepath.EvalSymlinks(tmp); err == nil && strings.Contains(res.Shape.Value, real) {
+		t.Errorf("Shape names the temporary directory %s: %q", real, res.Shape.Value)
+	}
+	if strings.Contains(res.Shape.Value, filepath.Clean(tmp)) || strings.Contains(res.Shape.Value, "dep-review-npm-") {
+		t.Errorf("Shape names the scratch directory: %q", res.Shape.Value)
+	}
+}
+
 // TestRealNPMGather is the whole gatherer with the real npm and the
 // recorded registry: no network.
 func TestRealNPMGather(t *testing.T) {

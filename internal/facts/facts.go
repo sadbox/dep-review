@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/advisory"
@@ -152,6 +154,26 @@ func AdvisoryClean(adv advisory.Result) allow.Fact {
 		return f
 	}
 	return blank(adv.NoMalware, "malware advisories").And(blank(adv.NoNewAdvisory, "new advisories"))
+}
+
+// ScratchName stands for a tool's scratch directory in text that is
+// shown.
+const ScratchName = "(scratch)"
+
+// HideScratch returns text a tool printed with every mention of dir
+// replaced by ScratchName. dir is the temporary directory the gate ran
+// the tool in. A tool names files there in what it reports (npm the
+// packages of a broken tree, the go command a file of its module cache),
+// and a gatherer puts the tool's words into a fact's Value, which is
+// shown on the pull request: where on the runner the gate worked is not
+// for a comment. It comes before Show, which cuts the text: a path that
+// was cut is not found. A dir that is not an absolute path is no
+// directory of the gate's, and nothing is replaced.
+func HideScratch(text, dir string) string {
+	if !filepath.IsAbs(dir) {
+		return text
+	}
+	return strings.ReplaceAll(text, dir, ScratchName)
 }
 
 // Show renders text the pull request, a tool or a source wrote (a path,

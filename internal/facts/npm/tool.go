@@ -40,6 +40,10 @@ const (
 	// npmTimeout bounds one npm run. Reading a lock takes well under a
 	// second.
 	npmTimeout = 2 * time.Minute
+
+	// projectDir is the directory in a run's scratch directory that holds
+	// the commit's two files, and that npm is run on.
+	projectDir = "project"
 )
 
 // lsOutput is one run of lsArgs.
@@ -51,6 +55,10 @@ type lsOutput struct {
 	Exit int
 	// Truncated says npm printed more than maxLSBytes.
 	Truncated bool
+	// Scratch is the temporary directory the run was made in, which holds
+	// the project and npm's home. npm prints absolute paths below it. It
+	// is empty for recorded output.
+	Scratch string
 }
 
 // tool is the part of npm the gatherer uses. The real one is realNPM;
@@ -142,7 +150,7 @@ func (n realNPM) List(ctx context.Context, manifest, lock []byte) (lsOutput, err
 		return lsOutput{}, err
 	}
 	defer os.RemoveAll(scratch)
-	project := filepath.Join(scratch, "project")
+	project := filepath.Join(scratch, projectDir)
 	home := filepath.Join(scratch, "home")
 	for _, dir := range []string{project, home} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
@@ -175,7 +183,7 @@ func (n realNPM) List(ctx context.Context, manifest, lock []byte) (lsOutput, err
 	if ctx.Err() != nil {
 		return lsOutput{}, ctx.Err()
 	}
-	out := lsOutput{Stdout: stdout.buf.Bytes(), Truncated: stdout.truncated}
+	out := lsOutput{Stdout: stdout.buf.Bytes(), Truncated: stdout.truncated, Scratch: scratch}
 	var exit *exec.ExitError
 	switch {
 	case err == nil:

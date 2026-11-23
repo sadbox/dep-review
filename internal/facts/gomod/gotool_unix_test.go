@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/mod/module"
 )
 
 // fakeGo is a goCommand whose go command is a shell script: what is
@@ -73,6 +75,25 @@ func TestGoCommandOutputCap(t *testing.T) {
 			t.Errorf("out = %q", out)
 		}
 	})
+}
+
+// With the real runner the scratch directory is wherever this machine
+// keeps temporary files. A reason the go command gives that names a file
+// in its module cache is handed on, and made a fact's Value, without it.
+func TestGoCommandReasonsDoNotNameTheScratchDirectory(t *testing.T) {
+	c := fakeGo(t, `printf '{"Path":"example.com/m","Version":"v1.0.0","Error":"example.com/m@v1.0.0: unzip %s/cache/download/example.com/m/@v/v1.0.0.zip: malformed file path"}\n' "$GOMODCACHE"`+"\nexit 1\n")
+	got, err := download(context.Background(), c, []module.Version{mv("example.com/m", "v1.0.0")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "example.com/m@v1.0.0: unzip (scratch)/gopath/pkg/mod/cache/download/example.com/m/@v/v1.0.0.zip: malformed file path"
+	d := got[mv("example.com/m", "v1.0.0")]
+	if d.Error != want {
+		t.Errorf("Error = %q, want %q", d.Error, want)
+	}
+	if f := goFailure("go mod download failed", d.Error, sourceDownload); strings.Contains(f.Value, c.scratch) || !strings.Contains(f.Value, "unzip (scratch)/gopath/") {
+		t.Errorf("the fact made from it = %+v", f)
+	}
 }
 
 // A process the go command started must not outlive a run whose context

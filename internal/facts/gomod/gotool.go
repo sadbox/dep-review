@@ -53,6 +53,10 @@ type goTool interface {
 	// failed and still prints a usable result, so a caller looks at the
 	// output before it looks at the error.
 	run(ctx context.Context, args ...string) ([]byte, error)
+	// scratchDir is the directory the command works in, with its module
+	// cache. The go command names files there in the errors it reports
+	// about a module.
+	scratchDir() string
 }
 
 // goCommand is the real go command, run in a scratch directory that
@@ -126,6 +130,9 @@ func (c goCommand) env() []string {
 		"GIT_TERMINAL_PROMPT=0",
 	}
 }
+
+// scratchDir implements goTool.
+func (c goCommand) scratchDir() string { return c.scratch }
 
 // run implements goTool.
 //
@@ -226,12 +233,23 @@ func (l listed) key() module.Version     { return module.Version{Path: l.Path, V
 // download runs "go mod download -json" for mods. A module the go command
 // could not download has its reason in Error. The error return is for the
 // command itself failing.
+//
+// The reason is the go command's own sentence, and it can name a file of
+// the module cache ("unzip <cache>/...zip: ..." for a zip the go command
+// will not unpack). It becomes a fact's Value (goFailure), so the scratch
+// directory is taken out of it here, where it is read, and no Value made
+// from it later has it.
 func download(ctx context.Context, tool goTool, mods []module.Version) (map[module.Version]downloaded, error) {
 	out, runErr := tool.run(ctx, append([]string{"mod", "download", "-json", "--"}, goArgs(mods)...)...)
 	if len(bytes.TrimSpace(out)) == 0 && runErr != nil {
 		return nil, runErr
 	}
-	return decode[downloaded]("go mod download", out)
+	result, err := decode[downloaded]("go mod download", out)
+	for key, d := range result {
+		d.Error = facts.HideScratch(d.Error, tool.scratchDir())
+		result[key] = d
+	}
+	return result, err
 }
 
 // list runs "go list -m -e -json" with flags for the given queries. With
@@ -244,7 +262,15 @@ func list(ctx context.Context, tool goTool, flags []string, mods []module.Versio
 	if runErr != nil {
 		return nil, runErr
 	}
-	return decode[listed]("go list", out)
+	result, err := decode[listed]("go list", out)
+	for _, l := range result {
+		if l.Error != nil {
+			// As in download: the text is shown, without the scratch
+			// directory.
+			l.Error.Err = facts.HideScratch(l.Error.Err, tool.scratchDir())
+		}
+	}
+	return result, err
 }
 
 // goArgs is each module as an argument of the go command: path@version,

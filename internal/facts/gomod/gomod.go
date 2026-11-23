@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -68,6 +69,13 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 			return facts.Result{}, fmt.Errorf("gomod: %w", err)
 		}
 		defer os.RemoveAll(scratch)
+		// The directory's one real path, so that the go command has a
+		// single spelling of it to print, whether it names a file by the
+		// environment it was given or by where it finds itself, and that
+		// spelling can be taken out of what is shown (download).
+		if scratch, err = filepath.EvalSymlinks(scratch); err != nil {
+			return facts.Result{}, fmt.Errorf("gomod: %w", err)
+		}
 		if tool, err = newGoCommand(bin, scratch); err != nil {
 			return facts.Result{}, fmt.Errorf("gomod: %w", err)
 		}
@@ -319,7 +327,8 @@ var proxyOutageRE = regexp.MustCompile(`^(?:loading module retractions for )?[^ 
 
 // goFailure is the fact for an error the go command reported about one
 // module: unavailable when the error is the proxy's outage, and otherwise
-// a "no" that says what failed.
+// a "no" that says what failed. text is the go command's, as download and
+// list hand it on: without the scratch directory's path.
 func goFailure(what, text, source string) allow.Fact {
 	if proxyOutageRE.MatchString(text) {
 		return allow.Unavailable("the module proxy did not answer: "+facts.Show(text), source)
