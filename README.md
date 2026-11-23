@@ -380,9 +380,12 @@ update.
 The full diff of every changed file under the rebuilt directories is
 then required reading (navigable parts, examined like any other; a
 binary one goes to a person), and the review's verdict and accounting
-decide as for any other review. A build can also read unchanged files,
-which were accepted with earlier versions; a changed source map that
-belongs to no changed bundle is shown as a residual of its own. A gVisor
+decide as for any other review. A build can also read files accepted
+with earlier versions, which were not necessarily shown then (a source
+map's extra fields, attributed code the summary does not render); what
+it makes of them lands in a changed file under the rebuilt directories,
+whose full diff is required. A changed source map that no analyzed
+bundle read is shown as a residual of its own. A gVisor
 escape could forge a result; at worst that puts the PR on review, never
 past it.
 
