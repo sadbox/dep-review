@@ -6,7 +6,7 @@
   "listed": {
     "go_modules": ["github.com/your-org/"],
     "github_actions": ["your-org/"],
-    "docker": ["docker.io/your-org/"],
+    "docker": ["gcr.io/your-project/"],
     "npm": ["@your-scope/"]
   }
 }

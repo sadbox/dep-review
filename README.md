@@ -85,7 +85,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |
 | NameCreated | when the package name first appeared (new names only) |
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have |
-| NoRegress | no new or changed install script; npm: in the tarball the install scripts, `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone; provenance not lost; Actions: the new commit descends from the old one |
+| NoRegress | no new or changed install script; npm: in the tarball the install scripts, `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone; provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version |
 | Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker) |
 | Veto | none, or a category and the lines the model quoted |
@@ -93,7 +93,11 @@ from the pull request's title, body, labels or Dependabot's metadata:
 A fact is in one of four states, and only the first contributes to a
 merge: it holds; it does not hold (person); its source was asked and did
 not answer (wait, then person at the deadline); it was never gathered
-(person).
+(person). One outage does not wait: when the registry or GitHub does not
+answer for Bound of a Go, npm or Actions update, there is no verified
+hash to read the code against, nothing is read, and an update that was
+not read is a person's at once (`read_unknown`; re-run the gate after
+the outage). A Docker update waits, because nothing of an image is read.
 
 With every fact holding, an update needs an age, measured from FirstSeen:
 
@@ -119,6 +123,15 @@ rewrites a grouped pull request in place, and a version it adds today is
 new today. A rebase keeps the pin's time; another version or hash starts
 again.
 
+For Go this is not rare. The index has no lookup by module: it is read
+forward from the version's commit time, 50 pages for one version and 150
+for one run. A tag that was cut days after its commit is not in those
+pages, and each such version costs 50 of the run's 150, so in a grouped
+pull request the updates looked up after them can get no lookup at all.
+All of these are dated from the gate's first evaluation and wait their
+age from there. A fully read security fix needs no age and is not held
+up.
+
 ## Ecosystems
 
 | Ecosystem | Shape and change set | Bound | FirstSeen | Read |
@@ -134,7 +147,9 @@ Limits that send real pull requests to a person:
 - An Actions update needs a tag pin (`@vX.Y.Z`) and `actions.lock`:
   without the lock entry there is no recorded repository and owner ID to
   compare with. A line that pins a commit (`@<40 hex> # vX.Y.Z`) and a
-  local `action.yml` are not read.
+  local `action.yml` are not read. A pin update replaces lines in place:
+  one that adds or removes a line of a workflow or of `actions.lock` (an
+  action that starts or stops using another) goes to a person.
 - A changed `uses:` line that points at a reusable workflow never merges.
   That includes a caller's pin of this gate.
 - Docker images merge only from the list, and only when written as an
@@ -143,9 +158,15 @@ Limits that send real pull requests to a person:
   is not read, whatever the list says.
 - A Go update that removes a requirement (a move from `example.com/m/v2`
   to `/v3` does) or changes the `toolchain` line.
-- An npm update whose tarball drops an install script, a `gypfile` or a
-  `binding.gyp`, or whose lock has an entry with a member npm 9 to 11 do
-  not write.
+- An npm update whose tarball adds, changes or drops an install script, a
+  `gypfile` or a `binding.gyp`, or whose lock has an entry with a member
+  npm 9 to 11 do not write.
+- An npm update whose lock at the base commit npm itself reports a
+  problem for (a missing or invalid entry, as two lock edits merged
+  without a rebase leave behind). The pull request that repairs the lock
+  is the one that goes to a person.
+- A Go, npm or Actions update whose registry did not answer when its
+  pinned hash was checked (see the four states above).
 - The gate runs on github.com only.
 - A pre-release is never an increase. A Go pseudo-version (a commit, not
   a release) is one only for a listed module, and can then merge like a
@@ -183,7 +204,10 @@ dependency the repository does not declare itself (one that a parent
 pulls in) needs no entry. An entry ending in `/` is a
 namespace; any other entry is a name and everything below it. Matching is
 exact and case-sensitive, with no wildcards. Entries can be added, never
-removed.
+removed. A Docker entry is matched against `docker.io/library/<name>`
+for an official image and `gcr.io/<repository>` for a gcr.io image; no
+other image is read, so an entry for one (`docker.io/your-org/`) never
+matches.
 
 ```json
 {
@@ -271,8 +295,10 @@ model, whatever the comment remembers.
    branch with *Restrict creations*, *Restrict updates* and *Restrict
    deletions*, and Dependabot as the only bypass actor. classify asks
    GitHub which rules apply to the pull request's branch and treats the
-   pull request as not Dependabot's alone without all three. It cannot see
-   the bypass list, so keeping that list to Dependabot is the owner's job.
+   pull request as not Dependabot's alone without all three. An update
+   rule that lets anyone pull the base branch in
+   (`update_allows_fetch_and_merge`) does not count. It cannot see the
+   bypass list, so keeping that list to Dependabot is the owner's job.
 5. Give the default branch a ruleset rule that requires at least one
    status check besides `dep-review`. Classic branch protection does not
    count.
@@ -359,7 +385,9 @@ and it then gets no status, comment or notification.
 | `.github/workflows/gate.yml` | the reusable workflow |
 | `cmd/dep-review` | one subcommand per job, and `replay`; flags, files, exit codes |
 | `internal/classify` | the identity proof |
+| `internal/model` | classify's answer as a file, and Dependabot's names for the ecosystems |
 | `internal/gather` | the fetch and review jobs |
+| `internal/facts` | what a gatherer is given and hands back |
 | `internal/facts/{gomod,npm,actions,docker}` | each ecosystem's facts |
 | `internal/advisory` | GitHub's Advisory Database |
 | `internal/artifact` | download, verify, extract, diff, chunk |

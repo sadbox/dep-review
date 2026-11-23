@@ -29,8 +29,8 @@
 // goes to a person here goes to a person there, and one that does not
 // still needs the registries, the advisory database and the model to
 // agree. The replay never sees a hash that does not match, a retracted
-// version, a new install script, a tag off its branch, an action pinned
-// without an actions.lock entry, a read that was partial, or a veto.
+// version, a new install script, a tag off its branch, an action whose
+// repository is not the one actions.lock records, a partial read, or a veto.
 //
 // Two things are not bounded that way. With no NameCreated the stand-in
 // is the unfavourable one: a new, unlisted name is a person here and
