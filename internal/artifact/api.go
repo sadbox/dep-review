@@ -160,8 +160,9 @@ type Prepared struct {
 	// Inspected is the answer of the Inspect function configured for the
 	// pair's Kind (Options.Inspect), and the zero Fact when there is
 	// none. It is not part of Key: it says nothing about what the model
-	// reads. The fetch command ANDs it into the update's NoRegress
-	// (allow.Fact.And).
+	// reads. For npm the fetch command makes the update's NoRegress from
+	// it and the gatherer's half (facts.Result.NoRegressSoFar), and a
+	// zero Fact there is a NoRegress that does not hold.
 	Inspected allow.Fact `json:"inspected"`
 }
 

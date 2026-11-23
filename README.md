@@ -57,7 +57,8 @@ Waiting for an age has no deadline. Waiting for a retry (a model read, a
 source that did not answer, a superseded Docker digest, required checks)
 ends `wait_deadline_days` after the latest time the update could have
 merged, or after the pull request was opened if that is later; then it is
-a person's.
+a person's. While neither time is known (GitHub and the registry's clock
+both went unanswered) there is no deadline, and the pull request waits.
 
 ## Facts
 
@@ -83,7 +84,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the pull request was opened |
 | NameCreated | when the package name first appeared (new names only) |
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have |
-| NoRegress | no new or changed install script; provenance not lost; Actions: the new commit descends from the old one |
+| NoRegress | no new or changed install script, and for npm no new or changed `binding.gyp` and none left to build by itself; provenance not lost; Actions: the new commit descends from the old one |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version |
 | Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker) |
 | Veto | none, or a category and the lines the model quoted |
@@ -115,7 +116,7 @@ either (`fast_path_companions: ride-along`).
 | Ecosystem | Shape and change set | Bound | FirstSeen | Read |
 |---|---|---|---|---|
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips |
-| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install scripts |
+| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install scripts: npm's NoRegress holds only once they were |
 | GitHub Actions | changed lines must be pin lines (`uses: owner/repo@<40 hex> # vX.Y.Z`, or a tag line in a workflow onboarded to `actions.lock`) and `actions.lock` entries | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
 | Docker | changed lines must be `FROM` lines, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`, GCR `timeUploadedMs` | nothing |
 

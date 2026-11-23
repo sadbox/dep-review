@@ -1334,6 +1334,60 @@ func TestWaitDeadline(t *testing.T) {
 	wantOutcome(t, ChecksRefused(merged, d.NotBefore), Wait, ReasonChecksPending)
 }
 
+// With no first-seen time and no opened time nothing says when the wait
+// began (spec section 11, amendment 22). There is then no deadline, and
+// the pull request is not given up on the moment the gate first looks.
+func TestNoDeadlineWithoutAStart(t *testing.T) {
+	p := testPolicy()
+	noClock := func(u *UpdateFacts) { u.FirstSeen = UnavailableTime("HTTP 503", "index.golang.org") }
+	superseded := func(u *UpdateFacts) {
+		u.Name, u.Listed, u.Read = "docker.io/library/golang", Yes("docker.io/library/", "policy"), ReadNotApplicable
+		u.Superseded = Yes("the tag resolves to another digest now", "registry")
+		u.FirstSeen = TimeFact{Value: "not asked", Source: "registry"}
+	}
+	tests := []struct {
+		name   string
+		f      PRFacts
+		reason Reason
+		// gaveUp is the reason once a start is known and its deadline has
+		// passed.
+		gaveUp Reason
+	}{
+		{"no clock answered", pr(GoModules, update(hour, noClock)), ReasonSourceUnavailable, ReasonSourceDeadline},
+		{"no clock answered, read missing", pr(GoModules, update(hour, noClock, read(ReadNone))), ReasonSourceUnavailable, ReasonSourceDeadline},
+		{"two updates, neither has a time", pr(GoModules, update(hour, noClock), update(hour, noClock)), ReasonSourceUnavailable, ReasonSourceDeadline},
+		{"a superseded pin, whose time is not looked at", pr(Docker, update(hour, superseded)), ReasonSuperseded, ReasonSupersededDeadline},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.f
+			f.Opened = time.Time{}
+			for _, now := range []time.Time{t0.Add(-1000 * day), t0, t0.Add(1000 * day)} {
+				d := Decide(f, p, now)
+				if d.Outcome != Wait || d.Reasons[0] != tc.reason {
+					t.Fatalf("at %v: %q %v, want wait with %q first", now, d.Outcome, d.Reasons, tc.reason)
+				}
+				if !d.Deadline.IsZero() {
+					t.Fatalf("at %v: deadline %v, want none", now, d.Deadline)
+				}
+			}
+			// Either start brings the deadline back.
+			f.Opened = t0.Add(-day)
+			d := Decide(f, p, t0)
+			if want := f.Opened.Add(7 * day); d.Outcome != Wait || !d.Deadline.Equal(want) {
+				t.Fatalf("with an opened time: %q, deadline %v, want wait until %v", d.Outcome, d.Deadline, want)
+			}
+			if got := Decide(f, p, d.Deadline); got.Outcome != Person || got.Reasons[0] != tc.gaveUp {
+				t.Fatalf("at the deadline: %q %v, want person with %q", got.Outcome, got.Reasons, tc.gaveUp)
+			}
+		})
+	}
+	// One update with a time is a start, also without Opened.
+	f := pr(GoModules, update(40*day, read(ReadNone)), update(hour, noClock))
+	f.Opened = time.Time{}
+	wantOutcome(t, Decide(f, p, t0), Person, ReasonReadDeadline, ReasonSourceDeadline)
+}
+
 // Opened is not a fact: it can move the deadline later and do nothing
 // else. Unknown, the deadline is the spec's literal one.
 func TestOpenedOnlyMovesTheDeadline(t *testing.T) {
@@ -1360,7 +1414,9 @@ func TestOpenedOnlyMovesTheDeadline(t *testing.T) {
 			if d0.Outcome != d.Outcome {
 				t.Fatalf("Opened changed a merge: %q without, %q with", d0.Outcome, d.Outcome)
 			}
-		case d0.Outcome == Wait && d.Outcome != Wait:
+		case d0.Outcome == Wait && !d0.Deadline.IsZero() && d.Outcome != Wait:
+			// A wait that had no deadline for want of a start is the one
+			// that Opened may end: it is the start.
 			t.Fatalf("Opened ended a wait: %q", d.Outcome)
 		}
 		if d0.Outcome != Person && d.Outcome != Person {

@@ -114,6 +114,18 @@ func TestPublish(t *testing.T) {
 			comment: []string{"The fact: `ChecksConfigured` of the pull request is `unavailable`"},
 		},
 		{
+			// Neither clock answered in the fetch job, so nothing says when
+			// the wait began: no deadline, and no date the comment made up.
+			name: "a wait with no start has no deadline",
+			facts: func(f *wire.Facts) {
+				f.Facts.Opened = time.Time{}
+				f.Facts.Updates[0].FirstSeen = allow.UnavailableTime("GitHub did not answer", "GitHub: the pull request")
+			},
+			action: ActionWait, reason: allow.ReasonSourceUnavailable, fact: "FirstSeen",
+			status: "pending: waiting (source_unavailable)", cached: 1,
+			comment: []string{"**Waiting.** " + allow.ReasonSourceUnavailable.Explain() + " No deadline is set yet"},
+		},
+		{
 			name: "the rules cannot be read",
 			github: func(f *fakeGitHub) {
 				f.rulesCode, f.rules = 403, `{"message":"Resource not accessible by integration"}`

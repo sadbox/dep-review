@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"path"
 	"strings"
 
 	"github.com/sadbox/dep-review/internal/allow"
@@ -95,7 +96,9 @@ func recordOf(doc versionDoc, copies []node) (installRecord, error) {
 // have word for word, and was built by the same provenance identity. The
 // tarball's own files are the third source for install scripts, and the
 // only one for the packages it bundles; InspectTarballs reads them once
-// the artifact reader has the verified tarballs.
+// the artifact reader has the verified tarballs. So this is never an
+// update's NoRegress by itself: it is handed to the fetch command beside
+// the update (facts.Result.NoRegressSoFar).
 func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnswer, source string) (allow.Fact, error) {
 	source += " and package-lock.json"
 	switch {
@@ -400,8 +403,16 @@ const tarballSource = "every package.json and binding.gyp in the verified tarbal
 // third source for install scripts, and the one a publisher cannot keep
 // out of sight, because npm runs what the files say whatever the
 // registry's metadata and the lock say. It holds when no package.json in
-// the new tarball has an install script, and no binding.gyp is there,
-// that the old tarball did not have at the same path, word for word.
+// the new tarball has an install script that the old tarball did not
+// have at the same path, word for word, and every binding.gyp in it is
+// the old tarball's at the same path, byte for byte.
+//
+// A binding.gyp is a build that npm runs at install by itself: a package
+// that has one and neither an install nor a preinstall script gets
+// "node-gyp rebuild". So one that is new or changed is a new install
+// step, and so is one that stays the same while the package beside it
+// drops the install or preinstall script it had: npm then starts the
+// build on its own, and no script was added anywhere.
 //
 // Every package.json and binding.gyp is looked at, wherever it is. That
 // covers bundled dependencies, which are installed from inside this
@@ -415,9 +426,9 @@ const tarballSource = "every package.json and binding.gyp in the verified tarbal
 // cannot import this package. oldPkg and newPkg are the extracted
 // packages: each is the directory that holds the package's own
 // package.json (the tarball with its first path element dropped, as npm
-// unpacks it). oldPkg is nil for a new name. The fetch command ANDs the
-// answer into the update's NoRegress, so an update whose tarballs were
-// never inspected does not keep a NoRegress that holds.
+// unpacks it). oldPkg is nil for a new name. The fetch command makes the
+// update's NoRegress from this answer and the registry's, so an update
+// whose tarballs were never inspected has no NoRegress that holds.
 func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 	if newPkg == nil {
 		return allow.Fact{Value: "the new tarball was not given"}
@@ -454,8 +465,12 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 
 		if d.Name() == "binding.gyp" {
 			gyps++
-			if !had {
+			switch {
+			case !had:
 				problem = fmt.Sprintf("%s is new: npm builds a package that has a binding.gyp when it is installed", show(p))
+				return fs.SkipAll
+			case !bytes.Equal(was, is):
+				problem = fmt.Sprintf("%s changes: it is what a package is built from when it is installed", show(p))
 				return fs.SkipAll
 			}
 			return nil
@@ -471,6 +486,26 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 			return fs.SkipAll
 		}
 		if len(hooks) == 0 {
+			// No script is left. Beside a binding.gyp that is not the end
+			// of it (see above): if the old package.json had the script
+			// that kept npm from building by itself, npm builds now.
+			if !had {
+				return nil
+			}
+			if _, err := fs.Stat(newPkg, path.Join(path.Dir(p), "binding.gyp")); errors.Is(err, fs.ErrNotExist) {
+				return nil
+			} else if err != nil {
+				return err
+			}
+			before, err := manifestHooks(was)
+			if err != nil {
+				problem = fmt.Sprintf("%s in the old tarball: %v", show(p), err)
+				return fs.SkipAll
+			}
+			if before["install"] != "" || before["preinstall"] != "" {
+				problem = fmt.Sprintf("%s drops its install scripts (%s) and keeps its binding.gyp, so npm runs node-gyp rebuild by itself when the package is installed", show(p), showHooks(before))
+				return fs.SkipAll
+			}
 			return nil
 		}
 		if !had {
@@ -496,7 +531,7 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 	case problem != "":
 		return allow.No(problem, tarballSource)
 	}
-	return allow.Yes(fmt.Sprintf("no new or changed install script in %d package.json, and no new binding.gyp (%d present)", manifests, gyps), tarballSource)
+	return allow.Yes(fmt.Sprintf("no new or changed install script in %d package.json, and no new or changed binding.gyp (%d present)", manifests, gyps), tarballSource)
 }
 
 // readSmall reads one file of an extracted tarball, refusing one too

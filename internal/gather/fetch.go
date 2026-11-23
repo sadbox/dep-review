@@ -78,7 +78,8 @@ const (
 //     GitHub's record of the branch lags (model.KindPending): Identity is
 //     unavailable and everything else is gathered as usual.
 //   - An ecosystem without a rule (uv, submodules): the file names it,
-//     and nothing is asked or fetched. allow.Decide answers no_rule.
+//     and nothing is asked or fetched, the base branch included, so no
+//     fact in it holds. allow.Decide answers no_rule.
 //   - GitHub not answering about the pull request or the branch rules:
 //     those facts are unavailable, and gathering goes on, so that the
 //     pull request waits instead of going to a person for facts nobody
@@ -107,18 +108,23 @@ func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 		GatheredAt:  f.Now(),
 		Facts:       wire.PRFacts{Ecosystem: eco},
 	}
+	// classified is classify's half of Identity. The other half, that the
+	// base is the default branch, is GitHub's to say, and the fact is made
+	// from the two together and nowhere else (gather). So a pull request
+	// nothing is gathered for never carries an Identity that holds.
+	var classified allow.Fact
 	switch c.Kind {
 	case model.KindDependabot:
-		file.Facts.Identity = allow.Yes(c.Reason, classifySource)
+		classified = allow.Yes(c.Reason, classifySource)
 	case model.KindDependabotUnverified:
-		file.Facts.Identity = allow.No(c.Reason, classifySource)
+		classified = allow.No(c.Reason, classifySource)
 	case model.KindPending:
 		// Everything classify could check is Dependabot's, and GitHub's
 		// record of who pushed the branch has not reached the head yet.
 		// That is a source that did not answer, not an answer (spec
 		// section 11, amendment 1): gathering goes on, the pull request
 		// waits, and the scheduled job runs the proof again.
-		file.Facts.Identity = allow.Unavailable(c.Reason, classifySource)
+		classified = allow.Unavailable(c.Reason, classifySource)
 	default:
 		// The gate does nothing at all for the other kinds; a workflow
 		// that runs this job for one of them is wrong.
@@ -137,15 +143,17 @@ func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 
 	why := ""
 	switch {
-	case file.Facts.Identity.Gathered() && !file.Facts.Identity.OK:
+	case classified.Gathered() && !classified.OK:
 		why = "classify did not show the pull request to be Dependabot's alone"
+		file.Facts.Identity = classified
 	case !hasRule:
 		why = "the ecosystem has no rule"
+		file.Facts.Identity = allow.Fact{Value: "classify: " + c.Reason + "; the base branch was not asked about: " + why}
 	}
 	if why != "" {
 		file.Facts.Shape = allow.Fact{Value: "not gathered: " + why}
 		file.Facts.ChecksConfigured = allow.Fact{Value: "not asked: " + why}
-	} else if err := f.gather(ctx, chunks, &file); err != nil {
+	} else if err := f.gather(ctx, chunks, classified, &file); err != nil {
 		return wire.Facts{}, err
 	}
 
@@ -170,8 +178,8 @@ func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 }
 
 // gather fills in everything about a Dependabot pull request in an
-// ecosystem that has a rule.
-func (f Fetch) gather(ctx context.Context, chunks string, file *wire.Facts) error {
+// ecosystem that has a rule. classified is classify's half of Identity.
+func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact, file *wire.Facts) error {
 	if f.GitHub == nil || f.Preparer == nil {
 		return errors.New("gather: no GitHub client or no artifact reader")
 	}
@@ -181,7 +189,7 @@ func (f Fetch) gather(ctx context.Context, chunks string, file *wire.Facts) erro
 	if err != nil {
 		return err
 	}
-	pr.Identity = pr.Identity.And(asked.base)
+	pr.Identity = classified.And(asked.base)
 	pr.ChecksConfigured = asked.checks
 	if asked.opened.Known() {
 		pr.Opened = asked.opened.Time
@@ -222,6 +230,9 @@ func (f Fetch) gather(ctx context.Context, chunks string, file *wire.Facts) erro
 		return fmt.Errorf("gather: %s: %w", pr.Ecosystem, err)
 	}
 	pr.Shape = res.Shape
+	if pr.Ecosystem == allow.NPM && len(res.NoRegressSoFar) != len(res.Updates) {
+		return errors.New("gather: the npm gatherer did not say what the registry and the lock show of NoRegress for every update")
+	}
 
 	pr.Updates = make([]wire.Update, len(res.Updates))
 	for i, u := range res.Updates {
@@ -269,11 +280,14 @@ func (f Fetch) gather(ctx context.Context, chunks string, file *wire.Facts) erro
 		if pr.Ecosystem == allow.NPM {
 			// npm's install scripts have three sources and the tarball is
 			// the one a publisher cannot keep out of sight (spec section
-			// 6). NoRegress holds only when it was looked at.
+			// 6). This is the only place an npm NoRegress is made: from
+			// what the registry and the lock say and what was found in the
+			// tarballs, so it holds only when they were looked at. Whatever
+			// the gatherer left in the update's own NoRegress is not read.
 			if inspected == (allow.Fact{}) {
 				inspected = allow.Fact{Value: "the package.json and binding.gyp files in the tarballs were not looked at"}
 			}
-			u.NoRegress = u.NoRegress.And(inspected)
+			u.NoRegress = res.NoRegressSoFar[i].And(inspected)
 		}
 	}
 	return nil

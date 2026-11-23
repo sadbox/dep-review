@@ -35,6 +35,7 @@ func TestLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		res = fetched(t, res)
 		t.Logf("Shape: %+v", res.Shape)
 		for _, u := range res.Updates {
 			t.Logf("%s %s -> %s\n  Bound: %+v\n  FirstSeen: %+v\n  NameCreated: %+v\n  Clean: %+v\n  NoRegress: %+v",
@@ -58,6 +59,7 @@ func TestLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		res = fetched(t, res)
 		if len(res.Updates) != 1 || !res.Updates[0].Bound.Holds() || res.Updates[0].NoRegress.OK {
 			t.Errorf("updates = %+v, want one that is bound and does not pass NoRegress", res.Updates)
 		}
@@ -96,6 +98,7 @@ func TestLiveDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	res = fetched(t, res)
 	t.Logf("Shape: ok=%v %s", res.Shape.OK, res.Shape.Value)
 	d := decide(res)
 	t.Logf("Decide at %s: %s %v", testNow.Format(time.DateOnly), d.Outcome, d.Reasons)

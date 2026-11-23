@@ -111,11 +111,22 @@ type Result struct {
 	// by the job that decides; the file the fetch job writes
 	// (internal/wire) cannot even carry them. A gatherer leaves both
 	// zero. For Docker, where nothing can be read, the deciding job sets
-	// Read to allow.ReadNotApplicable from the ecosystem alone.
+	// Read to allow.ReadNotApplicable from the ecosystem alone. The npm
+	// gatherer leaves NoRegress unset as well; see NoRegressSoFar.
 	//
 	// When Shape does not hold the change set cannot be trusted either,
 	// and Updates may be empty.
 	Updates []allow.UpdateFacts
+	// NoRegressSoFar is npm's alone. Whether an npm update brings a new
+	// install step is settled only by the files in its verified tarball,
+	// which the gatherer never sees. So the npm gatherer puts what the
+	// registry and the lock say here, one fact for each of Updates in the
+	// same order, and leaves every update's NoRegress unset: nothing it
+	// returns can hold by itself. The fetch command is the one place that
+	// makes NoRegress, from this fact and the artifact reader's
+	// inspection of the tarballs (artifact.Prepared.Inspected), and
+	// without an inspection it does not hold.
+	NoRegressSoFar []allow.Fact
 	// Artifacts lists what the model is to read: for each update with
 	// something readable, the old and the new artifact, each with the
 	// hash the Bound fact was established for. An entry belongs to the

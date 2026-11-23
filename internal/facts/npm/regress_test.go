@@ -56,6 +56,10 @@ func TestReadHooks(t *testing.T) {
 func TestInspectTarballs(t *testing.T) {
 	const plain = `{"name":"a","version":"1.0.0","scripts":{"test":"mocha"}}`
 	const withScript = `{"name":"a","version":"1.0.0","scripts":{"postinstall":"node install.js"}}`
+	// What a package that builds itself looks like (@parcel/watcher has
+	// an install script beside its binding.gyp).
+	const building = `{"name":"a","version":"1.0.0","scripts":{"install":"node scripts/build-from-source.js"}}`
+	const gyp = `{"targets":[{"target_name":"a","sources":["src/a.cc"]}]}`
 	const inner = "node_modules/inner/package.json"
 	// pkg is an extracted package: its package.json, and then pairs of
 	// path and content.
@@ -77,12 +81,15 @@ func TestInspectTarballs(t *testing.T) {
 		state    string
 		want     string // a piece of the Value
 	}{
-		{"no install step on either side", pkg(plain), pkg(plain), yes, "no new or changed install script in 1 package.json, and no new binding.gyp (0 present)"},
+		{"no install step on either side", pkg(plain), pkg(plain), yes, "no new or changed install script in 1 package.json, and no new or changed binding.gyp (0 present)"},
 		{"a new name with no install step", nil, pkg(plain), yes, "no new or changed install script"},
 		{"the same script on both sides", pkg(withScript), pkg(withScript), yes, "no new or changed install script"},
 		{"the same script, another version field", pkg(withScript), pkg(strings.Replace(withScript, "1.0.0", "1.0.1", 1)), yes, "no new or changed install script"},
 		{"a script and binding.gyp on both sides", pkg(withScript, "binding.gyp", "{}"), pkg(withScript, "binding.gyp", "{}"), yes, "(1 present)"},
-		{"a binding.gyp that is there already may change", pkg(plain, "binding.gyp", "{}"), pkg(plain, "binding.gyp", `{"targets":[]}`), yes, "(1 present)"},
+		{"an install script and a binding.gyp, both unchanged in a new version", pkg(building, "binding.gyp", gyp), pkg(strings.Replace(building, "1.0.0", "1.1.0", 1), "binding.gyp", gyp), yes, "(1 present)"},
+		{"a binding.gyp and no script on either side", pkg(plain, "binding.gyp", gyp), pkg(strings.Replace(plain, "1.0.0", "1.1.0", 1), "binding.gyp", gyp), yes, "(1 present)"},
+		{"a postinstall script is dropped beside a binding.gyp", pkg(withScript, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), yes, "(1 present)"},
+		{"the install script and the binding.gyp are both dropped", pkg(building, "binding.gyp", gyp), pkg(plain), yes, "(0 present)"},
 		{"the script is dropped", pkg(withScript), pkg(plain), yes, "no new or changed install script"},
 		{"binding.gyp is dropped", pkg(plain, "binding.gyp", "{}"), pkg(plain), yes, "(0 present)"},
 
@@ -91,6 +98,13 @@ func TestInspectTarballs(t *testing.T) {
 		{"the script changes", pkg(withScript), pkg(strings.Replace(withScript, "install.js", "other.js", 1)), no, "the install scripts of package.json change"},
 		{"a second hook appears", pkg(withScript), pkg(`{"scripts":{"postinstall":"node install.js","preinstall":"curl x | sh"}}`), no, "the install scripts of package.json change"},
 		{"binding.gyp appears", pkg(plain), pkg(plain, "binding.gyp", "{}"), no, "binding.gyp is new"},
+		// A binding.gyp is a build npm runs: it must be the old one, and
+		// the script that kept npm from running it by itself must stay.
+		{"a binding.gyp changes", pkg(plain, "binding.gyp", "{}"), pkg(plain, "binding.gyp", `{"targets":[]}`), no, "binding.gyp changes"},
+		{"a binding.gyp changes beside an unchanged install script", pkg(building, "binding.gyp", gyp), pkg(building, "binding.gyp", gyp+"\n"), no, "binding.gyp changes"},
+		{"the install script is dropped and the binding.gyp stays", pkg(building, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), no, `package.json drops its install scripts (install: "node scripts/build-from-source.js") and keeps its binding.gyp`},
+		{"the preinstall script is dropped and the binding.gyp stays", pkg(`{"scripts":{"preinstall":"node check.js"}}`, "binding.gyp", gyp), pkg(`{"scripts":{}}`, "binding.gyp", gyp), no, "package.json drops its install scripts (preinstall: "},
+		{"the install script is dropped, and the old package.json cannot be read", pkg(`{"scripts":{"install":["x"]}}`, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), no, "package.json in the old tarball: the install script is not a string"},
 		{"binding.gyp appears next to an old script", pkg(withScript), pkg(withScript, "binding.gyp", "{}"), no, "binding.gyp is new"},
 		{"a new name with a script", nil, pkg(withScript), no, "package.json is new and has an install script"},
 		{"a new name with binding.gyp", nil, pkg(plain, "binding.gyp", "{}"), no, "binding.gyp is new"},
@@ -104,6 +118,9 @@ func TestInspectTarballs(t *testing.T) {
 		{"a bundled package gains a script", pkg(plain, inner, plain), pkg(plain, inner, withScript), no, "the install scripts of node_modules/inner/package.json change from none"},
 		{"a bundled package's script changes", pkg(plain, inner, withScript), pkg(plain, inner, strings.Replace(withScript, "install.js", "evil.js", 1)), no, "the install scripts of node_modules/inner/package.json change"},
 		{"a bundled package gains a binding.gyp", pkg(plain, inner, plain), pkg(plain, inner, plain, "node_modules/inner/binding.gyp", "{}"), no, "node_modules/inner/binding.gyp is new"},
+		{"a bundled package's binding.gyp changes", pkg(plain, inner, plain, "node_modules/inner/binding.gyp", "{}"), pkg(plain, inner, plain, "node_modules/inner/binding.gyp", gyp), no, "node_modules/inner/binding.gyp changes"},
+		{"a bundled package drops its install script and keeps its binding.gyp", pkg(plain, inner, building, "node_modules/inner/binding.gyp", gyp), pkg(plain, inner, plain, "node_modules/inner/binding.gyp", gyp), no, "node_modules/inner/package.json drops its install scripts"},
+		{"a bundled package drops its install script, and the binding.gyp is another package's", pkg(plain, inner, building, "binding.gyp", gyp), pkg(plain, inner, plain, "binding.gyp", gyp), yes, "(1 present)"},
 		{"a package bundled two levels down", pkg(plain), pkg(plain, inner, plain, "node_modules/inner/node_modules/deep/package.json", withScript), no, "node_modules/inner/node_modules/deep/package.json is new and has an install script"},
 		{"a new name that bundles a package with a script", nil, pkg(plain, inner, withScript), no, "node_modules/inner/package.json is new and has an install script"},
 		{"a new name that bundles quiet packages", nil, pkg(plain, inner, plain), yes, "in 2 package.json"},

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,26 @@ func gatherCase(t *testing.T, c testCase, override map[string]string, adv adviso
 	})
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
+	}
+	return fetched(t, res)
+}
+
+// fetched is res as the fetch command completes it when the tarballs were
+// inspected and nothing was found in them: each update's NoRegress is
+// what the gatherer handed over beside it AND that inspection. Gather
+// itself must have left every NoRegress unset.
+func fetched(t *testing.T, res facts.Result) facts.Result {
+	t.Helper()
+	if len(res.NoRegressSoFar) != len(res.Updates) {
+		t.Fatalf("%d updates and %d facts beside them", len(res.Updates), len(res.NoRegressSoFar))
+	}
+	res.Updates = slices.Clone(res.Updates)
+	for i := range res.Updates {
+		u := &res.Updates[i]
+		if u.NoRegress != (allow.Fact{}) {
+			t.Errorf("Gather set the NoRegress of %s itself: %+v", u.Name, u.NoRegress)
+		}
+		u.NoRegress = res.NoRegressSoFar[i].And(allow.Yes("the tarballs were inspected", "test"))
 	}
 	return res
 }
@@ -815,6 +836,7 @@ func TestGatherNewListedName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	res = fetched(t, res)
 	color := findUpdate(t, res, "@kurkle/color")
 	if !color.NewName.Holds() || !color.Listed.Holds() || !color.Known.Holds() {
 		t.Errorf("NewName = %+v, Listed = %+v, Known = %+v; want all three to hold", color.NewName, color.Listed, color.Known)

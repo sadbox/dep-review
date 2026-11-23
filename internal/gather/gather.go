@@ -82,8 +82,8 @@ func Gatherers() map[string]facts.Gatherer {
 // internal/artifact's, told to run npm's own look at the verified
 // tarballs (spec section 11, amendment 5): internal/artifact cannot
 // import the npm gatherer, so the function is handed over here, and
-// Fetch ANDs its answer into NoRegress. scratch, hc and github are
-// artifact.Options' fields of those names.
+// Fetch makes npm's NoRegress from its answer and the gatherer's.
+// scratch, hc and github are artifact.Options' fields of those names.
 func NewPreparer(scratch string, hc *http.Client, github *gh.Client) (artifact.Preparer, error) {
 	return artifact.New(artifact.Options{
 		Scratch: scratch,

@@ -133,7 +133,12 @@ func TestRealNPMGather(t *testing.T) {
 		if got, want := names(res), "chart.js 4.4.6->4.4.7, core-js 3.38.0->3.38.1, tailwindcss 4.3.4->4.3.5"; got != want {
 			t.Errorf("%s: updates %s, want %s", name, got, want)
 		}
-		if d := decide(res); d.Outcome != allow.Merge {
+		// What Gather returns never merges by itself: the tarballs have
+		// not been looked at yet.
+		if d := decide(res); d.Outcome != allow.Person || !slices.Equal(d.Reasons, []allow.Reason{allow.ReasonFactMissing}) {
+			t.Errorf("%s: Decide before the fetch command's inspection = %s %v, want person [fact_missing]", name, d.Outcome, d.Reasons)
+		}
+		if d := decide(fetched(t, res)); d.Outcome != allow.Merge {
 			t.Errorf("%s: Decide = %s %v, want merge", name, d.Outcome, d.Reasons)
 		}
 	}

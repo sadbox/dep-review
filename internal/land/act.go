@@ -237,6 +237,9 @@ func status(res Result) (state, description string) {
 		if len(d.Reasons) > 0 && d.Reasons[0] == allow.ReasonAge {
 			return "pending", "waiting until " + stamp(d.NotBefore)
 		}
+		if d.Deadline.IsZero() {
+			return "pending", fmt.Sprintf("waiting (%s)", reason)
+		}
 		return "pending", fmt.Sprintf("waiting (%s), at most until %s", reason, stamp(d.Deadline))
 	case ActionRefused:
 		return "error", "GitHub refused the merge; see the comment"

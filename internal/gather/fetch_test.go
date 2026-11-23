@@ -140,8 +140,11 @@ func TestFetchNoRule(t *testing.T) {
 			if n := len(j.api.asked()) + len(j.gatherer.inputs) + len(j.preparer.pairs) + len(chunkFiles(t, dir)); n != 0 {
 				t.Errorf("something was fetched: GitHub %v, gatherer %d, reader %d", j.api.asked(), len(j.gatherer.inputs), len(j.preparer.pairs))
 			}
-			if !f.Facts.Identity.Holds() || len(f.Facts.Updates) != 0 {
-				t.Errorf("identity %+v, %d updates", f.Facts.Identity, len(f.Facts.Updates))
+			// The base branch was not asked about, so Identity is classify's
+			// word in a fact that does not hold.
+			id := f.Facts.Identity
+			if id.Holds() || id.Gathered() || id.Unavailable || !strings.Contains(id.Value, j.fetch.Class.Reason) || len(f.Facts.Updates) != 0 {
+				t.Errorf("identity %+v, %d updates", id, len(f.Facts.Updates))
 			}
 			wantOutcome(t, decide(t, f, nil), allow.Person, allow.ReasonNoRule)
 		})
@@ -522,8 +525,11 @@ func TestFetchGathererError(t *testing.T) {
 	}
 }
 
-// npm's NoRegress holds only when the reader looked at the tarballs
-// (spec section 11, amendment 5), and a download that failed is a wait.
+// npm's NoRegress is made in the fetch job and nowhere else (spec section
+// 11, amendments 5 and 21): from what the gatherer hands over beside the
+// update and what the reader found in the tarballs. Every row is a pull
+// request that merges but for its NoRegress: old enough, read in full, no
+// veto. It merges only when both halves hold.
 func TestFetchNPMInspection(t *testing.T) {
 	const (
 		yes = iota
@@ -541,39 +547,61 @@ func TestFetchNPMInspection(t *testing.T) {
 	fail := func(err error) func(artifact.Pair) (artifact.Prepared, error) {
 		return func(artifact.Pair) (artifact.Prepared, error) { return artifact.Prepared{}, err }
 	}
+	clean := allow.Yes("no install script in 3 package.json", "the tarballs")
 	for _, tc := range []struct {
-		name      string
-		eco       model.Ecosystem
-		gatherer  allow.Fact
+		name string
+		eco  model.Ecosystem
+		// soFar is the gatherer's half; the zero Fact means it holds.
+		soFar allow.Fact
+		// inUpdate is what a gatherer wrongly put in the update itself.
+		inUpdate  allow.Fact
 		answer    func(artifact.Pair) (artifact.Prepared, error)
 		noPair    bool
 		want      int
 		wantValue string
+		merges    bool
 	}{
-		{name: "both hold", eco: model.NPM, answer: inspected(allow.Yes("no install script in 3 package.json", "the tarballs")), want: yes,
-			wantValue: "nothing lost; no install script in 3 package.json"},
-		{name: "the tarball has a new install script", eco: model.NPM,
-			answer: inspected(allow.No("node_modules/inner/package.json is new and has an install script", "the tarballs")), want: no},
-		{name: "the registry already said no", eco: model.NPM, gatherer: allow.No("a new postinstall script", "registry"),
-			answer: inspected(allow.Yes("nothing", "the tarballs")), want: no, wantValue: "a new postinstall script"},
+		{name: "both hold", eco: model.NPM, answer: inspected(clean), want: yes,
+			wantValue: "nothing lost; no install script in 3 package.json", merges: true},
+		// The reader gives nothing, could not get the tarballs, or says no.
 		{name: "a reader that does not inspect", eco: model.NPM, answer: inspected(allow.Fact{}), want: missing},
 		{name: "the tarballs could not be read back", eco: model.NPM, answer: inspected(allow.Fact{Value: "the tarballs could not be read"}), want: missing},
+		{name: "an inspection that is unavailable", eco: model.NPM, answer: inspected(allow.Unavailable("the tarballs could not be downloaded", "the tarballs")), want: unavailable},
+		{name: "the tarball has a new install script", eco: model.NPM,
+			answer: inspected(allow.No("node_modules/inner/package.json is new and has an install script", "the tarballs")), want: no},
+		// The gatherer's half does not hold, whatever the tarballs say.
+		{name: "the registry already said no", eco: model.NPM, soFar: allow.No("a new postinstall script", "registry"),
+			answer: inspected(clean), want: no, wantValue: "a new postinstall script"},
+		{name: "the registry's answer could not be used", eco: model.NPM, soFar: allow.Fact{Value: "the registry's answer could not be used"},
+			answer: inspected(clean), want: missing},
+		// A NoRegress in the update itself is not read.
+		{name: "a gatherer that says yes in the update, and the tarballs say no", eco: model.NPM, inUpdate: allow.Yes("nothing lost", "registry"),
+			answer: inspected(allow.No("binding.gyp is new", "the tarballs")), want: no},
+		{name: "a gatherer that says yes in the update, and no beside it", eco: model.NPM, inUpdate: allow.Yes("nothing lost", "registry"),
+			soFar: allow.No("a new postinstall script", "registry"), answer: inspected(clean), want: no},
+		{name: "a gatherer that says yes in the update, and nothing was inspected", eco: model.NPM, inUpdate: allow.Yes("nothing lost", "registry"),
+			answer: inspected(allow.Fact{}), want: missing},
+		// No read was prepared at all. These wait or go to a person for
+		// the read as well.
 		{name: "the registry did not deliver the tarball", eco: model.NPM, answer: fail(fmt.Errorf("%w", artifact.ErrUnavailable)), want: unavailable},
-		{name: "the registry said no and did not deliver", eco: model.NPM, gatherer: allow.No("a new postinstall script", "registry"),
+		{name: "the registry said no and did not deliver", eco: model.NPM, soFar: allow.No("a new postinstall script", "registry"),
 			answer: fail(fmt.Errorf("%w", artifact.ErrUnavailable)), want: no},
 		{name: "the tarball does not match its hash", eco: model.NPM, answer: fail(fmt.Errorf("%w", artifact.ErrHashMismatch)), want: missing},
 		{name: "no artifact was named", eco: model.NPM, noPair: true, want: missing},
 		// Only npm has this third source.
-		{name: "a Go module is not inspected", eco: model.GoModules, answer: inspected(allow.Fact{}), want: yes, wantValue: "nothing lost"},
+		{name: "a Go module is not inspected", eco: model.GoModules, answer: inspected(allow.Fact{}), want: yes, wantValue: "nothing lost", merges: true},
 		{name: "an action is not inspected", eco: model.GitHubActions, answer: fail(fmt.Errorf("%w", artifact.ErrUnavailable)), want: yes, wantValue: "nothing lost"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			name, _ := ecosystem(tc.eco)
 			u := goodUpdate(t, name, "example-package")
-			if tc.gatherer != (allow.Fact{}) {
-				u.NoRegress = tc.gatherer
+			if tc.soFar != (allow.Fact{}) {
+				u.NoRegress = tc.soFar
 			}
 			j := newJob(t, tc.eco, u)
+			if tc.inUpdate != (allow.Fact{}) {
+				j.gatherer.res.Updates[0].NoRegress = tc.inUpdate
+			}
 			if tc.noPair {
 				j.gatherer.res.Artifacts = nil
 			}
@@ -593,7 +621,19 @@ func TestFetchNPMInspection(t *testing.T) {
 			if state != tc.want || (tc.wantValue != "" && got.Value != tc.wantValue) {
 				t.Errorf("no regress %+v", got)
 			}
+			if d := decide(t, f, cleanVerdicts(f)); (d.Outcome == allow.Merge) != tc.merges {
+				t.Errorf("decision %s %v, want merge: %v", d.Outcome, d.Reasons, tc.merges)
+			}
 		})
+	}
+
+	// A gatherer that hands over nothing beside its updates is a broken
+	// one, and the run fails: no facts file, so no decision.
+	j := newJob(t, model.NPM, goodUpdate(t, allow.NPM, "example-package"))
+	j.gatherer.res.NoRegressSoFar = nil
+	j.gatherer.res.Updates[0].NoRegress = allow.Yes("nothing lost", "registry")
+	if _, err := j.fetch.Run(context.Background(), filepath.Join(t.TempDir(), "facts")); err == nil {
+		t.Error("an npm result without the registry's half of NoRegress was accepted")
 	}
 }
 

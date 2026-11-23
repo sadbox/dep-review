@@ -16,7 +16,7 @@ import (
 type pull struct {
 	// base holds when the pull request's base is the repository's default
 	// branch. It is the part of Identity that classify does not establish;
-	// Fetch ANDs the two.
+	// Fetch makes Identity from the two.
 	base allow.Fact
 	// checks is the ChecksConfigured fact: an active rule on the default
 	// branch requires at least one status check.

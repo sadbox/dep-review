@@ -36,8 +36,10 @@
 //     that changed or was lost. The registry and the lock are two of the
 //     three sources for install scripts and are read here. The third is
 //     the tarball's own files, which InspectTarballs reads once the
-//     artifact reader has verified and extracted the tarballs; the fetch
-//     command ANDs its answer into NoRegress.
+//     artifact reader has verified and extracted the tarballs. So the
+//     gatherer never returns a NoRegress: what the registry and the lock
+//     say goes into facts.Result.NoRegressSoFar, and the fetch command
+//     makes the fact from that and the inspection.
 //
 // Bundled dependencies are part of their parent's artifact, not updates
 // of their own (spec section 11, amendment 5). They have no source and no
@@ -96,10 +98,11 @@ func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, err
 	}
 	reg := &registry{client: in.HTTP, packuments: map[string]packumentAnswer{}}
 	for i, u := range cs.updates {
-		pair, err := gatherUpdate(ctx, in, reg, u, &res.Updates[i])
+		pair, soFar, err := gatherUpdate(ctx, in, reg, u, &res.Updates[i])
 		if err != nil {
 			return facts.Result{}, err
 		}
+		res.NoRegressSoFar = append(res.NoRegressSoFar, soFar)
 		if pair != nil {
 			res.Artifacts = append(res.Artifacts, *pair)
 		}
@@ -193,9 +196,11 @@ func lockFacts(u update, policy allow.Policy, lockSource string) allow.UpdateFac
 
 // gatherUpdate fills in the facts of one update that the registry and the
 // advisory database are the source of: every fact lockFacts left unset,
-// except Read and Veto. The pair is nil when Bound does not hold: there is
-// then no verified hash to read an artifact against.
-func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, uf *allow.UpdateFacts) (*artifact.Pair, error) {
+// except Read, Veto and NoRegress. What the registry and the lock say
+// about NoRegress is returned beside the update, never in it (see
+// facts.Result.NoRegressSoFar). The pair is nil when Bound does not hold:
+// there is then no verified hash to read an artifact against.
+func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, uf *allow.UpdateFacts) (*artifact.Pair, allow.Fact, error) {
 	// One packument answers Bound, FirstSeen, NameCreated, half of Clean
 	// and most of NoRegress. A name the gate will not put in a URL gets no
 	// request at all.
@@ -206,7 +211,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 		var err error
 		doc, err = reg.packument(ctx, u.Name)
 		if err != nil {
-			return nil, err
+			return nil, allow.Fact{}, err
 		}
 	}
 	source := packumentURL(u.Name)
@@ -214,11 +219,10 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 	uf.Bound = boundFact(u, doc, source)
 	uf.FirstSeen, uf.NameCreated = timeFacts(u, doc, source)
 
-	nr, err := noRegressFact(ctx, reg, u, doc, source)
+	soFar, err := noRegressFact(ctx, reg, u, doc, source)
 	if err != nil {
-		return nil, err
+		return nil, allow.Fact{}, err
 	}
-	uf.NoRegress = nr
 
 	// The advisory database is the other half of Clean and all of
 	// SecurityFix. The checker puts whatever it learned, or failed to
@@ -233,7 +237,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 		res, err := in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To})
 		switch {
 		case ctx.Err() != nil:
-			return nil, ctx.Err()
+			return nil, allow.Fact{}, ctx.Err()
 		case err != nil:
 			blank = "the advisory checker failed: " + quote(err.Error())
 		default:
@@ -255,7 +259,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 			pair = &p
 		}
 	}
-	return pair, nil
+	return pair, soFar, nil
 }
 
 // artifactPair names the two tarballs of an update whose Bound holds, each

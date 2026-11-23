@@ -149,10 +149,17 @@ func Decide(f PRFacts, p Policy, now time.Time) Decision {
 		start = f.Opened
 	}
 	d.NotBefore = latest
-	d.Deadline = start.Add(p.WaitDeadline)
+	// With no first-seen time and no Opened, nothing says when the wait
+	// began: GitHub and the registry's clock went unanswered in one run.
+	// A deadline counted from the zero time has always passed, and would
+	// hand an outage to a person at once. So there is none until a start
+	// is known, and the pull request waits.
+	if !start.IsZero() {
+		d.Deadline = start.Add(p.WaitDeadline)
+	}
 
 	switch {
-	case len(gaveUp) > 0 && !now.Before(d.Deadline):
+	case len(gaveUp) > 0 && !d.Deadline.IsZero() && !now.Before(d.Deadline):
 		d.Outcome = Person
 		d.Reasons = gaveUp
 		d.NotBefore = time.Time{}

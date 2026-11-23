@@ -320,7 +320,8 @@ type PRFacts struct {
 	// nothing: it only keeps the wait deadline from starting before the
 	// pull request existed (see Decision.Deadline). The zero time means
 	// unknown, and the deadline then runs from the latest required time
-	// alone, which is the earlier and stricter reading.
+	// alone, which is the earlier and stricter reading. When no update
+	// has a first-seen time either, there is no deadline yet.
 	Opened time.Time `json:"opened"`
 	// Updates is every package the pull request moves. An empty list is
 	// Person: Dependabot never opens such a pull request.
@@ -413,7 +414,9 @@ type Decision struct {
 	// (ChecksRefused); waiting for an age has no deadline. While a retry
 	// is pending, the latest required time is taken as if every update
 	// had been read in full, so a partial read never moves the deadline
-	// later. Zero for Person.
+	// later. Zero for Person, and for a Wait that has nothing to count
+	// from: neither PRFacts.Opened nor any update's first-seen time is
+	// known. Such a pull request waits until one of them is.
 	Deadline time.Time `json:"deadline"`
 	// PerUpdate has one entry per PRFacts.Updates element, in order.
 	PerUpdate []UpdateDecision `json:"per_update"`

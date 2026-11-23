@@ -333,6 +333,10 @@ func lead(v view) string {
 		fmt.Fprintf(&b, "**Needs a person.** %s\n", r.Explain())
 	case r == allow.ReasonAge:
 		fmt.Fprintf(&b, "**Waiting until %s.** %s\n", stamp(d.NotBefore), r.Explain())
+	case d.Deadline.IsZero():
+		// allow.Decide sets no deadline while nothing says when the wait
+		// began.
+		fmt.Fprintf(&b, "**Waiting.** %s No deadline is set yet: neither when the pull request was opened nor when its versions were published is known.\n", r.Explain())
 	default:
 		// A retry: it ends when the retry succeeds, and at the deadline a
 		// person is asked.

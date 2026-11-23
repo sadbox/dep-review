@@ -227,6 +227,15 @@ func newJob(t *testing.T, eco model.Ecosystem, updates ...allow.UpdateFacts) *jo
 			j.gatherer.res.Artifacts = append(j.gatherer.res.Artifacts, pairFor(name, u))
 		}
 	}
+	if name == allow.NPM {
+		// As the npm gatherer returns it: what it knows of NoRegress
+		// beside the update, and nothing in it.
+		j.gatherer.res.Updates = slices.Clone(updates)
+		for i, u := range updates {
+			j.gatherer.res.NoRegressSoFar = append(j.gatherer.res.NoRegressSoFar, u.NoRegress)
+			j.gatherer.res.Updates[i].NoRegress = allow.Fact{}
+		}
+	}
 	j.fetch = Fetch{
 		Class: model.Classification{
 			Repo: testRepo, PR: testNumber, HeadSHA: headSHA, BaseSHA: baseSHA,
