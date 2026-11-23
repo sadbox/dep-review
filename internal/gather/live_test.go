@@ -116,7 +116,11 @@ func TestLiveFetch(t *testing.T) {
 // checksum database, the module index, GitHub's Advisory Database and the
 // artifact reader are the real ones; only the pull request itself is the
 // fake API's, since no public pull request stays open for this. Every
-// fact a merge needs must hold, and a read must be prepared:
+// fact a merge needs must hold, and both zips must be fetched and checked
+// against the pinned hashes. Between these two commits the module's files
+// did not change, which is the usual update of this module and the case
+// amendment 53 is about: the read is recorded as identical, no model is
+// asked, and it counts as full.
 //
 //	DEP_REVIEW_LIVE=1 go test ./internal/gather/ -run TestLivePseudoVersion -v
 func TestLivePseudoVersion(t *testing.T) {
@@ -179,13 +183,14 @@ func TestLivePseudoVersion(t *testing.T) {
 	}
 	t.Logf("FirstSeen  %+v", u.FirstSeen)
 	t.Logf("read       %s %q, state %q, %d chunks, %d unread, hash %s", u.Prepared.Status, u.Prepared.Detail, u.Prepared.State, len(u.Prepared.Chunks), len(u.Prepared.Unread), u.Hash)
-	if u.Prepared.Status != wire.Prepared || u.Hash != newSum {
-		t.Errorf("no read was prepared against the pinned hash: %+v, hash %q", u.Prepared, u.Hash)
+	if u.Prepared.Status != wire.Identical || u.Hash != newSum {
+		t.Errorf("the two zips were not read as holding the same files, against the pinned hash: %+v, hash %q", u.Prepared, u.Hash)
 	}
 
-	// With the model's answer and, where the index does not date the
-	// commit, publish's own clock, nothing else stands between this update
-	// and a merge: an old enough first-seen time is all that is stood in.
+	// An identical read takes no verdict. Where the index does not date
+	// the commit, publish's own clock would, and an old enough first-seen
+	// time is stood in for it here. Nothing else stands between this
+	// update and a merge.
 	if !u.FirstSeen.Known() {
 		if u.FirstSeen.Unavailable {
 			t.Skipf("the index did not answer: %+v", u.FirstSeen)
