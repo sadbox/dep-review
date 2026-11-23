@@ -35,13 +35,19 @@ import (
 //
 //   - A version it cannot read ("notaversion", "", " 1.2.3") is 200 with
 //     an empty list, not an error. Only X.Y.Z is ever sent, and for Go a
-//     pseudo-version, which the API orders as semver does (checked
-//     2026-11-23 for each of the three forms x/mod knows: an advisory
-//     is in the answer for a pseudo-version below its fix and not for
-//     one above, whether the fix is itself a pseudo-version,
-//     GHSA-p782-xgp4-8hr8 in golang.org/x/sys, or a release,
-//     GHSA-6v2p-p543-phr9 in golang.org/x/oauth2). A pseudo-version
-//     with "+incompatible" was not checked and is not sent.
+//     pseudo-version in the two forms the API was seen to read
+//     (2026-11-23). With no release before the commit,
+//     vX.0.0-YYYYMMDDHHMMSS-COMMIT: GHSA-p782-xgp4-8hr8 in
+//     golang.org/x/sys, whose fix is itself such a version. After the
+//     release vX.Y.(Z-1), vX.Y.Z-0.YYYYMMDDHHMMSS-COMMIT:
+//     GHSA-6v2p-p543-phr9 in golang.org/x/oauth2, fixed in a release.
+//     For each, the recorded answer has the advisory in it for a real
+//     commit below the fix and not for one above. COMMIT is twelve
+//     lower-case hex digits, as the go command writes it. Any other
+//     pseudo-version is not sent: one after a pre-release
+//     (vX.Y.Z-PRE.0.TIME-COMMIT), one with "+incompatible", one whose
+//     commit is spelled another way. For those an empty list would
+//     prove nothing.
 //   - NAME@VERSION matches the name byte for byte
 //     ("azure/setup-kubectl@2.0.0" finds nothing, "Azure/setup-kubectl@2.0.0"
 //     finds GHSA-p756-rfxh-x63h), while GitHub itself resolves an action's
@@ -209,6 +215,9 @@ var (
 	actionNameRe = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
 	// GitHub's advisory ID, from its own documented alphabet.
 	ghsaRe = regexp.MustCompile(`^GHSA(-[23456789cfghjmpqrvwx]{4}){3}$`)
+	// The commit of a pseudo-version as the go command writes it: the
+	// first twelve digits of the hash, in lower case.
+	pseudoCommitRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
 )
 
 // unaskable says why q cannot be put to the API, or "" when it can. It
@@ -231,7 +240,7 @@ func unaskable(eco string, q Query) string {
 	if !nameOK || len(q.Name) > 256 {
 		return "the package name is not one the advisory query can carry; nothing was asked"
 	}
-	const unread = " is neither a plain X.Y.Z release nor a Go pseudo-version; the database answers \"no advisories\" for a version it cannot read, so nothing was asked"
+	const unread = " is neither a plain X.Y.Z release nor a Go pseudo-version in a form the database was seen to read; it answers \"no advisories\" for a version it cannot read, so nothing was asked"
 	if !askable(eco, q.To) {
 		return "the new version" + unread
 	}
@@ -243,14 +252,37 @@ func unaskable(eco string, q Query) string {
 
 // askable reports whether v is a version the API was checked to read, on
 // either side of an update: a plain release, or for Go a pseudo-version
-// as go.mod spells it. What a pseudo-version is, is x/mod's to say; one
-// with build metadata ("+incompatible") is left out, because the API was
-// not asked about one.
+// in one of the two forms that have a recorded answer.
 func askable(eco, v string) bool {
-	if plainRelease(eco, v) {
-		return true
+	return plainRelease(eco, v) || (eco == ecoGo && askablePseudoVersion(v))
+}
+
+// askablePseudoVersion reports whether v is a Go pseudo-version in a form
+// the API's reading of was recorded (see the top of this file):
+//
+//	vX.0.0-YYYYMMDDHHMMSS-COMMIT      no release before the commit
+//	vX.Y.Z-0.YYYYMMDDHHMMSS-COMMIT    after the release vX.Y.(Z-1)
+//
+// as go.mod spells it, with COMMIT twelve lower-case hex digits and no
+// build metadata. What a pseudo-version is and which release or
+// pre-release it follows is x/mod's to say. One that follows a
+// pre-release has a longer pre-release part of its own, which the API
+// was not shown to order with a real version; it is refused with every
+// other form, because the API's answer for a version it cannot read is
+// the empty list that reads as clean.
+func askablePseudoVersion(v string) bool {
+	if !module.IsPseudoVersion(v) || module.CanonicalVersion(v) != v || semver.Build(v) != "" {
+		return false
 	}
-	return eco == ecoGo && module.IsPseudoVersion(v) && module.CanonicalVersion(v) == v && semver.Build(v) == ""
+	// base is "" for the first form and the release before the commit
+	// for the second. For a pseudo-version after a pre-release it is
+	// that pre-release.
+	base, err := module.PseudoVersionBase(v)
+	if err != nil || semver.Prerelease(base) != "" {
+		return false
+	}
+	commit, err := module.PseudoVersionRev(v)
+	return err == nil && pseudoCommitRe.MatchString(commit)
 }
 
 // plainRelease reports whether v is three numbers and nothing else: the

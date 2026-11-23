@@ -438,14 +438,38 @@ func TestUnaskableIsUnknownAndNotAsked(t *testing.T) {
 		{"npm empty name", Query{allow.NPM, "", "1.0.0", "1.0.1"}},
 		{"npm long name", Query{allow.NPM, long, "1.0.0", "1.0.1"}},
 		// A pseudo-version is asked about for Go alone, as go.mod spells
-		// it and with nothing after the commit (TestAskable has the ones
-		// that are sent).
+		// it, with nothing after the commit, and only in the two forms
+		// that have a recorded answer (TestAskable has the ones that are
+		// sent).
 		{"go pseudo-version with +incompatible", Query{allow.GoModules, "example.com/m", "v2.0.0+incompatible", "v2.0.1-0.20240101000000-abcdefabcdef+incompatible"}},
 		{"go old pseudo-version with +incompatible", Query{allow.GoModules, "example.com/m", "v2.0.1-0.20240101000000-abcdefabcdef+incompatible", "v2.0.1+incompatible"}},
 		{"go pseudo-version without the v", Query{allow.GoModules, "example.com/m", "v1.0.0", "1.0.1-0.20240101000000-abcdefabcdef"}},
 		{"go pseudo-version with a short time", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.202401010000-abcdefabcdef"}},
 		{"go pseudo-version with no commit", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.20240101000000"}},
 		{"go pseudo-version with other build metadata", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.20240101000000-abcdefabcdef+meta"}},
+		// The third form x/mod knows follows a pre-release. The database
+		// was not shown to read it with a real version, so it is not sent,
+		// on either side.
+		{"go pseudo-version after a pre-release", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.1.0-rc.1.0.20240101000000-abcdefabcdef"}},
+		{"go old pseudo-version after a pre-release", Query{allow.GoModules, "example.com/m", "v1.1.0-rc.1.0.20240101000000-abcdefabcdef", "v1.1.0"}},
+		{"go pseudo-version after a pre-release that is a number", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.1.0-1.0.20240101000000-abcdefabcdef"}},
+		{"go pseudo-version after the pre-release 0", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.1.0-0.0.20240101000000-abcdefabcdef"}},
+		{"go pseudo-version after a pre-release, with +incompatible", Query{allow.GoModules, "example.com/m", "v2.0.0+incompatible", "v2.1.0-rc.1.0.20240101000000-abcdefabcdef+incompatible"}},
+		// The commit is twelve lower-case hex digits and nothing else.
+		{"go pseudo-version with an upper-case commit", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.20240101000000-ABCDEFABCDEF"}},
+		{"go pseudo-version with a commit that is not hex", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.20240101000000-ghijklmnopqr"}},
+		{"go pseudo-version with a short commit", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.20240101000000-abcdefabcde"}},
+		{"go pseudo-version with a long commit", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.20240101000000-abcdefabcdef0"}},
+		{"go pseudo-version with the whole commit hash", Query{allow.GoModules, "example.com/m", "v1.0.0", "v0.0.0-20240101000000-8f4b7f84864484a7bf31766abe9204da3cbe65b3"}},
+		{"go first pseudo-version with an upper-case commit", Query{allow.GoModules, "example.com/m", "", "v0.0.0-20240101000000-ABCDEFABCDEF"}},
+		{"go old pseudo-version with a short commit", Query{allow.GoModules, "example.com/m", "v0.0.0-20240101000000-abcdef", "v1.0.1"}},
+		// Shapes near the two that x/mod does not take for a
+		// pseudo-version, or takes for one with no release to follow.
+		{"go pseudo-version after a release that cannot be", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.1.0-0.20240101000000-abcdefabcdef"}},
+		{"go first pseudo-version with a minor version", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.1.0-20240101000000-abcdefabcdef"}},
+		{"go first pseudo-version with a patch version", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-20240101000000-abcdefabcdef"}},
+		{"go pseudo-version with a long time", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.202401010000000-abcdefabcdef"}},
+		{"go pseudo-version with a leading zero", Query{allow.GoModules, "example.com/m", "v1.0.0", "v01.0.0-20240101000000-abcdefabcdef"}},
 		{"npm version shaped like a pseudo-version", Query{allow.NPM, "pkg", "1.0.0", "1.0.1-0.20240101000000-abcdefabcdef"}},
 		{"npm old version shaped like a pseudo-version", Query{allow.NPM, "pkg", "0.0.0-20240101000000-abcdefabcdef", "1.0.1"}},
 		{"actions tag shaped like a pseudo-version", Query{allow.GitHubActions, "o/r", "v1.0.0", "v1.0.1-0.20240101000000-abcdefabcdef"}},
@@ -509,16 +533,21 @@ func TestAskable(t *testing.T) {
 			[]string{"reviewed example.com/m@2.0.0+incompatible", "reviewed example.com/m@2.0.1+incompatible", "malware example.com/m@2.0.1+incompatible"}},
 		{"go capitals after the host", Query{allow.GoModules, "github.com/Azure/azure-sdk-for-go", "v1.0.0", "v1.0.1"},
 			[]string{"reviewed github.com/Azure/azure-sdk-for-go@1.0.0", "reviewed github.com/Azure/azure-sdk-for-go@1.0.1", "malware github.com/Azure/azure-sdk-for-go@1.0.1"}},
-		// A Go pseudo-version, on either side, in each of its three forms:
-		// with no release before it, after a release, after a pre-release.
+		// A Go pseudo-version, on either side, in the two forms that have
+		// a recorded answer: with no release before it, and after a
+		// release.
 		{"go pseudo-version to a later one", Query{allow.GoModules, "example.com/m", "v0.0.0-20240101000000-abcdefabcdef", "v0.0.0-20240201000000-0123456789ab"},
 			[]string{"reviewed example.com/m@0.0.0-20240101000000-abcdefabcdef", "reviewed example.com/m@0.0.0-20240201000000-0123456789ab", "malware example.com/m@0.0.0-20240201000000-0123456789ab"}},
 		{"go release to a pseudo-version above it", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.0.1-0.20240101000000-abcdefabcdef"},
 			[]string{"reviewed example.com/m@1.0.0", "reviewed example.com/m@1.0.1-0.20240101000000-abcdefabcdef", "malware example.com/m@1.0.1-0.20240101000000-abcdefabcdef"}},
 		{"go pseudo-version to a release", Query{allow.GoModules, "example.com/m", "v0.0.0-20240101000000-abcdefabcdef", "v1.0.1"},
 			[]string{"reviewed example.com/m@0.0.0-20240101000000-abcdefabcdef", "reviewed example.com/m@1.0.1", "malware example.com/m@1.0.1"}},
-		{"go pseudo-version after a pre-release", Query{allow.GoModules, "example.com/m", "v1.0.0", "v1.1.0-rc.1.0.20240101000000-abcdefabcdef"},
-			[]string{"reviewed example.com/m@1.0.0", "reviewed example.com/m@1.1.0-rc.1.0.20240101000000-abcdefabcdef", "malware example.com/m@1.1.0-rc.1.0.20240101000000-abcdefabcdef"}},
+		{"go pseudo-version after a release, to that module's next release", Query{allow.GoModules, "example.com/m", "v1.0.1-0.20240101000000-abcdefabcdef", "v1.0.1"},
+			[]string{"reviewed example.com/m@1.0.1-0.20240101000000-abcdefabcdef", "reviewed example.com/m@1.0.1", "malware example.com/m@1.0.1"}},
+		{"go pseudo-version after a release, to a later one", Query{allow.GoModules, "example.com/m", "v1.0.1-0.20240101000000-abcdefabcdef", "v1.2.4-0.20240201000000-0123456789ab"},
+			[]string{"reviewed example.com/m@1.0.1-0.20240101000000-abcdefabcdef", "reviewed example.com/m@1.2.4-0.20240201000000-0123456789ab", "malware example.com/m@1.2.4-0.20240201000000-0123456789ab"}},
+		{"go first pseudo-version of a later major", Query{allow.GoModules, "example.com/m/v2", "v2.0.0-20240101000000-abcdefabcdef", "v2.0.0-20240201000000-0123456789ab"},
+			[]string{"reviewed example.com/m/v2@2.0.0-20240101000000-abcdefabcdef", "reviewed example.com/m/v2@2.0.0-20240201000000-0123456789ab", "malware example.com/m/v2@2.0.0-20240201000000-0123456789ab"}},
 		{"go new name at a pseudo-version", Query{allow.GoModules, "example.com/m", "", "v0.0.0-20240101000000-abcdefabcdef"},
 			[]string{"reviewed example.com/m@0.0.0-20240101000000-abcdefabcdef", "malware example.com/m@0.0.0-20240101000000-abcdefabcdef"}},
 		{"npm", Query{allow.NPM, "pkg", "1.0.0", "1.0.1"},

@@ -254,12 +254,13 @@ var recordedCases = []struct {
 	},
 
 	// Go pseudo-versions. The database's "no advisories" is what grants,
-	// and it is also its answer for a version it cannot read, so each of
-	// the three forms of a pseudo-version is recorded on the new side of
-	// an update twice: below a fix, where the advisory must be in the
-	// answer, and above it, where it must not. The versions of the first
-	// four cases are real commits of the two modules; the two after a
-	// pre-release are made up, since neither module ever tagged one.
+	// and it is also its answer for a version it cannot read, so each
+	// form of a pseudo-version that is sent is recorded on the new side
+	// of an update twice: below a fix, where the advisory must be in the
+	// answer, and above it, where it must not. The versions are real
+	// commits of the two modules. The third form, a pseudo-version after
+	// a pre-release, has no such recording (neither module ever tagged a
+	// pre-release) and is not sent: TestUnaskableIsUnknownAndNotAsked.
 	{
 		// No release before it (v0.0.0-TIME-COMMIT). The fix is itself a
 		// pseudo-version, and the database names it as first patched.
@@ -319,41 +320,16 @@ var recordedCases = []struct {
 		},
 		requests: []string{"golang.org/x/oauth2@" + oauthBelow[1:], "golang.org/x/oauth2@0.27.0", "golang.org/x/oauth2@0.27.0"},
 	},
-	{
-		// After a pre-release (vX.Y.Z-PRE.0.TIME-COMMIT). It is below the
-		// release it leads up to only by semver's ordering of what follows
-		// the dash, which the database therefore reads.
-		name: "go release to a pseudo-version after a pre-release, below the fix",
-		q:    Query{Ecosystem: allow.GoModules, Name: "golang.org/x/oauth2", From: "v0.26.0", To: oauthPreBelow},
-		want: Result{
-			SecurityFix:   allow.No("no reviewed advisory affects v0.26.0 and not "+oauthPreBelow, sourceGoReviewed+"golang.org/x/oauth2@0.26.0 and golang.org/x/oauth2@"+oauthPreBelow[1:]),
-			NoMalware:     allow.Yes("no malware advisory affects "+oauthPreBelow, sourceGoMalware+"golang.org/x/oauth2@"+oauthPreBelow[1:]),
-			NoNewAdvisory: allow.Yes("no reviewed advisory affects "+oauthPreBelow+" and not v0.26.0; on both: GHSA-6v2p-p543-phr9", sourceGoReviewed+"golang.org/x/oauth2@0.26.0 and golang.org/x/oauth2@"+oauthPreBelow[1:]),
-		},
-		requests: []string{"golang.org/x/oauth2@0.26.0", "golang.org/x/oauth2@" + oauthPreBelow[1:], "golang.org/x/oauth2@" + oauthPreBelow[1:]},
-	},
-	{
-		name: "go release to a pseudo-version after a pre-release, above the fix",
-		q:    Query{Ecosystem: allow.GoModules, Name: "golang.org/x/oauth2", From: "v0.26.0", To: oauthPreAbove},
-		want: Result{
-			SecurityFix:   allow.No("GHSA-6v2p-p543-phr9: affects v0.26.0, not "+oauthPreAbove+", but first patched version is not "+oauthPreAbove, sourceGoReviewed+"golang.org/x/oauth2@0.26.0 and golang.org/x/oauth2@"+oauthPreAbove[1:]),
-			NoMalware:     allow.Yes("no malware advisory affects "+oauthPreAbove, sourceGoMalware+"golang.org/x/oauth2@"+oauthPreAbove[1:]),
-			NoNewAdvisory: allow.Yes("no reviewed advisory affects "+oauthPreAbove+" and not v0.26.0", sourceGoReviewed+"golang.org/x/oauth2@0.26.0 and golang.org/x/oauth2@"+oauthPreAbove[1:]),
-		},
-		requests: []string{"golang.org/x/oauth2@0.26.0", "golang.org/x/oauth2@" + oauthPreAbove[1:], "golang.org/x/oauth2@" + oauthPreAbove[1:]},
-	},
 }
 
 // The pseudo-versions of the recorded cases. GHSA-p782-xgp4-8hr8 is fixed
 // in golang.org/x/sys at sysFix, GHSA-6v2p-p543-phr9 in
 // golang.org/x/oauth2 at v0.27.0.
 const (
-	sysBelow      = "v0.0.0-20220406163625-3f8b81556e12"
-	sysFix        = "v0.0.0-20220412211240-33da011f77ad"
-	oauthBelow    = "v0.26.1-0.20250214215532-3f78298beea3"
-	oauthAbove    = "v0.27.1-0.20250228195905-9c82a8cf7ac2"
-	oauthPreBelow = "v0.27.0-rc.1.0.20250214215532-3f78298beea3"
-	oauthPreAbove = "v0.28.0-rc.1.0.20250228195905-9c82a8cf7ac2"
+	sysBelow   = "v0.0.0-20220406163625-3f8b81556e12"
+	sysFix     = "v0.0.0-20220412211240-33da011f77ad"
+	oauthBelow = "v0.26.1-0.20250214215532-3f78298beea3"
+	oauthAbove = "v0.27.1-0.20250228195905-9c82a8cf7ac2"
 )
 
 func TestRecorded(t *testing.T) {

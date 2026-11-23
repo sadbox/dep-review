@@ -180,7 +180,12 @@ Limits that send real pull requests to a person:
   release: `google.golang.org/genproto` publishes nothing else. For it
   the retraction check is the go command's word alone, since no version
   list carries a pseudo-version. A module that is not listed never moves
-  to one; from one to a release it moves like any other update.
+  to one; from one to a release it moves like any other update. The
+  advisory database is asked about a pseudo-version only in the two forms
+  it was seen to read, `vX.0.0-TIME-COMMIT` and, after a release,
+  `vX.Y.Z-0.TIME-COMMIT`. An update to or from any other, such as one
+  that follows a pre-release (`v1.2.0-rc.1.0.TIME-COMMIT`), goes to a
+  person.
 
 ## Configuration
 
