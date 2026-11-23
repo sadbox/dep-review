@@ -1,0 +1,12 @@
+{
+  "min_age_hours": 96,
+  "unread_age_days": 21,
+  "wait_deadline_days": 5,
+  "fast_path_companions": "wait",
+  "listed": {
+    "go_modules": ["github.com/your-org/"],
+    "github_actions": ["your-org/"],
+    "docker": ["docker.io/your-org/"],
+    "npm": ["@your-scope/"]
+  }
+}

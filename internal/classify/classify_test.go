@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +23,6 @@ type fixture struct {
 	event     map[string]any
 	pr        map[string]any
 	commits   []map[string]any
-	files     []map[string]any
 	byCommit  []map[string]any   // GET commits/{sha}/pulls
 	activity  []map[string]any   // GET activity?ref=<head branch>, oldest first
 	actCode   int                // non-zero: GET activity fails with this status
@@ -60,10 +58,6 @@ func act(typ, actor, before, after string) map[string]any {
 }
 
 func defaultFixture(t *testing.T) *fixture {
-	msg, err := os.ReadFile("testdata/msg_Espresso-Aficionados_sprobot_281.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
 	return &fixture{
 		event: map[string]any{
 			"action": "completed",
@@ -88,9 +82,8 @@ func defaultFixture(t *testing.T) *fixture {
 			"sha":       head,
 			"author":    map[string]any{"login": "dependabot[bot]"},
 			"committer": map[string]any{"login": "web-flow"},
-			"commit":    map[string]any{"message": string(msg), "verification": map[string]any{"verified": true, "reason": "valid"}},
+			"commit":    map[string]any{"message": "Bump the aws group with 2 updates", "verification": map[string]any{"verified": true, "reason": "valid"}},
 		}},
-		files:    []map[string]any{{"filename": "go.mod"}, {"filename": "go.sum"}},
 		activity: []map[string]any{act("branch_creation", "dependabot[bot]", zero, head)},
 		rules:    dependabotRules(),
 	}
@@ -119,7 +112,6 @@ func (f *fixture) client(t *testing.T) *gh.Client {
 	}
 	mux.Handle("GET /repos/o/r/pulls/7", js(f.pr))
 	mux.Handle("GET /repos/o/r/pulls/7/commits", js(f.commits))
-	mux.Handle("GET /repos/o/r/pulls/7/files", js(f.files))
 	mux.Handle("GET /repos/o/r/commits/"+head+"/pulls", js(f.byCommit))
 	mux.HandleFunc("GET /repos/o/r/activity", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -232,8 +224,10 @@ func TestClassify(t *testing.T) {
 		{"other committer", func(f *fixture) { f.commits[0]["committer"] = map[string]any{"login": "someone"} }, model.KindDependabotUnverified, "not committed"},
 		{"null author", func(f *fixture) { f.commits[0]["author"] = nil }, model.KindDependabotUnverified, "not authored"},
 		{"unknown ecosystem", func(f *fixture) { f.pr["head"].(map[string]any)["ref"] = "dependabot/cargo/x-1" }, model.KindDependabotUnverified, "ecosystem"},
-		{"no metadata", func(f *fixture) { f.commits[0]["commit"].(map[string]any)["message"] = "Bump x" }, model.KindDependabotUnverified, "metadata"},
-		{"unsafe file", func(f *fixture) { f.files = append(f.files, map[string]any{"filename": "../x"}) }, model.KindDependabotUnverified, "unsafe path"},
+		// What Dependabot wrote about its update decides nothing: the
+		// commit message, the body and the labels are not read.
+		{"any commit message", func(f *fixture) { f.commits[0]["commit"].(map[string]any)["message"] = "anything at all" }, model.KindDependabot, ""},
+		{"base commit malformed", func(f *fixture) { f.pr["base"].(map[string]any)["sha"] = "main" }, model.KindDependabotUnverified, "base commit is malformed"},
 		{"head repo differs on PR", func(f *fixture) { f.pr["head"].(map[string]any)["repo"] = map[string]any{"full_name": "evil/r"} }, model.KindDependabotUnverified, "not in this repository"},
 		{"signature reason not valid", func(f *fixture) {
 			f.commits[0]["commit"].(map[string]any)["verification"] = map[string]any{"verified": true, "reason": "unknown_key"}
@@ -443,26 +437,19 @@ func TestPull(t *testing.T) {
 	}
 }
 
+// The whole record: who, which commits, which ecosystem, and nothing
+// Dependabot declared.
 func TestClassifyRecord(t *testing.T) {
-	f := defaultFixture(t)
-	f.pr["labels"] = []any{map[string]any{"name": "security"}}
-	f.pr["body"] = "Fixes GHSA-2c8g-pr4w-hjxw and GHSA-2c8g-pr4w-hjxw; not GHSA-aaaa-bbbb-1111"
-	got, err := f.run(t)
+	got, err := defaultFixture(t).run(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Repo != "o/r" || got.PR != 7 || got.HeadSHA != head || got.BaseSHA != base || got.BaseRef != "main" || !got.Private {
-		t.Errorf("identity: %+v", got)
+	want := model.Classification{
+		Repo: "o/r", PR: 7, HeadSHA: head, BaseSHA: base,
+		Kind: model.KindDependabot, Reason: "authored, committed and signed by Dependabot only", Ecosystem: model.GoModules,
 	}
-	if got.Ecosystem != model.GoModules || len(got.Declared) != 2 || strings.Join(got.Files, ",") != "go.mod,go.sum" {
-		t.Errorf("record: %+v", got)
-	}
-	d := got.Declared[1]
-	if d.Name != "github.com/aws/aws-sdk-go-v2/service/s3" || d.From != "1.114.9" || d.To != "1.114.10" || d.Type != model.Patch || !d.Direct || !d.Security {
-		t.Errorf("declared: %+v", d)
-	}
-	if len(d.Advisory) != 1 || d.Advisory[0] != "GHSA-2c8g-pr4w-hjxw" {
-		t.Errorf("advisories: %v", d.Advisory)
+	if got != want {
+		t.Errorf("classification %+v, want %+v", got, want)
 	}
 }
 
@@ -481,18 +468,13 @@ func TestClassifyRejectsMalformedEvent(t *testing.T) {
 	}
 }
 
-// submoduleFixture is linkclean#12: a genuine Dependabot submodule bump.
+// submoduleFixture is a Dependabot submodule bump on the branch name of
+// linkclean#12.
 func submoduleFixture(t *testing.T) *fixture {
-	msg, err := os.ReadFile("testdata/msg_Espresso-Aficionados_linkclean_12.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
 	const ref = "dependabot/submodules/tools/upstream/adblock-lists-9778b88"
 	f := defaultFixture(t)
 	wr(f)["head_branch"] = ref
 	f.pr["head"].(map[string]any)["ref"] = ref
-	f.commits[0]["commit"].(map[string]any)["message"] = string(msg)
-	f.files = []map[string]any{{"filename": "tools/upstream/adblock-lists"}}
 	f.ignore = map[model.Ecosystem]bool{model.GitSubmodule: true}
 	return f
 }
@@ -527,8 +509,6 @@ func TestClassifyIgnore(t *testing.T) {
 		}, model.KindDependabotUnverified, "verified signature"},
 		{"no rules", func(f *fixture) { f.rules = nil }, model.KindDependabotUnverified, "no active rule"},
 		{"base changed", func(f *fixture) { f.timeline = []map[string]any{{"event": "base_ref_changed"}} }, model.KindDependabotUnverified, "base branch"},
-		{"no metadata", func(f *fixture) { f.commits[0]["commit"].(map[string]any)["message"] = "Bump x" }, model.KindDependabotUnverified, "metadata"},
-		{"no files", func(f *fixture) { f.files = nil }, model.KindDependabotUnverified, "changes no files"},
 		{"history behind the head", func(f *fixture) {
 			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
 		}, model.KindPending, "does not reach the head"},
@@ -548,43 +528,8 @@ func TestClassifyIgnore(t *testing.T) {
 			if tt.reason != "" && !strings.Contains(got.Reason, tt.reason) {
 				t.Errorf("reason = %q, want %q", got.Reason, tt.reason)
 			}
-			if got.Kind == model.KindIgnored && (got.Ecosystem != model.GitSubmodule || len(got.Declared) != 1 || got.HeadSHA != head) {
+			if got.Kind == model.KindIgnored && (got.Ecosystem != model.GitSubmodule || got.HeadSHA != head) {
 				t.Errorf("ignored record: %+v", got)
-			}
-		})
-	}
-}
-
-func TestIgnoredBy(t *testing.T) {
-	sub := model.Update{Ecosystem: model.GitSubmodule, Name: "a"}
-	dock := model.Update{Ecosystem: model.Docker, Name: "b"}
-	gomod := model.Update{Ecosystem: model.GoModules, Name: "c"}
-	both := map[model.Ecosystem]bool{model.GitSubmodule: true, model.Docker: true}
-	subOnly := map[model.Ecosystem]bool{model.GitSubmodule: true}
-	for _, tt := range []struct {
-		name     string
-		ignore   map[model.Ecosystem]bool
-		branch   model.Ecosystem
-		declared []model.Update
-		ok       bool
-		why      string
-	}{
-		{"all in the ignored ecosystem", subOnly, model.GitSubmodule, []model.Update{sub, sub}, true, "submodules"},
-		{"nothing ignored", nil, model.GitSubmodule, []model.Update{sub}, false, ""},
-		{"branch not ignored", subOnly, model.GoModules, []model.Update{gomod}, false, ""},
-		{"no declared updates", subOnly, model.GitSubmodule, nil, false, "no declared updates"},
-		{"mixed with a gated ecosystem", subOnly, model.GitSubmodule, []model.Update{sub, gomod}, false, "mixes submodules with go_modules"},
-		{"mixed, gated one first", subOnly, model.GitSubmodule, []model.Update{gomod, sub}, false, "mixes"},
-		// Both ignored, but the metadata and the branch disagree.
-		{"declared disagrees with the branch", both, model.GitSubmodule, []model.Update{dock}, false, "disagrees"},
-		{"one declared disagrees", both, model.GitSubmodule, []model.Update{sub, dock}, false, "disagrees"},
-		{"declared ecosystem missing", subOnly, model.GitSubmodule, []model.Update{{Name: "x"}}, false, "mixes"},
-		{"declared ecosystem malformed", subOnly, model.GitSubmodule, []model.Update{{Ecosystem: "x\ny", Name: "x"}}, false, "with unknown"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			why, ok := ignoredBy(tt.ignore, tt.branch, tt.declared)
-			if ok != tt.ok || !strings.Contains(why, tt.why) || (tt.why == "" && why != "") {
-				t.Errorf("got %v %q, want %v %q", ok, why, tt.ok, tt.why)
 			}
 		})
 	}

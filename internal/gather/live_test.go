@@ -69,7 +69,7 @@ func TestLiveFetch(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "facts")
 	fetch := Fetch{
 		Class: model.Classification{
-			Repo: repo, PR: number, HeadSHA: pr.Head.SHA, BaseSHA: pr.Base.SHA, BaseRef: pr.Base.Ref,
+			Repo: repo, PR: number, HeadSHA: pr.Head.SHA, BaseSHA: pr.Base.SHA,
 			Kind: model.KindDependabot, Reason: "taken to be Dependabot's by the live test", Ecosystem: eco,
 		},
 		Changes: changes, Config: cfg, HTTP: client, GitHub: github, Advisories: advisory.New(github),

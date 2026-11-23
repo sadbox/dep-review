@@ -229,7 +229,7 @@ func newJob(t *testing.T, eco model.Ecosystem, updates ...allow.UpdateFacts) *jo
 	}
 	j.fetch = Fetch{
 		Class: model.Classification{
-			Repo: testRepo, PR: testNumber, HeadSHA: headSHA, BaseSHA: baseSHA, BaseRef: "main",
+			Repo: testRepo, PR: testNumber, HeadSHA: headSHA, BaseSHA: baseSHA,
 			Kind: model.KindDependabot, Reason: "authored, committed and signed by Dependabot only", Ecosystem: eco,
 		},
 		Changes:   Changes{Base: mergeSHA, Head: headSHA, Files: []facts.File{{Path: "go.mod", BaseMode: "100644", HeadMode: "100644", Base: []byte("a\n"), Head: []byte("b\n")}}},

@@ -307,3 +307,23 @@ func TestReadVerdicts(t *testing.T) {
 		t.Errorf("a missing classification: %v", err)
 	}
 }
+
+// The example settings file is one the gate accepts, and it shows what a
+// repository's file is for: stricter ages and more list entries.
+func TestExampleSettings(t *testing.T) {
+	b, err := os.ReadFile("../../examples/" + filepath.Base(config.RepoFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	example, err := config.Load(b)
+	if err != nil {
+		t.Fatalf("the example is not a usable settings file: %v", err)
+	}
+	builtIn, err := config.Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if example.MinAgeHours <= builtIn.MinAgeHours || len(example.Listed.NPM) <= len(builtIn.Listed.NPM) {
+		t.Errorf("the example raises no age or adds no list entry: %+v", example)
+	}
+}

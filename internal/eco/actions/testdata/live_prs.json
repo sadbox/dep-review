@@ -1,9 +1,0 @@
-[
-  {"repo": "Espresso-Aficionados/sprobot", "pr": 215, "base": "9ff492e274f5b6f103d51d1f8a6ceb20aa9af0e0", "head": "ef53c2c47352bae0978168847660e14933b6693e", "want": "review"},
-  {"repo": "Espresso-Aficionados/sprobot", "pr": 220, "base": "c619ff5437e6717ebe3db56fd413c6566f303a17", "head": "c5bcf88f0a92429c7ae61c39cacb40ce7ff0ebd9", "want": "review"},
-  {"repo": "Espresso-Aficionados/sprobot", "pr": 227, "base": "e3d2e6a6b2f0e76472f1c9ca7ff9b8659e5532e2", "head": "66447874da2933da79a992b69b36a667e5047381", "want": "human"},
-  {"repo": "Espresso-Aficionados/sprobot", "pr": 232, "base": "736161477feba0272cf83cc2720748cdcad3776f", "head": "f515a512764c664e339a47c3e807b2efd8d67ab0", "want": "review"},
-  {"repo": "Espresso-Aficionados/sprobot", "pr": 264, "base": "f9c0d3523bddb95d8a7f8351c79d4c2fa5ead616", "head": "5fc7d1d61d73e9f52a09fa80bc8e9d108ba18e73", "want": "human"},
-  {"repo": "Espresso-Aficionados/sprobot", "pr": 271, "base": "5b44561942f3d1bfb1f2f86cd73e7eb0158c3e60", "head": "287b074abbe09f5a41c9b42de34b9cf39123f49a", "want": "review"},
-  {"repo": "raviqqe/muffet", "pr": 1120, "base": "39b5d949695378e6ed1b334235821db25f320dd8", "head": "6b63b3231b90be9d986ac559e61784b90c7c66ff", "want": "review"}
-]

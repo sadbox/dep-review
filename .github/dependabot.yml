@@ -1,7 +1,6 @@
-# Dependabot for this repository. Its PRs go through the dep-review gate
-# like any other repository's. The gVisor release in
-# sandbox/install-gvisor.sh is not covered (it is a download, not a
-# package) and is bumped by hand; see README.md ("Updating pins").
+# Dependabot for this repository. Its pull requests are read and merged by
+# hand: this repository does not run the gate on itself (it has no caller
+# workflow).
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -17,39 +16,3 @@ updates:
       interval: daily
     cooldown:
       default-days: 3
-
-  # The reviewer and proxy images' bases (sandbox/Dockerfile).
-  - package-ecosystem: docker
-    directory: /sandbox
-    schedule:
-      interval: daily
-    cooldown:
-      default-days: 3
-    groups:
-      docker:
-        patterns: ["*"]
-
-  # The rebuild job's Node images (sandbox/rebuild/Dockerfile).
-  - package-ecosystem: docker
-    directory: /sandbox/rebuild
-    schedule:
-      interval: daily
-    cooldown:
-      default-days: 3
-    groups:
-      docker:
-        patterns: ["*"]
-
-  # The Claude Code CLI's native packages (sandbox/package.json). Both
-  # architectures must move together. A CLI bump also needs the proxy's
-  # allowlist testdata re-recorded (README.md, "Updating pins"); CI's
-  # sandbox job fails until it is.
-  - package-ecosystem: npm
-    directory: /sandbox
-    schedule:
-      interval: daily
-    cooldown:
-      default-days: 3
-    groups:
-      claude-code:
-        patterns: ["@anthropic-ai/claude-code-*"]

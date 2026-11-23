@@ -12,11 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/sadbox/dep-review/internal/fetch"
 )
-
-var _ fetch.GitHub = (*Client)(nil)
 
 // testClient returns a client against srv that records its sleeps instead
 // of sleeping.
