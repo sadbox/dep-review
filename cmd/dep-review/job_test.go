@@ -24,6 +24,10 @@ const (
 	testKey  = "2222222222222222222222222222222222222222222222222222222222222222"
 )
 
+// testGathered is when goodFacts were gathered. The publish job of these
+// tests decides a minute later (fakeAPI.config).
+var testGathered = time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+
 // The repository and the app come from the job's environment, and only
 // in the shapes the gate puts into URLs and logins.
 func TestLandConfig(t *testing.T) {
@@ -108,7 +112,7 @@ func goodFacts() wire.Facts {
 		Version:     wire.Version,
 		PullRequest: wire.PullRequest{Repo: "o/r", Number: 7, Head: testHead},
 		Config:      strings.Repeat("3", 64),
-		GatheredAt:  time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC),
+		GatheredAt:  testGathered,
 		Facts: wire.PRFacts{
 			Ecosystem: allow.GoModules, Identity: yes, Shape: yes, ChecksConfigured: yes,
 			Updates: []wire.Update{{

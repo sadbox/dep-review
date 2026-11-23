@@ -13,7 +13,7 @@
 // the merge call. And there is no stored approval: the comment remembers
 // the last outcome, the model's verdicts by content key and when a pin
 // was first evaluated, and a merge always follows a fresh allow.Decide on
-// freshly gathered facts.
+// facts gathered no longer ago than MaxFactsAge.
 package land
 
 import (
@@ -107,6 +107,30 @@ func (cfg Config) now() time.Time {
 // again from fetch. Test with errors.Is.
 var ErrConfigChanged = errors.New("land: the facts were gathered under another configuration")
 
+// MaxFactsAge is how long after they were gathered facts are decided on:
+// four hours. A run that goes as it should never meets it. From fetch
+// gathering to publish deciding is at most the timeouts of the fetch, the
+// review and the publish job in gate.yml (20, 120 and 15 minutes: 2 h 35
+// min; a scheduled run's refresh and publish have 45 minutes), which
+// leaves 1 h 25 min for runners to start and for the publishes queued
+// ahead. A test in cmd/dep-review holds the two together.
+//
+// What does meet it is a job run again by itself. GitHub's "re-run failed
+// jobs" and "re-run job" hand the jobs that are run again the artifacts
+// of the first attempt, so publish would decide on what the registries
+// said then with the clock of now: old enough, and as clean as it was.
+const MaxFactsAge = 4 * time.Hour
+
+// clockSlack is how far ahead of this job's clock the facts may have been
+// gathered: two runners' clocks, not a facts file from the future.
+const clockSlack = time.Minute
+
+// ErrFactsStale is Decide's error for facts that were gathered more than
+// MaxFactsAge before its clock, or after it. Nothing is decided on them.
+// The whole gate has to run again; a job run again by itself gets the
+// same facts. Test with errors.Is.
+var ErrFactsStale = errors.New("land: the facts are too old to decide on")
+
 // Evaluation is Decide's result: the decision and what it was made from.
 type Evaluation struct {
 	// Stale says why there is nothing to do: the pull request is closed
@@ -141,9 +165,10 @@ type Evaluation struct {
 // otherwise this job's own (dateUnseen).
 //
 // An error means there is no decision: a file that does not decode, facts
-// for another repository or gathered under other settings
-// (ErrConfigChanged), or GitHub not answering for something that is not a
-// fact (the pull request, the policy file, the gate's comment).
+// for another repository, gathered under other settings (ErrConfigChanged)
+// or too long ago (ErrFactsStale), or GitHub not answering for something
+// that is not a fact (the pull request, the policy file, the gate's
+// comment).
 func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Evaluation, error) {
 	if err := cfg.check(); err != nil {
 		return Evaluation{}, err
@@ -164,6 +189,12 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 	}
 	if ev.Stale = pr.changed(ev.PullRequest.Head); ev.Stale != "" {
 		return ev, nil
+	}
+	// After the look at the pull request: one that was closed or has a
+	// newer head is nothing to do, however old the facts.
+	if age := ev.now.Sub(facts.GatheredAt); age > MaxFactsAge || age < -clockSlack {
+		return Evaluation{}, fmt.Errorf("%w: they were gathered at %s and this job decides at %s; run all of the gate's jobs again",
+			ErrFactsStale, stamp(facts.GatheredAt), stamp(ev.now))
 	}
 	if ev.branch, err = pr.defaultBranch(cfg.Repo); err != nil {
 		return Evaluation{}, err

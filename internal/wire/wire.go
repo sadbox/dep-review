@@ -101,8 +101,9 @@ type Facts struct {
 	// configuration itself compares, and does not decide on facts that
 	// were gathered under another list or another chunk budget.
 	Config string `json:"config"`
-	// GatheredAt is when fetch gathered the facts. Publish decides with
-	// its own clock; this says how old the facts are.
+	// GatheredAt is when fetch or refresh gathered the facts, by that
+	// job's clock. Publish decides with its own clock, and not on facts
+	// that are older than land.MaxFactsAge by it.
 	GatheredAt time.Time `json:"gathered_at"`
 	Facts      PRFacts   `json:"facts"`
 }

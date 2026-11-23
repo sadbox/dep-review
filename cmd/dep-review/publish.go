@@ -121,6 +121,12 @@ func publishEvent(ctx context.Context, cfg land.Config, in string, class model.C
 	}
 	if err != nil && !written {
 		what := fmt.Sprintf("In this run the fetch job ended %s and the review job %s.", jobResult("FETCH_RESULT"), jobResult("REVIEW_RESULT"))
+		if errors.Is(err, land.ErrFactsStale) {
+			// Not a job that failed: the run's jobs were not all run again,
+			// and that is what the person has to do differently.
+			what = fmt.Sprintf("The facts this run decided on were gathered more than %d hours earlier, or by a clock ahead of this job's: "+
+				"a job that is run again by itself gets the facts of the run's first attempt.", int(land.MaxFactsAge.Hours()))
+		}
 		if ferr := land.Failed(ctx, cfg, class.PR, class.HeadSHA, what); ferr != nil {
 			log.Printf("publish: #%d: the failed run could not be reported on the pull request: %v", class.PR, ferr)
 		}

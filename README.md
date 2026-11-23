@@ -53,6 +53,16 @@ model and would not end that wait. A classify job that fails leaves only
 the failed workflow run: nothing is written on a pull request that was
 not classified.
 
+To run the gate again, re-run all jobs of the workflow run, which is
+what the comment and the notification say. Publish decides only on facts
+gathered in the last 4 hours, by the fetch job's clock and its own.
+GitHub's "re-run failed jobs" hands a job that runs again the artifacts
+of the first attempt, so a publish or review job run again by itself
+would decide on what the registries said then with the clock of now.
+Such a run is reported as one that could not decide. The 4 hours are the
+timeouts of fetch, review and publish (2 h 35 min) and the time a job
+may wait for a runner or for the publishes ahead of it.
+
 Waiting for an age has no deadline. Waiting for a retry (a model read, a
 source that did not answer, a superseded Docker digest, required checks)
 ends `wait_deadline_days` after the latest time the update could have

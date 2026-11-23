@@ -492,7 +492,10 @@ jobs:
     # (Dependabot opens its PRs in batches); `queue: max` keeps up to 100
     # waiting, in order, so an event's publish and the scheduled one never
     # displace each other. A publish waits at most the others' 15 minutes
-    # each, and its own timeout starts when it does.
+    # each, and its own timeout starts when it does. One that waits until
+    # its facts are more than four hours old decides nothing and reports
+    # the run (internal/land, MaxFactsAge): the timeouts of fetch, review
+    # and publish add up to 2 h 35 min of those.
     concurrency:
       group: dep-review-publish
       cancel-in-progress: false

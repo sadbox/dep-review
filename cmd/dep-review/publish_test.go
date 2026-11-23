@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/gh"
@@ -61,7 +62,8 @@ func (f *fakeAPI) config(t *testing.T) land.Config {
 	c := gh.New("token")
 	c.BaseURL = srv.URL + "/"
 	c.MaxRetries = 0
-	return land.Config{GitHub: c, Repo: "o/r", BotLogin: "gate[bot]", RunURL: "https://github.com/o/r/actions/runs/42"}
+	return land.Config{GitHub: c, Repo: "o/r", BotLogin: "gate[bot]", RunURL: "https://github.com/o/r/actions/runs/42",
+		Now: func() time.Time { return testGathered.Add(time.Minute) }}
 }
 
 // pullJSON is pull request 7 as both classify and land read it: open, on
@@ -97,6 +99,11 @@ func TestPublishRefreshed(t *testing.T) {
 			// The facts here were gathered under settings of their own,
 			// which is as far as a decision gets against this fake.
 			is: land.ErrConfigChanged, calls: "GET pulls/7, GET pulls/7, GET contents/.github/dep-review.json"},
+		// A scheduled run's publish job run again by itself: nothing is
+		// written, the comment still says wait, and the next run decides.
+		{name: "facts of an earlier attempt: not decided", dir: "7", pull: pullJSON("open", "mallory", testHead),
+			facts: func(f *wire.Facts) { no(f); f.GatheredAt = testGathered.Add(-land.MaxFactsAge) },
+			is:    land.ErrFactsStale, calls: "GET pulls/7, GET pulls/7"},
 		{name: "closed since: skipped", dir: "7", pull: pullJSON("closed", "dependabot[bot]", testHead), calls: "GET pulls/7"},
 		{name: "a newer head since: skipped", dir: "7", pull: pullJSON("open", "dependabot[bot]", strings.Repeat("4", 40)), calls: "GET pulls/7"},
 		{name: "the pull request cannot be read", dir: "7", want: "404", calls: "GET pulls/7"},
@@ -179,11 +186,17 @@ func TestPublishEvent(t *testing.T) {
 		pull     string
 		want     string // part of the error
 		reported bool   // the failed run was reported on the pull request
+		says     string // what the report says of the run; "": how its jobs ended
 	}{
 		{name: "the fetch job left no facts", pull: open, want: "no facts file", reported: true},
 		{name: "facts about another pull request", facts: func(f *wire.Facts) { f.PullRequest.Number = 8 }, pull: open,
 			want: "classify looked at", reported: true},
 		{name: "deciding fails", facts: func(*wire.Facts) {}, pull: open, want: "another configuration", reported: true},
+		// A job run again by itself gets the first attempt's facts. The
+		// report says so, and what to do instead (spec section 11,
+		// amendment 52).
+		{name: "the first attempt's facts, hours later", facts: func(f *wire.Facts) { f.GatheredAt = testGathered.Add(-land.MaxFactsAge) }, pull: open,
+			want: "too old to decide on", reported: true, says: "The facts this run decided on were gathered more than 4 hours earlier"},
 		{name: "no facts, and the pull request has a newer head", pull: pullJSON("open", "dependabot[bot]", strings.Repeat("4", 40)),
 			want: "no facts file"},
 		{name: "a kind the gate does nothing for", class: func(c *model.Classification) { c.Kind = model.KindOther }, pull: open,
@@ -221,7 +234,11 @@ func TestPublishEvent(t *testing.T) {
 			if !strings.HasSuffix(calls, "GET pulls/7, POST statuses/"+testHead+", GET issues/7/comments, POST issues/7/comments") {
 				t.Errorf("requests %q, want the status and the comment last", calls)
 			}
-			for _, s := range []string{`"state":"error"`, "### dep-review: the run failed", "the fetch job ended failure and the review job unknown.", "actions/runs/42"} {
+			says := tc.says
+			if says == "" {
+				says = "the fetch job ended failure and the review job unknown."
+			}
+			for _, s := range []string{`"state":"error"`, "### dep-review: the run failed", says, "actions/runs/42", "re-run all jobs, not only the failed ones"} {
 				if !strings.Contains(written, s) {
 					t.Errorf("the report lacks %q: %s", s, written)
 				}

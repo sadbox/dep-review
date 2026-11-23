@@ -5,8 +5,12 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/sadbox/dep-review/internal/land"
 )
 
 // The tests here read .github/workflows/gate.yml as text and pin its
@@ -117,6 +121,41 @@ func TestTimeoutsAndRunners(t *testing.T) {
 		if !strings.Contains(job, "\n    runs-on: ubuntu-26.04\n") {
 			t.Errorf("%s does not run on ubuntu-26.04", name)
 		}
+	}
+}
+
+// publish does not decide on facts older than land.MaxFactsAge (spec
+// section 11, amendment 52). A run that goes as it should must never meet
+// that bound: from the moment the facts are gathered to the moment
+// publish decides is at most the timeouts of the jobs in between, and an
+// hour is left on top for runners to start and for the publishes queued
+// ahead. Whoever raises a timeout here raises the bound with it.
+func TestFactsAgeCoversARun(t *testing.T) {
+	jobs := gateJobs(t)
+	timeout := func(name string) time.Duration {
+		t.Helper()
+		m := regexp.MustCompile(`(?m)^    timeout-minutes: ([0-9]+)$`).FindStringSubmatch(jobs[name])
+		if m == nil {
+			t.Fatalf("%s has no timeout-minutes", name)
+		}
+		minutes, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return time.Duration(minutes) * time.Minute
+	}
+	const queue = time.Hour
+	for path, run := range map[string]time.Duration{
+		"an event's run":  timeout("fetch") + timeout("review") + timeout("publish"),
+		"a scheduled run": timeout("refresh") + timeout("publish"),
+	} {
+		if land.MaxFactsAge < run+queue {
+			t.Errorf("%s may take %s from gathering to deciding, and publish refuses facts older than %s: less than an hour is left for queues",
+				path, run, land.MaxFactsAge)
+		}
+	}
+	if want := 4 * time.Hour; land.MaxFactsAge != want {
+		t.Errorf("the bound is %s; the comment a failed run gets, the README and the spec say %s", land.MaxFactsAge, want)
 	}
 }
 

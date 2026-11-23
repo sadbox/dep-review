@@ -84,8 +84,9 @@ const (
 	settings = "Where repository settings are kept as code, change them there: a change made by hand in the web UI or with gh is undone by the next apply."
 	// rerun is the way out when the gate does not know something. It says
 	// nothing against the update, on purpose: these reasons are the gate
-	// failing to find out, not the gate finding a fault.
-	rerun = "Re-run the gate. If it says the same again, look at the update and merge or close the pull request by hand."
+	// failing to find out, not the gate finding a fault. All jobs: one
+	// that is run again by itself gets the facts of the first attempt.
+	rerun = "Re-run all jobs of the gate's workflow run. If it says the same again, look at the update and merge or close the pull request by hand."
 	// sooner ends the hint of a wait that needs nobody.
 	sooner = " Merge by hand to have it sooner."
 )

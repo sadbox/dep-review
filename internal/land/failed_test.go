@@ -48,7 +48,7 @@ func TestFailed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if s := f.statuses(headA); len(s) != 3 || s[2] != "error: the gate's run failed before it could decide; re-run the failed jobs" {
+	if s := f.statuses(headA); len(s) != 3 || s[2] != "error: the gate's run failed before it could decide; re-run all jobs" {
 		t.Errorf("statuses %q", s)
 	}
 	body := f.gateComment(testPR)
@@ -62,14 +62,15 @@ func TestFailed(t *testing.T) {
 		t.Errorf("the marker remembers %+v, want the time it had", m.FirstSeen)
 	}
 	for _, want := range []string{"### dep-review: the run failed", "for head `" + headA + "`", testWhat + " 'x' \u00a6 \u2039b\u203a ### not a heading\n",
-		"open the [workflow run](" + testRun + ") and re-run the failed jobs"} {
+		"open the [workflow run](" + testRun + ") and re-run all jobs, not only the failed ones",
+		"does not decide on facts gathered more than 4 hours before"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the comment lacks %q:\n%s", want, body)
 		}
 	}
 	want := Message{
 		Title: "dep-review: o/r#7",
-		Body:  "o/r#7: the gate's run failed before it could decide. Re-run the failed jobs: " + testRun,
+		Body:  "o/r#7: the gate's run failed before it could decide. Re-run all jobs: " + testRun,
 		URL:   "https://github.com/o/r/pull/7",
 	}
 	if len(rec.got) != 1 || rec.got[0] != want {
@@ -178,7 +179,7 @@ func TestReviewerSilent(t *testing.T) {
 					t.Fatalf("result %+v, %v; want %s", res, err, tc.action)
 				}
 			}
-			want := message(Config{Repo: testRepo}, testPR, " waits unread: the model did not answer for code the gate prepared, and the scheduled job asks no model. Re-run the review job: "+testRun)
+			want := message(Config{Repo: testRepo}, testPR, " waits unread: the model did not answer for code the gate prepared, and the scheduled job asks no model. Re-run all jobs: "+testRun)
 			unread := 0
 			for _, m := range rec.got {
 				if m == want {

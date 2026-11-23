@@ -67,8 +67,10 @@ type Result struct {
 //
 // On an event's run (Config.ModelAsked) a wait with a prepared read the
 // model left without a verdict is also notified, once per head: the
-// scheduled job asks no model, so only a person running the review job
-// again ends that wait before its deadline.
+// scheduled job asks no model, so only a person running the gate again
+// ends that wait before its deadline. All of its jobs: the review job run
+// again by itself would hand publish the first attempt's facts, which it
+// does not decide on once they are older than MaxFactsAge.
 //
 // A failed notification is returned as an error after everything else was
 // written, and is not remembered as sent: the next run sends it. It is
@@ -145,7 +147,7 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	}
 	if cfg.ModelAsked && res.Action == ActionWait && unanswered(ev) {
 		notifyErr = errors.Join(notifyErr, notifyOnce(ctx, cfg, &mk.NotifiedUnread, pr.Head, message(cfg, pr.Number,
-			" waits unread: the model did not answer for code the gate prepared, and the scheduled job asks no model. Re-run the review job"+runLink(cfg))))
+			" waits unread: the model did not answer for code the gate prepared, and the scheduled job asks no model. Re-run all jobs"+runLink(cfg))))
 	}
 
 	if err := upsertComment(ctx, cfg, pr.Number, prev, render(view{res: res, ev: ev, marker: mk, runURL: cfg.RunURL})); err != nil {
@@ -176,6 +178,11 @@ func unanswered(ev Evaluation) bool {
 // outcome is ActionFailed, which the scheduled job does not pick up: it
 // asks no model, and could not finish what this run did not.
 //
+// The way out it names is always to run all jobs again, never the failed
+// ones: a job that is not run again keeps what it made in the first
+// attempt, and Decide refuses facts older than MaxFactsAge
+// (ErrFactsStale), which is one of the failures reported here.
+//
 // A pull request that is closed or has a newer head is left alone: the
 // newer head has a run of its own, whose comment this must not replace.
 // what is the gate's own sentence about the run, never an error's text.
@@ -190,7 +197,7 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 	if err != nil || cur.changed(head) != "" {
 		return err // nil for a pull request that changed
 	}
-	if err := setStatus(ctx, cfg, head, "error", "the gate's run failed before it could decide; re-run the failed jobs"); err != nil {
+	if err := setStatus(ctx, cfg, head, "error", "the gate's run failed before it could decide; re-run all jobs"); err != nil {
 		return err
 	}
 	prev, err := findComment(ctx, cfg, number)
@@ -207,7 +214,7 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 		mk.Fingerprint, mk.Cache, mk.FirstSeen = old.Fingerprint, old.Cache, old.FirstSeen
 	}
 	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number,
-		": the gate's run failed before it could decide. Re-run the failed jobs"+runLink(cfg)))
+		": the gate's run failed before it could decide. Re-run all jobs"+runLink(cfg)))
 
 	run := "this pull request's dep-review workflow run"
 	if cfg.RunURL != "" {
@@ -215,9 +222,10 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 	}
 	body := fmt.Sprintf("%s\n### dep-review: the run failed\n\n"+
 		"**The gate's run failed before it could decide.** Nothing was judged, merged or refused for head %s. %s\n\n"+
-		"**Way out:** open %s and re-run the failed jobs. If it fails the same way, re-run all jobs. "+
+		"**Way out:** open %s and re-run all jobs, not only the failed ones: a job that is not run again keeps the facts of the first attempt, "+
+		"and the gate does not decide on facts gathered more than %d hours before. "+
 		"Until a run decides, the gate does not look at this pull request again by itself.\n",
-		mk.String(), code(head), inline(what), run)
+		mk.String(), code(head), inline(what), run, int(MaxFactsAge.Hours()))
 	if err := upsertComment(ctx, cfg, number, prev, body); err != nil {
 		return err
 	}

@@ -60,10 +60,13 @@ func gcrImage(t *testing.T, to string, uploaded time.Time) wire.Facts {
 	return f
 }
 
-// evaluate is one run of publish at now, and what the gate's comment
-// remembers afterwards.
+// evaluate is one run of the gate that publishes at now, and what the
+// gate's comment remembers afterwards. Every run gathers its own facts:
+// publish does not decide on another run's once they are old (spec section
+// 11, amendment 52).
 func evaluate(t *testing.T, f *fakeGitHub, now time.Time, facts wire.Facts) (Result, []seen) {
 	t.Helper()
+	facts.GatheredAt = now.Add(-time.Minute)
 	res, err := publish(t, f.config(now, nil), files(t, facts, clean(t)))
 	if err != nil {
 		t.Fatal(err)

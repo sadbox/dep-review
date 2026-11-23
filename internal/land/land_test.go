@@ -585,11 +585,17 @@ func TestWaitOnChecksThenDeadline(t *testing.T) {
 	}
 
 	// One second before the deadline it still waits; at the deadline it
-	// does not.
-	if res, err = publish(t, f.config(deadline.Add(-time.Second), rec), dir); err != nil || res.Action != ActionWait {
+	// does not. These are scheduled runs, days later, each on the facts it
+	// gathered itself.
+	scheduled := func(now time.Time) string {
+		facts := goodFacts(t)
+		facts.GatheredAt = now.Add(-time.Minute)
+		return files(t, facts, clean(t))
+	}
+	if res, err = publish(t, f.config(deadline.Add(-time.Second), rec), scheduled(deadline.Add(-time.Second))); err != nil || res.Action != ActionWait {
 		t.Fatalf("just before the deadline: %+v, %v", res, err)
 	}
-	res, err = publish(t, f.config(deadline, rec), dir)
+	res, err = publish(t, f.config(deadline, rec), scheduled(deadline))
 	if err != nil {
 		t.Fatal(err)
 	}
