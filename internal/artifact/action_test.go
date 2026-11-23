@@ -65,10 +65,10 @@ func TestContainerActionIsNotRead(t *testing.T) {
 
 		// What is not the one shape the gate knows is not guessed at.
 		{"no metadata file where the workflow uses the action", nil, with(map[string]string{"Dockerfile": "FROM alpine\n"}), []string{"."}, "no action.yml"},
-		{"a flow mapping", nil, with(map[string]string{"action.yml": "name: x\nruns: {using: docker, image: Dockerfile}\n"}), []string{"."}, "has 0 lines"},
-		{"no line that says what runs", nil, with(map[string]string{"action.yml": "name: x\ndescription: y\n"}), []string{"."}, "has 0 lines"},
-		{"two lines that both say node", nil, with(map[string]string{"action.yml": nodeAction + "  using: node20\n"}), []string{"."}, "has 2 lines"},
-		{"a quoted key", nil, with(map[string]string{"action.yml": "name: x\nruns:\n  \"using\": docker\n  image: Dockerfile\n"}), []string{"."}, "that is not `using: nodeNN`"},
+		{"a flow mapping", nil, with(map[string]string{"action.yml": "name: x\nruns: {using: docker, image: Dockerfile}\n"}), []string{"."}, "is not `runs:` alone"},
+		{"no line that says what runs", nil, with(map[string]string{"action.yml": "name: x\ndescription: y\n"}), []string{"."}, "has 0 top-level `runs` keys"},
+		{"two lines that both say node", nil, with(map[string]string{"action.yml": nodeAction + "  using: node20\n"}), []string{"."}, "has 2 `using` keys"},
+		{"a quoted key", nil, with(map[string]string{"action.yml": "name: x\nruns:\n  \"using\": docker\n  image: Dockerfile\n"}), []string{"."}, "is in the `runs` block"},
 		{"two lines that say what runs", nil, with(map[string]string{"action.yml": nodeAction + "  using: docker\n"}), []string{"."}, "that is not `using: nodeNN`"},
 		{"an unknown runner", nil, with(map[string]string{"action.yml": "runs:\n  using: wasm\n"}), []string{"."}, "that is not `using: nodeNN`"},
 		{"a value that only starts like node", nil, with(map[string]string{"action.yml": "runs:\n  using: node20docker\n"}), []string{"."}, "that is not `using: nodeNN`"},
@@ -109,6 +109,107 @@ func TestContainerActionIsNotRead(t *testing.T) {
 				t.Fatalf("Prepare: state %q, %v; want ErrActionKind saying %q", got.State, err, tt.refused)
 			}
 		})
+	}
+}
+
+// A metadata file counts only in the plain block form (spec section 11,
+// amendment 68). YAML has other ways of saying `runs` and `using`, and a
+// line reader that took a few of them could be shown one runtime while
+// the runner reads another. Each case below is such a way, or a decoy
+// that only a line reader would believe.
+func TestMetadataForms(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		refused string // part of the problem; "" for a file that counts
+	}{
+		// What the publishers write.
+		{"a node action", nodeAction, ""},
+		{"a composite action with steps at the key's indent", "name: x\nruns:\n  using: composite\n  steps:\n  - run: echo hi\n    shell: bash\n  - uses: actions/checkout@v4\n", ""},
+		{"a leading document marker", "---\nname: x\nruns:\n  using: node24\n  main: dist/index.js\n", ""},
+		{"a leading document marker with blanks after it", "--- \t\nname: x\nruns:\n  using: node24\n", ""},
+		{"comments and blank lines everywhere", "# top\n\nname: x # n\n  # stray\nruns: # what runs\n  # first\n\n  using: 'node20' # LTS\n    # deeper\n  main: dist/index.js\npost: x\n", ""},
+		{"a block scalar elsewhere", "name: x\ndescription: |\n  using: docker\n  runs:\nruns:\n  using: node20\n  main: x\n", ""},
+		{"line ends of another system", strings.ReplaceAll(nodeAction, "\n", "\r\n"), ""},
+		{"keys of every plain shape", "name: x\nbranding_x-1:\n  icon: y\nruns:\n  using: node20\n  pre-if: always()\n", ""},
+
+		// The line breaks YAML knows and a split on LF does not.
+		{"a byte order mark", "\xef\xbb\xbf" + nodeAction, "byte order mark"},
+		{"a bare CR before a using line", "runs:\n  using: node20\r  using: docker\n", "bare CR"},
+		{"a CR CR LF", "runs:\n  using: node20\r\r\n", "bare CR"},
+		{"U+2028 before a using line", "runs:\n  main: x\u2028  using: docker\n  using: node20\n", "U+2028"},
+		{"U+2029", "runs:\n  using: node20\u2029\n", "U+2029"},
+		{"U+0085", "runs:\n  using: node20\u0085\n", "U+0085"},
+		{"a tab in the indentation", "runs:\n\tusing: docker\n  using: node20\n", "line 2 has a tab"},
+		{"a tab before a comment", "runs:\n  using: node20\n\t# x\n", "line 3 has a tab"},
+		{"a tab on a blank line", "runs:\n  using: node20\n \t\n", "line 3 has a tab"},
+
+		// The top level.
+		{"a decoy in a block scalar, beside runs in flow style", "name: x\ndescription: |\n  runs:\n  using: node20\nruns: {using: docker, image: Dockerfile}\n", "line 5 is not `runs:` alone"},
+		{"a whole-file flow mapping", "{name: x,\nruns: {using: docker, image: Dockerfile}}\n", "line 1 starts in column 0"},
+		{"a quoted key", "name: x\nruns:\n  using: node20\n\"runs\":\n  using: docker\n", "line 4 starts in column 0"},
+		{"a single-quoted key", "'runs':\n  using: docker\n", "line 1 starts in column 0"},
+		{"an explicit key", "name: x\nruns:\n  using: node20\n? runs\n: using: docker\n", "line 4 starts in column 0"},
+		{"a merge key at the top", "name: x\nruns:\n  using: node20\n<<: {runs: {using: docker}}\n", "line 4 starts in column 0"},
+		{"an anchor for the runs block", "runs: &r\n  using: node20\n", "line 1 is not `runs:` alone"},
+		{"an alias for the runs block", "x: &r\n  using: docker\nruns: *r\n", "line 3 is not `runs:` alone"},
+		{"a tag", "!!map\nruns:\n  using: node20\n", "line 1 starts in column 0"},
+		{"a directive", "%YAML 1.2\n---\nruns:\n  using: node20\n", "line 1 starts in column 0"},
+		{"a second document", "runs:\n  using: node20\n---\nruns:\n  using: docker\n", "line 3 is a document marker"},
+		{"an end of document", "runs:\n  using: node20\n...\n", "line 3 is a document marker"},
+		{"a document marker with content", "--- !!map\nruns:\n  using: node20\n", "line 1 is a document marker"},
+		{"a document marker after a key", "name: x\n---\n", "line 2 is a document marker"},
+		{"two runs keys", "runs:\n  using: node20\nruns:\n  using: docker\n", "has 2 top-level `runs` keys"},
+		{"a runs key in capitals", "name: x\nRuns:\n  using: docker\nruns:\n  using: node20\n", "has 2 top-level `runs` keys"},
+		{"only a runs key in capitals", "Runs:\n  using: node20\n", "line 1 is not `runs:` alone"},
+		{"no runs key", "name: x\ndescription: y\n", "has 0 top-level `runs` keys"},
+		{"an indented first line", "  name: x\nruns:\n  using: node20\n", "line 1 is indented"},
+		// After the one `---` the root mapping must still start in column
+		// 0. Without that rule a mapping indented under `---` would hold a
+		// multi-line quoted scalar whose column-0 lines are a decoy.
+		{"an indented root mapping under the document marker", "---\n  description: \"a\nruns:\n  using: node20\n  b: c\"\n  runs:\n    using: docker\n", "line 2 is indented"},
+
+		// The runs block.
+		{"a runs block in flow style", "runs:\n  {using: docker, image: Dockerfile}\n", "line 2 is in the `runs` block"},
+		{"a quoted using key", "name: x\nruns:\n  main: x\n  \"using\": docker\n  using: node20\n", "line 4 is in the `runs` block"},
+		{"an explicit using key", "runs:\n  ? using\n  : docker\n  using: node20\n", "line 2 is in the `runs` block"},
+		{"a merge key in the runs block", "base: &b\n  using: docker\nruns:\n  <<: *b\n  main: x\n", "line 4 is in the `runs` block"},
+		{"a line less indented than the block's first", "runs:\n    using: node20\n  using: docker\n", "line 3 is indented less"},
+		{"two using lines", "runs:\n  using: node20\n  using: node24\n", "has 2 `using` keys"},
+		{"a using key in capitals", "runs:\n  USING: docker\n  using: node20\n", "that is not `using: nodeNN`"},
+		{"a using key only deeper", "runs:\n  main: x\n  steps:\n    using: node20\n", "has 0 `using` keys"},
+		{"a runs block with nothing in it", "runs:\nname: x\n", "has 0 `using` keys"},
+		{"a using value of another runtime", "runs:\n  using: docker\n  image: Dockerfile\n", "that is not `using: nodeNN`"},
+		{"an alias for the using value", "x: &u node20\nruns:\n  using: *u\n", "that is not `using: nodeNN`"},
+		{"an image by reference", fmt.Sprintf(imageAction, "1"), "docker://"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := metadataProblem([]byte(tt.content))
+			if tt.refused == "" {
+				if got != "" {
+					t.Fatalf("metadataProblem = %q, want none", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.refused) {
+				t.Fatalf("metadataProblem = %q, want one saying %q", got, tt.refused)
+			}
+		})
+	}
+}
+
+// Where the directory is not known, only directories with a metadata
+// file are held to the rule. A directory with a Dockerfile and nothing
+// else is not looked for: the runner builds it only for an action that
+// names that directory, and is an accepted limit (spec section 11,
+// amendments 55 and 68).
+func TestDockerfileOnlyDirectoryIsNotSought(t *testing.T) {
+	files := map[string]string{"action.yml": nodeAction, "dist/index.js": "run(2)\n", "scan/Dockerfile": "FROM alpine\n"}
+	p, f := actionPair(t, map[string]string{"action.yml": nodeAction, "dist/index.js": "run()\n"}, files)
+	got, err := newReader(t, f).Prepare(context.Background(), p, roomy)
+	if err != nil || len(got.Chunks) == 0 {
+		t.Fatalf("Prepare: %d chunks, %v; want a read", len(got.Chunks), err)
 	}
 }
 

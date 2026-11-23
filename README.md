@@ -226,8 +226,10 @@ Limits that send real pull requests to a person:
   with a `docker://` step. It runs an image, and nothing of an image is
   read. The gate looks at the `action.yml` (or `action.yaml`) in the
   directory the workflows use the action from, and takes one line there,
-  `using: nodeNN` or `using: composite`; a file that says it any other
-  way, or no file, goes to a person too.
+  `using: nodeNN` or `using: composite`, under a bare `runs:`, in a
+  file written in YAML's plain block form (plain keys, no flow style,
+  quoted keys, anchors, aliases or second document); a file that says it
+  any other way, or no file, goes to a person too.
 - Docker images merge only from the list, and only when written as an
   official Docker Hub image by its bare name or as a gcr.io image. Any
   other spelling (`library/golang`, `grafana/grafana`, another registry)
