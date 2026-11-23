@@ -48,6 +48,9 @@ const (
 	maxGCRListBytes = 64 << 20
 
 	requestTimeout = time.Minute
+	// maxTries is how often one request is made before the registry
+	// counts as one that could not be asked.
+	maxTries = 3
 )
 
 // earliestClock is before either registry existed. A time before it is a
@@ -66,6 +69,7 @@ var (
 // asker makes the registry requests of one Gather call.
 type asker struct {
 	client *http.Client
+	sleep  func(ctx context.Context, d time.Duration) error
 	// hubTokens caches Docker Hub's anonymous pull token per repository.
 	hubTokens map[string]string
 	// gcrLists caches GCR's tag list per repository: it is megabytes, and
@@ -84,13 +88,13 @@ type answer struct {
 	body []byte
 	// tooLarge: the body was longer than the caller's limit, and dropped.
 	tooLarge bool
-	// failed: the registry was asked and did not answer: no connection, a
-	// rate limit or a server error. status is then that answer's, or 0.
-	// That says nothing about the image, so what depended on it is
-	// unavailable, and it is kept apart from every answer that did
-	// arrive: a 404 is a "no", and an answer the gatherer cannot read
-	// (another status, a body in another shape) establishes nothing
-	// however often it is asked for.
+	// failed: the registry could not be asked. Every try ended without a
+	// connection, in a rate limit or in a server error. status is then
+	// the last try's, or 0 when it had none. That says nothing about the
+	// image, so what depended on the answer is unavailable, and it is
+	// kept apart from every answer that did arrive: a 404 is a "no", and
+	// an answer the gatherer cannot read (another status, a body in
+	// another shape) establishes nothing however often it is asked for.
 	failed bool
 }
 
@@ -99,14 +103,14 @@ type answer struct {
 // the other end sent.
 func (ans answer) unreachable(who string) string {
 	if ans.status != 0 {
-		return fmt.Sprintf("%s did not answer (HTTP %d)", who, ans.status)
+		return fmt.Sprintf("%s could not be asked (HTTP %d, %d tries)", who, ans.status, maxTries)
 	}
-	return who + " could not be reached"
+	return fmt.Sprintf("%s could not be reached (%d tries)", who, maxTries)
 }
 
-// outage reports whether a status says "ask again" and nothing about the
-// image.
-func outage(status int) bool {
+// transient reports whether a status says "ask again" and nothing about
+// the image.
+func transient(status int) bool {
 	switch status {
 	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
 		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
@@ -115,22 +119,29 @@ func outage(status int) bool {
 	return false
 }
 
-// do makes one request, once: a registry that does not answer is a wait,
-// and the next evaluation asks again. Every answer that says something
-// about the image, 404 and 401 included, is returned as it is. A registry
-// that could not be asked is an answer too, in the failed state. The
-// error is non-nil only when the context is done: then the run itself is
-// over and there is no result.
+// do makes one request, up to maxTries times. Every answer that says
+// something about the image, 404 and 401 included, is returned as it is.
+// A registry that could not be asked on any try is an answer too, in the
+// failed state: what depended on it is unavailable. The error is non-nil
+// only when the context is done: then the run itself is over and there is
+// no result.
 func (a *asker) do(ctx context.Context, method, rawURL, accept, bearer string, maxBody int64) (answer, error) {
-	ans, err := a.once(ctx, method, rawURL, accept, bearer, maxBody)
-	switch {
-	case err == nil && !outage(ans.status):
-		return ans, nil
-	case ctx.Err() != nil:
-		return answer{}, ctx.Err()
+	for try := 1; ; try++ {
+		ans, err := a.once(ctx, method, rawURL, accept, bearer, maxBody)
+		if err == nil && !transient(ans.status) {
+			return ans, nil
+		}
+		if ctx.Err() != nil {
+			return answer{}, ctx.Err()
+		}
+		if try == maxTries {
+			// After a transport error ans is empty, so status is 0.
+			return answer{status: ans.status, failed: true}, nil
+		}
+		if err := a.sleep(ctx, time.Duration(try)*time.Second); err != nil {
+			return answer{}, err
+		}
 	}
-	// After a transport error ans is empty, so status is 0.
-	return answer{status: ans.status, failed: true}, nil
 }
 
 // once makes one request.
@@ -165,6 +176,18 @@ func (a *asker) once(ctx context.Context, method, rawURL, accept, bearer string,
 	}
 	ans.body = body
 	return ans, nil
+}
+
+// sleepCtx waits for d or for the context to end.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // registryFacts is what the registry is the source of, for the head side

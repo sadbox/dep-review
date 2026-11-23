@@ -117,14 +117,28 @@ var (
 	distrolessRefresh = oneLine("gcr.io/distroless/static:nonroot@"+digestA, "gcr.io/distroless/static:nonroot@"+digestB)
 )
 
-// gatherWith runs the gatherer against a fake registry.
+// gatherWith runs the gatherer against a fake registry, without waiting
+// between tries.
 func gatherWith(t *testing.T, reg http.RoundTripper, files []facts.File) (facts.Result, error) {
 	t.Helper()
-	return New().Gather(context.Background(), facts.Input{
+	res, _, err := gatherWaits(t, reg, files)
+	return res, err
+}
+
+// gatherWaits is gatherWith, and returns the waits that were asked for.
+func gatherWaits(t *testing.T, reg http.RoundTripper, files []facts.File) (facts.Result, []time.Duration, error) {
+	t.Helper()
+	var waits []time.Duration
+	g := &Gatherer{sleep: func(_ context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}}
+	res, err := g.Gather(context.Background(), facts.Input{
 		Files:  files,
 		Policy: defaultPolicy(t),
 		HTTP:   &http.Client{Transport: reg},
 	})
+	return res, waits, err
 }
 
 // oneUpdate is gatherWith for a pull request with exactly one update and
@@ -516,12 +530,12 @@ func TestGCRDeprecated(t *testing.T) {
 	}
 }
 
-// A registry that cannot be asked is not asked again in the same run:
-// what depended on it is unavailable, which is a wait and never a person
-// before the deadline (spec section 11, amendment 1), and the next
-// evaluation asks again. The run does not fail, nothing else it learned
-// is lost, and nothing is said against the pin.
-func TestOutage(t *testing.T) {
+// A registry that cannot be asked is tried again. One that still has no
+// answer leaves what depended on it unavailable, which is a wait and
+// never a person before the deadline (spec section 11, amendment 1): the
+// run does not fail, nothing else it learned is lost, and nothing is said
+// against the pin.
+func TestTransient(t *testing.T) {
 	down := errors.New("connection refused: <script>")
 	tests := []struct {
 		key string
@@ -545,11 +559,28 @@ func TestOutage(t *testing.T) {
 		good := registry(t).answers[key][0]
 
 		for _, bad := range []fakeAnswer{{status: 429}, {status: 500}, {status: 502}, {status: 503}, {status: 504}, {err: down}} {
-			t.Run(fmt.Sprintf("%s/%d", strings.SplitN(key, "?", 2)[0], bad.status), func(t *testing.T) {
+			name := fmt.Sprintf("%s/%d", strings.SplitN(key, "?", 2)[0], bad.status)
+
+			t.Run(name+"/twice, then an answer", func(t *testing.T) {
 				reg := registry(t)
-				// The answer after the outage is there, and is not asked for.
-				reg.answers[key] = []fakeAnswer{bad, good}
-				res, err := gatherWith(t, reg, files)
+				reg.answers[key] = []fakeAnswer{bad, bad, good}
+				res, waits, err := gatherWaits(t, reg, files)
+				if err != nil {
+					t.Fatal(err)
+				}
+				u := res.Updates[0]
+				if !u.Bound.Holds() || !u.Clean.Holds() || !u.FirstSeen.Known() {
+					t.Errorf("facts: %+v", u)
+				}
+				if reg.count(key) != 3 || !reflect.DeepEqual(waits, []time.Duration{time.Second, 2 * time.Second}) {
+					t.Errorf("asked %d times, waited %v", reg.count(key), waits)
+				}
+			})
+
+			t.Run(name+"/every time", func(t *testing.T) {
+				reg := registry(t)
+				reg.answers[key] = []fakeAnswer{bad}
+				res, waits, err := gatherWaits(t, reg, files)
 				if err != nil {
 					t.Fatalf("the run failed: %v", err)
 				}
@@ -575,19 +606,19 @@ func TestOutage(t *testing.T) {
 				if u.Superseded.Holds() {
 					t.Errorf("an unreachable registry is not a superseded pin: %+v", u.Superseded)
 				}
-				if reg.count(key) != 1 {
-					t.Errorf("asked %d times", reg.count(key))
+				if reg.count(key) != maxTries || len(waits) != maxTries-1 {
+					t.Errorf("asked %d times, waited %v", reg.count(key), waits)
 				}
 				if last := reg.asked[len(reg.asked)-1]; last != key {
-					t.Errorf("asked %s after %s went unanswered", last, key)
+					t.Errorf("asked %s after giving up on %s", last, key)
 				}
 
-				// The value says that the registry did not answer, with the
+				// The value says that the registry was not asked, with the
 				// status when there was one, and never the error's text.
 				said := u.Bound.Value + "\n" + u.Clean.Value + "\n" + u.FirstSeen.Value
-				want := fmt.Sprintf("did not answer (HTTP %d)", bad.status)
+				want := fmt.Sprintf("could not be asked (HTTP %d, %d tries)", bad.status, maxTries)
 				if bad.err != nil {
-					want = "could not be reached"
+					want = fmt.Sprintf("could not be reached (%d tries)", maxTries)
 				}
 				if !strings.Contains(said, want) {
 					t.Errorf("the values do not say %q:\n%s", want, said)
@@ -636,12 +667,26 @@ func TestContextEnds(t *testing.T) {
 		}
 	}
 
-	// Already ended before the first request.
+	// While waiting to try again.
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	reg := healthyHub(t)
+	reg.answers[hubHeadURL] = []fakeAnswer{{status: 503}}
+	g := &Gatherer{sleep: func(ctx context.Context, d time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}}
+	_, err := g.Gather(ctx, facts.Input{Files: golangRefresh, Policy: defaultPolicy(t), HTTP: &http.Client{Transport: reg}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v, want the context's", err)
+	}
+	if reg.count(hubHeadURL) != 1 {
+		t.Errorf("asked %d times after the context ended", reg.count(hubHeadURL))
+	}
+
+	// Already ended before the first request.
+	reg = healthyHub(t)
 	reg.answers[hubTokenURL] = []fakeAnswer{{err: context.Canceled}}
-	_, err := New().Gather(ctx, facts.Input{Files: golangRefresh, Policy: defaultPolicy(t), HTTP: &http.Client{Transport: reg}})
+	_, err = New().Gather(ctx, facts.Input{Files: golangRefresh, Policy: defaultPolicy(t), HTTP: &http.Client{Transport: reg}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error %v, want the context's", err)
 	}
@@ -926,27 +971,55 @@ type brokenBody struct{}
 func (brokenBody) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
 func (brokenBody) Close() error             { return nil }
 
-// A body that breaks off is a registry that did not answer, never read as
-// a short answer: what depended on it is unavailable, the rest stands,
-// and the error's text is not shown.
+// A body that breaks off is a registry that could not be asked: tried
+// again, and never read as a short answer.
 func TestBodyBreaksOff(t *testing.T) {
-	reg := healthyGCR(t)
+	reg := healthyHub(t)
+	broken := 2
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		resp, err := reg.RoundTrip(req)
-		if err == nil && req.Method == http.MethodGet {
+		if err == nil && req.URL.Host == "hub.docker.com" && broken > 0 {
+			broken--
 			resp.Body = brokenBody{}
 		}
 		return resp, err
 	})
-	res, err := gatherWith(t, rt, distrolessRefresh)
+	res, waits, err := gatherWaits(t, rt, golangRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Updates[0].FirstSeen.Known() || len(waits) != 2 || reg.count(hubTagURL) != 3 {
+		t.Errorf("FirstSeen %+v, waited %v, asked %d times", res.Updates[0].FirstSeen, waits, reg.count(hubTagURL))
+	}
+
+	// Every time: the time is unknown, the rest stands, and the error's
+	// text is not shown.
+	broken = maxTries
+	reg = healthyHub(t)
+	res, err = gatherWith(t, rt, golangRefresh)
 	if err != nil {
 		t.Fatal(err)
 	}
 	u := res.Updates[0]
-	if !u.Bound.Holds() || !u.Clean.Unavailable || u.Clean.OK || u.Clean.Source == "" || reg.count(gcrListURL) != 1 {
-		t.Errorf("Bound %+v, Clean %+v, list asked %d times", u.Bound, u.Clean, reg.count(gcrListURL))
+	if !u.Bound.Holds() || !u.Clean.Holds() || u.FirstSeen.Known() {
+		t.Errorf("Bound %+v, Clean %+v, FirstSeen %+v", u.Bound, u.Clean, u.FirstSeen)
 	}
-	if want := "the registry's tag list could not be reached"; u.Clean.Value != want {
-		t.Errorf("Clean says %q, want %q", u.Clean.Value, want)
+	if want := "Docker Hub could not be reached (3 tries)"; u.FirstSeen.Value != want {
+		t.Errorf("FirstSeen says %q, want %q", u.FirstSeen.Value, want)
+	}
+}
+
+func TestSleepCtx(t *testing.T) {
+	if err := sleepCtx(context.Background(), time.Millisecond); err != nil {
+		t.Errorf("a wait that ran out: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if err := sleepCtx(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Errorf("a wait whose context ended: %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Error("the wait did not end with its context")
 	}
 }

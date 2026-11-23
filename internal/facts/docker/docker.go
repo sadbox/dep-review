@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/facts"
@@ -22,8 +23,12 @@ import (
 // listSource is the Source of the facts read from the policy list.
 const listSource = `"listed.docker" in the policy`
 
-// Gatherer is the Docker fact gatherer.
-type Gatherer struct{}
+// Gatherer is the Docker fact gatherer. The zero value is ready to use.
+type Gatherer struct {
+	// sleep waits between tries of one registry request. Nil means a
+	// real wait; tests replace it.
+	sleep func(ctx context.Context, d time.Duration) error
+}
 
 // New returns the Docker fact gatherer.
 func New() *Gatherer { return &Gatherer{} }
@@ -44,7 +49,10 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 	// one would let an answer choose the next host.
 	client := *in.HTTP
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	a := &asker{client: &client, hubTokens: map[string]string{}, gcrLists: map[string]gcrList{}}
+	a := &asker{client: &client, sleep: g.sleep, hubTokens: map[string]string{}, gcrLists: map[string]gcrList{}}
+	if a.sleep == nil {
+		a.sleep = sleepCtx
+	}
 
 	for i, c := range moved {
 		f, err := a.ask(ctx, c)
