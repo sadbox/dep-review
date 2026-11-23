@@ -59,7 +59,7 @@ a newer head can never be merged on an old verdict.
 
 The Go checks flag code that runs on import (a new or changed `func init`,
 a package-level initializer that calls code, any changed declaration that
-init code reaches by name within its package), code the compiler does not
+init code reaches within its package), code the compiler does not
 check (cgo and its preamble, C/C++/assembly sources, `//go:linkname`), new
 risky or blank imports, every `//go:linkname`, `//go:cgo_*` and
 `//go:generate` directive in a changed file, newly embedded files,
@@ -107,6 +107,16 @@ What is flagged:
 - a changed binary under `testdata/` (never built by itself) when the new
   tree embeds it, or when the module has cgo, C or assembly sources or a
   `.syso` (which can link or include any file without naming it);
+- in such a module, any other changed text file except `go.mod`
+  (`gomod.includable-changed`), whatever its extension. Assembly, C or
+  cgo can `#include` or `.incbin` it by name, so it can be compiled code.
+  A `.go` file (built, unbuilt or a test) counts only when an include
+  names it, or any include is computed (a macro, `-include`); a `go.sum`
+  counts unless every line is a hash line, since cmd/go never reads a
+  dependency's go.sum. A deleted file counts too, because the same
+  include may now find another file of that name. It routes like
+  assembly: to a person, with the review as triage, or reviewed for
+  well-known modules;
 - a file the new tree newly embeds, changed or not: what each package
   embeds is `go list`'s `EmbedFiles` in both trees (the union over every
   `go tool dist list` platform, cgo on and off), compared per package. An
@@ -138,6 +148,29 @@ quoted, with controls and default-ignorable characters shown as escapes.
 Unparseable Go files, truncated evidence and a module with more flagged
 items than a review can take also go to a person. Module diffs do not
 detect renames.
+
+#### The init walk
+
+The walk from init code follows each reached declaration's references as
+`go/types` resolves them. It type-checks the package once per distinct
+set of files go/build builds, with the module's own imports from the tree
+and the standard library from GOROOT's source (cgo off). It runs in a
+memory-limited child with a timeout. The rules:
+- a package-level object of the package is followed;
+- a local, a parameter, a field, an import or a definition is not;
+- a method selected on a concrete type of the package reaches that
+  type's method only;
+- one on another package's concrete type (`sync.Pool.Put`) reaches no
+  code of this package;
+- one on an interface reaches every method of that name;
+- reaching a type still reaches all its methods, since a value handed to
+  another package can have any of them called;
+- anything the checker can't resolve is followed by name, as before:
+  imports outside the module and the standard library, type errors, and
+  files no configuration builds.
+
+If the child fails, the whole walk is by name. The walk still doesn't
+follow calls into other packages of the module.
 
 #### Navigable diffs
 
@@ -214,6 +247,8 @@ that commit, as the go command does, and `dirhash` must give the go.sum
 hash. A mismatch is `gomod.upstream-mismatch`, which goes to a person.
 When upstream history is verified, a benign item that has commits listed
 counts only if the verdict cites at least one of them and nothing else.
+The history is read in pieces like the flagged-items file, up to 1 MB,
+and counts toward the 4 MB of required reading.
 The reviewer is told to read each message against the diff, since the
 repository's owner wrote it. A message that doesn't fit makes the item
 unclear.
@@ -224,7 +259,7 @@ these hold:
 - the proxy recorded no origin, or the repository isn't git;
 - the host isn't github.com, go.googlesource.com or gitlab.com;
 - the two versions share no history within 1000 commits;
-- more than 150 commits lie between them;
+- more than 400 commits lie between them;
 - the attachment would pass its size budget;
 - the fetch fails.
 

@@ -68,7 +68,7 @@ func runFetch(args []string) error {
 		return err
 	}
 	ecoutil.Isolate(&ecoutil.Isolation{Command: []string{self, describeBinaryCommand}, GoCommand: []string{self, goChildCommand},
-		Children: map[string][]string{gomod.UpstreamChild: {self, upstreamChildCommand}}})
+		Children: map[string][]string{gomod.UpstreamChild: {self, upstreamChildCommand}, gomod.TypesChild: {self, typesChildCommand}}})
 
 	// The fetch job's own read-only token (contents/pull-requests: read):
 	// REST reads of the caller repository and public upstreams.

@@ -77,6 +77,41 @@ func defaultLister() goLister {
 	return goLister{goBin: bin}
 }
 
+// goroot is the go command's GOROOT, for the type checker's standard
+// library ("" without one).
+func (l goLister) goroot() string {
+	if l.goBin == "" {
+		return ""
+	}
+	gorootMu.Lock()
+	defer gorootMu.Unlock()
+	if g, ok := gorootCache[l.goBin]; ok {
+		return g
+	}
+	home, err := os.MkdirTemp("", "gate-goroot-")
+	if err != nil {
+		return ""
+	}
+	// The directory is the gate's own, made just above.
+	defer os.RemoveAll(home)
+	if err := ecoutil.GoHome(home); err != nil {
+		return ""
+	}
+	out, err := ecoutil.RunGo(ecoutil.GoRun{Go: l.goBin, Dir: home, Args: []string{"env", "GOROOT"},
+		Env: []string{"GOTOOLCHAIN=local", "GOENV=off", "HOME=" + home, "GOCACHE=" + filepath.Join(home, "cache")}, Timeout: time.Minute})
+	g := ""
+	if err == nil {
+		g = strings.TrimSpace(string(out))
+	}
+	gorootCache[l.goBin] = g
+	return g
+}
+
+var (
+	gorootMu    sync.Mutex
+	gorootCache = map[string]string{}
+)
+
 // toolTags are, per GOOS/GOARCH, the tool tags the toolchain sets
 // (go list -f '{{context.ToolTags}}'), read once per go command.
 func (l goLister) toolTags() (map[string][]string, error) {

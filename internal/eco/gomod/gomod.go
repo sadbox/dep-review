@@ -348,7 +348,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 	var upstream []model.Upstream
 	var diffs []model.DiffFile
 	reports := map[string]*report{}       // flaggedUpdate key -> its checks
-	flaggedBytes := 0                     // bytes of the flagged-items files, read in full
+	flaggedBytes := 0                     // bytes of the flagged-items and upstream files, read in full
 	checked := map[string]bool{}          // flaggedUpdate keys already checked
 	clock := ecoutil.NewClock(renderTime) // one for every module of this fetch
 	dl := Downloader{Scratch: filepath.Join(env.Scratch, "gomod"), GoBin: f.GoBin}
@@ -461,9 +461,12 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 				}
 				if md != nil {
 					desc := fmt.Sprintf("upstream commits between the two versions of %s and which flagged items each touched (third-party text); cite the explaining commits per item", key)
-					if err := env.Evidence.AddUntrusted(evName(u, "upstream.md"), desc, md); err != nil {
+					// Read to cite commits, so it counts as required reading.
+					n, err := env.Evidence.AddLarge(evName(u, "upstream.md"), desc, md)
+					if err != nil {
 						return nil, nil, nil, nil, err
 					}
+					flaggedBytes += n
 				}
 			}
 			findings = append(findings, h.findings(su.Name)...)
