@@ -197,6 +197,16 @@ func ScriptsOffChanged(d Decision, now time.Time) Decision {
 	return notMerged(d, now, ReasonScriptsOffChanged, ReasonScriptsOffDeadline)
 }
 
+// BaseChanged is the decision for a merge Decide allowed and publish did
+// not ask for, because the default branch has changed a file the pull
+// request changes since the commit it branches from (spec section 11,
+// amendments 62 and 78). Like ChecksRefused, with the same deadline, it
+// is a wait until the decision's deadline and a person's from then on,
+// and it leaves a decision that is not a merge as it is.
+func BaseChanged(d Decision, now time.Time) Decision {
+	return notMerged(d, now, ReasonBaseChanged, ReasonBaseChangedDeadline)
+}
+
 // VetoesForgotten is the decision for a pull request on which the gate
 // had to give up a veto it recorded: its comment holds no more (spec
 // section 11, amendment 71). It is a person's whatever d was, with

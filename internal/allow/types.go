@@ -377,7 +377,8 @@ type Decision struct {
 	// Person: Policy.WaitDeadline after the later of the latest required
 	// time and PRFacts.Opened. It ends a retry (a model read, a source
 	// that did not answer, a superseded pin) and a merge that GitHub
-	// refused or publish did not ask for yet (ChecksRefused); waiting for
+	// refused or publish did not ask for yet (ChecksRefused, BaseChanged,
+	// ScriptsOffChanged); waiting for
 	// an age has no deadline. While a retry
 	// is pending, the latest required time is taken as if every update
 	// had been read in full, so a partial read never moves the deadline

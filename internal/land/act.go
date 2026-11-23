@@ -45,9 +45,10 @@ type Result struct {
 	// Action is which it was; never ActionFailed.
 	Action Action
 	// Decision is the decision acted on: allow.Decide's, or
-	// allow.ChecksRefused's when the merge it allowed has to wait: GitHub
-	// refused it because required checks are pending or failing or the
-	// base branch moved under the call, or the gate did not ask (Held).
+	// allow.ChecksRefused's when the merge it allowed has to wait because
+	// GitHub refused it (required checks are pending or failing, or the
+	// base branch moved under the call), or allow.BaseChanged's or
+	// allow.ScriptsOffChanged's when the gate did not ask.
 	Decision allow.Decision
 	// Held says the gate did not ask GitHub to merge, because the default
 	// branch has changed a file the pull request changes, or may have
@@ -119,10 +120,10 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 			return Result{}, err
 		}
 		if held {
-			// The decision for "GitHub will not merge yet" fits a merge the
-			// gate will not ask for yet: a wait the scheduled job tries
-			// again, a person's at the deadline.
-			res.Decision, res.Held, res.Note = allow.ChecksRefused(ev.Decision, ev.now), true, file
+			// A wait the scheduled job tries again, with a reason of its own
+			// and the deadline of "GitHub will not merge yet", a person's
+			// from then on (spec section 11, amendment 78).
+			res.Decision, res.Held, res.Note = allow.BaseChanged(ev.Decision, ev.now), true, file
 			merging = false
 		}
 	}
@@ -217,11 +218,39 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	if cfg.Scheduled && mk.Asks >= unreadNoticeAfter && res.Action == ActionWait && unanswered(ev) {
 		notifyErr = errors.Join(notifyErr, notifyOnce(ctx, cfg, &mk.NotifiedUnread, pr.Head, message(cfg, pr.Number, unreadNotice+runRef(cfg))))
 	}
+	if res.Held && res.Action == ActionWait {
+		if mk.HeldSince.IsZero() {
+			mk.HeldSince = ev.now
+		}
+		// A security fix would have merged on the fast path, so its owner
+		// is told at once; any other once Dependabot has had a day to
+		// rebuild it (spec section 11, amendment 78).
+		if fix := securityFix(ev.Facts); fix || (cfg.Scheduled && !ev.now.Before(mk.HeldSince.Add(heldNoticeAfter))) {
+			notifyErr = errors.Join(notifyErr, notifyOnce(ctx, cfg, &mk.NotifiedHeld, pr.Head, heldMessage(cfg, pr.Number, res.Note, fix)))
+		}
+	}
 
 	if err := upsertComment(ctx, cfg, pr.Number, prev, render(view{res: res, ev: ev, marker: mk, runURL: cfg.RunURL})); err != nil {
 		return Result{}, errors.Join(statusErr, err)
 	}
 	return res, errors.Join(statusErr, notifyErr)
+}
+
+// heldNoticeAfter is how long after a hold began the owner is told about
+// a held merge that is not a security fix. Dependabot rebuilds most such
+// pull requests within minutes; one it has not rebuilt in a day it may
+// not rebuild at all.
+const heldNoticeAfter = 24 * time.Hour
+
+// securityFix reports whether an update of the pull request is a security
+// fix: one that would have merged on the fast path.
+func securityFix(f allow.PRFacts) bool {
+	for _, u := range f.Updates {
+		if u.SecurityFix.Holds() {
+			return true
+		}
+	}
+	return false
 }
 
 // unreadNoticeAfter is how many scheduled runs must have asked the model

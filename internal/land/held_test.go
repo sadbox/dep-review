@@ -139,13 +139,13 @@ func TestHeldForTheBase(t *testing.T) {
 			}
 
 			if res.Action != ActionWait || !res.Held || res.Note != tc.note ||
-				len(res.Decision.Reasons) != 1 || res.Decision.Reasons[0] != allow.ReasonChecksPending {
-				t.Errorf("result %+v, want a held merge that waits like one GitHub refused over checks", res)
+				len(res.Decision.Reasons) != 1 || res.Decision.Reasons[0] != allow.ReasonBaseChanged {
+				t.Errorf("result %+v, want a held merge that waits for a reason of its own", res)
 			}
 			if n := f.count("PUT", "/merge"); n != 0 {
 				t.Errorf("%d merge calls, want none", n)
 			}
-			if want := []string{"pending: waiting (checks_pending), at most until 2026-11-29 11:00 UTC"}; strings.Join(statuses, "\n") != strings.Join(want, "\n") {
+			if want := []string{"pending: waiting (base_changed), at most until 2026-11-29 11:00 UTC"}; strings.Join(statuses, "\n") != strings.Join(want, "\n") {
 				t.Errorf("statuses %q, want %q: no success on a head the gate will not merge", statuses, want)
 			}
 			if len(rec.got) != 0 {
@@ -190,16 +190,16 @@ func TestHeldUntilTheDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Action != ActionPerson || !res.Held || len(res.Decision.Reasons) != 1 || res.Decision.Reasons[0] != allow.ReasonChecksDeadline {
+	if res.Action != ActionPerson || !res.Held || len(res.Decision.Reasons) != 1 || res.Decision.Reasons[0] != allow.ReasonBaseChangedDeadline {
 		t.Errorf("result %+v, want a person's at the deadline", res)
 	}
 	if n := f.count("PUT", "/merge"); n != 0 {
 		t.Errorf("%d merge calls, want none", n)
 	}
-	if got, want := f.statuses(headA), "failure: needs a person: checks_deadline"; len(got) != 1 || got[0] != want {
+	if got, want := f.statuses(headA), "failure: needs a person: base_changed_deadline"; len(got) != 1 || got[0] != want {
 		t.Errorf("statuses %q, want only %q", got, want)
 	}
-	if len(rec.got) != 1 {
+	if len(rec.got) != 1 || !strings.Contains(rec.got[0].Body, "base_changed_deadline") {
 		t.Errorf("%d notifications, want 1: %+v", len(rec.got), rec.got)
 	}
 	body := f.gateComment(testPR)

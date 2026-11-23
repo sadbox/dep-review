@@ -52,10 +52,13 @@ Before it asks, the gate looks at what the default branch has changed
 since the commit the pull request branches from. If that includes a file
 the pull request changes, it does not ask: the facts are about the head
 on the base it had, and two edits of one lock file can merge without a
-conflict into a lock nobody proposed. The pull request waits. Dependabot
-usually rebuilds it within minutes, and the new head gets a run of its
-own; if not, it needs a person at the wait deadline, and a rebase asked
-of Dependabot or a merge by hand ends the wait sooner. A pull request
+conflict into a lock nobody proposed. The pull request waits
+(`base_changed`). Dependabot usually rebuilds it within minutes, and the
+new head gets a run of its own; if not, the owner is told, once for the
+head: at once for a security fix, otherwise at the first scheduled run a
+day after the hold began. The notification names the file and the
+comment that has Dependabot rebase. At the wait deadline it needs a
+person (`base_changed_deadline`). A pull request
 that is only behind merges as it is. The gate never rebases, updates or
 comments to bring a pull request up to date.
 
@@ -86,7 +89,8 @@ refresh, reread and publish have 2 h 45 min) and the time a job may wait
 for a runner or for the publishes ahead of it.
 
 Waiting for an age has no deadline. Waiting for a retry (a model read, a
-source that did not answer, a superseded Docker digest, required checks)
+source that did not answer, a superseded Docker digest, required checks,
+a merge held because the default branch changed a file of the pull request)
 ends `wait_deadline_days` after the latest time the update could have
 merged, or after the pull request was opened if that is later; then it is
 a person's. While neither time is known (GitHub and the registry's clock
@@ -610,8 +614,9 @@ and it then gets no status, comment or notification.
 - **Third-party text.** Everything a registry, a dependency or the model
   wrote reaches the comment only through one sanitiser, in code spans,
   with a length cap; it reaches logs only through a logger that escapes
-  control characters and workflow commands. Notifications and commit
-  statuses carry only the gate's own words.
+  control characters and workflow commands. Commit statuses carry only
+  the gate's own words, and so do notifications but for one thing: the
+  name of the file a held merge is held for, through the same sanitiser.
 - **The scheduled path.** refresh runs both the identity proof and the
   fetch in one unprivileged job, so publish takes neither on its word:
   it runs the proof again itself for every refreshed pull request and

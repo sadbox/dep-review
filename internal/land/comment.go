@@ -80,6 +80,12 @@ type marker struct {
 	Notified       []string `json:"notified"`
 	NotifiedFailed []string `json:"notified_failed"`
 	NotifiedUnread []string `json:"notified_unread"`
+	// NotifiedHeld lists the heads the owner was told about a merge the
+	// gate holds (Act, baseChanged), and HeldSince is when the hold of
+	// Head began: the first run that held it (spec section 11, amendment
+	// 78).
+	NotifiedHeld []string  `json:"notified_held"`
+	HeldSince    time.Time `json:"held_since"`
 	// Fingerprint is the reviewer's fingerprint every Cache entry was
 	// written under.
 	Fingerprint string `json:"fingerprint"`
@@ -137,17 +143,17 @@ type cached struct {
 // over. A run that decided replaces the verdicts and the first-seen times
 // with its own, which Decide made from old's (cacheEntries, dateUnseen).
 //
-// The count of scheduled asks and the status set are for one head: a new
-// head starts with neither.
+// The count of scheduled asks, the status set and when a hold began are
+// for one head: a new head starts with none of them.
 func (old marker) next(outcome Action, head string) marker {
 	mk := marker{
 		Outcome: outcome, Head: head,
-		Notified: old.Notified, NotifiedFailed: old.NotifiedFailed, NotifiedUnread: old.NotifiedUnread,
+		Notified: old.Notified, NotifiedFailed: old.NotifiedFailed, NotifiedUnread: old.NotifiedUnread, NotifiedHeld: old.NotifiedHeld,
 		Fingerprint: old.Fingerprint, Cache: old.Cache, FirstSeen: old.FirstSeen,
 		Forgot: old.Forgot,
 	}
 	if old.Head == head {
-		mk.Asks, mk.AskedAt, mk.Status = old.Asks, old.AskedAt, old.Status
+		mk.Asks, mk.AskedAt, mk.Status, mk.HeldSince = old.Asks, old.AskedAt, old.Status, old.HeldSince
 	}
 	return mk
 }
@@ -286,9 +292,9 @@ var widest = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", -
 func fitted(old marker, head, fingerprint string, firstSeen []seen, cache []cached) (kept []cached, forgot bool) {
 	m := old.next(ActionRefused, head)
 	m.Fingerprint, m.Cache, m.FirstSeen = fingerprint, cache, firstSeen
-	m.NotBefore, m.Deadline, m.Asks, m.AskedAt = widest, widest, maxAsks, widest
+	m.NotBefore, m.Deadline, m.Asks, m.AskedAt, m.HeldSince = widest, widest, maxAsks, widest, widest
 	m.Status = &lastStatus{State: "failure", Description: strings.Repeat("x", maxStatusDescription)}
-	for _, list := range []*[]string{&m.Notified, &m.NotifiedFailed, &m.NotifiedUnread} {
+	for _, list := range []*[]string{&m.Notified, &m.NotifiedFailed, &m.NotifiedUnread, &m.NotifiedHeld} {
 		*list = append(slices.Clone(*list), head)
 	}
 	m = m.fit()
@@ -335,7 +341,7 @@ func parseMarker(body string) (marker, bool) {
 		}
 		pins[s.Pin] = true
 	}
-	for _, list := range [][]string{m.Notified, m.NotifiedFailed, m.NotifiedUnread} {
+	for _, list := range [][]string{m.Notified, m.NotifiedFailed, m.NotifiedUnread, m.NotifiedHeld} {
 		if len(list) > maxNotified || slices.ContainsFunc(list, func(head string) bool { return !gh.ValidSHA(head) }) {
 			return marker{}, false
 		}
@@ -605,11 +611,11 @@ func lead(v view) string {
 }
 
 // heldLead is the lead for a merge the gate did not ask GitHub for (Act,
-// baseChanged). The decision is the one for a refusal over required
-// checks, and that reason's sentences say GitHub refused. It was not
-// asked, so this lead says in its own words what happened and what ends
-// the wait. It names Dependabot's command in no form Dependabot would
-// take for one: the gate does not ask for a rebase, a person may.
+// baseChanged). The decision is allow.BaseChanged's, whose reasons have
+// sentences of their own (spec section 11, amendment 78); this lead says
+// more: which file, and what ends the wait. It names Dependabot's
+// command in no form Dependabot would take for one: the gate does not ask
+// for a rebase, a person may, and the owner's notification spells it.
 func heldLead(v view) string {
 	what := fmt.Sprintf("GitHub lists only %d of the files the default branch has changed since the commit this pull request branches from, so the gate cannot tell whether one the pull request changes is among them",
 		compareFilesCap)
@@ -620,8 +626,12 @@ func heldLead(v view) string {
 	if v.res.Action == ActionWait {
 		state = "**Waiting, at most until " + stamp(v.res.Decision.Deadline) + ".**"
 	}
+	told := ""
+	if v.res.Action == ActionWait {
+		told = " The owner is told if Dependabot has not rebuilt it a day after the hold began, and at once for a security fix."
+	}
 	return state + " Every fact below holds and " + modelSaid(v) + ", but the gate did not ask GitHub to merge: " + what +
-		". The facts are about this head on the base it had; a merge now would put it on another.\n" +
+		". The facts are about this head on the base it had; a merge now would put it on another." + told + "\n" +
 		"\n**Way out:** Dependabot rebuilds most such pull requests by itself within minutes, and the new head gets a run of its own. " +
 		"If it has not, ask Dependabot to rebase the pull request, or look at what the merge would give and merge by hand. " +
 		"The gate does not rebase, update or comment to bring a pull request up to date.\n"
@@ -727,6 +737,8 @@ var reasonFact = map[allow.Reason]string{
 	allow.ReasonChecksPending:       "",
 	allow.ReasonVetoesForgotten:     "",
 	allow.ReasonScriptsOffChanged:   "",
+	allow.ReasonBaseChanged:         "",
+	allow.ReasonBaseChangedDeadline: "",
 }
 
 // failed finds the row a reason is about, and says whose fact it is: the

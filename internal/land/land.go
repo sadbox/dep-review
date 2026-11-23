@@ -6,8 +6,9 @@
 // gate's built-in policy. Act carries the answer out.
 //
 // Nothing in this package decides for a merge. An outcome is
-// allow.Decide's, or allow.ChecksRefused's after GitHub refused a merge
-// or this package did not ask for it; what this package adds is only ever
+// allow.Decide's, or allow.ChecksRefused's after GitHub refused a merge,
+// or allow.BaseChanged's or allow.ScriptsOffChanged's when this package
+// did not ask for it; what this package adds is only ever
 // "not yet" (the default branch changed a file the pull request changes:
 // baseChanged), "nothing was done" (the pull request changed), "GitHub
 // refused" (reported, never retried as if it were a wait) or "the run

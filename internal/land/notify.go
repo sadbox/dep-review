@@ -16,7 +16,10 @@ import (
 // Message is a notification. Every part is a fixed sentence of the gate's
 // filled with a validated repository, a number, a reason from allow's
 // closed set and the run's URL. Nothing a dependency, a registry, GitHub
-// or the model wrote is ever in one.
+// or the model wrote is ever in one, but for one thing: the name of the
+// file a held merge is held for, GitHub's, which whoever can push to the
+// default branch chose. It goes in as the comment shows it (inline): one
+// capped line, with nothing GitHub or a bot would act on.
 type Message struct {
 	// Title names the pull request.
 	Title string
@@ -47,6 +50,23 @@ func notification(cfg Config, pr wire.PullRequest, res Result) (Message, bool) {
 		return message(cfg, pr.Number, " needs a person."), true
 	}
 	return Message{}, false
+}
+
+// heldMessage is the notification about a merge the gate holds (spec
+// section 11, amendment 78): the file, and Dependabot's command, which
+// the comment must not hold. fix says the pull request is a security fix,
+// told at once; any other waited a day.
+func heldMessage(cfg Config, number int, file string, fix bool) Message {
+	what := "the default branch has changed more files than GitHub lists since the pull request's base, so the gate cannot tell whether one the pull request changes is among them"
+	if file != "" {
+		what = "the default branch has changed `" + inline(file) + "`, which the pull request changes too"
+	}
+	when := " It has not been rebuilt for a day."
+	if fix {
+		when = " It is a security fix. Dependabot rebuilds most such pull requests by itself within minutes."
+	}
+	return message(cfg, number, " waits: "+what+", so the gate did not ask GitHub to merge."+when+
+		" To have Dependabot rebuild it, comment `@dependabot rebase` on the pull request; or merge by hand."+runRef(cfg))
 }
 
 // message is a notification about a pull request: its name, then rest.

@@ -2294,3 +2294,34 @@ func TestOwnRepository(t *testing.T) {
 		t.Error("a policy with no own list has an own repository")
 	}
 }
+
+// TestBaseChanged: a merge publish held because the default branch changed
+// one of the pull request's files waits for a reason of its own, and is a
+// person's at the very deadline ChecksRefused would give it (spec section
+// 11, amendment 78).
+func TestBaseChanged(t *testing.T) {
+	p := testPolicy()
+	f := pr(GoModules, update(40*day))
+	f.Opened = t0.Add(-day)
+	d := Decide(f, p, t0)
+	wantOutcome(t, d, Merge)
+	for _, now := range []time.Time{t0, d.Deadline.Add(-1), d.Deadline} {
+		got, checks := BaseChanged(d, now), ChecksRefused(d, now)
+		want := map[Outcome]Reason{Wait: ReasonBaseChanged, Person: ReasonBaseChangedDeadline}[checks.Outcome]
+		wantOutcome(t, got, checks.Outcome, want)
+		if !got.Deadline.Equal(checks.Deadline) || !got.NotBefore.Equal(checks.NotBefore) || len(got.PerUpdate) != 1 {
+			t.Fatalf("at %s: %+v, and ChecksRefused gives %+v", now, got, checks)
+		}
+	}
+	other := Decide(pr(GoModules, update(hour)), p, t0)
+	if got := BaseChanged(other, t0.Add(400*day)); !reflect.DeepEqual(got, other) {
+		t.Fatalf("BaseChanged changed a %q decision", other.Outcome)
+	}
+	// Dependabot acts on a command in a comment, and a reason's sentences
+	// are written into the gate's comment.
+	for _, r := range []Reason{ReasonBaseChanged, ReasonBaseChangedDeadline} {
+		if s := r.Explain() + r.Hint(); strings.Contains(s, "@") {
+			t.Errorf("%s: %q", r, s)
+		}
+	}
+}

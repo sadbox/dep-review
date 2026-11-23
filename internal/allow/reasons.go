@@ -66,11 +66,12 @@ const (
 
 // Reasons that come from waiting too long. All are Person.
 const (
-	ReasonReadDeadline       Reason = "read_deadline"
-	ReasonSourceDeadline     Reason = "source_deadline"
-	ReasonSupersededDeadline Reason = "superseded_deadline"
-	ReasonChecksDeadline     Reason = "checks_deadline"
-	ReasonScriptsOffDeadline Reason = "scripts_off_deadline"
+	ReasonReadDeadline        Reason = "read_deadline"
+	ReasonSourceDeadline      Reason = "source_deadline"
+	ReasonSupersededDeadline  Reason = "superseded_deadline"
+	ReasonChecksDeadline      Reason = "checks_deadline"
+	ReasonScriptsOffDeadline  Reason = "scripts_off_deadline"
+	ReasonBaseChangedDeadline Reason = "base_changed_deadline"
 )
 
 // Reasons to wait. All are Wait.
@@ -84,6 +85,10 @@ const (
 	// because the default branch's root .npmrc is no longer the file the
 	// facts rest on (ScriptsOffChanged).
 	ReasonScriptsOffChanged Reason = "scripts_off_changed"
+	// ReasonBaseChanged: publish did not ask GitHub to merge, because the
+	// default branch has changed a file the pull request changes since the
+	// commit it branches from (BaseChanged).
+	ReasonBaseChanged Reason = "base_changed"
 )
 
 // The ways out that several reasons share.
@@ -216,6 +221,9 @@ var reasonTable = []reasonText{
 	{ReasonScriptsOffDeadline, Person,
 		"The default branch's root .npmrc was still not the file that turns install scripts off, which this pull request's facts rest on, when the wait deadline passed. The update's install scripts and build files were not compared.",
 		"Ask Dependabot to rebase the pull request, so that the new head is evaluated on its own, or compare the update's install scripts by hand and merge or close the pull request."},
+	{ReasonBaseChangedDeadline, Person,
+		"The default branch had changed a file this pull request changes, since the commit the pull request branches from, and the pull request had not been rebuilt when the wait deadline passed. Every other fact held, and the gate did not ask GitHub to merge: the facts are about the head on the base it had.",
+		"Ask Dependabot to rebase the pull request, so that the new head is evaluated on its own, or look at what the merge would give and merge by hand."},
 	{ReasonAge, Wait,
 		"The new version has not been public for long enough yet.",
 		"Nothing to do: the gate looks again after the time shown." + sooner},
@@ -234,6 +242,9 @@ var reasonTable = []reasonText{
 	{ReasonScriptsOffChanged, Wait,
 		"The default branch's root .npmrc is no longer the file that turns install scripts off. This pull request's facts rest on that file as it was at the commit the pull request records, so the update's install scripts and build files were not compared, and the gate did not ask GitHub to merge.",
 		"Once Dependabot rebuilds the pull request (ask it to rebase if it does not), the new head is evaluated on its own, with its install inputs compared. If the file is put back, this head merges at the next run."},
+	{ReasonBaseChanged, Wait,
+		"The default branch has changed a file this pull request changes, since the commit the pull request branches from, so the gate did not ask GitHub to merge: the facts are about the head on the base it had, and a merge now would put it on another.",
+		"Dependabot rebuilds most such pull requests by itself, and the new head is evaluated on its own. If it has not, ask Dependabot to rebase the pull request, or merge by hand."},
 }
 
 // Reasons returns the closed set, in a fixed order.
