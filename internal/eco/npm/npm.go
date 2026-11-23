@@ -116,12 +116,14 @@ func (f Fetcher) Fetch(ctx context.Context, env fetch.Env) (fetch.Result, error)
 	}
 	summary.WriteString("## Downloads (registry.npmjs.org)\n\n")
 	for i, c := range work {
-		fs, err := f.verifyAndDiff(ctx, env, home, filepath.Join(env.Scratch, "npm", fmt.Sprint(i)), c, &summary)
+		fs, ds, err := f.verifyAndDiff(ctx, env, home, filepath.Join(env.Scratch, "npm", fmt.Sprint(i)), c, &summary, len(res.Diffs))
 		if err != nil {
 			return fetch.Result{}, err
 		}
 		res.Findings = append(res.Findings, fs...)
+		res.Diffs = append(res.Diffs, ds...)
 	}
+	res.Findings = append(res.Findings, ecoutil.ReadingLimits("npm", res.Diffs, 0)...)
 	if err := env.Evidence.Add("npm-summary.md", "npm change set, integrity verification and checks run by the gate", summary.Bytes()); err != nil {
 		return fetch.Result{}, err
 	}
@@ -513,14 +515,14 @@ type side struct {
 	pkg  manifest // package.json from the tarball
 }
 
-func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir string, c change, summary *bytes.Buffer) ([]model.Finding, error) {
+func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir string, c change, summary *bytes.Buffer, n int) ([]model.Finding, []model.DiffFile, error) {
 	u := c.update
 	var findings []model.Finding
 	add := func(route model.Route, code, detail string) {
 		findings = append(findings, model.Finding{Code: code, Route: route, Update: u.Name, Detail: u.Name + ": " + detail})
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var sides [2]*side
 	for i, s := range []struct {
@@ -534,31 +536,31 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 		doc, _, err := f.versionDoc(ctx, env, u.Name, s.ver)
 		if errors.Is(err, gh.ErrNotFound) {
 			add(model.RouteHuman, "npm.not-on-registry", fmt.Sprintf("%s is not on %s (unpublished?)", s.ver, registryHost))
-			return findings, nil
+			return findings, nil, nil
 		}
 		if errors.Is(err, errBadName) {
 			add(model.RouteRefuse, "npm.bad-name", s.ver+": "+err.Error())
-			return findings, nil
+			return findings, nil, nil
 		}
 		if errors.Is(err, strictjson.ErrRejected) {
 			add(model.RouteRefuse, "npm.registry-json-ambiguous", fmt.Sprintf("%s: registry document: %v", s.ver, err))
-			return findings, nil
+			return findings, nil, nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		want, err := sriSHA512(s.entry.Integrity)
 		if errors.Is(err, errWeakIntegrity) {
 			add(model.RouteHuman, "npm.weak-integrity", s.ver+": lockfile has no sha512 integrity; not verified")
-			return findings, nil
+			return findings, nil, nil
 		}
 		if err != nil {
 			add(model.RouteRefuse, "npm.integrity-ambiguous", s.ver+": lockfile "+err.Error())
-			return findings, nil
+			return findings, nil, nil
 		}
 		if reg, err := sriSHA512(doc.Dist.Integrity); err != nil || !bytes.Equal(reg, want) {
 			add(model.RouteRefuse, "npm.integrity-mismatch", fmt.Sprintf("%s: lockfile integrity %s differs from the registry's %s", s.ver, s.entry.Integrity, doc.Dist.Integrity))
-			return findings, nil
+			return findings, nil, nil
 		}
 		// Download what the package manager downloads (the lockfile's
 		// resolved URL), and only if it is the registry's own tarball for
@@ -566,41 +568,41 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 		dl, regForm, frag := tarballURL(s.entry, c.lockKind)
 		if regForm != doc.Dist.Tarball {
 			add(model.RouteRefuse, "npm.resolved-mismatch", fmt.Sprintf("%s: lockfile resolved %q is not the registry's tarball %q", s.ver, s.entry.Resolved, doc.Dist.Tarball))
-			return findings, nil
+			return findings, nil, nil
 		}
 		if f.Registry == "" {
 			if err := ecoutil.CheckHost(dl, registryHost, yarnRegistryHost); err != nil {
 				add(model.RouteRefuse, "npm.tarball-off-registry", s.ver+": "+err.Error())
-				return findings, nil
+				return findings, nil, nil
 			}
 		}
 		if frag != "" && frag != doc.Dist.Shasum {
 			add(model.RouteRefuse, "npm.integrity-mismatch", fmt.Sprintf("%s: yarn.lock sha1 fragment %s differs from the registry's shasum %s", s.ver, frag, doc.Dist.Shasum))
-			return findings, nil
+			return findings, nil, nil
 		}
 		tgz := filepath.Join(dir, s.label+".tgz")
 		if err := ecoutil.GetFile(ctx, env.HTTP, dl, tgz, ecoutil.ArtifactLimit); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		data, err := os.ReadFile(tgz)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		sum := sha512.Sum512(data)
 		if !bytes.Equal(sum[:], want) {
 			add(model.RouteRefuse, "npm.integrity-mismatch", fmt.Sprintf("%s: downloaded tarball sha512 does not match the lockfile", s.ver))
-			return findings, nil
+			return findings, nil, nil
 		}
 		if doc.Dist.Shasum != "" {
 			if s1 := sha1.Sum(data); fmt.Sprintf("%x", s1) != doc.Dist.Shasum {
 				add(model.RouteRefuse, "npm.integrity-mismatch", s.ver+": tarball sha1 differs from the registry's shasum")
-				return findings, nil
+				return findings, nil, nil
 			}
 		}
 		tree, err := ecoutil.ExtractTarGz(tgz, filepath.Join(dir, s.label), true)
 		if err != nil {
 			add(model.RouteHuman, "npm.bad-tarball", fmt.Sprintf("%s: %v", s.ver, err))
-			return findings, nil
+			return findings, nil, nil
 		}
 		if i == 1 && len(tree.Rejected) > 0 {
 			add(model.RouteHuman, "npm.unsafe-tarball-entry", fmt.Sprintf("%s: tarball has entries the gate does not extract: %s", s.ver, ecoutil.List(tree.Rejected, 10)))
@@ -620,7 +622,7 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 	}
 	old, cur := sides[0], sides[1]
 	if cur == nil {
-		return findings, nil
+		return findings, nil, nil
 	}
 	for _, fd := range checkPackage(old, cur) {
 		add(fd.Route, fd.Code, fd.Detail)
@@ -632,20 +634,28 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home, dir str
 	}
 	diffs, cut, err := ecoutil.DiffTrees(ctx, home, dir, oldRel, "new")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	text, _ := ecoutil.JoinDiffs(diffs, nil)
-	if cut {
-		text = append(text, "\n[dep-review: diff exceeded the gate's read limit]\n"...)
+	// Every file is required: npm installs all of a package's files, and
+	// any of them can be required at run time.
+	var oldTree *ecoutil.Tree
+	if old != nil {
+		oldTree = old.tree
 	}
-	if len(text) == 0 {
-		text = []byte("(the package trees are identical)\n")
+	key := u.Name + " " + ecoutil.OrNew(u.From) + " -> " + u.To
+	nd := ecoutil.NavDiffs{
+		Eco: "npm", Key: key, Update: u.Name, What: "package",
+		Name: func(suffix string) string {
+			return "npm" + u.Directory + "/" + u.Name + "@" + ecoutil.OrNew(u.From) + "..." + u.To + "." + suffix
+		},
+		Desc:  fmt.Sprintf("index of the per-file diffs of npm package %s %s -> %s: read every required one and list its ID in examined", u.Name, ecoutil.OrNew(u.From), u.To),
+		Diffs: diffs, Cut: cut, Old: oldTree, Cur: cur.tree,
 	}
-	name := "npm" + u.Directory + "/" + u.Name + "@" + ecoutil.OrNew(u.From) + "..." + u.To + ".diff"
-	if err := env.Evidence.AddUntrusted(name, fmt.Sprintf("diff of npm package %s %s -> %s (third-party code)", u.Name, ecoutil.OrNew(u.From), u.To), text); err != nil {
-		return nil, err
+	ds, fs, err := nd.Write(env, n)
+	if err != nil {
+		return nil, nil, err
 	}
-	return findings, nil
+	return append(findings, fs...), ds, nil
 }
 
 func human(code, update, detail string) model.Finding {

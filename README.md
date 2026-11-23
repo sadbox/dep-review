@@ -107,6 +107,16 @@ What is flagged:
 - a changed binary under `testdata/` (never built by itself) when the new
   tree embeds it, or when the module has cgo, C or assembly sources or a
   `.syso` (which can link or include any file without naming it);
+- in such a module, any other changed text file except `go.mod`
+  (`gomod.includable-changed`), whatever its extension. Assembly, C or
+  cgo can `#include` or `.incbin` it by name, so it can be compiled code.
+  A `.go` file (built, unbuilt or a test) counts only when an include
+  names it, or any include is computed (a macro, `-include`); a `go.sum`
+  counts unless every line is a hash line, since cmd/go never reads a
+  dependency's go.sum. A deleted file counts too, because the same
+  include may now find another file of that name. It routes like
+  assembly: to a person, with the review as triage, or reviewed for
+  well-known modules;
 - a file the new tree newly embeds, changed or not: what each package
   embeds is `go list`'s `EmbedFiles` in both trees (the union over every
   `go tool dist list` platform, cgo on and off), compared per package. An
@@ -178,8 +188,8 @@ checker resolved. On aws-sdk-go with its core `aws` package changed, all
 
 #### Navigable diffs
 
-A Go module's diff is split per file, and each file's diff is its own
-evidence file. The parts have caps of their own: 2 MB each, 50 MB
+A Go module's, npm package's or Python package's diff is split per file,
+and each file's diff is its own evidence file. The parts have caps of their own: 2 MB each, 50 MB
 together. A gate-written `diffs.md` index lists every changed file with an
 ID. Every file is required reading unless the go command's own rules say
 no consumer build reads it: a `_test.go` file that nothing embeds, in a
@@ -197,8 +207,16 @@ required ID, or a person decides. A person also decides when:
 Parts are named by ID. The fetch job ships the evidence's checksums as a
 `SHA256SUMS` manifest inside the artifact and outputs only that file's
 sum, which review and publish verify first.
-The flagged-items file uses the same caps. Other ecosystems keep the
-single-file limits (400 KB a file, 4 MB in all).
+The flagged-items file uses the same caps. For npm and Python packages every file is required, since whatever is
+installed can be loaded. A diff that is binary on either side goes to a person
+(`<eco>.binary-diff`), since git shows no content for it. Lines longer
+than 2,000 bytes are wrapped in the part after escaping, because the
+reviewer's reader cuts longer ones. A continuation starts with `~` and
+the line's own diff marker; git starts no diff line with `~`, so source
+text cannot pose as one. A lone CR, and U+2028, U+2029 and U+0085, are
+escaped like control characters, since JavaScript or Python end a line
+there and the reader does not. Actions and Docker evidence keep the single-file
+limits (400 KB a file, 4 MB in all).
 
 #### Split reviews
 
@@ -240,6 +258,8 @@ that commit, as the go command does, and `dirhash` must give the go.sum
 hash. A mismatch is `gomod.upstream-mismatch`, which goes to a person.
 When upstream history is verified, a benign item that has commits listed
 counts only if the verdict cites at least one of them and nothing else.
+The history is read in pieces like the flagged-items file, up to 1 MB,
+and counts toward the 4 MB of required reading.
 The reviewer is told to read each message against the diff, since the
 repository's owner wrote it. A message that doesn't fit makes the item
 unclear.
@@ -250,7 +270,7 @@ these hold:
 - the proxy recorded no origin, or the repository isn't git;
 - the host isn't github.com, go.googlesource.com or gitlab.com;
 - the two versions share no history within 1000 commits;
-- more than 150 commits lie between them;
+- more than 400 commits lie between them;
 - the attachment would pass its size budget;
 - the fetch fails.
 

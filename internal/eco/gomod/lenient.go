@@ -45,7 +45,7 @@ func wellKnownModule(path string) bool {
 }
 
 // lenientCodes are the person-routed codes leniency puts on review.
-var lenientCodes = map[string]bool{codeCgo: true, codeCSource: true, codeAsm: true}
+var lenientCodes = map[string]bool{codeCgo: true, codeCSource: true, codeAsm: true, codeIncludable: true}
 
 // lenientCode reports that leniency puts code's finding on review: one of
 // lenientCodes, or codeIncomplete when every item not shown in full is a
