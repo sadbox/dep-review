@@ -197,6 +197,22 @@ func ScriptsOffChanged(d Decision, now time.Time) Decision {
 	return notMerged(d, now, ReasonScriptsOffChanged, ReasonScriptsOffDeadline)
 }
 
+// VetoesForgotten is the decision for a pull request on which the gate
+// had to give up a veto it recorded: its comment holds no more (spec
+// section 11, amendment 71). It is a person's whatever d was, with
+// ReasonVetoesForgotten first and a person's other reasons after it.
+func VetoesForgotten(d Decision) Decision {
+	out := d
+	out.PerUpdate = append([]UpdateDecision(nil), d.PerUpdate...)
+	reasons := []Reason{ReasonVetoesForgotten}
+	if d.Outcome == Person {
+		reasons = appendNew(reasons, d.Reasons...)
+	}
+	out.Outcome, out.Reasons = Person, reasons
+	out.NotBefore, out.Deadline = time.Time{}, time.Time{}
+	return out
+}
+
 // notMerged turns a merge into a wait for one reason, or a person's for
 // another at the deadline.
 func notMerged(d Decision, now time.Time, wait, deadline Reason) Decision {

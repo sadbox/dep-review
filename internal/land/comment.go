@@ -31,9 +31,10 @@ const (
 	// maxNotified is how many heads the marker remembers a notification
 	// for.
 	maxNotified = 20
-	// maxCached is how many verdicts the marker remembers. One that does
-	// not fit is a read the scheduled job has no answer for, and asks the
-	// model about again.
+	// maxCached is how many verdicts the marker remembers. A clean one
+	// that does not fit is a read the scheduled job has no answer for, and
+	// asks the model about again; a veto that does not fit is recorded as
+	// forgotten (marker.Forgot).
 	maxCached = 100
 	// maxAsks bounds the marker's count of scheduled asks. The gaps
 	// between asks double (askDue), so a real count stays far below it.
@@ -96,6 +97,15 @@ type marker struct {
 	// that was not is asked about after a gap that doubles (askDue).
 	Asks    int       `json:"asks"`
 	AskedAt time.Time `json:"asked_at"`
+	// Forgot says that a run had to give up a whole veto: more vetoes
+	// than the marker holds even without what the model wrote (fit), or
+	// than maxCached (cacheEntries). A veto that is not remembered would be
+	// asked about again, and the model may answer otherwise the second
+	// time (spec section 11, amendments 63 and 71), so the pull request is
+	// a person's from then on (allow.VetoesForgotten). next carries it
+	// over and nothing clears it: not a new head, not another reviewer
+	// fingerprint, not a run with no veto.
+	Forgot bool `json:"vetoes_forgotten"`
 }
 
 // cached is one remembered verdict: wire.Verdict without the fingerprint,
@@ -117,6 +127,7 @@ func (old marker) next(outcome Action, head string) marker {
 		Outcome: outcome, Head: head,
 		Notified: old.Notified, NotifiedFailed: old.NotifiedFailed, NotifiedUnread: old.NotifiedUnread,
 		Fingerprint: old.Fingerprint, Cache: old.Cache, FirstSeen: old.FirstSeen,
+		Forgot: old.Forgot,
 	}
 	if old.Head == head {
 		mk.Asks, mk.AskedAt = old.Asks, old.AskedAt
@@ -155,21 +166,68 @@ func (m marker) askDue(head string, now time.Time) bool {
 // text may be able to end the HTML comment it sits in.
 var markerRE = regexp.MustCompile(`^<!-- dep-review:v2 ([A-Za-z0-9_-]+) -->`)
 
-// String is the marker line. Cache entries are dropped from the end until
-// it fits; cacheEntries puts the vetoes first, so they are the last to
-// go.
+// String is the marker line. Decide already cut the cache to what the
+// marker holds (fitted); fit here is the last resort for a marker that
+// grew after that, and records a veto it gives up as Decide would.
 func (m marker) String() string {
-	for {
-		b, err := json.Marshal(m)
-		if s := base64.RawURLEncoding.EncodeToString(b); err == nil && (len(s) <= maxMarkerBytes || len(m.Cache) == 0) {
-			return "<!-- dep-review:v2 " + s + " -->"
-		}
-		if len(m.Cache) == 0 {
-			// What is left is commit IDs, times and the gate's own words.
-			panic("land: marker: " + err.Error())
-		}
-		m.Cache = m.Cache[:len(m.Cache)-1]
+	b, err := json.Marshal(m.fit())
+	if err != nil {
+		// What is left is commit IDs, times and the gate's own words.
+		panic("land: marker: " + err.Error())
 	}
+	return "<!-- dep-review:v2 " + base64.RawURLEncoding.EncodeToString(b) + " -->"
+}
+
+// fit is m with its cache cut to what maxMarkerBytes holds. It gives up
+// clean entries first, from the end, which cost only another question;
+// then what the model wrote of each veto, from the last veto back, which
+// the next comment no longer quotes: the key, the read and the category
+// stay, and so does the veto; and only then whole vetoes, from the end,
+// which it records in Forgot (spec section 11, amendment 71). m itself is
+// not changed. A marker that does not fit with no cache at all is
+// returned as it is.
+func (m marker) fit() marker {
+	m.Cache = slices.Clone(m.Cache)
+	full := func() bool {
+		b, err := json.Marshal(m)
+		return err == nil && base64.RawURLEncoding.EncodedLen(len(b)) > maxMarkerBytes
+	}
+	for i := len(m.Cache) - 1; i >= 0 && full(); i-- {
+		if m.Cache[i].Veto == nil {
+			m.Cache = slices.Delete(m.Cache, i, i+1)
+		}
+	}
+	for i := len(m.Cache) - 1; i >= 0 && full(); i-- {
+		if v := m.Cache[i].Veto; v != nil && (len(v.Quotes) > 0 || v.Notes != "") {
+			m.Cache[i].Veto = &allow.Veto{Category: v.Category, Quotes: []string{}}
+		}
+	}
+	for len(m.Cache) > 0 && full() {
+		m.Cache = m.Cache[:len(m.Cache)-1]
+		m.Forgot = true
+	}
+	return m
+}
+
+// widest is a time whose text is as long as a time in a marker can be.
+var widest = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", -(12*60+30)*60))
+
+// fitted is the cache Decide keeps: cache as the largest marker that Act,
+// or a later run that only adds to the marker (Failed, Asked, Tell,
+// Expired), can write for this evaluation holds it. That marker has old's
+// lists with one more head in each, every time at its widest and the most
+// asks, so that what Decide believes is what is written and String has
+// nothing left to cut. forgot is Forgot of that marker: old's, or a veto
+// given up here.
+func fitted(old marker, head, fingerprint string, firstSeen []seen, cache []cached) (kept []cached, forgot bool) {
+	m := old.next(ActionRefused, head)
+	m.Fingerprint, m.Cache, m.FirstSeen = fingerprint, cache, firstSeen
+	m.NotBefore, m.Deadline, m.Asks, m.AskedAt = widest, widest, maxAsks, widest
+	for _, list := range []*[]string{&m.Notified, &m.NotifiedFailed, &m.NotifiedUnread} {
+		*list = append(slices.Clone(*list), head)
+	}
+	m = m.fit()
+	return m.Cache, m.Forgot
 }
 
 // parseMarker reads the marker of a comment body. Anything that is not
@@ -243,8 +301,10 @@ func (m marker) verdicts() wire.Verdicts {
 // request no longer has is kept as well: Dependabot can rewrite a pull
 // request to other versions and back. The vetoes come first, in the order
 // of the updates and then of old, so that a marker with more than it
-// holds loses clean entries, which only cost another question.
-func cacheEntries(f wire.Facts, v wire.Verdicts, old marker, fingerprint string) []cached {
+// holds loses clean entries, which only cost another question (fit).
+// forgot says that there were more vetoes than maxCached, and the last
+// ones were given up.
+func cacheEntries(f wire.Facts, v wire.Verdicts, old marker, fingerprint string) (entries []cached, forgot bool) {
 	answers := map[string]wire.Verdict{}
 	for _, verdict := range v.Verdicts {
 		if verdict.Fingerprint == fingerprint {
@@ -281,7 +341,7 @@ func cacheEntries(f wire.Facts, v wire.Verdicts, old marker, fingerprint string)
 		}
 	}
 	out := append(vetoes, clean...)
-	return out[:min(len(out), maxCached)]
+	return out[:min(len(out), maxCached)], len(vetoes) > maxCached
 }
 
 // cut keeps the first maxCachedText bytes of s, as valid UTF-8.
@@ -596,6 +656,7 @@ var reasonFact = map[allow.Reason]string{
 	allow.ReasonSourceUnavailable:   answerUnavailable,
 	allow.ReasonSuperseded:          "Superseded",
 	allow.ReasonChecksPending:       "",
+	allow.ReasonVetoesForgotten:     "",
 	allow.ReasonScriptsOffChanged:   "",
 }
 

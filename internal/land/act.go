@@ -182,6 +182,7 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	// from what the comment remembered: no veto and no time is lost here.
 	mk := old.next(res.Action, pr.Head)
 	mk.Fingerprint, mk.Cache, mk.FirstSeen = ev.fingerprint, ev.cache, ev.firstSeen
+	mk.Forgot = mk.Forgot || ev.forgot
 	if res.Action == ActionWait {
 		mk.NotBefore, mk.Deadline = res.Decision.NotBefore, res.Decision.Deadline
 	}

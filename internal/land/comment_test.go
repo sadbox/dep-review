@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -368,9 +369,9 @@ func TestMarkerRejected(t *testing.T) {
 	}
 }
 
-// TestMarkerFits: the marker drops cache entries from the end before it
-// outgrows its budget, and the comment stays under GitHub's limit however
-// many updates a pull request has.
+// TestMarkerFits: the marker gives up cache entries before it outgrows its
+// budget (TestMarkerKeepsVetoes has the order), and the comment stays
+// under GitHub's limit however many updates a pull request has.
 func TestMarkerFits(t *testing.T) {
 	m := marker{Outcome: ActionWait, Head: headA, Fingerprint: strings.Repeat("f", 64)}
 	long := strings.Repeat("q", maxCachedText)
@@ -383,10 +384,10 @@ func TestMarkerFits(t *testing.T) {
 		t.Fatalf("marker line of %d bytes", len(line))
 	}
 	got, ok := parseMarker(line)
-	if !ok || len(got.Cache) == 0 || len(got.Cache) >= maxCached {
-		t.Fatalf("read back %d cache entries (ok %t), want some and not all", len(got.Cache), ok)
+	if !ok || len(got.Cache) == 0 || len(got.Cache) >= maxCached || !got.Forgot {
+		t.Fatalf("read back %d cache entries (ok %t, forgot %t), want some and not all, and the vetoes given up said", len(got.Cache), ok, got.Forgot)
 	}
-	if !reflect.DeepEqual(got.Cache, m.Cache[:len(got.Cache)]) {
+	if !slices.Equal(keys(got.Cache), keys(m.Cache[:len(got.Cache)])) {
 		t.Error("the entries kept are not the first ones")
 	}
 	if len(m.Cache) != maxCached {
@@ -480,7 +481,7 @@ func TestCacheEntries(t *testing.T) {
 			[]cached{{Key: keyC, Read: allow.ReadPartial}, {Key: keyA, Read: allow.ReadFull}}},
 	}
 	for _, tc := range tests {
-		got := cacheEntries(tc.facts, wire.Verdicts{Version: wire.Version, Verdicts: tc.verdicts}, marker{}, reviewer)
+		got, _ := cacheEntries(tc.facts, wire.Verdicts{Version: wire.Version, Verdicts: tc.verdicts}, marker{}, reviewer)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
@@ -529,7 +530,7 @@ func TestCacheEntries(t *testing.T) {
 				Veto: &allow.Veto{Category: "obfuscation", Quotes: []string{}}}}},
 			want: []cached{{Key: keyA, Read: allow.ReadFull, Veto: short}}},
 	} {
-		got := cacheEntries(tc.facts, wire.Verdicts{Version: wire.Version, Verdicts: tc.verdicts}, tc.old, reviewer)
+		got, _ := cacheEntries(tc.facts, wire.Verdicts{Version: wire.Version, Verdicts: tc.verdicts}, tc.old, reviewer)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
@@ -547,9 +548,9 @@ func TestCacheEntries(t *testing.T) {
 		}
 		full = append(full, v)
 	}
-	got := cacheEntries(prepared(keys...), wire.Verdicts{Version: wire.Version, Verdicts: full}, marker{}, reviewer)
-	if len(got) != maxCached {
-		t.Fatalf("%d entries, want %d", len(got), maxCached)
+	got, forgot := cacheEntries(prepared(keys...), wire.Verdicts{Version: wire.Version, Verdicts: full}, marker{}, reviewer)
+	if len(got) != maxCached || forgot {
+		t.Fatalf("%d entries, forgot %t; want %d and no veto given up", len(got), forgot, maxCached)
 	}
 	for i, c := range got {
 		if (c.Veto != nil) != (i < 5) {

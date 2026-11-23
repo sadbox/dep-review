@@ -58,6 +58,12 @@ const (
 	ReasonFirstSeenUnknown Reason = "first_seen_unknown"
 )
 
+// A reason that concerns the gate's own memory of the pull request. It is
+// Person (VetoesForgotten).
+const (
+	ReasonVetoesForgotten Reason = "vetoes_forgotten"
+)
+
 // Reasons that come from waiting too long. All are Person.
 const (
 	ReasonReadDeadline       Reason = "read_deadline"
@@ -192,6 +198,9 @@ var reasonTable = []reasonText{
 	{ReasonFirstSeenUnknown, Person,
 		"When the new version became public could not be established by a clock its publisher cannot set.",
 		rerun},
+	{ReasonVetoesForgotten, Person,
+		"The gate recorded more vetoes on this pull request than its comment can remember, and gave some of them up. A veto it does not remember would be asked about again, so this pull request needs a person from now on, whatever later runs find.",
+		"Look at the vetoes in this and earlier comments, then merge or close the pull request by hand."},
 	{ReasonReadDeadline, Person,
 		"The update's code had still not been read when the wait deadline passed.",
 		rerun},

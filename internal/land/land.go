@@ -140,6 +140,7 @@ type Evaluation struct {
 	file        wire.Facts // for the comment: the prepared reads, the time gathered
 	fingerprint string     // the reviewer's
 	cache       []cached   // the verdicts worth remembering
+	forgot      bool       // a veto was given up, by this run or before (marker.Forgot)
 	// stood has the content keys whose veto is one the gate's comment
 	// remembered and this run's verdicts file does not repeat.
 	stood     map[string]bool
@@ -233,7 +234,13 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 	dateUnseen(&ev, old.FirstSeen)
 
 	ev.Decision = allow.Decide(ev.Facts, policy, ev.now)
-	ev.cache = cacheEntries(facts, verdicts, old, ev.fingerprint)
+	cache, cut := cacheEntries(facts, verdicts, old, ev.fingerprint)
+	ev.cache, ev.forgot = fitted(old, ev.PullRequest.Head, ev.fingerprint, ev.firstSeen, cache)
+	if ev.forgot = ev.forgot || cut; ev.forgot {
+		// A veto the gate cannot remember would be asked about again
+		// (spec section 11, amendment 71).
+		ev.Decision = allow.VetoesForgotten(ev.Decision)
+	}
 	return ev, nil
 }
 
