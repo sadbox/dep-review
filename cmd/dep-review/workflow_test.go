@@ -375,6 +375,12 @@ func TestArtifactsVerified(t *testing.T) {
 			}
 		}
 	}
+	// The manifest refresh puts beside the pull requests' directories is
+	// the one file publish skips there (sumsFile).
+	if !strings.Contains(jobs["refresh"], `mv "$RUNNER_TEMP/`+sumsFile+`" ./`+sumsFile+"\n") ||
+		!strings.Contains(stepOf(t, jobs["publish"], "Verify the refreshed artifact"), "sha256sum --check --strict --quiet ./"+sumsFile+"\n") {
+		t.Errorf("refresh does not write, or publish does not check, the manifest %s", sumsFile)
+	}
 	// publish downloads these artifacts and no other.
 	if !strings.Contains(jobs["publish"], `pattern: "{gate-bin,classification,facts,verdicts,refreshed}"`) {
 		t.Error("publish's download pattern changed; so must this test")

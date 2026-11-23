@@ -128,15 +128,31 @@ func TestPublishRefreshed(t *testing.T) {
 		})
 	}
 
+	// The artifact as the publish job has it: the directories, and the
+	// checksum manifest the refresh job put beside them.
+	t.Run("the manifest is no pull request", func(t *testing.T) {
+		api := &fakeAPI{pull: pullJSON("closed", "dependabot[bot]", testHead)}
+		in := t.TempDir()
+		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
+		writeFile(t, filepath.Join(in, "refreshed", "SHA256SUMS"), strings.Repeat("0", 64)+"  ./7/facts.json\n")
+		if err := publishRefreshed(context.Background(), api.config(t), in, nil); err != nil {
+			t.Errorf("err = %v", err)
+		}
+		if got := strings.Join(api.calls, ", "); got != "GET pulls/7" {
+			t.Errorf("requests %q, want #7 looked at", got)
+		}
+	})
 	t.Run("one that is refused does not stop the others", func(t *testing.T) {
 		api := &fakeAPI{pull: pullJSON("closed", "dependabot[bot]", testHead)}
 		in := t.TempDir()
 		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
 		writeFacts(t, filepath.Join(in, "refreshed", "12", "facts.json"), goodFacts())
 		writeFile(t, filepath.Join(in, "refreshed", "13"), "a file, not a directory")
+		writeFile(t, filepath.Join(in, "refreshed", "SHA256SUMS"), "")
+		writeFile(t, filepath.Join(in, "refreshed", "SHA256SUMS.old"), "any other file is refused")
 		err := publishRefreshed(context.Background(), api.config(t), in, nil)
-		if err == nil || !strings.Contains(err.Error(), "2 of 3") {
-			t.Errorf("err = %v, want two of three refused", err)
+		if err == nil || !strings.Contains(err.Error(), "3 of 4") {
+			t.Errorf("err = %v, want three of four refused", err)
 		}
 		if got := strings.Join(api.calls, ", "); got != "GET pulls/7" {
 			t.Errorf("requests %q, want #7 looked at", got)

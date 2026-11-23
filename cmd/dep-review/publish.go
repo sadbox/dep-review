@@ -30,6 +30,10 @@ const (
 	verdictsArtifact       = "verdicts"
 	refreshedArtifact      = "refreshed"
 	classificationFile     = "classification.json"
+	// sumsFile is the checksum manifest gate.yml's refresh job puts
+	// beside the pull requests' directories, and its publish job has
+	// checked by the time this command runs.
+	sumsFile = "SHA256SUMS"
 )
 
 // runPublish: dep-review publish --in <dir> [--ignore-ecosystems <list>]
@@ -145,15 +149,19 @@ func publishRefreshed(ctx context.Context, cfg land.Config, in string, ignore ma
 	if err != nil {
 		return err
 	}
-	failed := 0
+	failed, total := 0, 0
 	for _, e := range entries {
+		if e.Name() == sumsFile && e.Type().IsRegular() {
+			continue
+		}
+		total++
 		if err := refreshed(ctx, cfg, filepath.Join(in, refreshedArtifact), e, ignore); err != nil {
 			failed++
 			log.Printf("publish: %s: %v", e.Name(), err)
 		}
 	}
 	if failed > 0 {
-		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on", failed, len(entries))
+		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on", failed, total)
 	}
 	return nil
 }
