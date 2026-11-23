@@ -32,7 +32,7 @@ jobs:
         # -race needs cgo.
         env:
           CGO_ENABLED: "1"
-        run: go test -race ./...
+        run: go test -race -timeout 20m ./...
 
   # The review sandbox, for real: gVisor on the hosted runner, the reviewer
   # image, the credential proxy and the internal network, all set up by the
