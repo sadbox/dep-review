@@ -320,6 +320,28 @@ func TestPublishCountsAnAskItCouldNotDecideOn(t *testing.T) {
 	if api := run(t, false); api.comment != asked || len(api.bodies) != 0 {
 		t.Errorf("after a run that asked nobody: comment %q, writes %v", api.comment, api.bodies)
 	}
+
+	// The same when what stops publish comes before deciding: its own
+	// proof does not bear the facts out (the refreshed facts say the pull
+	// request is Dependabot's alone, and this job's proof does not), or
+	// the proof cannot be run at all.
+	for name, pull := range map[string]string{
+		"this job's proof contradicts the facts": pullJSON("open", "mallory", testHead),
+		"this job's proof cannot be finished":    pullJSON("open", "dependabot[bot]", testHead), // the fake has no commit list
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := &fakeAPI{pull: pull, comment: asked}
+			in := t.TempDir()
+			writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
+			writeFile(t, filepath.Join(in, "reverdicts", "7", "verdicts.json"), `{"version":1,"verdicts":[]}`)
+			if err := publishRefreshed(context.Background(), api.config(t), in, nil); err == nil || !strings.Contains(err.Error(), "1 of 1") {
+				t.Fatalf("err = %v, want the run to fail for the one pull request", err)
+			}
+			if got := asksOf(t, api.comment); got != 2 || !strings.HasSuffix(api.comment, rest) {
+				t.Errorf("%d asks counted, want 2; comment %q", got, api.comment)
+			}
+		})
+	}
 }
 
 // sweepNotifier records what publish told the owner.

@@ -291,19 +291,6 @@ func refreshed(ctx context.Context, cfg land.Config, in string, e fs.DirEntry, i
 	if facts.PullRequest.Number != number {
 		return fmt.Errorf("the directory's facts are about #%d", facts.PullRequest.Number)
 	}
-	class, err := classify.Pull(ctx, cfg.GitHub, cfg.Repo, number, facts.PullRequest.Head, classify.Options{IgnoreEcosystems: ignore})
-	if err != nil {
-		return err
-	}
-	if !handled(class.Kind) {
-		// Closed, moved on (the new head has a run of its own) or
-		// ignored: no longer the gate's to decide.
-		log.Printf("publish: #%d: %s now, nothing to do", number, class.Kind)
-		return nil
-	}
-	if err := checkFacts(class, facts); err != nil {
-		return err
-	}
 	cfg.Scheduled = true
 	// The review job writes a file for a pull request only when it put a
 	// read of it before the model, answered or not.
@@ -312,16 +299,37 @@ func refreshed(ctx context.Context, cfg land.Config, in string, e fs.DirEntry, i
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	written, err := decide(ctx, cfg, w)
+	written, err := decideRefreshed(ctx, cfg, w, facts, ignore)
 	if err != nil && !written && cfg.ModelAsked {
 		// Nothing was written, so nothing counted the ask. It is counted
-		// all the same, or a pull request that cannot be decided would be
-		// asked about at every run.
+		// all the same, whatever kept this job from deciding: its own
+		// proof, the facts, GitHub. Or a pull request that cannot be
+		// decided would be asked about at every run.
 		if aerr := land.Asked(ctx, cfg, number, facts.PullRequest.Head); aerr != nil {
 			log.Printf("publish: #%d: the ask could not be counted: %v", number, aerr)
 		}
 	}
 	return err
+}
+
+// decideRefreshed is this job's own proof for a refreshed pull request,
+// and then the decision. written is decide's.
+func decideRefreshed(ctx context.Context, cfg land.Config, w decidable, facts wire.Facts, ignore map[model.Ecosystem]bool) (written bool, err error) {
+	number := facts.PullRequest.Number
+	class, err := classify.Pull(ctx, cfg.GitHub, cfg.Repo, number, facts.PullRequest.Head, classify.Options{IgnoreEcosystems: ignore})
+	if err != nil {
+		return false, err
+	}
+	if !handled(class.Kind) {
+		// Closed, moved on (the new head has a run of its own) or
+		// ignored: no longer the gate's to decide.
+		log.Printf("publish: #%d: %s now, nothing to do", number, class.Kind)
+		return false, nil
+	}
+	if err := checkFacts(class, facts); err != nil {
+		return false, err
+	}
+	return decide(ctx, cfg, w)
 }
 
 // decide is Decide and Act for one pull request. written says Act wrote
