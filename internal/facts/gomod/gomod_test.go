@@ -324,6 +324,96 @@ func TestGatherNoOldHash(t *testing.T) {
 	}
 }
 
+// The pull request of a module that publishes no release, from one
+// commit to a later one (spec section 11, amendments 24 and 40): go.mod
+// and go.sum as Dependabot writes them, with the hashes the checksum
+// database has for the two real versions.
+const (
+	rpcOldSum = "h1:cDmz0iu+zm7SfyudwKqfExdDAxoJWhT2VtYJ+pLi7GQ="
+	rpcNewSum = "h1:aDW6Vb2T1K0xbAgW+ED8iz39WlgjjX/OKiNh6tXv/+g="
+	// The module's go.mod is the same at both commits.
+	rpcModSum = "h1:OaIUM3+LpYcK2GXM4FTmhWoIq371Owdr+Cc7/BsYHHc="
+
+	rpcBaseMod = "module example.com/app\n\ngo 1.26\n\nrequire " + genprotoRPC + " " + rpcOld + "\n"
+	rpcHeadMod = "module example.com/app\n\ngo 1.26\n\nrequire " + genprotoRPC + " " + rpcNew + "\n"
+	rpcBaseSum = genprotoRPC + " " + rpcOld + " " + rpcOldSum + "\n" + genprotoRPC + " " + rpcOld + "/go.mod " + rpcModSum + "\n"
+	rpcHeadSum = genprotoRPC + " " + rpcNew + " " + rpcNewSum + "\n" + genprotoRPC + " " + rpcNew + "/go.mod " + rpcModSum + "\n"
+)
+
+// TestGatherPseudoVersion gathers for that pull request with what the go
+// command really printed for the new version. On the list every fact a
+// merge needs holds; off the list Increase and Clean are a "no".
+func TestGatherPseudoVersion(t *testing.T) {
+	const indexed = "2026-11-18T22:31:07.123456Z"
+	gather := func(t *testing.T, list ...string) (allow.UpdateFacts, facts.Result, *advisories) {
+		t.Helper()
+		in, _, adv := input(t, pr(rpcBaseMod, rpcHeadMod, rpcBaseSum, rpcHeadSum))
+		in.Policy.Listed = map[string][]string{allow.GoModules: list}
+		// The index has the version, cached some minutes after its commit.
+		in.HTTP = &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
+			return respond(req, http.StatusOK, line("example.com/other", "v1.0.0", "2026-11-18T22:15:00Z")+line(genprotoRPC, rpcNew, indexed)), nil
+		})}
+		tool := &fakeTool{t: t, files: map[string]string{
+			"mod download -json -- " + genprotoRPC + "@" + rpcNew:             "download_pseudo.json",
+			"list -m -e -u -retracted -json -- " + genprotoRPC + "@" + rpcNew: "list_pseudo.json",
+			"list -m -e -versions -json -- " + genprotoRPC:                    "list_versions_tagless.json",
+		}}
+		res, err := gatherer(tool).Gather(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.Shape.Holds() || len(res.Updates) != 1 {
+			t.Fatalf("Shape %+v, %d updates", res.Shape, len(res.Updates))
+		}
+		return res.Updates[0], res, adv
+	}
+
+	t.Run("on the list", func(t *testing.T) {
+		u, res, adv := gather(t, "google.golang.org/")
+		if u.Name != genprotoRPC || u.From != rpcOld || u.To != rpcNew {
+			t.Errorf("the update is %s %s to %s", u.Name, u.From, u.To)
+		}
+		for name, f := range map[string]allow.Fact{"Known": u.Known, "Listed": u.Listed, "Increase": u.Increase,
+			"Bound": u.Bound, "Clean": u.Clean, "NoRegress": u.NoRegress} {
+			if !f.Holds() {
+				t.Errorf("%s = %+v, want it to hold", name, f)
+			}
+		}
+		for name, f := range map[string]allow.Fact{"NewName": u.NewName, "Major": u.Major, "SecurityFix": u.SecurityFix, "Indirect": u.Indirect} {
+			if !f.Gathered() || f.OK {
+				t.Errorf("%s = %+v, want a gathered no", name, f)
+			}
+		}
+		if !strings.Contains(u.Clean.Value, "it carries no pseudo-version") {
+			t.Errorf("Clean does not say what it rests on: %+v", u.Clean)
+		}
+		// The index's own clock, never the commit's time in the version.
+		if !u.FirstSeen.Known() || !u.FirstSeen.Time.Equal(ts(indexed)) || u.FirstSeen.Source != sourceIndex {
+			t.Errorf("FirstSeen = %+v, want the index's %s", u.FirstSeen, indexed)
+		}
+		// The advisory database is asked about both pseudo-versions.
+		if want := (advisory.Query{Ecosystem: allow.GoModules, Name: genprotoRPC, From: rpcOld, To: rpcNew}); len(adv.queries) != 1 || adv.queries[0] != want {
+			t.Errorf("advisory queries %+v, want %+v", adv.queries, want)
+		}
+		// And the model is to read the two zips, each against its go.sum hash.
+		want := artifact.Pair{Ecosystem: allow.GoModules, Name: genprotoRPC, From: rpcOld, To: rpcNew,
+			Old: artifact.Ref{Kind: artifact.GoModuleZip, Name: genprotoRPC, Version: rpcOld, Hash: rpcOldSum},
+			New: artifact.Ref{Kind: artifact.GoModuleZip, Name: genprotoRPC, Version: rpcNew, Hash: rpcNewSum}}
+		if len(res.Artifacts) != 1 || res.Artifacts[0] != want {
+			t.Errorf("artifacts %+v, want %+v", res.Artifacts, want)
+		}
+	})
+
+	t.Run("not on the list", func(t *testing.T) {
+		u, _, _ := gather(t, "golang.org/x/")
+		if u.Listed.Holds() || !u.Known.Holds() {
+			t.Errorf("Listed %+v, Known %+v", u.Listed, u.Known)
+		}
+		checkFact(t, u.Increase, "is a pseudo-version (a commit, not a release) of a module that is not on the list")
+		checkFact(t, u.Clean, "is a pseudo-version of a module that is not on the list")
+	})
+}
+
 func TestGatherStopsAtShape(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -776,11 +866,41 @@ func TestCleanRecorded(t *testing.T) {
 			info, infoOK := listedFixture(t, tc.infoFile, tc.target)
 			versions, versionsOK := listedFixture(t, tc.versionsFile, mv(tc.target.Path, ""))
 			up := update{name: tc.target.Path, from: "v1.0.0", to: tc.target.Version}
-			got := cleanFact(up, downloaded{Sum: "h1:x", GoModSum: "h1:y"}, true, info, infoOK, versions, versionsOK, nothingKnown())
+			got := cleanFact(up, false, downloaded{Sum: "h1:x", GoModSum: "h1:y"}, true, info, infoOK, versions, versionsOK, nothingKnown())
 			checkFact(t, got, tc.want)
 		})
 	}
+
+	// A module that has no tagged version at all: the go command names no
+	// retraction and no deprecation for the pseudo-version, and answers for
+	// the version list with the path and nothing else, no error and no
+	// version. Clean holds for it on the list and nowhere else (spec
+	// section 11, amendment 40).
+	t.Run("a pseudo-version of a module with no tagged version", func(t *testing.T) {
+		info, infoOK := listedFixture(t, "list_pseudo.json", mv(genprotoRPC, rpcNew))
+		versions, versionsOK := listedFixture(t, "list_versions_tagless.json", mv(genprotoRPC, ""))
+		if !infoOK || !versionsOK || info.Error != nil || versions.Error != nil || len(versions.Versions) != 0 || info.Time == nil {
+			t.Fatalf("the recorded answers: %+v (%t), %+v (%t)", info, infoOK, versions, versionsOK)
+		}
+		up := update{name: genprotoRPC, from: rpcOld, to: rpcNew}
+		good := downloaded{Sum: "h1:x", GoModSum: "h1:y"}
+		listedModule := cleanFact(up, true, good, true, info, infoOK, versions, versionsOK, nothingKnown())
+		if !listedModule.Holds() || !strings.Contains(listedModule.Value, "it carries no pseudo-version") || strings.Contains(listedModule.Source, "-versions") {
+			t.Errorf("on the list: %+v, want it to hold and to say what it rests on", listedModule)
+		}
+		checkFact(t, cleanFact(up, false, good, true, info, infoOK, versions, versionsOK, nothingKnown()),
+			"is a pseudo-version of a module that is not on the list")
+	})
 }
+
+// A module on the built-in list that publishes no tagged version, and two
+// of its pseudo-versions (real ones: testdata/go has the go command's
+// answers for the new one).
+const (
+	genprotoRPC = "google.golang.org/genproto/googleapis/rpc"
+	rpcOld      = "v0.0.0-20260917231906-eeb232e0883d"
+	rpcNew      = "v0.0.0-20261118221215-c8830f628b3f"
+)
 
 func checkFact(t *testing.T, got allow.Fact, want string) {
 	t.Helper()
@@ -799,6 +919,11 @@ func TestClean(t *testing.T) {
 	good := downloaded{Sum: "h1:x", GoModSum: "h1:y"}
 	info := listed{Path: up.name, Version: up.to}
 	versions := listed{Path: up.name, Versions: []string{"v1.0.0", "v1.1.0"}}
+	// A pseudo-version of a module with no tagged version, as the go
+	// command answers for one (TestCleanRecorded has the recorded answer).
+	pseudo := update{name: genprotoRPC, from: rpcOld, to: rpcNew}
+	pseudoInfo := listed{Path: pseudo.name, Version: pseudo.to}
+	tagless := listed{Path: pseudo.name}
 	goErr := &struct{ Err string }{"boom"}
 	// The two shapes of a proxy that did not answer, as the go command
 	// reports them for a module, and the one for the retractions.
@@ -827,99 +952,150 @@ func TestClean(t *testing.T) {
 		want  string // substring of the value
 	}{
 		{"everything fine", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, versions, true, nothingKnown())
+			return cleanFact(up, false, good, true, info, true, versions, true, nothingKnown())
 		}, "", "served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory"},
 		{"not downloaded", func() allow.Fact {
-			return cleanFact(up, downloaded{}, false, info, true, versions, true, nothingKnown())
+			return cleanFact(up, false, downloaded{}, false, info, true, versions, true, nothingKnown())
 		}, unknown, "not established: go mod download did not report"},
 		{"download failed", func() allow.Fact {
-			return cleanFact(up, downloaded{Error: "410 Gone"}, true, info, true, versions, true, nothingKnown())
+			return cleanFact(up, false, downloaded{Error: "410 Gone"}, true, info, true, versions, true, nothingKnown())
 		}, no, "the proxy did not serve the version: 410 Gone"},
 		{"the proxy did not answer the download", func() allow.Fact {
-			return cleanFact(up, downloaded{Error: proxy503}, true, info, true, versions, true, nothingKnown())
+			return cleanFact(up, false, downloaded{Error: proxy503}, true, info, true, versions, true, nothingKnown())
 		}, unavailable, "the module proxy did not answer: example.com/m@v1.1.0: reading"},
 		{"go list silent", func() allow.Fact {
-			return cleanFact(up, good, true, listed{}, false, versions, true, nothingKnown())
+			return cleanFact(up, false, good, true, listed{}, false, versions, true, nothingKnown())
 		}, unknown, "not established: go list did not report the version"},
 		{"go list error", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Error: goErr}, true, versions, true, nothingKnown())
+			return cleanFact(up, false, good, true, listed{Error: goErr}, true, versions, true, nothingKnown())
 		}, no, "go list failed: boom"},
 		{"the proxy did not answer go list", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Error: &struct{ Err string }{proxyTimeout}}, true, versions, true, nothingKnown())
+			return cleanFact(up, false, good, true, listed{Error: &struct{ Err string }{proxyTimeout}}, true, versions, true, nothingKnown())
 		}, unavailable, "the module proxy did not answer"},
 		{"retracted", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Retracted: []string{"bad release", "really"}}, true, versions, true, nothingKnown())
+			return cleanFact(up, false, good, true, listed{Retracted: []string{"bad release", "really"}}, true, versions, true, nothingKnown())
 		}, no, "retracted: bad release; really"},
 		{"retraction text is escaped", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Retracted: []string{"line one\nline two"}}, true, versions, true, nothingKnown())
+			return cleanFact(up, false, good, true, listed{Retracted: []string{"line one\nline two"}}, true, versions, true, nothingKnown())
 		}, no, `retracted: line one\nline two`},
 		{"deprecated", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Deprecated: "use v2"}, true, versions, true, nothingKnown())
+			return cleanFact(up, false, good, true, listed{Deprecated: "use v2"}, true, versions, true, nothingKnown())
 		}, no, "the module is deprecated: use v2"},
 		{"no version list", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, listed{}, false, nothingKnown())
+			return cleanFact(up, false, good, true, info, true, listed{}, false, nothingKnown())
 		}, unknown, "not established: go list did not report the module's versions"},
 		{"version list error", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, listed{Error: goErr}, true, nothingKnown())
+			return cleanFact(up, false, good, true, info, true, listed{Error: goErr}, true, nothingKnown())
 		}, no, "the module's retractions could not be loaded: boom"},
 		{"the proxy did not answer for the retractions", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, listed{Error: &struct{ Err string }{retract502}}, true, nothingKnown())
+			return cleanFact(up, false, good, true, info, true, listed{Error: &struct{ Err string }{retract502}}, true, nothingKnown())
 		}, unavailable, "the module proxy did not answer: loading module retractions"},
 		{"version not in the list", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, listed{Versions: []string{"v1.0.0"}}, true, nothingKnown())
+			return cleanFact(up, false, good, true, info, true, listed{Versions: []string{"v1.0.0"}}, true, nothingKnown())
 		}, no, "v1.1.0 is not in the module's list"},
-		// Increase can hold for a listed module's pseudo-version (spec
-		// section 11, amendment 24). Clean still does not: no version
-		// list vouches for a commit, here for a module that has no tagged
-		// version at all. So such an update stays a person's.
-		{"a pseudo-version, which no version list vouches for", func() allow.Fact {
-			pseudo := update{name: "google.golang.org/genproto/googleapis/rpc", from: "v0.0.0-20240101000000-aaaaaaaaaaaa", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}
-			return cleanFact(pseudo, good, true, listed{Path: pseudo.name, Version: pseudo.to}, true, listed{Path: pseudo.name}, true, nothingKnown())
-		}, no, "is not a tagged version, so the version list cannot confirm it is not retracted"},
+		// A pseudo-version is in no version list (spec section 11,
+		// amendment 40). For a module on the list, what go list -m -u
+		// -retracted says of it is taken alone; for any other module it
+		// stays a "no", whatever the go command says.
+		{"a listed module's pseudo-version", func() allow.Fact {
+			return cleanFact(pseudo, true, good, true, pseudoInfo, true, tagless, true, nothingKnown())
+		}, "", "go list -m -u -retracted reports no retraction and no deprecation, and the module's version list cannot confirm that: it carries no pseudo-version"},
+		{"a listed module's pseudo-version above a release", func() allow.Fact {
+			above := update{name: "golang.org/x/net", from: "v1.1.0", to: "v1.1.1-0.20240201000000-bbbbbbbbbbbb"}
+			return cleanFact(above, true, good, true, listed{Path: above.name, Version: above.to}, true, listed{Path: above.name, Versions: []string{"v1.0.0", "v1.1.0"}}, true, nothingKnown())
+		}, "", "it carries no pseudo-version"},
+		{"an unlisted module's pseudo-version", func() allow.Fact {
+			return cleanFact(pseudo, false, good, true, pseudoInfo, true, tagless, true, nothingKnown())
+		}, no, "is a pseudo-version of a module that is not on the list, and no version list can confirm that it is not retracted"},
+		{"a listed module's pseudo-version that a retraction covers", func() allow.Fact {
+			return cleanFact(pseudo, true, good, true, listed{Retracted: []string{"every commit before the first release"}}, true, tagless, true, nothingKnown())
+		}, no, "retracted: every commit before the first release"},
+		{"a listed module's pseudo-version, the module deprecated", func() allow.Fact {
+			return cleanFact(pseudo, true, good, true, listed{Deprecated: "use example.com/other"}, true, tagless, true, nothingKnown())
+		}, no, "the module is deprecated: use example.com/other"},
+		{"a listed module's pseudo-version that go list could not answer for", func() allow.Fact {
+			return cleanFact(pseudo, true, good, true, listed{Error: goErr}, true, tagless, true, nothingKnown())
+		}, no, "go list failed: boom"},
+		{"a listed module's pseudo-version, go list silent", func() allow.Fact {
+			return cleanFact(pseudo, true, good, true, listed{}, false, tagless, true, nothingKnown())
+		}, unknown, "not established: go list did not report the version"},
+		// The list cannot carry the version, and it still has to have
+		// loaded: for a module with releases that is what shows that the
+		// retractions were read.
+		{"a listed module's pseudo-version, the retractions not loaded", func() allow.Fact {
+			return cleanFact(pseudo, true, good, true, pseudoInfo, true, listed{Error: goErr}, true, nothingKnown())
+		}, no, "the module's retractions could not be loaded: boom"},
+		{"a listed module's pseudo-version, no version list", func() allow.Fact {
+			return cleanFact(pseudo, true, good, true, pseudoInfo, true, listed{}, false, nothingKnown())
+		}, unknown, "not established: go list did not report the module's versions"},
+		{"a listed module's pseudo-version the proxy does not serve", func() allow.Fact {
+			return cleanFact(pseudo, true, downloaded{Error: "410 Gone"}, true, pseudoInfo, true, tagless, true, nothingKnown())
+		}, no, "the proxy did not serve the version: 410 Gone"},
+		{"a listed module's pseudo-version with a new advisory", func() allow.Fact {
+			adv := nothingKnown()
+			adv.NoNewAdvisory = allow.No("GHSA-new affects it", "advisories")
+			return cleanFact(pseudo, true, good, true, pseudoInfo, true, tagless, true, adv)
+		}, no, "GHSA-new affects it"},
+		{"a listed module's pseudo-version, advisories not asked about", func() allow.Fact {
+			adv := nothingKnown()
+			adv.NoMalware, adv.NoNewAdvisory = allow.Fact{Value: "nothing was asked"}, allow.Fact{Value: "nothing was asked"}
+			return cleanFact(pseudo, true, good, true, pseudoInfo, true, tagless, true, adv)
+		}, unknown, "nothing was asked"},
+		// Being on the list changes nothing for a release: it has to be
+		// in the list of versions that are not retracted.
+		{"a listed module's release that is not in the list", func() allow.Fact {
+			return cleanFact(up, true, good, true, info, true, listed{Versions: []string{"v1.0.0"}}, true, nothingKnown())
+		}, no, "v1.1.0 is not in the module's list"},
+		// From a pseudo-version to a release: only the new version is
+		// asked about, and it is a release like any other.
+		{"from a pseudo-version to a release, not listed", func() allow.Fact {
+			from := update{name: up.name, from: "v1.0.1-0.20240101000000-aaaaaaaaaaaa", to: up.to}
+			return cleanFact(from, false, good, true, info, true, versions, true, nothingKnown())
+		}, "", "served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory"},
 		{"advisory database down", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, versions, true, advisoriesDown)
+			return cleanFact(up, false, good, true, info, true, versions, true, advisoriesDown)
 		}, unavailable, "GitHub's Advisory Database did not answer (HTTP 503"},
 		{"the checker returned nothing", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, versions, true, advisory.Result{})
+			return cleanFact(up, false, good, true, info, true, versions, true, advisory.Result{})
 		}, unknown, "not established: malware advisories were not checked"},
 		{"malware", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.No("GHSA-mal", "advisories")
-			return cleanFact(up, good, true, info, true, versions, true, adv)
+			return cleanFact(up, false, good, true, info, true, versions, true, adv)
 		}, no, "GHSA-mal"},
 		{"malware not checked", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.Fact{}
-			return cleanFact(up, good, true, info, true, versions, true, adv)
+			return cleanFact(up, false, good, true, info, true, versions, true, adv)
 		}, unknown, "not established: malware advisories were not checked"},
 		{"malware could not be asked about", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.Fact{Value: "the package name is not one the advisory query can carry; nothing was asked"}
-			return cleanFact(up, good, true, info, true, versions, true, adv)
+			return cleanFact(up, false, good, true, info, true, versions, true, adv)
 		}, unknown, "nothing was asked"},
 		{"new advisory", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoNewAdvisory = allow.No("GHSA-new affects v1.1.0", "advisories")
-			return cleanFact(up, good, true, info, true, versions, true, adv)
+			return cleanFact(up, false, good, true, info, true, versions, true, adv)
 		}, no, "GHSA-new affects v1.1.0"},
 		{"new advisories not checked", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoNewAdvisory = allow.Fact{}
-			return cleanFact(up, good, true, info, true, versions, true, adv)
+			return cleanFact(up, false, good, true, info, true, versions, true, adv)
 		}, unknown, "not established: new advisories were not checked"},
 
 		// A "no" is the answer whatever else went unanswered, and an
 		// outage is never reported where waiting could not help.
 		{"retracted, and the advisory database is down", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Retracted: []string{"bad release"}}, true, versions, true, advisoriesDown)
+			return cleanFact(up, false, good, true, listed{Retracted: []string{"bad release"}}, true, versions, true, advisoriesDown)
 		}, no, "retracted: bad release"},
 		{"the proxy is down, and there is a malware advisory", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.No("GHSA-mal", "advisories")
-			return cleanFact(up, downloaded{Error: proxy503}, true, info, true, versions, true, adv)
+			return cleanFact(up, false, downloaded{Error: proxy503}, true, info, true, versions, true, adv)
 		}, no, "GHSA-mal"},
 		{"the advisory database is down, and go list said nothing", func() allow.Fact {
-			return cleanFact(up, good, true, listed{}, false, versions, true, advisoriesDown)
+			return cleanFact(up, false, good, true, listed{}, false, versions, true, advisoriesDown)
 		}, unknown, "not established: go list did not report the version"},
 	}
 	for _, tc := range tests {

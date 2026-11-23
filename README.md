@@ -147,10 +147,12 @@ Limits that send real pull requests to a person:
   `binding.gyp`, or whose lock has an entry with a member npm 9 to 11 do
   not write.
 - The gate runs on github.com only.
-- A pre-release is never an increase. A pseudo-version is one only for
-  a listed Go module, and such an update still goes to a person: the
-  retraction check and the advisory lookup have no rule for a version
-  that is not a tagged release.
+- A pre-release is never an increase. A Go pseudo-version (a commit, not
+  a release) is one only for a listed module, and can then merge like a
+  release: `google.golang.org/genproto` publishes nothing else. For it
+  the retraction check is the go command's word alone, since no version
+  list carries a pseudo-version. A module that is not listed never moves
+  to one; from one to a release it moves like any other update.
 
 ## Configuration
 

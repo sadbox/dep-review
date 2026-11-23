@@ -34,7 +34,14 @@ import (
 // understand is closed before the request is made:
 //
 //   - A version it cannot read ("notaversion", "", " 1.2.3") is 200 with
-//     an empty list, not an error. Only X.Y.Z is ever sent.
+//     an empty list, not an error. Only X.Y.Z is ever sent, and for Go a
+//     pseudo-version, which the API orders as semver does (checked
+//     2026-11-23 for each of the three forms x/mod knows: an advisory
+//     is in the answer for a pseudo-version below its fix and not for
+//     one above, whether the fix is itself a pseudo-version,
+//     GHSA-p782-xgp4-8hr8 in golang.org/x/sys, or a release,
+//     GHSA-6v2p-p543-phr9 in golang.org/x/oauth2). A pseudo-version
+//     with "+incompatible" was not checked and is not sent.
 //   - NAME@VERSION matches the name byte for byte
 //     ("azure/setup-kubectl@2.0.0" finds nothing, "Azure/setup-kubectl@2.0.0"
 //     finds GHSA-p756-rfxh-x63h), while GitHub itself resolves an action's
@@ -224,19 +231,32 @@ func unaskable(eco string, q Query) string {
 	if !nameOK || len(q.Name) > 256 {
 		return "the package name is not one the advisory query can carry; nothing was asked"
 	}
-	if !plainRelease(eco, q.To) {
-		return "the new version is not a plain X.Y.Z release; the database answers \"no advisories\" for a version it cannot read, so nothing was asked"
+	const unread = " is neither a plain X.Y.Z release nor a Go pseudo-version; the database answers \"no advisories\" for a version it cannot read, so nothing was asked"
+	if !askable(eco, q.To) {
+		return "the new version" + unread
 	}
-	if q.From != "" && !plainRelease(eco, q.From) {
-		return "the old version is not a plain X.Y.Z release; the database answers \"no advisories\" for a version it cannot read, so nothing was asked"
+	if q.From != "" && !askable(eco, q.From) {
+		return "the old version" + unread
 	}
 	return ""
 }
 
+// askable reports whether v is a version the API was checked to read, on
+// either side of an update: a plain release, or for Go a pseudo-version
+// as go.mod spells it. What a pseudo-version is, is x/mod's to say; one
+// with build metadata ("+incompatible") is left out, because the API was
+// not asked about one.
+func askable(eco, v string) bool {
+	if plainRelease(eco, v) {
+		return true
+	}
+	return eco == ecoGo && module.IsPseudoVersion(v) && module.CanonicalVersion(v) == v && semver.Build(v) == ""
+}
+
 // plainRelease reports whether v is three numbers and nothing else: the
-// one version shape the API was checked to read. Go and Actions versions
-// may carry their leading "v", and a Go version "+incompatible".
-// x/mod/semver does the reading.
+// version shape the API was checked to read for every ecosystem. Go and
+// Actions versions may carry their leading "v", and a Go version
+// "+incompatible". x/mod/semver does the reading.
 func plainRelease(eco, v string) bool {
 	if eco != ecoNPM {
 		v = strings.TrimPrefix(v, "v")

@@ -139,12 +139,12 @@ func TestLiveRetraction(t *testing.T) {
 
 	adv := nothingKnown()
 	good := downloaded{Sum: "h1:x", GoModSum: "h1:y"}
-	retracted := cleanFact(update{name: fsnotify, from: "v1.5.2", to: "v1.5.3"}, good, true,
+	retracted := cleanFact(update{name: fsnotify, from: "v1.5.2", to: "v1.5.3"}, false, good, true,
 		infos[mv(fsnotify, "v1.5.3")], true, versions[mv(fsnotify, "")], true, adv)
 	if retracted.OK || !strings.Contains(retracted.Value, "retracted:") {
 		t.Errorf("Clean for the retracted version = %+v", retracted)
 	}
-	clean := cleanFact(update{name: fsnotify, from: "v1.5.3", to: "v1.5.4"}, good, true,
+	clean := cleanFact(update{name: fsnotify, from: "v1.5.3", to: "v1.5.4"}, false, good, true,
 		infos[mv(fsnotify, "v1.5.4")], true, versions[mv(fsnotify, "")], true, adv)
 	if !clean.Holds() {
 		t.Errorf("Clean for the good version = %+v", clean)

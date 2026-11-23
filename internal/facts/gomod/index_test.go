@@ -201,8 +201,8 @@ func TestFirstSeenTransportError(t *testing.T) {
 // A pseudo-version carries its commit's time, and the proxy's .info for
 // it repeats that time: both are the publisher's to set. FirstSeen is
 // the index's own timestamp or nothing (spec section 11, amendment 24).
-// With nothing, the fetch command falls back to when the pull request was
-// opened (amendment 4).
+// With nothing, the publish job dates the pin from its own first
+// evaluation of it (amendment 38).
 func TestFirstSeenOfAPseudoVersion(t *testing.T) {
 	const (
 		name    = "google.golang.org/genproto/googleapis/rpc"

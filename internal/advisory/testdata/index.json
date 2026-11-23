@@ -112,6 +112,81 @@
       "body": "reviewed_go_golang.org_x_net_0.17.0.json"
     },
     {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.26.0&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.26.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.26.1-0.20250214215532-3f78298beea3&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.26.1-0.20250214215532-3f78298beea3.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.26.1-0.20250214215532-3f78298beea3&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.26.1-0.20250214215532-3f78298beea3.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.0&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.27.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.0&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.27.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.0-rc.1.0.20250214215532-3f78298beea3&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.27.0-rc.1.0.20250214215532-3f78298beea3.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.0-rc.1.0.20250214215532-3f78298beea3&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.27.0-rc.1.0.20250214215532-3f78298beea3.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.1-0.20250228195905-9c82a8cf7ac2&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.27.1-0.20250228195905-9c82a8cf7ac2.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.1-0.20250228195905-9c82a8cf7ac2&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.27.1-0.20250228195905-9c82a8cf7ac2.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.28.0-rc.1.0.20250228195905-9c82a8cf7ac2&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.28.0-rc.1.0.20250228195905-9c82a8cf7ac2.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.28.0-rc.1.0.20250228195905-9c82a8cf7ac2&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.28.0-rc.1.0.20250228195905-9c82a8cf7ac2.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220406163625-3f8b81556e12&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_sys_0.0.0-20220406163625-3f8b81556e12.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220406163625-3f8b81556e12&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_sys_0.0.0-20220406163625-3f8b81556e12.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220412211240-33da011f77ad&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_sys_0.0.0-20220412211240-33da011f77ad.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220412211240-33da011f77ad&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_sys_0.0.0-20220412211240-33da011f77ad.json"
+    },
+    {
       "request": "/advisories?affects=lodash%404.17.20&ecosystem=npm&per_page=100&type=reviewed",
       "status": 200,
       "body": "reviewed_npm_lodash_4.17.20.json"

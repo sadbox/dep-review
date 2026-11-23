@@ -91,6 +91,7 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 	// and the go command fails loudly when it cannot load the
 	// retractions. With -retracted it reports "not retracted" in silence
 	// when the proxy answers "not found" for the go.mod that holds them.
+	// (A list with no version in it has nothing to fail on: cleanFact.)
 	unretracted, err := list(ctx, tool, []string{"-versions"}, names)
 	if err != nil {
 		return facts.Result{}, fmt.Errorf("gomod: %w", err)
@@ -123,7 +124,7 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 			adv = advisory.Result{}
 		}
 		u.SecurityFix = adv.SecurityFix
-		u.Clean = cleanFact(up, d, downloadedOK, info, infoOK, versions, versionsOK, adv)
+		u.Clean = cleanFact(up, u.Listed.Holds(), d, downloadedOK, info, infoOK, versions, versionsOK, adv)
 
 		// The commit time go list reports only chooses where the reading
 		// of the index starts; the publisher sets it.
@@ -330,7 +331,21 @@ func goFailure(what, text, source string) allow.Fact {
 // not retracted, the module is not deprecated, and the advisory database
 // has nothing new against it. A "no" from any of them is the answer
 // whatever else went unanswered (allow.Fact.And).
-func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK bool, versions listed, versionsOK bool, adv advisory.Result) allow.Fact {
+//
+// Retraction has two answers, and a release needs both: go list -m -u
+// -retracted names no retraction, and the version is in the list that
+// leaves the retracted ones out. A pseudo-version is in no list, so for
+// it the second cannot be had. For a module on the list (listedModule)
+// the first is taken alone (spec section 11, amendment 40); the list is
+// still asked for and must have loaded, which for a module with releases
+// is what shows that its retractions could be read at all. For a module
+// with no release (google.golang.org/genproto/googleapis/rpc) nothing
+// shows it: with the proxy answering "not found" for the go.mod that
+// holds the retractions, both commands print what they print without
+// (checked 2026-11-23). That much is taken on the list's word for the
+// module's publisher. For any other module a pseudo-version stays a
+// "no".
+func cleanFact(up update, listedModule bool, d downloaded, downloadedOK bool, info listed, infoOK bool, versions listed, versionsOK bool, adv advisory.Result) allow.Fact {
 	served := allow.Yes("served by the proxy", sourceDownload)
 	switch {
 	case !downloadedOK:
@@ -339,6 +354,10 @@ func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK b
 		served = goFailure("the proxy did not serve the version", d.Error, sourceDownload)
 	}
 
+	// The words and the source of a Clean that holds; a pseudo-version's
+	// say which of the two answers about retraction it rests on.
+	holds := allow.Yes("served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory",
+		"go mod download, go list -m -u -retracted, go list -m -versions, advisory database")
 	current := allow.Yes("not retracted, not deprecated", sourceList)
 	switch {
 	case !infoOK:
@@ -355,16 +374,18 @@ func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK b
 		current = facts.NotEstablished("go list did not report the module's versions")
 	case versions.Error != nil:
 		current = goFailure("the module's retractions could not be loaded", versions.Error.Err, sourceList)
+	case module.IsPseudoVersion(up.to) && !listedModule:
+		current = allow.No(up.to+" is a pseudo-version of a module that is not on the list, and no version list can confirm that it is not retracted", sourceList)
 	case module.IsPseudoVersion(up.to):
-		current = allow.No(up.to+" is not a tagged version, so the version list cannot confirm it is not retracted", sourceList)
+		holds = allow.Yes("served by the proxy; go list -m -u -retracted reports no retraction and no deprecation, and the module's version list cannot confirm that: it carries no pseudo-version; no malware advisory, no new advisory",
+			"go mod download, go list -m -u -retracted, advisory database")
 	case !slices.Contains(versions.Versions, up.to):
 		current = allow.No(up.to+" is not in the module's list of versions that are not retracted", sourceList)
 	}
 
 	clean := served.And(current).And(facts.AdvisoryClean(adv))
 	if clean.Holds() {
-		return allow.Yes("served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory",
-			"go mod download, go list -m -u -retracted, go list -m -versions, advisory database")
+		return holds
 	}
 	return clean
 }

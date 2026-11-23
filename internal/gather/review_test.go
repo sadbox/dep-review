@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -189,6 +190,47 @@ func TestReview(t *testing.T) {
 			t.Errorf("%s: pair %+v, want %+v", name, req.Pair, want)
 		}
 	}
+}
+
+// noRequests is a transport for a reviewer that must not ask anything.
+type noRequests struct{ t *testing.T }
+
+func (n noRequests) RoundTrip(req *http.Request) (*http.Response, error) {
+	n.t.Errorf("the reviewer made a request: %s %s", req.Method, req.URL)
+	return nil, errors.New("no request was expected")
+}
+
+// A read with no chunks is a whole read: the two artifacts differ in
+// nothing a model reads. That is the usual update of a module such as
+// google.golang.org/genproto/googleapis/rpc, whose pseudo-version follows
+// its repository's head while the module itself seldom changes (spec
+// section 11, amendment 40). The real reviewer records a full read with
+// no veto for it and asks no model, and the update merges like any other.
+func TestReviewNothingChanged(t *testing.T) {
+	u := goodUpdate(t, allow.GoModules, "google.golang.org/genproto/googleapis/rpc")
+	u.From, u.To = "v0.0.0-20260917231906-eeb232e0883d", "v0.0.0-20261118221215-c8830f628b3f"
+	if !u.Listed.Holds() {
+		t.Fatal("the module is not on the built-in list; the test proves nothing")
+	}
+	j := newJob(t, model.GoModules, u)
+	j.preparer.answers[u.Name] = func(p artifact.Pair) (artifact.Prepared, error) { return preparedRead(p), nil }
+	dir, f := j.run(t)
+	read := f.Facts.Updates[0].Prepared
+	if read.Status != wire.Prepared || read.State != allow.ReadFull || len(read.Chunks) != 0 || len(chunkFiles(t, dir)) != 0 {
+		t.Fatalf("the read fetch prepared: %+v", read)
+	}
+
+	settings := veto.FromConfig(defaults(t))
+	client, err := veto.New(settings, veto.APIKey("test-key"), &http.Client{Transport: noRequests{t}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reviewed(t, Review{Reviewer: client, Fingerprint: settings.Fingerprint(), Logf: t.Logf}, dir)
+	want := wire.Verdict{Key: read.Key, Fingerprint: settings.Fingerprint(), Read: allow.ReadFull}
+	if len(got.Verdicts) != 1 || !reflect.DeepEqual(got.Verdicts[0], want) {
+		t.Fatalf("verdicts %+v, want %+v", got.Verdicts, want)
+	}
+	wantOutcome(t, allow.Decide(wire.Join(f, got, settings.Fingerprint()), defaults(t).Policy(), now), allow.Merge, "")
 }
 
 // Two updates with the same read have one verdict, asked for once.

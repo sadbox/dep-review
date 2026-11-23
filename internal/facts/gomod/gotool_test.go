@@ -28,6 +28,16 @@ import (
 //	download_tampered.json           one line appended to fsnotify@v1.5.4's go.mod
 //	list_versions_unloadable.json    404 for the go.mod of fsnotify's latest version
 //	list_retracted_unloadable.json   the same, for "go list -m -u -retracted"
+//
+// Three more were printed on 2026-11-23, for a pseudo-version of a module
+// with no tagged version (google.golang.org/genproto/googleapis/rpc):
+// download_pseudo.json, list_pseudo.json and list_versions_tagless.json.
+// For such a module the version list is the path and nothing else: no
+// version and no error. That stays so behind the same forwarder answering
+// 404 for the go.mod of the module's latest version, or for its @latest:
+// "go list -m -versions" and "go list -m -u -retracted" for an older
+// pseudo-version then print what they print without it, so nothing shows
+// that the retractions of a module with no tagged version were not read.
 
 // fakeTool replays recorded output of the go command.
 type fakeTool struct {

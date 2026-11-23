@@ -1,0 +1,16 @@
+{
+	"Path": "google.golang.org/genproto/googleapis/rpc",
+	"Version": "v0.0.0-20261118221215-c8830f628b3f",
+	"Info": "/scratch/gopath/pkg/mod/cache/download/google.golang.org/genproto/googleapis/rpc/@v/v0.0.0-20261118221215-c8830f628b3f.info",
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/google.golang.org/genproto/googleapis/rpc/@v/v0.0.0-20261118221215-c8830f628b3f.mod",
+	"Zip": "/scratch/gopath/pkg/mod/cache/download/google.golang.org/genproto/googleapis/rpc/@v/v0.0.0-20261118221215-c8830f628b3f.zip",
+	"Dir": "/scratch/gopath/pkg/mod/google.golang.org/genproto/googleapis/rpc@v0.0.0-20261118221215-c8830f628b3f",
+	"Sum": "h1:aDW6Vb2T1K0xbAgW+ED8iz39WlgjjX/OKiNh6tXv/+g=",
+	"GoModSum": "h1:OaIUM3+LpYcK2GXM4FTmhWoIq371Owdr+Cc7/BsYHHc=",
+	"Origin": {
+		"VCS": "git",
+		"URL": "https://github.com/googleapis/go-genproto",
+		"Subdir": "googleapis/rpc",
+		"Hash": "c8830f628b3f225f093d4aa49c037516334a5501"
+	}
+}
