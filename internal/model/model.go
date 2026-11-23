@@ -34,10 +34,11 @@ const (
 	// branch) but fails a check, e.g. someone pushed to the branch. Always
 	// goes to a person; never treated as "not Dependabot".
 	KindDependabotUnverified Kind = "dependabot-unverified"
-	// KindPending: everything checked so far is Dependabot's, but the
-	// branch's activity log has not caught up with the head yet. The proof
-	// is unfinished, not failed: the PR waits, and the scheduled job runs
-	// the proof again.
+	// KindPending: nothing GitHub answered speaks against the PR, but the
+	// proof could not be finished: the branch's activity log has not
+	// caught up with the head yet, or GitHub did not answer for the log,
+	// the timeline or the branch's rules. The proof is unfinished, not
+	// failed: the PR waits, and the scheduled job runs the proof again.
 	KindPending Kind = "dependabot-pending"
 	// KindIgnored: a KindDependabot PR in an ecosystem the caller listed
 	// in ignore_ecosystems (another trusted process owns those PRs): no
@@ -64,7 +65,9 @@ type Classification struct {
 	BaseSHA string `json:"base_sha"`
 	Kind    Kind   `json:"kind"`
 	Reason  string `json:"reason"` // why this kind; shown to the person
-	// Ecosystem is the one the branch name names. classify sets it only
-	// for a pull request that passed its whole proof.
+	// Ecosystem is the one the branch name names. classify sets it for a
+	// pull request that passed its whole proof and for one whose proof is
+	// unfinished (KindPending), which the fetch job gathers facts for all
+	// the same; an ignored pull request has it too.
 	Ecosystem Ecosystem `json:"ecosystem,omitempty"`
 }

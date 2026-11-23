@@ -239,34 +239,43 @@ func Pull(ctx context.Context, c *gh.Client, repoName string, num int, headSHA s
 	// The commits cannot tell Dependabot's own pushes from a person
 	// squash-merging another Dependabot PR into this branch: both are
 	// authored by dependabot[bot], committed by web-flow and signed by
-	// GitHub. The branch's activity log records who moved the ref.
-	// The activity log lags the push by a little; give it a moment, and if
-	// it still has not caught up, the proof is unfinished (KindPending).
-	why, lag := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
-	for try := 0; lag && try < len(historyBackoff); try++ {
-		if err := sleep(ctx, historyBackoff[try]); err != nil {
+	// GitHub. Three reads make the rest of the proof. An answer that is
+	// not proof ends it at once. A read that leaves it open (a log that
+	// lags, GitHub not answering) does not: the reads after it are still
+	// made, because a "no" from any of them is an answer, and a person's
+	// now whatever else is still open.
+	reads := []func() (string, answer, error){
+		// The branch's activity log records who moved the ref. It lags the
+		// push by a little; give it a moment.
+		func() (string, answer, error) {
+			why, got, err := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
+			for try := 0; err == nil && got == lagging && try < len(historyBackoff); try++ {
+				if err := sleep(ctx, historyBackoff[try]); err != nil {
+					return "", 0, err
+				}
+				why, got, err = branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
+			}
+			return why, got, err
+		},
+		// A PR retargeted to another base after Dependabot opened it is
+		// not the update Dependabot proposed.
+		func() (string, answer, error) { return timelineProblem(ctx, c, repoName, num) },
+		// The log shows who moved the branch; a ruleset makes sure nobody
+		// else could. Its bypass list (Dependabot only) is the owner's to
+		// maintain: a read-only token cannot see it.
+		func() (string, answer, error) { return rulesProblem(ctx, c, repoName, pr.Head.Ref) },
+	}
+	unfinished := "" // why the proof is still open: the first read that left it so
+	for _, read := range reads {
+		why, got, err := read()
+		switch {
+		case err != nil:
 			return model.Classification{}, err
+		case got == disproven:
+			return unverified(why)
+		case got != proven && unfinished == "":
+			unfinished = why
 		}
-		why, lag = branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
-	}
-	switch {
-	case lag:
-		cl.Kind, cl.Reason = model.KindPending, why
-		logf("kind=dependabot-pending: %s", why)
-		return cl, nil
-	case why != "":
-		return unverified(why)
-	}
-	// A PR retargeted to another base after Dependabot opened it is not the
-	// update Dependabot proposed.
-	if why := timelineProblem(ctx, c, repoName, num); why != "" {
-		return unverified(why)
-	}
-	// The log shows who moved the branch; a ruleset makes sure nobody else
-	// could. Its bypass list (Dependabot only) is the owner's to maintain:
-	// a read-only token cannot see it.
-	if why := rulesProblem(ctx, c, repoName, pr.Head.Ref); why != "" {
-		return unverified(why)
 	}
 
 	eco, ok := model.EcosystemFromBranch(pr.Head.Ref)
@@ -274,6 +283,14 @@ func Pull(ctx context.Context, c *gh.Client, repoName string, num int, headSHA s
 		return unverified("the branch name does not name a supported ecosystem")
 	}
 	cl.Ecosystem = eco
+	if unfinished != "" {
+		// Not a verdict on the pull request (spec section 11, amendments 1
+		// and 51). The ecosystem is the branch's to name whatever becomes
+		// of the proof, and the fetch job needs it to gather the rest.
+		cl.Kind, cl.Reason = model.KindPending, unfinished
+		logf("kind=dependabot-pending: %s", unfinished)
+		return cl, nil
+	}
 
 	// Only a PR that passed every check above is ever ignored; anything
 	// else returned before this point and is handled as usual. The
@@ -303,24 +320,62 @@ type activity struct {
 // all, inside the classify job's timeout.
 var historyBackoff = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 45 * time.Second}
 
+// answer is what one read of the proof came to.
+type answer int
+
+const (
+	// proven: nothing GitHub answered speaks against the pull request.
+	proven answer = iota
+	// disproven: GitHub answered, and the answer is not proof. That
+	// includes an answer that says nothing of what was asked for (a 404, a
+	// 403 that is no rate limit, a body that does not decode).
+	disproven
+	// lagging: the activity log is clean and does not reach the head yet.
+	// GitHub records activity shortly after a push, so it is read again.
+	lagging
+	// unanswered: GitHub was asked and did not answer (gh.Unavailable),
+	// after the client's own retries. That says nothing about the pull
+	// request, and it is not waited out here: the pull request waits and
+	// the scheduled job runs the proof again.
+	unanswered
+)
+
+// notRead is what a read of the proof that failed with err comes to.
+// what names the thing read. The context is looked at first: to
+// gh.Unavailable a deadline that ran out is a timeout like any other, and
+// classify running out of time is an error, not GitHub's silence.
+func notRead(ctx context.Context, what string, err error) (string, answer, error) {
+	if ctx.Err() != nil {
+		return "", 0, ctx.Err()
+	}
+	code := ""
+	if n := gh.StatusCode(err); n != 0 {
+		code = fmt.Sprintf(" (HTTP %d)", n)
+	}
+	if gh.Unavailable(err) {
+		return what + " could not be read: GitHub did not answer" + code, unanswered, nil
+	}
+	return what + " could not be read" + code, disproven, nil
+}
+
 // branchHistoryProblem reads the head branch's activity log (oldest first)
-// and returns why it does not prove that only Dependabot moved the branch
-// since it was last created, or "". Every entry from the last
+// and says whether it proves that only Dependabot moved the branch since
+// it was last created, and if not, why. Every entry from the last
 // branch_creation on must be Dependabot's creation, push or force push,
 // each starting where the previous one ended, and the last must end at
-// head. Anything else, including an unreadable or incomplete log, is not
+// head. Anything else GitHub answers, an incomplete log included, is not
 // proof.
 //
-// lag is set when the only problem is that the log, otherwise clean, does
-// not reach head yet: GitHub records activity shortly after the push.
-func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head string) (why string, lag bool) {
+// It is lagging when the only problem is that the log, otherwise clean,
+// does not reach head yet. The error is the context's.
+func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head string) (string, answer, error) {
 	q := url.Values{"ref": {"refs/heads/" + branch}, "direction": {"asc"}}
 	acts, err := gh.List[activity](ctx, c, fmt.Sprintf("repos/%s/activity?%s", repo, q.Encode()))
 	if err != nil {
-		return fmt.Sprintf("the branch's push history could not be read (HTTP %d)", gh.StatusCode(err)), false
+		return notRead(ctx, "the branch's push history", err)
 	}
 	if len(acts) == 0 {
-		return "the branch has no push history yet", true
+		return "the branch has no push history yet", lagging, nil
 	}
 	start := -1
 	for i, a := range acts {
@@ -329,46 +384,45 @@ func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head 
 		}
 	}
 	if start < 0 {
-		return "the branch's push history does not include its creation", false
+		return "the branch's push history does not include its creation", disproven, nil
 	}
 	prev := ""
 	for i, a := range acts[start:] {
 		switch {
 		case a.Actor == nil || a.Actor.Login != dependabotLogin:
-			return "someone other than dependabot[bot] changed the branch (" + safeType(a.ActivityType) + ")", false
+			return "someone other than dependabot[bot] changed the branch (" + safeType(a.ActivityType) + ")", disproven, nil
 		case i == 0 && !zeroSHA(a.Before):
-			return "the branch's creation does not start from nothing", false
+			return "the branch's creation does not start from nothing", disproven, nil
 		case i > 0 && a.ActivityType != "push" && a.ActivityType != "force_push":
-			return "the branch was changed by a " + safeType(a.ActivityType), false
+			return "the branch was changed by a " + safeType(a.ActivityType), disproven, nil
 		case i > 0 && a.Before != prev:
-			return "the branch's push history has a gap", false
+			return "the branch's push history has a gap", disproven, nil
 		case !gh.ValidSHA(a.After):
-			return "the branch's push history has a malformed commit ID", false
+			return "the branch's push history has a malformed commit ID", disproven, nil
 		}
 		prev = a.After
 	}
 	if prev != head {
-		return "the branch's push history does not reach the head commit yet", true
+		return "the branch's push history does not reach the head commit yet", lagging, nil
 	}
-	return "", false
+	return "", proven, nil
 }
 
-// timelineProblem reads the PR's timeline and returns why it disqualifies
-// the PR (its base branch was changed), or "". An unreadable timeline is
-// not proof either.
-func timelineProblem(ctx context.Context, c *gh.Client, repo string, pr int) string {
+// timelineProblem reads the PR's timeline and says whether it disqualifies
+// the PR (its base branch was changed). The error is the context's.
+func timelineProblem(ctx context.Context, c *gh.Client, repo string, pr int) (string, answer, error) {
 	events, err := gh.List[struct {
 		Event string `json:"event"`
 	}](ctx, c, fmt.Sprintf("repos/%s/issues/%d/timeline", repo, pr))
 	if err != nil {
-		return fmt.Sprintf("the pull request's timeline could not be read (HTTP %d)", gh.StatusCode(err))
+		return notRead(ctx, "the pull request's timeline", err)
 	}
 	for _, e := range events {
 		if e.Event == "base_ref_changed" {
-			return "the pull request's base branch was changed after it was opened"
+			return "the pull request's base branch was changed after it was opened", disproven, nil
 		}
 	}
-	return ""
+	return "", proven, nil
 }
 
 // headRefRe is the shape of a Dependabot branch name the gate puts in a
@@ -376,24 +430,24 @@ func timelineProblem(ctx context.Context, c *gh.Client, repo string, pr int) str
 // it; a name that does not is not asked about, which is not proof.
 var headRefRe = regexp.MustCompile(`^dependabot/[A-Za-z0-9._/-]{1,240}$`)
 
-// rulesProblem returns "" when GitHub's rules for the pull request's head
-// branch restrict creating, updating and deleting it, and otherwise why
-// not.
+// rulesProblem says whether GitHub's rules for the pull request's head
+// branch restrict creating, updating and deleting it, and if not, why.
 //
 // GitHub is asked which rules apply to the branch (rules/branches), and
 // answers with every rule of every active ruleset whose conditions match
 // it, repository and organization rulesets alike; rulesets that are
 // disabled or only evaluated are left out. The gate matches no ref
 // pattern itself: a matcher of its own is a second reading of GitHub's
-// pattern rules, and v0.1.9's did not agree with them. An answer that
-// could not be read is not proof.
-func rulesProblem(ctx context.Context, c *gh.Client, repo, branch string) string {
+// pattern rules, and v0.1.9's did not agree with them. The error is the
+// context's.
+func rulesProblem(ctx context.Context, c *gh.Client, repo, branch string) (string, answer, error) {
+	const badName = "the branch's name is not one the gate asks GitHub's rules about"
 	if !headRefRe.MatchString(branch) {
-		return "the branch's name is not one the gate asks GitHub's rules about"
+		return badName, disproven, nil
 	}
 	for _, el := range strings.Split(branch, "/") {
 		if el == "" || el == "." || strings.Contains(el, "..") {
-			return "the branch's name is not one the gate asks GitHub's rules about"
+			return badName, disproven, nil
 		}
 	}
 	rules, err := gh.List[struct {
@@ -403,7 +457,7 @@ func rulesProblem(ctx context.Context, c *gh.Client, repo, branch string) string
 		} `json:"parameters"`
 	}](ctx, c, fmt.Sprintf("repos/%s/rules/branches/%s", repo, branch))
 	if err != nil {
-		return fmt.Sprintf("the branch's rules could not be read (HTTP %d)", gh.StatusCode(err))
+		return notRead(ctx, "the branch's rules", err)
 	}
 	have := map[string]bool{}
 	for _, r := range rules {
@@ -415,9 +469,9 @@ func rulesProblem(ctx context.Context, c *gh.Client, repo, branch string) string
 		have[r.Type] = true
 	}
 	if !have["creation"] || !have["update"] || !have["deletion"] {
-		return "no active rule restricts creating, updating and deleting this dependabot/ branch"
+		return "no active rule restricts creating, updating and deleting this dependabot/ branch", disproven, nil
 	}
-	return ""
+	return "", proven, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

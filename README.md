@@ -98,6 +98,12 @@ answer for Bound of a Go, npm or Actions update, there is no verified
 hash to read the code against, nothing is read, and an update that was
 not read is a person's at once (`read_unknown`; re-run the gate after
 the outage). A Docker update waits, because nothing of an image is read.
+Identity waits like any other fact: when the branch's activity log has
+not caught up with the push, or GitHub does not answer for the log, the
+timeline or the branch's rules, the proof is unfinished, the other facts
+are gathered all the same, and the scheduled run tries the proof again.
+An answer that is not proof (someone else pushed, no ruleset, a 403 or a
+404) is a person's at once.
 
 With every fact holding, an update needs an age, measured from FirstSeen:
 

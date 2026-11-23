@@ -187,6 +187,49 @@ func TestFetchKinds(t *testing.T) {
 		f.Facts.Identity = allow.Yes("authored, committed and signed by Dependabot only", "classify")
 		wantOutcome(t, decide(t, f, cleanVerdicts(f)), allow.Merge, "")
 	})
+	// The wait is one the schedule retries and the deadline ends: at the
+	// deadline an unfinished proof is a person's (spec section 11,
+	// amendments 1 and 51).
+	t.Run("pending until the deadline", func(t *testing.T) {
+		j := newJob(t, model.GoModules, goodUpdate(t, allow.GoModules, "example.com/m"))
+		j.fetch.Class.Kind = model.KindPending
+		j.fetch.Class.Reason = "the branch's rules could not be read: GitHub did not answer (HTTP 503)"
+		_, f := j.run(t)
+		joined := wire.Join(f, wire.Verdicts{Version: wire.Version, Verdicts: cleanVerdicts(f)}, finger)
+		d := allow.Decide(joined, defaults(t).Policy(), now)
+		wantOutcome(t, d, allow.Wait, allow.ReasonSourceUnavailable)
+		if d.Deadline.IsZero() {
+			t.Fatal("the wait has no deadline")
+		}
+		wantOutcome(t, allow.Decide(joined, defaults(t).Policy(), d.Deadline.Add(-time.Second)), allow.Wait, allow.ReasonSourceUnavailable)
+		wantOutcome(t, allow.Decide(joined, defaults(t).Policy(), d.Deadline), allow.Person, allow.ReasonSourceDeadline)
+	})
+	// classify names the branch's ecosystem with an unfinished proof. A
+	// classification that does not is not one it writes, and is not
+	// written up as an ecosystem without a rule.
+	t.Run("pending and no ecosystem", func(t *testing.T) {
+		j := newJob(t, "", goodUpdate(t, allow.GoModules, "example.com/m"))
+		j.fetch.Class.Kind = model.KindPending
+		dir := filepath.Join(t.TempDir(), "facts")
+		if _, err := j.fetch.Run(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "names no ecosystem") {
+			t.Fatalf("error %v, want one about the missing ecosystem", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("something was written: %v", err)
+		}
+	})
+	// In an ecosystem without a rule the answer does not hang on the
+	// proof: it is a person's either way, and is said at once.
+	t.Run("pending in an ecosystem without a rule", func(t *testing.T) {
+		j := newJob(t, model.UV, goodUpdate(t, allow.GoModules, "example.com/m"))
+		j.fetch.Class.Kind = model.KindPending
+		j.fetch.Class.Reason = "the branch's push history does not reach the head commit yet"
+		_, f := j.run(t)
+		if f.Facts.Identity.Holds() || len(j.api.asked())+len(j.gatherer.inputs) != 0 {
+			t.Errorf("identity %+v, GitHub %v, gatherer %d", f.Facts.Identity, j.api.asked(), len(j.gatherer.inputs))
+		}
+		wantOutcome(t, decide(t, f, nil), allow.Person, allow.ReasonNoRule)
+	})
 	for _, kind := range []model.Kind{model.KindOther, model.KindStale, model.KindIgnored, ""} {
 		t.Run("kind "+string(kind), func(t *testing.T) {
 			j := newJob(t, model.GoModules)

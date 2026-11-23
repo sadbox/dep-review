@@ -245,8 +245,10 @@ func checkFacts(class model.Classification, facts wire.Facts) error {
 	}
 	// The file's ecosystem alone decides whether "nothing to read" is a
 	// read (Docker), so it is not the fetch job's word alone. classify
-	// names an ecosystem only once its proof is whole, and in Dependabot's
-	// words; the file has the gate's, which differ for npm (gather).
+	// names an ecosystem once the proof is whole or only unfinished
+	// (pending), not for a pull request it calls unverified, and in
+	// Dependabot's words; the file has the gate's, which differ for npm
+	// (gather).
 	if class.Ecosystem != "" {
 		want := string(class.Ecosystem)
 		if class.Ecosystem == model.NPM {

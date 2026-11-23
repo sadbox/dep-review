@@ -182,6 +182,15 @@ func TestCheckFacts(t *testing.T) {
 		{name: "pending, and the facts say Dependabot's alone",
 			class: func(c *model.Classification) { c.Kind = model.KindPending },
 			want:  "classify said"},
+		// A pending classification names the branch's ecosystem, and the
+		// facts are held to it like a verified one's.
+		{name: "pending, and the facts are for another ecosystem",
+			class: func(c *model.Classification) { c.Kind, c.Ecosystem = model.KindPending, model.GoModules },
+			facts: func(f *wire.Facts) {
+				f.Facts.Identity = allow.Unavailable("the log lags", "classify")
+				f.Facts.Ecosystem = allow.Docker
+			},
+			want: "classify named"},
 		{name: "a kind the gate does nothing for",
 			class: func(c *model.Classification) { c.Kind = model.KindOther },
 			want:  "classify said"},

@@ -97,10 +97,18 @@ func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 		classified = allow.No(c.Reason, classifySource)
 	case model.KindPending:
 		// GitHub's record of who pushed the branch has not reached the
-		// head yet. That is a source that did not answer, not an answer
-		// (spec section 11, amendment 1): gathering goes on and the pull
-		// request waits.
+		// head yet, or GitHub did not answer for a part of the proof. That
+		// is a source that did not answer, not an answer (spec section 11,
+		// amendments 1 and 51): gathering goes on and the pull request
+		// waits.
 		classified = allow.Unavailable(c.Reason, classifySource)
+		if c.Ecosystem == "" {
+			// classify names the branch's ecosystem for an unfinished proof.
+			// Without one nothing could be gathered, and the facts would
+			// call a pull request that waits one whose ecosystem has no
+			// rule.
+			return wire.Facts{}, errors.New("gather: the classification is pending and names no ecosystem")
+		}
 	default:
 		// The gate does nothing at all for the other kinds; a workflow
 		// that runs this job for one of them is wrong.

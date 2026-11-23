@@ -534,3 +534,102 @@ func TestClassifyIgnore(t *testing.T) {
 		})
 	}
 }
+
+// A proof GitHub did not let classify finish says nothing about the pull
+// request (spec section 11, amendments 1 and 51): the log lags, or one of
+// the three reads got no answer. The classification is pending and names
+// the branch's ecosystem, so the fetch job gathers everything and the
+// pull request waits. An answer that is not proof stays a refusal,
+// whatever else is still open.
+func TestProofUnfinished(t *testing.T) {
+	behind := func(f *fixture) {
+		f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
+	}
+	tests := []struct {
+		name   string
+		mutate func(f *fixture)
+		kind   model.Kind
+		reason string
+		sleeps int // re-reads of a log that lags
+	}{
+		{"the log lags", behind, model.KindPending, "does not reach the head", len(historyBackoff)},
+		{"no log yet", func(f *fixture) { f.activity = nil }, model.KindPending, "no push history yet", len(historyBackoff)},
+		{"the log: 503", func(f *fixture) { f.actCode = http.StatusServiceUnavailable }, model.KindPending,
+			"push history could not be read: GitHub did not answer (HTTP 503)", 0},
+		{"the log: rate limit", func(f *fixture) { f.actCode = http.StatusTooManyRequests }, model.KindPending,
+			"push history could not be read: GitHub did not answer (HTTP 429)", 0},
+		{"the timeline: 502", func(f *fixture) { f.tlCode = http.StatusBadGateway }, model.KindPending,
+			"timeline could not be read: GitHub did not answer (HTTP 502)", 0},
+		{"the rules: 500", func(f *fixture) { f.rulesCode = http.StatusInternalServerError }, model.KindPending,
+			"rules could not be read: GitHub did not answer (HTTP 500)", 0},
+		{"the rules: rate limit", func(f *fixture) { f.rulesCode = http.StatusTooManyRequests }, model.KindPending,
+			"rules could not be read: GitHub did not answer (HTTP 429)", 0},
+		// GitHub answered, and the answer is not proof.
+		{"the log: 403", func(f *fixture) { f.actCode = http.StatusForbidden }, model.KindDependabotUnverified, "could not be read (HTTP 403)", 0},
+		{"the timeline: 404", func(f *fixture) { f.tlCode = http.StatusNotFound }, model.KindDependabotUnverified, "could not be read (HTTP 404)", 0},
+		{"the rules: 404", func(f *fixture) { f.rulesCode = http.StatusNotFound }, model.KindDependabotUnverified, "could not be read (HTTP 404)", 0},
+		// A "no" is a person's now, whatever is still open.
+		{"the log lags and the base was changed", func(f *fixture) {
+			behind(f)
+			f.timeline = []map[string]any{{"event": "base_ref_changed"}}
+		}, model.KindDependabotUnverified, "base branch was changed", len(historyBackoff)},
+		{"the log: 503, and no rules apply", func(f *fixture) {
+			f.actCode, f.rules = http.StatusServiceUnavailable, nil
+		}, model.KindDependabotUnverified, "no active rule", 0},
+		{"the timeline: 502, and a person pushed", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.tlCode = http.StatusBadGateway
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("push", "someone", mid, head)}
+		}, model.KindDependabotUnverified, "someone other than dependabot", 0},
+		{"the rules: 500, and an ecosystem the gate does not know", func(f *fixture) {
+			f.rulesCode = http.StatusInternalServerError
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/cargo/x-1"
+		}, model.KindDependabotUnverified, "ecosystem", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := defaultFixture(t)
+			tt.mutate(f)
+			c := f.client(t)
+			// The client's own retries are internal/gh's to test.
+			c.MaxRetries = 0
+			got, err := Pull(context.Background(), c, "o/r", 7, head, f.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Kind != tt.kind || !strings.Contains(got.Reason, tt.reason) {
+				t.Fatalf("kind %s (%s), want %s (%q)", got.Kind, got.Reason, tt.kind, tt.reason)
+			}
+			// GitHub not answering is not a log that lags: the client has
+			// asked more than once already, and it is not waited out here.
+			if len(f.slept) != tt.sleeps {
+				t.Errorf("%d waits for the log, want %d: %v", len(f.slept), tt.sleeps, f.slept)
+			}
+			if tt.kind == model.KindPending && (got.Ecosystem != model.GoModules || got.PR != 7 || got.HeadSHA != head || got.BaseSHA != base) {
+				t.Errorf("a pending classification names %+v, want the pull request, both commits and the branch's ecosystem", got)
+			}
+		})
+	}
+}
+
+// A context that ended is not GitHub failing to answer: to gh.Unavailable
+// a deadline that ran out is a timeout like any other, and classify
+// running out of time must fail the job, not leave a pull request
+// waiting on a proof nobody tried.
+func TestProofReadsEndWithTheContext(t *testing.T) {
+	f := defaultFixture(t)
+	c := f.client(t)
+	c.MaxRetries = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	const branch = "dependabot/go_modules/aws-1c8ebe5c54"
+	if why, got, err := branchHistoryProblem(ctx, c, "o/r", branch, head); err == nil {
+		t.Errorf("the activity log: %q, %v, and no error", why, got)
+	}
+	if why, got, err := timelineProblem(ctx, c, "o/r", 7); err == nil {
+		t.Errorf("the timeline: %q, %v, and no error", why, got)
+	}
+	if why, got, err := rulesProblem(ctx, c, "o/r", branch); err == nil {
+		t.Errorf("the rules: %q, %v, and no error", why, got)
+	}
+}
