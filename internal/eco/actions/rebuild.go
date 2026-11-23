@@ -120,24 +120,3 @@ func planRebuild(ctx context.Context, up git, p *pair, entries, usings []string)
 	}
 	return plan, "", nil
 }
-
-// buildOnlyChanged lists the locked packages added or moved to another
-// version that no bundle contains (module markers or source-map paths):
-// a build of the commit runs them, and the reviewer reads no diff of
-// them. A removed package runs nowhere.
-func buildOnlyChanged(changes []pkgChange, reports []*bundleReport) []string {
-	bundled := map[string]bool{}
-	for _, r := range reports {
-		for k := range r.pkgs {
-			bundled[k] = true
-		}
-	}
-	var out []string
-	for _, c := range changes {
-		if !c.removed && !bundled[c.name] {
-			out = append(out, safePath(strings.TrimPrefix(c.name, "@")))
-		}
-	}
-	slices.Sort(out)
-	return slices.Compact(out)
-}

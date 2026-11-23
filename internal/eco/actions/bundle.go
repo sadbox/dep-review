@@ -59,10 +59,7 @@ type bundleReport struct {
 	nullContent      []string
 	nullContentBytes int
 	byPkg            map[string]*pkgStat
-	// pkgs are the npm packages with a module or a source in the new
-	// bundle, changed or not (pkgOf).
-	pkgs  map[string]bool
-	diffs []namedDiff
+	diffs            []namedDiff
 }
 
 func (r *bundleReport) residualFraction() float64 {
@@ -283,15 +280,6 @@ func installPath(p string) string {
 	return p[:i] + "node_modules/" + strings.Join(rest[:n], "/")
 }
 
-func (r *bundleReport) present(name string) {
-	if pkg := pkgOf(name); pkg != "" {
-		if r.pkgs == nil {
-			r.pkgs = map[string]bool{}
-		}
-		r.pkgs[pkg] = true
-	}
-}
-
 func (r *bundleReport) addPkg(name string, n int) {
 	pkg := pkgOf(name)
 	if pkg == "" {
@@ -403,7 +391,6 @@ func analyzeModules(r *bundleReport, oldText, newText string, a attribution) {
 	for _, k := range order {
 		body := nm[k]
 		n := len(body) + 1
-		r.present(k)
 		ob, had := om[k]
 		if had && ob == body {
 			r.unchanged += n
@@ -530,7 +517,6 @@ func analyzeSourceMap(r *bundleReport, oldJS string, oldMap *sourceMap, newJS st
 	for _, p := range nb.order {
 		n := nb.sources[p]
 		o := counterpart[p]
-		r.present(p)
 		srcKnown := n.content != nil && (o == nil || o.content != nil)
 		if o != nil && srcSame(o, n) {
 			if alignedOK[p] && rn.consistent(aligned[p]) {

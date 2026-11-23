@@ -369,10 +369,14 @@ the comment. A match shows that the committed bundle is what the source,
 lockfile and build script produce, not that they are benign, so it
 changes one route only. An `actions.dist-residual` (bundle bytes nothing
 changed explains) goes to review instead of a person when the rebuild of
-that update verified and no build-only locked package changed: one that
-no bundle contains, so it is in no diff the reviewer reads (fetch marks
-such a finding `if_rebuilt`; publish relaxes it only for a verified
-result bound to the update's plan, every plan of the update verified).
+that update verified, no locked package changed (so the build's
+dependencies are the bytes accepted before), and every changed file is
+first-party source, which the reviewer reads in full, or inside the
+rebuilt bundle directories. Which packages a build runs can't be told
+from the bundle, which the attacker writes, so a changed lockfile keeps
+the residual with a person. Fetch marks such a finding `if_rebuilt`;
+publish relaxes it only for a verified result bound to every plan of the
+update.
 The residual stays in `dist.txt` for the reviewer, and the review's
 verdict and accounting decide as for any other review. A build may still
 copy any file of the tree, which the first-party diff shows. A gVisor

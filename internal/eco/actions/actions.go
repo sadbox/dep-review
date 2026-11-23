@@ -1501,21 +1501,39 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 			fs.rebuilds = append(fs.rebuilds, *plan)
 		}
 		// A verified rebuild sends a residual to review instead of a person
-		// (the user's decision, 2026-11-22) when it shows what the residual
-		// doubts: the bundle is the commit's build, and no build-only
-		// locked package (one in no bundle, so in no diff the reviewer
-		// reads) changed.
-		buildOnly := buildOnlyChanged(pkgChanges, reports)
+		// (the user's decision, 2026-11-22) only where a match shows the
+		// bundle is a build of what the reviewer reads: no locked package
+		// changed (the build's dependencies are the bytes accepted before),
+		// and every changed file is first-party source, shown in full, or
+		// inside the rebuilt bundle directories. Which packages a build
+		// runs cannot be told from the bundle, which the attacker writes.
+		noClear := ""
+		switch {
+		case plan == nil:
+			noClear = "no rebuild plan"
+		case len(pkgChanges) > 0 || len(locks) > 0:
+			noClear = "locked packages changed"
+		default:
+			shown := map[string]bool{}
+			for _, c := range firstParty {
+				shown[c.path] = true
+			}
+			for _, c := range changed {
+				if !shown[c.path] && !rebuild.Under(c.path, plan.Dirs) {
+					noClear = safePath(c.path) + " changed outside the first-party diff and the rebuilt directories"
+					break
+				}
+			}
+		}
 		for _, r := range residual {
 			fs.add(model.RouteHuman, "actions.dist-residual", name, "%s: %.2f%% of the bundle changed without a changed first-party file or locked package to explain it (limit %.2f%%)",
 				safePath(r.path), 100*r.residualFraction(), 100*f.cfg.MaxResidual)
 			switch {
-			case plan == nil:
-			case len(buildOnly) > 0:
-				fmt.Fprintf(sum, "- %s: a verified rebuild would not clear the residual: build-only packages changed (%s)\n", safePath(r.path), strings.Join(buildOnly[:min(len(buildOnly), 10)], ", "))
-			case rebuild.Under(r.path, plan.Dirs):
+			case noClear == "" && rebuild.Under(r.path, plan.Dirs):
 				fs.list[len(fs.list)-1].IfRebuilt = true
 				fs.list[len(fs.list)-1].Detail += "; a verified rebuild sends this to review"
+			case noClear != "" && plan != nil:
+				fmt.Fprintf(sum, "- %s: a verified rebuild would not clear the residual: %s\n", safePath(r.path), noClear)
 			}
 		}
 		if plan != nil {
