@@ -249,9 +249,6 @@ Limits that send real pull requests to a person:
   problem for (a missing or invalid entry, as two lock edits merged
   without a rebase leave behind). The pull request that repairs the lock
   is the one that goes to a person.
-- A Go, npm or Actions update whose registry did not answer when its
-  pinned hash was checked (see the four states above). An own workflow
-  waits instead.
 - An update that changes, adds or removes a file whose path has anything
   but ASCII letters, digits and `._/@+-` in it (a space, a parenthesis,
   another script). A path stands on lines the model is told the gate
@@ -328,7 +325,10 @@ The settings are built into the gate, in
 and they are the only ones. A repository has no settings file, and
 nothing in a repository or a pull request changes a value. What differs
 between repositories is in the caller's workflow (`app_slug`,
-`ignore_ecosystems`, the Anthropic IDs) and in `dependabot.yml`.
+`ignore_ecosystems`, the Anthropic IDs) and in `dependabot.yml`. One
+file of a repository is read for a fact, and it is no setting: a root
+`.npmrc` that turns npm's install scripts off (see "npm: turning install
+scripts off").
 
 | Key | Value |
 |---|---|
@@ -484,7 +484,8 @@ other code (a new version) and a changed prompt or model.
    the gate asks no model on a manual dispatch. The workflow uses no API
    key. While the rule does not admit `schedule`, a scheduled ask is
    denied, counts as a miss and is tried again later; nothing merges
-   unread.
+   unread. An owner with more than one rule changes each: every
+   repository passes the ID of its own as `anthropic_federation_rule_id`.
 8. For npm, optionally turn install scripts off (next section).
 
 ### npm: turning install scripts off
@@ -584,7 +585,10 @@ and it then gets no status, comment or notification.
   believes the facts only about the pull request and head that classify
   proved: the classify job on an event, its own run of the proof on a
   schedule. The policy is built into the gate: no file of a repository
-  or a pull request changes it.
+  or a pull request changes it. One file of the repository changes what
+  a fact asks: the root `.npmrc` at the base branch's commit, by which
+  npm's install inputs are not compared. A pull request that changes
+  that file has no Shape.
 - **Third-party text.** Everything a registry, a dependency or the model
   wrote reaches the comment only through one sanitiser, in code spans,
   with a length cap; it reaches logs only through a logger that escapes
