@@ -134,6 +134,23 @@ func TestExtractTarGzRefusesUnsafeArchives(t *testing.T) {
 		{"names that differ only in case", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/INDEX.js", body: "second\n"}}))
 		}, "occurs twice"},
+		// Directories too (amendment 72): what is beside what must not
+		// depend on whether the file system ignores case.
+		{"directories that differ only in case", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/Sub/binding.gyp", body: "{}\n"}, {name: "package/sub/package.json", body: "{}\n"}}))
+		}, "differ only in case"},
+		{"directories that differ only in case, two levels down", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/node_modules/Inner/binding.gyp", body: "{}\n"}, {name: "package/node_modules/inner/package.json", body: "{}\n"}}))
+		}, "differ only in case"},
+		{"a directory that differs from a file only in case", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/Readme", body: "x\n"}, {name: "package/readme/x.js", body: "y\n"}}))
+		}, "a file and a directory"},
+		{"a file that differs from a directory only in case", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/lib/x.js", body: "y\n"}, {name: "package/LIB", body: "x\n"}}))
+		}, "a file and a directory"},
+		{"a directory spelled with a dotless i beside its plain spelling", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/l\u0131b/a.js", body: "x\n"}, {name: "package/lib/b.js", body: "y\n"}}))
+		}, "differ only in case"},
 		// A name that is not in clean form is never rewritten: npm drops
 		// the first element of the name as it stands, so "./package/x" is
 		// "package/x" to npm and would be "x" here.

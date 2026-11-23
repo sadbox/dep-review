@@ -177,6 +177,10 @@ func TestInspectTarballs(t *testing.T) {
 		{"a new package.json beside an old Binding.gyp", pkg(plain, "addon/Binding.gyp", gyp), pkg(plain, "addon/Binding.gyp", gyp, "addon/package.json", `{"name":"addon"}`), no, "addon/package.json is new beside a binding.gyp"},
 		{"a Binding.gyp is gone and package.json stays", pkg(plain, "Binding.gyp", "{}"), pkg(plain), no, "Binding.gyp is gone, and package.json beside it stays"},
 		{"only a Package.json at the root", pkg(plain), fstest.MapFS{"Package.json": {Data: []byte(plain)}}, no, "the new tarball has no package.json at its root"},
+		// Letters whose capital is an ASCII letter (amendment 72).
+		{"a binding.gyp spelled with a dotless i appears", pkg(plain), pkg(next, "b\u0131nd\u0131ng.gyp", gyp), no, "is new"},
+		{"a .gypi spelled with a dotless i changes", pkg(plain, "common.gyp\u0131", "{}"), pkg(next, "common.gyp\u0131", gypi), no, "changes"},
+		{"a package.json spelled with a long s and a script", pkg(plain), pkg(plain, "lib/package.j\u017fon", withScript), no, "is new and has an install script"},
 
 		// Bundled dependencies are part of the tarball and are held to
 		// the same rule, each at its own path.

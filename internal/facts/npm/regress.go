@@ -369,13 +369,25 @@ const tarballSource = "every package.json, binding.gyp and .gypi file in the ver
 // ignores it (macOS, Windows) npm and node-gyp open a Binding.gyp or a
 // common.GYPI as the file they look for (spec section 11, amendment 69).
 func gypFile(name string) bool {
-	return strings.EqualFold(name, "binding.gyp") || gypiFile(name)
+	return foldName(name) == "binding.gyp" || gypiFile(name)
+}
+
+// foldName is a file name as a file system that ignores case compares
+// it, as far as the gate goes: in upper case, then in lower. Upper first
+// takes a letter whose capital is an ASCII letter (the dotless i, the
+// long s) to that letter, as such file systems do. The extraction folds
+// paths the same way, and refuses an archive in which two files or two
+// directories differ only so (spec section 11, amendment 72), so a
+// package.json and the binding.gyp beside it are in one directory here
+// exactly when they are in one there.
+func foldName(name string) string {
+	return strings.ToLower(strings.ToUpper(name))
 }
 
 // gypiFile reports whether a file of this name is a .gypi file, in any
 // case.
 func gypiFile(name string) bool {
-	return strings.HasSuffix(strings.ToLower(name), ".gypi")
+	return strings.HasSuffix(foldName(name), ".gypi")
 }
 
 // gypBeside is the path of a file named binding.gyp in any case in the
@@ -389,7 +401,7 @@ func gypBeside(tree fs.FS, dir string) (string, error) {
 		return "", nil
 	}
 	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(e.Name(), "binding.gyp") {
+		if !e.IsDir() && foldName(e.Name()) == "binding.gyp" {
 			return path.Join(dir, e.Name()), nil
 		}
 	}
@@ -456,7 +468,7 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 			return err
 		}
 		switch name := d.Name(); {
-		case strings.EqualFold(name, "package.json"):
+		case foldName(name) == "package.json":
 			// In any case, as npm on such a file system reads it. The
 			// root's is looked for by its exact name above.
 			manifests++

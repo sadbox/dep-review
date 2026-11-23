@@ -99,7 +99,7 @@ func extractTarGz(archive, dir string, lim extractLimits) (*tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	x := &extraction{root: root, lim: lim, files: map[string]file{}, seen: map[string]bool{}}
+	x := &extraction{root: root, lim: lim, files: map[string]file{}, seen: map[string]bool{}, dirs: map[string]string{}}
 	if err := x.all(zr); err != nil {
 		root.Close()
 		return nil, err
@@ -132,11 +132,14 @@ type extraction struct {
 	root  *os.Root
 	lim   extractLimits
 	files map[string]file
-	// seen holds the lower-cased path of every file written. Two names
-	// that differ only in case are one file on a case-insensitive file
+	// seen holds the folded path of every file written, and dirs the
+	// folded path of every directory an entry names or lies in, with the
+	// spelling it was first given (foldPath). Two names that differ only
+	// in case are one file, or one directory, on a case-insensitive file
 	// system and two on another; refusing them keeps the result the same
-	// everywhere.
+	// everywhere (spec section 11, amendment 72).
 	seen  map[string]bool
+	dirs  map[string]string
 	total int64
 }
 
@@ -169,6 +172,9 @@ func (x *extraction) entry(n int, h *tar.Header, content io.Reader) error {
 	case tar.TypeDir:
 		if rel == "" {
 			return nil // the top-level directory itself
+		}
+		if err := x.directories(h.Name, rel); err != nil {
+			return err
 		}
 		if err := x.root.MkdirAll(rel, 0o700); err != nil {
 			return unsafeArchive("%q: %v", h.Name, err)
@@ -217,13 +223,46 @@ func entryPath(name string, dir bool) (string, error) {
 	return rest, nil
 }
 
+// foldPath is a path as a file system that ignores case compares it, as
+// far as the gate goes: in upper case, then in lower. Upper first takes a
+// letter whose capital is an ASCII letter (the dotless i, the long s) to
+// that letter, as such file systems do. It is no one file system's table.
+func foldPath(p string) string {
+	return strings.ToLower(strings.ToUpper(p))
+}
+
+// directories records dir and every directory above it, and refuses one
+// whose name differs only in case from a directory already named, or
+// that a file already has: sub/package.json and Sub/binding.gyp are two
+// directories here and one where case is ignored, and what is beside
+// what must not depend on where the archive is unpacked.
+func (x *extraction) directories(name, dir string) error {
+	for ; dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
+		key := foldPath(dir)
+		if was, ok := x.dirs[key]; ok && was != dir {
+			return unsafeArchive("%q: the directories %q and %q differ only in case", name, was, dir)
+		}
+		if x.seen[key] {
+			return unsafeArchive("%q: a file and a directory have the name %q (or two that differ only in case)", name, dir)
+		}
+		x.dirs[key] = dir
+	}
+	return nil
+}
+
 func (x *extraction) file(name, rel string, size int64, content io.Reader) error {
 	if rel == "" {
 		return unsafeArchive("%q: a file where the top-level directory should be", name)
 	}
-	key := strings.ToLower(rel)
+	key := foldPath(rel)
 	if x.seen[key] {
 		return unsafeArchive("%q: the name occurs twice (or two names differ only in case)", name)
+	}
+	if _, ok := x.dirs[key]; ok {
+		return unsafeArchive("%q: a file and a directory have this name (or two that differ only in case)", name)
+	}
+	if err := x.directories(name, path.Dir(rel)); err != nil {
+		return err
 	}
 	if size < 0 || size > x.lim.bytes-x.total {
 		return unsafeArchive("more than %d bytes", x.lim.bytes)
