@@ -1,7 +1,6 @@
 package land
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -66,9 +65,11 @@ func pinKey(ecosystem string, u wire.Update) string {
 // does), it may be any pin the comment remembers, so nothing is forgotten
 // in such a run: an outage must not start a clock again.
 //
-// The comment is read only when an update has no registry time. The
-// error is GitHub not answering for it.
-func dateUnseen(ctx context.Context, cfg Config, ev *Evaluation) error {
+// before is what the gate's comment remembers (memory). A marker that
+// does not parse, or was written before the gate remembered times, has
+// none: every pin is first evaluated now. Whatever the marker's outcome
+// and head, a time in it is one this job wrote for the pin.
+func dateUnseen(ev *Evaluation, before []seen) {
 	needed, unnamed := false, false
 	for i, u := range ev.Facts.Updates {
 		needed = needed || !u.FirstSeen.Known()
@@ -76,20 +77,7 @@ func dateUnseen(ctx context.Context, cfg Config, ev *Evaluation) error {
 		unnamed = unnamed || (ev.Facts.Ecosystem != allow.Docker && ev.file.Facts.Updates[i].Hash == "")
 	}
 	if !needed {
-		return nil
-	}
-	c, err := findComment(ctx, cfg, ev.PullRequest.Number)
-	if err != nil {
-		return err
-	}
-	var before []seen
-	if c != nil {
-		// A marker that does not parse, or was written before the gate
-		// remembered times, has none: every pin is first evaluated now.
-		// Whatever the marker's outcome and head, a time in it is one this
-		// job wrote for the pin.
-		old, _ := parseMarker(c.Body)
-		before = old.FirstSeen
+		return
 	}
 	times := map[string]time.Time{}
 	for _, s := range before {
@@ -140,5 +128,4 @@ func dateUnseen(ctx context.Context, cfg Config, ev *Evaluation) error {
 			}
 		}
 	}
-	return nil
 }

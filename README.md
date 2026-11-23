@@ -409,6 +409,14 @@ the scheduled run, which has no model and decides on what was read
 before. An event's run (a push, a rebase, a re-run) always asks the
 model, whatever the comment remembers.
 
+A veto is remembered for good. Once the model has objected to an
+update's code, that veto stands for the same code under the same
+question in every later run, on an event and on the schedule, whatever
+the model answers when it is asked again and also when it does not
+answer. A rebase does not clear it and neither does running the gate
+again. A person does, by merging or closing the pull request; so does
+other code (a new version) and a changed prompt or model.
+
 ## Using it in a repository
 
 1. Copy `examples/dep-review-trigger.yaml` and `examples/dep-review.yaml`
@@ -525,7 +533,8 @@ and it then gets no status, comment or notification.
   request and has no tools. publish alone holds the gate app's token, in
   the `dep-review` environment, and parses no untrusted text in a shell.
 - **What a job can assert.** The model can only veto: no answer of its
-  makes a decision more permissive than "no veto". The facts file has no
+  makes a decision more permissive than "no veto", and none takes back a
+  veto the gate's comment remembers. The facts file has no
   member that says a model read an update; that comes only from the
   verdicts file, matched by content hash. The one read that counts
   without a verdict is of two artifacts that hold the same files, where

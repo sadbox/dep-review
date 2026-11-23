@@ -763,12 +763,27 @@ func TestStatusBeforeComment(t *testing.T) {
 		f := newFake(t)
 		f.mergeCode, f.mergeBody = 405, fmt.Sprintf(`{"message":%q}`, message)
 		f.pulls = []string{open, open, pullJSON(testPR, "open", headA, "main", "dirty", false)}
-		f.commentsCode = 500
+		// Decide's read of the comment is answered, and Act's is not.
+		f.commentsCode, f.commentsFirst = 500, 1
 		if _, err := publish(t, f.config(t0, nil), files(t, goodFacts(t), clean(t))); err == nil {
 			t.Fatalf("%s: no error although the comments could not be read", message)
 		}
 		if s := f.statuses(headA); len(s) != 2 || s[1] != want {
 			t.Errorf("%s: statuses %q, want the second and last to be %q", message, s, want)
 		}
+	}
+}
+
+// TestNoDecisionWithoutTheComment: the gate's comment may remember a veto
+// (spec section 11, amendment 63), so a decision is not made while GitHub
+// does not answer for it: no status, no merge call, an error.
+func TestNoDecisionWithoutTheComment(t *testing.T) {
+	f := newFake(t)
+	f.commentsCode = 500
+	if _, err := publish(t, f.config(t0, nil), files(t, goodFacts(t), clean(t))); err == nil {
+		t.Fatal("decided although the gate's comment could not be read")
+	}
+	if w := f.writes(); len(w) != 0 {
+		t.Errorf("wrote %+v: nothing may be decided without the comment", w)
 	}
 }

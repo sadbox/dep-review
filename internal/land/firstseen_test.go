@@ -351,9 +351,11 @@ func TestRegistryTimeWins(t *testing.T) {
 	if res, remembered = evaluate(t, f, t0, facts); res.Action != ActionMerged || len(remembered) != 0 {
 		t.Errorf("an old registry time: %s %v, remembered %+v", res.Action, res.Decision.Reasons, remembered)
 	}
-	// Decide did not need the comment: the one read is Act's.
-	if got := f.count("GET", "/comments"); got != 1 {
-		t.Errorf("the comments were read %d times, want once", got)
+	// The comment is read once to decide, whatever the registry dated: it
+	// may remember a veto (spec section 11, amendment 63). The second read
+	// is Act's.
+	if got := f.count("GET", "/comments"); got != 2 {
+		t.Errorf("the comments were read %d times, want twice", got)
 	}
 }
 

@@ -168,7 +168,7 @@ var reasonTable = []reasonText{
 		byHand},
 	{ReasonVeto, Person,
 		"The model objected to code in this update.",
-		"Read the lines it quoted, in the update's table. Merge by hand if they are harmless, close the pull request if they are not."},
+		"Read the lines it quoted, in the update's table. Merge by hand if they are harmless, close the pull request if they are not. The gate does not take a veto back: it stands for this same code when the gate runs again or the pull request is rebased, whatever the model answers then."},
 	{ReasonModelRefused, Person,
 		"The model refused to read this update.",
 		byHand},

@@ -47,7 +47,12 @@ const (
 // which pull requests to evaluate again, Notified keeps a re-run from
 // notifying twice, Cache is the model's answers for the scheduled job,
 // which asks no model, and FirstSeen is the gate's own clock for a pin no
-// registry dates.
+// registry dates. One thing in it does decide, and only against a merge:
+// a veto in Cache stands for the same content in every later run
+// (answers).
+//
+// Whoever writes a marker starts from the one that is there (next), so
+// that no run forgets a veto, a first-seen time or whom it told.
 //
 // It is believed only in a comment whose author is the gate app
 // (findComment). A person who can write to the repository can edit that
@@ -89,13 +94,26 @@ type cached struct {
 	Veto *allow.Veto     `json:"veto"`
 }
 
+// next is the marker a run writes in place of old: outcome and head are
+// the run's, and what the gate remembers whatever a run decides is carried
+// over. A run that decided replaces the verdicts and the first-seen times
+// with its own, which Decide made from old's (cacheEntries, dateUnseen).
+func (old marker) next(outcome Action, head string) marker {
+	return marker{
+		Outcome: outcome, Head: head,
+		Notified: old.Notified, NotifiedFailed: old.NotifiedFailed, NotifiedUnread: old.NotifiedUnread,
+		Fingerprint: old.Fingerprint, Cache: old.Cache, FirstSeen: old.FirstSeen,
+	}
+}
+
 // markerRE is the marker line. The payload is base64 of JSON, because a
 // cached veto carries text the model quoted from a dependency, and no such
 // text may be able to end the HTML comment it sits in.
 var markerRE = regexp.MustCompile(`^<!-- dep-review:v2 ([A-Za-z0-9_-]+) -->`)
 
 // String is the marker line. Cache entries are dropped from the end until
-// it fits.
+// it fits; cacheEntries puts the vetoes first, so they are the last to
+// go.
 func (m marker) String() string {
 	for {
 		b, err := json.Marshal(m)
@@ -164,40 +182,58 @@ func (m marker) verdicts() wire.Verdicts {
 	return v
 }
 
-// cacheEntries picks the verdicts to remember: the ones wire.Join used for
-// this pull request's prepared reads under the current fingerprint, and of
-// those only a model's complete answer. Read full or partial with no veto
-// is a clean entry, and the review job writes that only after every chunk
-// answered no_veto; a read with no answer (none) or one the reviewer would
-// not send (refused) is not remembered, so it is asked again.
-func cacheEntries(f wire.Facts, v wire.Verdicts, fingerprint string) []cached {
+// cacheEntries picks the verdicts to remember. v is what Decide joined
+// (answers): of it, the ones for this pull request's prepared reads under
+// the current fingerprint, and of those only a model's complete answer.
+// Read full or partial with no veto is a clean entry, and the review job
+// writes that only after every chunk answered no_veto; a read with no
+// answer (none) or one the reviewer would not send (refused) is not
+// remembered, so it is asked again.
+//
+// A veto is never dropped for a run's sake. One that old, the marker the
+// comment had, remembers under this fingerprint for content the pull
+// request no longer has is kept as well: Dependabot can rewrite a pull
+// request to other versions and back. The vetoes come first, in the order
+// of the updates and then of old, so that a marker with more than it
+// holds loses clean entries, which only cost another question.
+func cacheEntries(f wire.Facts, v wire.Verdicts, old marker, fingerprint string) []cached {
 	answers := map[string]wire.Verdict{}
 	for _, verdict := range v.Verdicts {
 		if verdict.Fingerprint == fingerprint {
 			answers[verdict.Key] = verdict
 		}
 	}
-	var out []cached
+	var vetoes, clean []cached
+	kept := map[string]bool{} // two updates with one key are one entry
 	for _, u := range f.Facts.Updates {
 		verdict, ok := answers[u.Prepared.Key]
-		if !ok || u.Prepared.Status != wire.Prepared || len(out) == maxCached {
+		if !ok || u.Prepared.Status != wire.Prepared || kept[verdict.Key] {
 			continue
 		}
 		if verdict.Read != allow.ReadFull && verdict.Read != allow.ReadPartial {
 			continue
 		}
-		delete(answers, u.Prepared.Key) // two updates with one key are one entry
-		c := cached{Key: verdict.Key, Read: verdict.Read}
-		if verdict.Veto != nil {
-			veto := allow.Veto{Category: verdict.Veto.Category, Quotes: []string{}, Notes: cut(verdict.Veto.Notes)}
-			for _, q := range verdict.Veto.Quotes[:min(len(verdict.Veto.Quotes), maxCachedQuotes)] {
-				veto.Quotes = append(veto.Quotes, cut(q))
-			}
-			c.Veto = &veto
+		kept[verdict.Key] = true
+		if verdict.Veto == nil {
+			clean = append(clean, cached{Key: verdict.Key, Read: verdict.Read})
+			continue
 		}
-		out = append(out, c)
+		veto := allow.Veto{Category: verdict.Veto.Category, Quotes: []string{}, Notes: cut(verdict.Veto.Notes)}
+		for _, q := range verdict.Veto.Quotes[:min(len(verdict.Veto.Quotes), maxCachedQuotes)] {
+			veto.Quotes = append(veto.Quotes, cut(q))
+		}
+		vetoes = append(vetoes, cached{Key: verdict.Key, Read: verdict.Read, Veto: &veto})
 	}
-	return out
+	if old.Fingerprint == fingerprint {
+		for _, e := range old.Cache {
+			if e.Veto != nil && !kept[e.Key] {
+				kept[e.Key] = true
+				vetoes = append(vetoes, e)
+			}
+		}
+	}
+	out := append(vetoes, clean...)
+	return out[:min(len(out), maxCached)]
 }
 
 // cut keeps the first maxCachedText bytes of s, as valid UTF-8.
@@ -602,10 +638,14 @@ func updateRows(v view, i int) []row {
 	if read == "" {
 		read = "not recorded"
 	}
-	asked := false // a model was asked about this read
+	asked := false        // a model was asked about this read
+	vetoer := "the model" // whose word a veto is
 	if i < len(v.ev.file.Facts.Updates) {
 		p := v.ev.file.Facts.Updates[i].Prepared
 		prepared = string(p.Status)
+		if v.ev.stood[p.Key] {
+			vetoer = stoodSource
+		}
 		switch {
 		case p.Status == wire.Prepared:
 			prepared = fmt.Sprintf("chunks prepared: %d; changed files not shown: %d", len(p.Chunks), len(p.Unread))
@@ -631,13 +671,18 @@ func updateRows(v view, i int) []row {
 		if more := len(u.Veto.Quotes) - maxQuotesShown; more > 0 {
 			cells = append(cells, fmt.Sprintf("(%d more)", more))
 		}
-		rows = append(rows, row{"Veto", code("raised"), strings.Join(cells, " "), code("the model")})
+		rows = append(rows, row{"Veto", code("raised"), strings.Join(cells, " "), code(vetoer)})
 		if u.Veto.Notes != "" {
-			rows = append(rows, row{"Model's note", "", code(u.Veto.Notes), code("the model")})
+			rows = append(rows, row{"Model's note", "", code(u.Veto.Notes), code(vetoer)})
 		}
 	}
 	return rows
 }
+
+// stoodSource is the source of a veto this run's verdicts do not carry:
+// the gate's comment remembered it for the same content (answers). The
+// quotes are then the few the comment keeps.
+const stoodSource = "the model, in an earlier run: the gate's comment remembers the veto for this same content, and no later answer takes it back"
 
 // updateName is an update as a heading or a sentence names it.
 func updateName(u allow.UpdateFacts) string {

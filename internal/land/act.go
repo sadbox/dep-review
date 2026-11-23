@@ -160,13 +160,16 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	mk := marker{Outcome: res.Action, Head: pr.Head, Fingerprint: ev.fingerprint, Cache: ev.cache, FirstSeen: ev.firstSeen}
+	var old marker
+	if prev != nil {
+		old, _ = parseMarker(prev.Body)
+	}
+	// The verdicts and the first-seen times are Decide's, which made them
+	// from what the comment remembered: no veto and no time is lost here.
+	mk := old.next(res.Action, pr.Head)
+	mk.Fingerprint, mk.Cache, mk.FirstSeen = ev.fingerprint, ev.cache, ev.firstSeen
 	if res.Action == ActionWait {
 		mk.NotBefore, mk.Deadline = res.Decision.NotBefore, res.Decision.Deadline
-	}
-	if prev != nil {
-		old, _ := parseMarker(prev.Body)
-		mk.Notified, mk.NotifiedFailed, mk.NotifiedUnread = old.Notified, old.NotifiedFailed, old.NotifiedUnread
 	}
 	var notifyErr error
 	if msg, ok := notification(cfg, pr, res); ok {
@@ -231,15 +234,14 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 	if err != nil {
 		return err
 	}
-	mk := marker{Outcome: ActionFailed, Head: head}
+	// What earlier runs read, when they first saw a pin, and whom they
+	// told, is still true. Which pins the pull request still has is for
+	// the next run that decides to say.
+	var old marker
 	if prev != nil {
-		// What earlier runs read, when they first saw a pin, and whom
-		// they told, is still true. Which pins the pull request still has
-		// is for the next run that decides to say.
-		old, _ := parseMarker(prev.Body)
-		mk.Notified, mk.NotifiedFailed, mk.NotifiedUnread = old.Notified, old.NotifiedFailed, old.NotifiedUnread
-		mk.Fingerprint, mk.Cache, mk.FirstSeen = old.Fingerprint, old.Cache, old.FirstSeen
+		old, _ = parseMarker(prev.Body)
 	}
+	mk := old.next(ActionFailed, head)
 	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number,
 		": the gate's run failed before it could decide. Re-run all jobs"+runLink(cfg)))
 

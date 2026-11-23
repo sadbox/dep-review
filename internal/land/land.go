@@ -15,7 +15,9 @@
 // the merge call. And there is no stored approval: the comment remembers
 // the last outcome, the model's verdicts by content key and when a pin
 // was first evaluated, and a merge always follows a fresh allow.Decide on
-// facts gathered no longer ago than MaxFactsAge.
+// facts gathered no longer ago than MaxFactsAge. What is stored and does
+// decide is an objection: a veto the comment remembers stands for the
+// same content until a person merges or closes the pull request (answers).
 package land
 
 import (
@@ -130,25 +132,31 @@ type Evaluation struct {
 	file        wire.Facts // for the comment: the prepared reads, the time gathered
 	fingerprint string     // the reviewer's
 	cache       []cached   // the verdicts worth remembering
-	firstSeen   []seen     // the first evaluations worth remembering
-	branch      string     // the default branch
-	now         time.Time  // the instant decided at
+	// stood has the content keys whose veto is one the gate's comment
+	// remembered and this run's verdicts file does not repeat.
+	stood     map[string]bool
+	firstSeen []seen    // the first evaluations worth remembering
+	branch    string    // the default branch
+	now       time.Time // the instant decided at
 }
 
 // Decide loads and checks the facts file and the verdicts file, which the
 // publish job gets from two different jobs, and asks allow.Decide. It
 // writes nothing.
 //
-// A prepared read's Read and Veto come from the verdicts file alone
-// (wire.Join): a verdict that is missing, or was written under another
-// reviewer fingerprint, is Read none. A missing verdicts file is no
-// verdicts. An update's FirstSeen is the facts file's when a registry
-// gave a time, and otherwise this job's own (dateUnseen).
+// A prepared read's Read and Veto come from the verdicts file and from
+// what the gate's own comment remembers (answers, wire.Join): a veto the
+// comment remembers for the same content stands whatever the file says,
+// and a verdict that is missing, or was written under another reviewer
+// fingerprint, is Read none. A missing verdicts file is no verdicts. An
+// update's FirstSeen is the facts file's when a registry gave a time, and
+// otherwise this job's own (dateUnseen).
 //
 // An error means there is no decision: a file that does not decode, facts
 // for another repository or gathered too long ago (ErrFactsStale), or
 // GitHub not answering for something that is not a fact (the pull request,
-// the gate's comment).
+// the gate's comment). The comment is read at every decision: without it
+// a veto the gate recorded would be decided without.
 func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Evaluation, error) {
 	if err := cfg.check(); err != nil {
 		return Evaluation{}, err
@@ -191,6 +199,11 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 	policy := conf.Policy()
 	ev.fingerprint = veto.FromConfig(conf).Fingerprint()
 
+	old, err := memory(ctx, cfg, ev.PullRequest.Number)
+	if err != nil {
+		return Evaluation{}, err
+	}
+	verdicts, ev.stood = answers(verdicts, old, ev.fingerprint)
 	ev.Facts = wire.Join(facts, verdicts, ev.fingerprint)
 	// Whatever the facts file says about required checks, this job asks
 	// GitHub itself, now.
@@ -206,13 +219,78 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 	}
 	// The one fact this job makes from its own clock, for the updates no
 	// registry dates. allow.Decide is given the result like any other fact.
-	if err := dateUnseen(ctx, cfg, &ev); err != nil {
-		return Evaluation{}, err
-	}
+	dateUnseen(&ev, old.FirstSeen)
 
 	ev.Decision = allow.Decide(ev.Facts, policy, ev.now)
-	ev.cache = cacheEntries(facts, verdicts, ev.fingerprint)
+	ev.cache = cacheEntries(facts, verdicts, old, ev.fingerprint)
 	return ev, nil
+}
+
+// memory is what the gate's own comment on a pull request remembers: its
+// marker, or the zero marker when the gate has no comment there or the
+// comment has no marker this version reads. Nothing is then remembered:
+// no verdict, no veto and no first-seen time. The error is GitHub not
+// answering.
+func memory(ctx context.Context, cfg Config, number int) (marker, error) {
+	c, err := findComment(ctx, cfg, number)
+	if err != nil || c == nil {
+		return marker{}, err
+	}
+	old, _ := parseMarker(c.Body)
+	return old, nil
+}
+
+// answers settles which verdict counts for each content key under the
+// reviewer's fingerprint: the one in this run's verdicts file, or the one
+// the gate's comment remembers (spec section 11, amendment 63).
+//
+//	the comment remembers   this run's file says    counts
+//	a veto                  a veto                  this run's veto
+//	a veto                  anything else, nothing  the remembered veto
+//	no veto, or nothing     anything, nothing       this run's, as it is
+//
+// So a veto stands. The model is not asked the same way twice (nothing
+// fixes its sampling), and an objection that one later answer could take
+// back would hold only until the next rebase. What gets past a veto is a
+// person merging or closing the pull request, content with another key,
+// or a reviewer with another fingerprint: the comment's entries are all
+// under the one fingerprint it names, and under any other none of them is
+// looked at.
+//
+// The result has one entry for each key, all under fingerprint; a verdict
+// of the file under another fingerprint is left out, as wire.Join would
+// not look at it. stood has the keys whose veto is the remembered one.
+func answers(file wire.Verdicts, old marker, fingerprint string) (merged wire.Verdicts, stood map[string]bool) {
+	merged = wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{}}
+	at := map[string]int{} // a key's place in merged
+	for _, v := range file.Verdicts {
+		if v.Fingerprint != fingerprint {
+			continue
+		}
+		at[v.Key] = len(merged.Verdicts)
+		merged.Verdicts = append(merged.Verdicts, v)
+	}
+	stood = map[string]bool{}
+	if old.Fingerprint != fingerprint {
+		return merged, stood
+	}
+	for _, e := range old.Cache {
+		if e.Veto == nil {
+			continue
+		}
+		remembered := wire.Verdict{Key: e.Key, Fingerprint: fingerprint, Read: e.Read, Veto: e.Veto}
+		i, has := at[e.Key]
+		switch {
+		case !has:
+			merged.Verdicts = append(merged.Verdicts, remembered)
+		case merged.Verdicts[i].Veto == nil:
+			merged.Verdicts[i] = remembered
+		default:
+			continue // the model objects again, in this run's words
+		}
+		stood[e.Key] = true
+	}
+	return merged, stood
 }
 
 // readFiles reads the facts file, which must be there, and the verdicts

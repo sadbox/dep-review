@@ -97,10 +97,11 @@ func TestPublishRefreshed(t *testing.T) {
 			want: "classify said", calls: "GET pulls/7"},
 		{name: "classify rejects it and the facts say so: decided", dir: "7", facts: no, pull: pullJSON("open", "mallory", testHead),
 			// The decision is carried out: a person's. All it asks GitHub
-			// for is the pull request, the branch's rules and the gate's
-			// comment; there are no settings to fetch (spec section 11,
-			// amendment 56).
-			calls: "GET pulls/7, GET pulls/7, GET rules/branches/main, POST statuses/" + testHead + ", GET issues/7/comments, POST issues/7/comments"},
+			// for is the pull request, the gate's comment (once to decide,
+			// for a veto it may remember, and once to write), and the
+			// branch's rules; there are no settings to fetch (spec section
+			// 11, amendments 56 and 63).
+			calls: "GET pulls/7, GET pulls/7, GET issues/7/comments, GET rules/branches/main, POST statuses/" + testHead + ", GET issues/7/comments, POST issues/7/comments"},
 		// A scheduled run's publish job run again by itself: nothing is
 		// written, the comment still says wait, and the next run decides.
 		{name: "facts of an earlier attempt: not decided", dir: "7", pull: pullJSON("open", "mallory", testHead),

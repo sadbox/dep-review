@@ -90,9 +90,10 @@ type fakeGitHub struct {
 	mergeBody   string
 	mergedAfter bool
 
-	// commentsCode, when set, is the status every read of the comments
-	// gets.
-	commentsCode int
+	// commentsCode, when set, is the status a read of the comments gets,
+	// once commentsFirst reads were answered as usual.
+	commentsCode  int
+	commentsFirst int
 	// lenient: a request the fake does not know is answered 404 without
 	// failing the test.
 	lenient bool
@@ -194,9 +195,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gh.ValidSHA(strings.TrimSuffix(strings.TrimPrefix(rest, "compare/"), "...main")):
 		answer(f.compareCode, f.compare)
 	case r.Method == "GET" && strings.HasPrefix(rest, "issues/") && strings.HasSuffix(rest, "/comments"):
-		if f.commentsCode != 0 {
+		if f.commentsCode != 0 && f.commentsFirst == 0 {
 			answer(f.commentsCode, `{"message":"Server Error"}`)
 			return
+		}
+		if f.commentsFirst > 0 {
+			f.commentsFirst--
 		}
 		n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(rest, "issues/"), "/comments"))
 		type user struct {

@@ -467,7 +467,7 @@ func TestCacheEntries(t *testing.T) {
 			[]cached{{Key: keyC, Read: allow.ReadPartial}, {Key: keyA, Read: allow.ReadFull}}},
 	}
 	for _, tc := range tests {
-		got := cacheEntries(tc.facts, wire.Verdicts{Version: wire.Version, Verdicts: tc.verdicts}, reviewer)
+		got := cacheEntries(tc.facts, wire.Verdicts{Version: wire.Version, Verdicts: tc.verdicts}, marker{}, reviewer)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
@@ -479,5 +479,68 @@ func TestCacheEntries(t *testing.T) {
 	}
 	if veto.Quotes[0] != long || len(veto.Quotes) != 4 {
 		t.Error("the verdict's own veto was changed")
+	}
+
+	// A veto is kept whatever the pull request holds now, and comes before
+	// every clean entry, so that a marker with more than it holds drops
+	// the clean ones (spec section 11, amendment 63).
+	short := &allow.Veto{Category: "exfiltration", Quotes: []string{"b"}}
+	for _, tc := range []struct {
+		name     string
+		facts    wire.Facts
+		verdicts []wire.Verdict
+		old      marker // what the comment remembered
+		want     []cached
+	}{
+		{name: "vetoes first, then the clean entries", facts: prepared(keyA, keyB),
+			verdicts: []wire.Verdict{
+				{Key: keyA, Fingerprint: reviewer, Read: allow.ReadFull},
+				{Key: keyB, Fingerprint: reviewer, Read: allow.ReadFull, Veto: short},
+			},
+			want: []cached{{Key: keyB, Read: allow.ReadFull, Veto: short}, {Key: keyA, Read: allow.ReadFull}}},
+		{name: "a remembered veto for content the pull request no longer has is kept", facts: prepared(keyA),
+			verdicts: []wire.Verdict{{Key: keyA, Fingerprint: reviewer, Read: allow.ReadFull}},
+			old: marker{Fingerprint: reviewer, Cache: []cached{
+				{Key: keyB, Read: allow.ReadFull}, {Key: keyC, Read: allow.ReadPartial, Veto: short}}},
+			want: []cached{{Key: keyC, Read: allow.ReadPartial, Veto: short}, {Key: keyA, Read: allow.ReadFull}}},
+		{name: "a remembered veto is kept when this run has no verdict at all", facts: prepared(keyA),
+			old:  marker{Fingerprint: reviewer, Cache: []cached{{Key: keyC, Read: allow.ReadFull, Veto: short}}},
+			want: []cached{{Key: keyC, Read: allow.ReadFull, Veto: short}}},
+		{name: "a veto remembered under another fingerprint is another reviewer's", facts: prepared(keyA),
+			verdicts: []wire.Verdict{{Key: keyA, Fingerprint: reviewer, Read: allow.ReadFull}},
+			old:      marker{Fingerprint: other, Cache: []cached{{Key: keyC, Read: allow.ReadFull, Veto: short}}},
+			want:     []cached{{Key: keyA, Read: allow.ReadFull}}},
+		{name: "a veto for a read the pull request has is one entry, this run's", facts: prepared(keyA),
+			verdicts: []wire.Verdict{{Key: keyA, Fingerprint: reviewer, Read: allow.ReadFull, Veto: short}},
+			old: marker{Fingerprint: reviewer, Cache: []cached{{Key: keyA, Read: allow.ReadPartial,
+				Veto: &allow.Veto{Category: "obfuscation", Quotes: []string{}}}}},
+			want: []cached{{Key: keyA, Read: allow.ReadFull, Veto: short}}},
+	} {
+		got := cacheEntries(tc.facts, wire.Verdicts{Version: wire.Version, Verdicts: tc.verdicts}, tc.old, reviewer)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+
+	// More than the marker holds: the vetoes stay and clean entries go.
+	var keys []string
+	var full []wire.Verdict
+	for i := 0; i < maxCached+5; i++ {
+		key := fmt.Sprintf("%064x", i+1)
+		keys = append(keys, key)
+		v := wire.Verdict{Key: key, Fingerprint: reviewer, Read: allow.ReadFull}
+		if i >= maxCached {
+			v.Veto = short
+		}
+		full = append(full, v)
+	}
+	got := cacheEntries(prepared(keys...), wire.Verdicts{Version: wire.Version, Verdicts: full}, marker{}, reviewer)
+	if len(got) != maxCached {
+		t.Fatalf("%d entries, want %d", len(got), maxCached)
+	}
+	for i, c := range got {
+		if (c.Veto != nil) != (i < 5) {
+			t.Fatalf("entry %d: veto %v; want the 5 vetoes first and kept", i, c.Veto)
+		}
 	}
 }
