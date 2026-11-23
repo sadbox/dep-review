@@ -159,7 +159,24 @@ func TestInspectTarballs(t *testing.T) {
 		{"a bundled package is removed with its .gypi", pkg(plain, inner, plain, "node_modules/inner/common.gypi", gypi), pkg(next), no, "node_modules/inner/common.gypi is gone"},
 		// Other names are other files: the model reads them.
 		{"a .gyp file that is not binding.gyp changes", pkg(plain, "deps/zlib.gyp", "{}"), pkg(next, "deps/zlib.gyp", gyp), yes, "(0 binding.gyp and .gypi files present)"},
-		{"names that only look like it", pkg(plain), pkg(next, "config.gypi.txt", gypi, "gypi", gypi, "Binding.GYPI", gypi), yes, "(0 binding.gyp and .gypi files present)"},
+		{"names that only look like it", pkg(plain), pkg(next, "config.gypi.txt", gypi, "gypi", gypi, "Binding.gyp.txt", gyp), yes, "(0 binding.gyp and .gypi files present)"},
+
+		// npm and node-gyp open Binding.gyp or common.GYPI as the file
+		// they look for on a file system that ignores case (macOS,
+		// Windows), so names are matched without regard to case. Old and
+		// new are still paired by exact path: a name that differs from the
+		// old one only in case has no counterpart, and is new (spec section
+		// 11, amendment 69).
+		{"a Binding.gyp appears", pkg(plain), pkg(next, "Binding.gyp", gyp), no, "Binding.gyp is new"},
+		{"a BINDING.GYP appears beside an unchanged binding.gyp", pkg(plain, "binding.gyp", gyp), pkg(next, "binding.gyp", gyp, "BINDING.GYP", gyp), no, "BINDING.GYP is new"},
+		{"a binding.gyp is renamed to Binding.gyp", pkg(plain, "binding.gyp", gyp), pkg(next, "Binding.gyp", gyp), no, "Binding.gyp is new"},
+		{"an unchanged Binding.gyp", pkg(plain, "Binding.gyp", gyp), pkg(next, "Binding.gyp", gyp), yes, "(1 binding.gyp and .gypi files present)"},
+		{"a Common.GYPI changes", pkg(plain, "binding.gyp", gyp, "Common.GYPI", "{}"), pkg(next, "binding.gyp", gyp, "Common.GYPI", gypi), no, "Common.GYPI changes"},
+		{"a .GYPI is gone", pkg(plain, "deps/x.GYPI", gypi), pkg(next), no, "deps/x.GYPI is gone"},
+		{"a Package.json with a script in a directory", pkg(plain), pkg(plain, "lib/Package.json", withScript), no, "lib/Package.json is new and has an install script"},
+		{"a new package.json beside an old Binding.gyp", pkg(plain, "addon/Binding.gyp", gyp), pkg(plain, "addon/Binding.gyp", gyp, "addon/package.json", `{"name":"addon"}`), no, "addon/package.json is new beside a binding.gyp"},
+		{"a Binding.gyp is gone and package.json stays", pkg(plain, "Binding.gyp", "{}"), pkg(plain), no, "Binding.gyp is gone, and package.json beside it stays"},
+		{"only a Package.json at the root", pkg(plain), fstest.MapFS{"Package.json": {Data: []byte(plain)}}, no, "the new tarball has no package.json at its root"},
 
 		// Bundled dependencies are part of the tarball and are held to
 		// the same rule, each at its own path.

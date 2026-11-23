@@ -364,8 +364,36 @@ const tarballSource = "every package.json, binding.gyp and .gypi file in the ver
 // file is loaded), a binding.gyp includes one by path, and node-gyp
 // includes a config.gypi and a common.gypi beside a binding.gyp without
 // being told to (node-gyp 12.4.0, lib/configure.js).
+//
+// The name is compared without regard to case: on a file system that
+// ignores it (macOS, Windows) npm and node-gyp open a Binding.gyp or a
+// common.GYPI as the file they look for (spec section 11, amendment 69).
 func gypFile(name string) bool {
-	return name == "binding.gyp" || strings.HasSuffix(name, ".gypi")
+	return strings.EqualFold(name, "binding.gyp") || gypiFile(name)
+}
+
+// gypiFile reports whether a file of this name is a .gypi file, in any
+// case.
+func gypiFile(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), ".gypi")
+}
+
+// gypBeside is the path of a file named binding.gyp in any case in the
+// directory dir of tree, or "" when there is none. A nil tree has none.
+func gypBeside(tree fs.FS, dir string) (string, error) {
+	if tree == nil {
+		return "", nil
+	}
+	entries, err := fs.ReadDir(tree, dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(e.Name(), "binding.gyp") {
+			return path.Join(dir, e.Name()), nil
+		}
+	}
+	return "", err
 }
 
 // gypWhy ends the problem a gyp file is.
@@ -428,7 +456,9 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 			return err
 		}
 		switch name := d.Name(); {
-		case name == "package.json":
+		case strings.EqualFold(name, "package.json"):
+			// In any case, as npm on such a file system reads it. The
+			// root's is looked for by its exact name above.
 			manifests++
 			problem, err = manifestProblem(oldPkg, newPkg, p)
 		case gypFile(name):
@@ -460,7 +490,7 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 func gypiGone(oldPkg, newPkg fs.FS) (string, error) {
 	var problem string
 	err := fs.WalkDir(oldPkg, ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".gypi") {
+		if err != nil || d.IsDir() || !gypiFile(d.Name()) {
 			return err
 		}
 		if _, has, err := readSmall(newPkg, p); err != nil || has {
@@ -496,7 +526,6 @@ func gypProblem(oldPkg, newPkg fs.FS, p string) (string, error) {
 // binding.gyp that is there is gypProblem's; this looks at its being
 // there.
 func manifestProblem(oldPkg, newPkg fs.FS, p string) (string, error) {
-	gyp := path.Join(path.Dir(p), "binding.gyp")
 	is, _, err := readSmall(newPkg, p)
 	if err != nil {
 		return "", err
@@ -505,19 +534,19 @@ func manifestProblem(oldPkg, newPkg fs.FS, p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, hasGyp, err := readSmall(newPkg, gyp)
+	newGyp, err := gypBeside(newPkg, path.Dir(p))
 	if err != nil {
 		return "", err
 	}
-	_, hadGyp, err := readSmall(oldPkg, gyp)
+	oldGyp, err := gypBeside(oldPkg, path.Dir(p))
 	if err != nil {
 		return "", err
 	}
 	switch {
-	case !had && hasGyp:
+	case !had && newGyp != "":
 		return show(p) + " is new beside a binding.gyp", nil
-	case had && hadGyp && !hasGyp:
-		return show(gyp) + " is gone, and " + show(p) + " beside it stays", nil
+	case had && oldGyp != "" && newGyp == "":
+		return show(oldGyp) + " is gone, and " + show(p) + " beside it stays", nil
 	case had && bytes.Equal(was, is):
 		// The same bytes say the same, whatever they say: that is what
 		// keeps a fixture nobody can parse from stopping an update that
