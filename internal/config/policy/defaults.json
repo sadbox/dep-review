@@ -11,7 +11,7 @@
                    "github.com/aws/", "github.com/Azure/", "github.com/AzureAD/",
                    "github.com/microsoft/", "github.com/microsoftgraph/",
                    "go.opentelemetry.io/"],
-    "github_actions": ["actions/", "github/", "docker/"],
+    "github_actions": ["actions/", "github/", "docker/", "astral-sh/"],
     "docker": ["docker.io/library/", "gcr.io/distroless/"],
     "npm": ["tailwindcss", "@tailwindcss/"]
   },

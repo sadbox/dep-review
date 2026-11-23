@@ -140,6 +140,6 @@ func testPolicy() allow.Policy {
 		WaitDeadline: 7 * 24 * time.Hour,
 		FastPath:     true,
 		Companions:   allow.RideAlong,
-		Listed:       map[string][]string{allow.GitHubActions: {"actions/", "github/", "docker/"}},
+		Listed:       map[string][]string{allow.GitHubActions: {"actions/", "github/", "docker/", "astral-sh/"}},
 	}
 }

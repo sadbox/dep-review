@@ -44,7 +44,7 @@ func specDefaults() Config {
 				"github.com/aws/", "github.com/Azure/", "github.com/AzureAD/",
 				"github.com/microsoft/", "github.com/microsoftgraph/",
 				"go.opentelemetry.io/"},
-			GitHubActions: []string{"actions/", "github/", "docker/"},
+			GitHubActions: []string{"actions/", "github/", "docker/", "astral-sh/"},
 			Docker:        []string{"docker.io/library/", "gcr.io/distroless/"},
 			NPM:           []string{"tailwindcss", "@tailwindcss/"},
 		},
@@ -162,6 +162,21 @@ func TestPolicy(t *testing.T) {
 		if !allow.Listed(p, eco, name) {
 			t.Errorf("%s: %q is not listed", eco, name)
 		}
+	}
+
+	// astral-sh/ is on the list by the owner's ruling (spec section 11,
+	// amendment 57): every action of that publisher, and no name that
+	// only starts like it.
+	if !allow.Listed(p, allow.GitHubActions, "astral-sh/setup-uv") {
+		t.Error("astral-sh/setup-uv is not listed")
+	}
+	for _, name := range []string{"astral-sh-fork/setup-uv", "astral-sh", "Astral-sh/setup-uv"} {
+		if allow.Listed(p, allow.GitHubActions, name) {
+			t.Errorf("%q is listed", name)
+		}
+	}
+	if allow.Listed(p, allow.NPM, "astral-sh/setup-uv") || allow.Listed(p, allow.GoModules, "astral-sh/setup-uv") {
+		t.Error("the Actions entry lists a name of another ecosystem")
 	}
 
 	// And allow accepts the policy: an old, clean update merges.

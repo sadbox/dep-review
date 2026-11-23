@@ -44,7 +44,7 @@ func testPolicy() Policy {
 				"github.com/aws/", "github.com/Azure/", "github.com/AzureAD/",
 				"github.com/microsoft/", "github.com/microsoftgraph/",
 				"go.opentelemetry.io/"},
-			GitHubActions: {"actions/", "github/", "docker/"},
+			GitHubActions: {"actions/", "github/", "docker/", "astral-sh/"},
 			Docker:        {"docker.io/library/", "gcr.io/distroless/"},
 			NPM:           {"tailwindcss", "@tailwindcss/"},
 		},
@@ -1672,7 +1672,9 @@ func TestListed(t *testing.T) {
 		{GitHubActions, "Actions/checkout", false},
 		{GitHubActions, "github/codeql-action/init", true},
 		{GitHubActions, "docker/login-action", true},
-		{GitHubActions, "astral-sh/setup-uv", false},
+		{GitHubActions, "astral-sh/setup-uv", true},
+		{GitHubActions, "astral-sh-fork/setup-uv", false},
+		{GitHubActions, "example-org/setup-tool", false},
 		{GitHubActions, "x/actions/checkout", false},
 
 		{Docker, "docker.io/library/golang", true},
@@ -1865,7 +1867,7 @@ func randomVeto(r *rand.Rand) *Veto {
 var randomNames = map[string][]string{
 	GoModules:     {"golang.org/x/net", "cloud.google.com/go/storage", "github.com/kr/text", "modernc.org/sqlite"},
 	NPM:           {"tailwindcss", "@tailwindcss/oxide", "esbuild", "chart.js"},
-	GitHubActions: {"actions/checkout", "docker/login-action", "astral-sh/setup-uv"},
+	GitHubActions: {"actions/checkout", "docker/login-action", "example-org/setup-tool"},
 	Docker:        {"docker.io/library/golang", "gcr.io/distroless/static-debian12", "ghcr.io/example/app"},
 	"uv":          {"requests"},
 }
