@@ -1256,18 +1256,6 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 			}
 		}
 	}
-	// A source map is read with the bundle it belongs to. A changed map
-	// of no changed bundle runs nowhere, but a build can read it: it is
-	// shown, as bundle content nothing explains.
-	isBundle := map[string]bool{}
-	for _, c := range bundles {
-		isBundle[c.path] = true
-	}
-	for _, c := range maps {
-		if !isBundle[strings.TrimSuffix(c.path, ".map")] {
-			distOther = append(distOther, c)
-		}
-	}
 
 	// package.json: scripts and bundlers.
 	var pkgNotes strings.Builder
@@ -1437,6 +1425,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		attr.lockChanged, attr.lockPaths = map[string]bool{}, map[string]bool{}
 	}
 	var reports []*bundleReport
+	usedMaps := map[string]bool{}
 	for _, c := range bundles {
 		if c.status == 'D' {
 			continue
@@ -1446,6 +1435,15 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 			return err
 		}
 		reports = append(reports, analyzeBundle(in, attr))
+		usedMaps[in.newMapPath] = true
+	}
+	// A changed source map that no changed bundle read runs nowhere, but
+	// a build can read it: it is shown, as bundle content nothing
+	// explains.
+	for _, c := range maps {
+		if c.status != 'D' && !usedMaps[c.path] {
+			distOther = append(distOther, c)
+		}
 	}
 	for _, c := range distOther {
 		if c.status == 'D' {
@@ -1625,26 +1623,26 @@ func readBundle(ctx context.Context, g git, p *pair, c fileChange) (bundleInput,
 		}
 		in.old = od
 	}
-	load := func(rev string, js []byte) []byte {
+	load := func(rev string, js []byte) ([]byte, string) {
 		if js == nil {
-			return nil
+			return nil, ""
 		}
 		inline, ref := mapReference(c.path, js)
 		if inline != nil {
-			return inline
+			return inline, ""
 		}
 		for _, mp := range []string{ref, c.path + ".map"} {
 			if mp == "" {
 				continue
 			}
 			if b, err := g.show(ctx, rev, mp); err == nil {
-				return b
+				return b, mp
 			}
 		}
-		return nil
+		return nil, ""
 	}
-	in.newMap = load(p.newRef, in.new)
-	in.oldMap = load(p.oldRef, in.old)
+	in.newMap, in.newMapPath = load(p.newRef, in.new)
+	in.oldMap, _ = load(p.oldRef, in.old)
 	return in, nil
 }
 
