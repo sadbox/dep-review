@@ -43,18 +43,31 @@ type Result struct {
 	// Action is which it was; never ActionFailed.
 	Action Action
 	// Decision is the decision acted on: allow.Decide's, or
-	// allow.ChecksRefused's when GitHub refused the merge because
-	// required checks are pending or failing, or the base branch moved.
+	// allow.ChecksRefused's when the merge it allowed has to wait: GitHub
+	// refused it because required checks are pending or failing or the
+	// base branch moved under the call, or the gate did not ask (Held).
 	Decision allow.Decision
-	// Note says more about a stale pull request (the gate's words) or a
-	// refusal, also one the gate waits on because the base branch moved
-	// (GitHub's words: third-party text).
+	// Held says the gate did not ask GitHub to merge, because the default
+	// branch has changed a file the pull request changes, or may have
+	// (baseChanged).
+	Held bool
+	// Note says more about a stale pull request (the gate's words), about
+	// a refusal, also one the gate waits on because the base branch moved
+	// (GitHub's words: third-party text), or about a held merge: the file
+	// both sides change, by the name GitHub gives it (third-party text),
+	// and empty when GitHub's list of files was cut short.
 	Note string
 }
 
 // Act carries out an evaluation: for a merge it asks GitHub to merge the
 // exact head, then it sets the dep-review status to the outcome, notifies
 // when a person is needed and writes the gate's one comment.
+//
+// A merge is not asked for while the default branch has changed one of
+// the pull request's files (baseChanged): the pull request then waits
+// like one GitHub refused. That is looked at first, before any status is
+// set, so neither a held merge nor a look that failed leaves a success
+// behind.
 //
 // The status is set to success before the merge call, because a
 // repository may list dep-review itself among its required checks. It is
@@ -88,7 +101,21 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	pr := ev.PullRequest
 	res := Result{Decision: ev.Decision}
 
-	if ev.Decision.Outcome == allow.Merge {
+	merging := ev.Decision.Outcome == allow.Merge
+	if merging {
+		held, file, err := baseChanged(ctx, cfg, pr, ev.branch)
+		if err != nil {
+			return Result{}, err
+		}
+		if held {
+			// The decision for "GitHub will not merge yet" fits a merge the
+			// gate will not ask for yet: a wait the scheduled job tries
+			// again, a person's at the deadline.
+			res.Decision, res.Held, res.Note = allow.ChecksRefused(ev.Decision, ev.now), true, file
+			merging = false
+		}
+	}
+	if merging {
 		if err := setStatus(ctx, cfg, pr.Head, "success", "every fact holds; asking GitHub to merge"); err != nil {
 			return Result{}, err
 		}
@@ -263,6 +290,73 @@ func setStatus(ctx context.Context, cfg Config, sha, state, description string) 
 		body["target_url"] = cfg.RunURL
 	}
 	return cfg.GitHub.Post(ctx, fmt.Sprintf("repos/%s/statuses/%s", cfg.Repo, sha), body, nil)
+}
+
+// compareFilesCap is the most files GitHub lists for one comparison,
+// however many changed.
+const compareFilesCap = 300
+
+// baseChanged reports whether the default branch has changed a file the
+// pull request changes, since the commit the pull request branches from
+// (spec section 11, amendment 62). Every fact is about the head against
+// that commit, and GitHub merges the head onto the branch as it is now.
+// Two changes to one lock file can merge without a conflict into a lock
+// that neither side wrote, and required checks can pass on such a lock.
+// So that merge is not asked for. The gate does not rebase, update
+// or comment to bring the pull request up to date: Dependabot rebuilds
+// most such pull requests itself, and the new head gets a run of its own.
+//
+// Both answers are GitHub's: the pull request's files, and the comparison
+// from the head to the branch, whose ahead_by counts the commits the
+// branch has and the head lacks and whose files are what those commits
+// changed. A name is a file's name now or the one it was renamed from, on
+// either side. A pull request that is only behind is not held. GitHub
+// lists compareFilesCap files at most, and a list that long may lack the
+// one that matters, so it holds too; file is then empty.
+//
+// An error is an answer that did not come or does not say what changed.
+// Nothing is merged on one.
+func baseChanged(ctx context.Context, cfg Config, pr wire.PullRequest, branch string) (held bool, file string, err error) {
+	type changed struct {
+		Filename         string `json:"filename"`
+		PreviousFilename string `json:"previous_filename"`
+	}
+	mine, err := gh.List[changed](ctx, cfg.GitHub, fmt.Sprintf("repos/%s/pulls/%d/files", cfg.Repo, pr.Number))
+	if err != nil {
+		return false, "", err
+	}
+	var theirs struct {
+		AheadBy *int       `json:"ahead_by"`
+		Files   *[]changed `json:"files"`
+	}
+	if err := cfg.GitHub.Get(ctx, fmt.Sprintf("repos/%s/compare/%s...%s", cfg.Repo, pr.Head, branch), &theirs); err != nil {
+		return false, "", err
+	}
+	// A pull request the gate would merge changes at least one file, and
+	// GitHub's comparison always has both members.
+	if len(mine) == 0 || theirs.AheadBy == nil || *theirs.AheadBy < 0 || theirs.Files == nil {
+		return false, "", fmt.Errorf("land: GitHub's file list for #%d or its comparison of %s with %s does not say what changed", pr.Number, pr.Head, branch)
+	}
+	switch {
+	case *theirs.AheadBy == 0:
+		return false, "", nil
+	case len(*theirs.Files) >= compareFilesCap:
+		return true, "", nil
+	}
+	names := map[string]bool{}
+	for _, f := range mine {
+		names[f.Filename], names[f.PreviousFilename] = true, true
+	}
+	// A file that was not renamed has no previous name, on either side.
+	delete(names, "")
+	for _, f := range *theirs.Files {
+		for _, name := range []string{f.Filename, f.PreviousFilename} {
+			if names[name] {
+				return true, name, nil
+			}
+		}
+	}
+	return false, "", nil
 }
 
 // mergeKind is how an attempt to merge ended.

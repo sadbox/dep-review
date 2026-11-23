@@ -338,6 +338,9 @@ func lead(v view) string {
 		return "**GitHub refused the merge.** Every fact below holds and " + modelSaid(v) + ", so the gate asked GitHub to merge head " + head +
 			". GitHub answered: " + code(v.res.Note) + "\n" + ownSaid(v) + "\n**Way out:** look at the pull request's merge box, then merge by hand or have Dependabot recreate the pull request. The gate does not try this head again.\n"
 	}
+	if v.res.Held {
+		return heldLead(v)
+	}
 	if len(d.Reasons) == 0 {
 		return "**No reason was recorded.** Look at the update and merge or close the pull request by hand.\n"
 	}
@@ -375,6 +378,29 @@ func lead(v view) string {
 	}
 	fmt.Fprintf(&b, "\n**Way out:** %s\n", r.Hint())
 	return b.String()
+}
+
+// heldLead is the lead for a merge the gate did not ask GitHub for (Act,
+// baseChanged). The decision is the one for a refusal over required
+// checks, and that reason's sentences say GitHub refused. It was not
+// asked, so this lead says in its own words what happened and what ends
+// the wait. It names Dependabot's command in no form Dependabot would
+// take for one: the gate does not ask for a rebase, a person may.
+func heldLead(v view) string {
+	what := fmt.Sprintf("GitHub lists only %d of the files the default branch has changed since the commit this pull request branches from, so the gate cannot tell whether one the pull request changes is among them",
+		compareFilesCap)
+	if v.res.Note != "" {
+		what = "since the commit this pull request branches from, the default branch has changed " + code(v.res.Note) + ", which the pull request changes too"
+	}
+	state := "**Needs a person.** The wait deadline has passed."
+	if v.res.Action == ActionWait {
+		state = "**Waiting, at most until " + stamp(v.res.Decision.Deadline) + ".**"
+	}
+	return state + " Every fact below holds and " + modelSaid(v) + ", but the gate did not ask GitHub to merge: " + what +
+		". The facts are about this head on the base it had; a merge now would put it on another.\n" +
+		"\n**Way out:** Dependabot rebuilds most such pull requests by itself within minutes, and the new head gets a run of its own. " +
+		"If it has not, ask Dependabot to rebase the pull request, or look at what the merge would give and merge by hand. " +
+		"The gate does not rebase, update or comment to bring a pull request up to date.\n"
 }
 
 // modelSaid is the clause about the model in the lead of a decision to

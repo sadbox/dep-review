@@ -77,6 +77,13 @@ type fakeGitHub struct {
 	// rules is the answer to rules/branches/main, with its status.
 	rules     string
 	rulesCode int
+	// prFiles and compare answer the two reads before a merge, each with
+	// its status: the pull request's file list, and the comparison of a
+	// commit with main.
+	prFiles     string
+	prFilesCode int
+	compare     string
+	compareCode int
 	// mergeCode and mergeBody answer the merge call. mergedAfter makes
 	// the pull request read as merged from then on.
 	mergeCode   int
@@ -117,10 +124,16 @@ func newFake(t *testing.T) *fakeGitHub {
 		open:      "[]",
 		rules:     oneRequiredCheck,
 		rulesCode: 200,
-		mergeCode: 200,
-		mergeBody: `{"merged":true}`,
-		comments:  map[int][]*fakeComment{},
-		nextID:    100,
+		// The pull request changes go.mod and go.sum, and main has nothing
+		// its head lacks.
+		prFiles:     `[{"filename":"go.mod","status":"modified"},{"filename":"go.sum","status":"modified"}]`,
+		prFilesCode: 200,
+		compare:     `{"status":"identical","ahead_by":0,"behind_by":0,"total_commits":0,"commits":[],"files":[]}`,
+		compareCode: 200,
+		mergeCode:   200,
+		mergeBody:   `{"merged":true}`,
+		comments:    map[int][]*fakeComment{},
+		nextID:      100,
 	}
 	f.srv = httptest.NewServer(f)
 	t.Cleanup(f.srv.Close)
@@ -175,6 +188,11 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		answer(200, f.open)
 	case route == "GET rules/branches/main":
 		answer(f.rulesCode, f.rules)
+	case route == fmt.Sprintf("GET pulls/%d/files", testPR):
+		answer(f.prFilesCode, f.prFiles)
+	case r.Method == "GET" && strings.HasPrefix(rest, "compare/") && strings.HasSuffix(rest, "...main") &&
+		gh.ValidSHA(strings.TrimSuffix(strings.TrimPrefix(rest, "compare/"), "...main")):
+		answer(f.compareCode, f.compare)
 	case r.Method == "GET" && strings.HasPrefix(rest, "issues/") && strings.HasSuffix(rest, "/comments"):
 		if f.commentsCode != 0 {
 			answer(f.commentsCode, `{"message":"Server Error"}`)

@@ -5,11 +5,13 @@
 // first evaluated a pin no registry dates) and asks allow.Decide with the
 // gate's built-in policy. Act carries the answer out.
 //
-// Nothing in this package decides. An outcome is allow.Decide's, or
-// allow.ChecksRefused's after GitHub refused a merge; what this package
-// adds is only ever "nothing was done" (the pull request changed),
-// "GitHub refused" (reported, never retried as if it were a wait) or "the
-// run failed" (Failed). The gate does not judge CI: GitHub's rules answer
+// Nothing in this package decides for a merge. An outcome is
+// allow.Decide's, or allow.ChecksRefused's after GitHub refused a merge
+// or this package did not ask for it; what this package adds is only ever
+// "not yet" (the default branch changed a file the pull request changes:
+// baseChanged), "nothing was done" (the pull request changed), "GitHub
+// refused" (reported, never retried as if it were a wait) or "the run
+// failed" (Failed). The gate does not judge CI: GitHub's rules answer
 // the merge call. And there is no stored approval: the comment remembers
 // the last outcome, the model's verdicts by content key and when a pin
 // was first evaluated, and a merge always follows a fresh allow.Decide on

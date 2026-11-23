@@ -30,7 +30,7 @@ readers is out of scope.
 
 | Outcome | When | What happens |
 |---|---|---|
-| merge | every fact holds, no veto, and GitHub accepts the merge | squash merge of exactly the head commit the facts are about |
+| merge | every fact holds, no veto, the default branch has not changed a file of the pull request, and GitHub accepts the merge | squash merge of exactly the head commit the facts are about |
 | wait | only time, CI, or a retry is missing | status `pending`; the scheduled run looks again |
 | person | a fact is false or was never established, or the model raised a veto | status `failure`, one comment, one notification |
 
@@ -44,6 +44,17 @@ GitHub's rules decide; a refusal because required checks are pending or
 failing is a wait, and so is GitHub's "Base branch was modified" (another
 merge landed at the same moment; the next scheduled run asks again). Any
 other refusal is reported (status `error`) and not retried.
+
+Before it asks, the gate looks at what the default branch has changed
+since the commit the pull request branches from. If that includes a file
+the pull request changes, it does not ask: the facts are about the head
+on the base it had, and two edits of one lock file can merge without a
+conflict into a lock nobody proposed. The pull request waits. Dependabot
+usually rebuilds it within minutes, and the new head gets a run of its
+own; if not, it needs a person at the wait deadline, and a rebase asked
+of Dependabot or a merge by hand ends the wait sooner. A pull request
+that is only behind merges as it is. The gate never rebases, updates or
+comments to bring a pull request up to date.
 
 A run that cannot decide is not silent. When the fetch job leaves no
 facts, or deciding fails, publish still runs: it sets the status to

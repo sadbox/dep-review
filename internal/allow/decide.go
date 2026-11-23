@@ -177,8 +177,12 @@ func Decide(f PRFacts, p Policy, now time.Time) Decision {
 // request that Decide allowed, because required checks are pending or
 // failing. The gate does not judge CI itself: publish calls the merge API
 // with the head commit, and when GitHub says no, this turns the Merge
-// into Wait, or into Person once the deadline has passed. A decision that
-// is not Merge is returned unchanged. Pure, like Decide.
+// into Wait, or into Person once the deadline has passed. Publish takes
+// the same decision for the two other merges that have to wait: one
+// GitHub refused because the base branch moved under the call, and one
+// publish did not ask for because the base changed a file the pull
+// request changes (spec section 11, amendments 17 and 62). A decision
+// that is not Merge is returned unchanged. Pure, like Decide.
 func ChecksRefused(d Decision, now time.Time) Decision {
 	if d.Outcome != Merge {
 		return d
