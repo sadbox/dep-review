@@ -187,3 +187,12 @@ func safeUpdate(u model.Update) model.Update {
 	u.Directory = safeDir(u.Directory)
 	return u
 }
+
+// safeRef is safeIdent for a walk reference: a name, or "T.M" for a
+// method the type checker resolved.
+func safeRef(s string) string {
+	if t, m, ok := strings.Cut(s, "."); ok {
+		return safeIdent(t) + "." + safeIdent(m)
+	}
+	return safeIdent(s)
+}

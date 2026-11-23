@@ -59,7 +59,7 @@ a newer head can never be merged on an old verdict.
 
 The Go checks flag code that runs on import (a new or changed `func init`,
 a package-level initializer that calls code, any changed declaration that
-init code reaches by name within its package), code the compiler does not
+init code reaches within its package), code the compiler does not
 check (cgo and its preamble, C/C++/assembly sources, `//go:linkname`), new
 risky or blank imports, every `//go:linkname`, `//go:cgo_*` and
 `//go:generate` directive in a changed file, newly embedded files,
@@ -148,6 +148,29 @@ quoted, with controls and default-ignorable characters shown as escapes.
 Unparseable Go files, truncated evidence and a module with more flagged
 items than a review can take also go to a person. Module diffs do not
 detect renames.
+
+#### The init walk
+
+The walk from init code follows each reached declaration's references as
+`go/types` resolves them. It type-checks the package once per distinct
+set of files go/build builds, with the module's own imports from the tree
+and the standard library from GOROOT's source (cgo off). It runs in a
+memory-limited child with a timeout. The rules:
+- a package-level object of the package is followed;
+- a local, a parameter, a field, an import or a definition is not;
+- a method selected on a concrete type of the package reaches that
+  type's method only;
+- one on another package's concrete type (`sync.Pool.Put`) reaches no
+  code of this package;
+- one on an interface reaches every method of that name;
+- reaching a type still reaches all its methods, since a value handed to
+  another package can have any of them called;
+- anything the checker can't resolve is followed by name, as before:
+  imports outside the module and the standard library, type errors, and
+  files no configuration builds.
+
+If the child fails, the whole walk is by name. The walk still doesn't
+follow calls into other packages of the module.
 
 #### Navigable diffs
 
