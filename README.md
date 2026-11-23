@@ -123,14 +123,14 @@ rewrites a grouped pull request in place, and a version it adds today is
 new today. A rebase keeps the pin's time; another version or hash starts
 again.
 
-For Go this is not rare. The index has no lookup by module: it is read
-forward from the version's commit time, 50 pages for one version and 150
-for one run. A tag that was cut days after its commit is not in those
-pages, and each such version costs 50 of the run's 150, so in a grouped
-pull request the updates looked up after them can get no lookup at all.
-All of these are dated from the gate's first evaluation and wait their
-age from there. A fully read security fix needs no age and is not held
-up.
+For Go the registry's clock has a limit of its own. The index has no
+lookup by module: it is read forward from the version's commit time, 50
+pages for one version and 150 for one run. A tag that was cut days after
+its commit is not in those pages, and each such version costs 50 of the
+run's 150, so in a grouped pull request the updates looked up after them
+can get no lookup at all. All of these are dated from the gate's first
+evaluation and wait their age from there. A fully read security fix
+needs no age and is not held up.
 
 ## Ecosystems
 
