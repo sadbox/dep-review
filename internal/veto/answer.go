@@ -1,12 +1,12 @@
 package veto
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
+	"slices"
 	"strings"
-	"unicode/utf8"
 )
 
 // ErrNoVerdict is wrapped by every error that means "the model answered,
@@ -20,10 +20,10 @@ func noVerdict(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrNoVerdict, fmt.Sprintf(format, args...))
 }
 
-// What is kept of the text the model wrote. Its quotes and notes go into
-// a pull request comment, so their size is bounded here whatever the
-// model was talked into writing; the answer schema cannot express a
-// length. Over the cap is cut, never refused: see parseAnswer.
+// The caps on what is kept of the model's text. This is the one place a
+// veto's quotes and notes are cut: they go into a pull request comment,
+// and the answer schema cannot express a length. Over the cap is cut,
+// never refused, because refusing would lose the veto.
 const (
 	maxQuotes     = 10
 	maxQuoteBytes = 300
@@ -32,7 +32,7 @@ const (
 
 // messagesResponse is what this package reads of a Messages response.
 // The API adds fields over time; unknown ones are ignored here. The
-// strict reading is for the model's own text (parseAnswer).
+// strict reading is for the model's own text (readAnswer).
 type messagesResponse struct {
 	Type        string         `json:"type"`
 	Content     []contentBlock `json:"content"`
@@ -68,10 +68,10 @@ type chunkAnswer struct {
 // interpret turns one Messages response into the answer for its chunk.
 //
 // The two answers are not read with the same care, on purpose. A veto is
-// taken from anything that carries one: it can only send the update to a
-// person, and losing it to a formality would give the update a second
-// try at a clean answer. A no_veto is accepted only from a response that
-// ended normally and is exactly the closed structure.
+// taken from any text block, under any stop reason: it can only send the
+// update to a person, and losing it to a formality would give the update
+// a second try at a clean answer. A no_veto is accepted only from a
+// response that ended normally and is exactly the closed structure.
 func interpret(resp messagesResponse) (chunkAnswer, error) {
 	if resp.Type != "message" {
 		return chunkAnswer{}, noVerdict("response type is %q, want \"message\"", clip(resp.Type, 40))
@@ -95,9 +95,15 @@ func interpret(resp messagesResponse) (chunkAnswer, error) {
 			other = b.Type
 		}
 	}
-	for _, t := range texts {
-		if a, ok := vetoIn(t); ok {
+	var first chunkAnswer
+	var firstErr error
+	for i, t := range texts {
+		a, err := readAnswer(t)
+		if err == nil && a.category != "" {
 			return a, nil
+		}
+		if i == 0 {
+			first, firstErr = a, err
 		}
 	}
 
@@ -111,162 +117,92 @@ func interpret(resp messagesResponse) (chunkAnswer, error) {
 	case len(texts) != 1:
 		return chunkAnswer{}, noVerdict("response has %d text blocks, want 1", len(texts))
 	}
-	return parseNoVeto(texts[0])
+	return first, firstErr
 }
 
-// member is one "key": value pair of the answer object, in the order
-// written. encoding/json's own struct decoding is not used for the
-// answer: it matches keys without regard to case and lets the last of
-// two equal keys win, and either would let an answer mean two things.
-type member struct {
-	key   string
-	value json.RawMessage
+// answer is the model's text as the answer schema describes it. The
+// pointers tell a member that is missing or null from an empty one.
+type answer struct {
+	Verdict *string    `json:"verdict"`
+	Quotes  *[]*string `json:"quotes"`
+	Notes   *string    `json:"notes"`
 }
 
-// readObject reads text as one JSON object. whole is false when the text
-// is not exactly one complete object: members then holds what was read
-// before the fault.
-func readObject(text string) (members []member, whole bool) {
-	dec := json.NewDecoder(strings.NewReader(text))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil, false
-	}
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return members, false
-		}
-		key, ok := tok.(string)
-		if !ok {
-			return members, false
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return members, false
-		}
-		members = append(members, member{key, value})
-	}
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
-		return members, false
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return members, false // something after the object
-	}
-	return members, true
-}
-
-// vetoIn reports the veto in text, if there is one: a JSON object, even
-// one that is cut off or has extra members, with a "verdict" member
-// whose value is one of Categories. The quotes and notes are taken as
-// far as they are usable and cut to the caps.
-func vetoIn(text string) (chunkAnswer, bool) {
-	members, _ := readObject(text)
-	category := Category("")
-	for _, m := range members {
-		if s, ok := jsonString(m.value); ok && m.key == "verdict" && isCategory(s) {
-			category = Category(s)
-			break
-		}
-	}
-	if category == "" {
-		return chunkAnswer{}, false
-	}
-	a := chunkAnswer{category: category, quotes: []string{}}
-	for _, m := range members {
-		switch m.key {
-		case "quotes":
-			var items []json.RawMessage
-			if len(a.quotes) > 0 || json.Unmarshal(m.value, &items) != nil {
-				continue
-			}
-			for _, item := range items {
-				if s, ok := jsonString(item); ok && len(a.quotes) < maxQuotes {
-					a.quotes = append(a.quotes, clip(strings.ToValidUTF8(s, "�"), maxQuoteBytes))
-				}
-			}
-		case "notes":
-			if s, ok := jsonString(m.value); ok && a.notes == "" {
-				a.notes = clip(strings.ToValidUTF8(s, "�"), maxNotesBytes)
-			}
-		}
-	}
-	return a, true
-}
-
-// parseNoVeto accepts text only when it is exactly
+// readAnswer reads one text block. It is a no_veto only when it is exactly
 //
 //	{"verdict": "no_veto", "quotes": [strings], "notes": "string"}
 //
-// with those three keys once each, spelled exactly, and nothing else
-// before, inside or after. Anything else is no verdict, including a
-// verdict outside the enum such as "approve" or "model_refused".
-func parseNoVeto(text string) (chunkAnswer, error) {
-	if !utf8.ValidString(text) {
-		return chunkAnswer{}, noVerdict("answer is not valid UTF-8")
-	}
-	members, whole := readObject(text)
-	if !whole {
-		return chunkAnswer{}, noVerdict("answer is not exactly one JSON object")
-	}
-	seen := map[string]json.RawMessage{}
-	for _, m := range members {
-		if m.key != "verdict" && m.key != "quotes" && m.key != "notes" {
-			return chunkAnswer{}, noVerdict("answer has an unknown member")
+// with nothing before, inside or after. encoding/json/v2 matches names in
+// exact case and refuses a name given twice, text after the object and
+// invalid UTF-8; the option refuses a member the schema does not have.
+// Anything else is a veto when it names a category and no verdict when it
+// does not, including a verdict outside the enum such as "approve" or
+// "model_refused".
+func readAnswer(text string) (chunkAnswer, error) {
+	var a answer
+	if err := json.Unmarshal([]byte(text), &a, json.RejectUnknownMembers(true)); err != nil {
+		if category, ok := looseVeto(text); ok {
+			return chunkAnswer{category: category, quotes: []string{}, notes: looseNotes}, nil
 		}
-		if _, dup := seen[m.key]; dup {
-			return chunkAnswer{}, noVerdict("answer has %q twice", m.key)
-		}
-		seen[m.key] = m.value
+		return chunkAnswer{}, noVerdict("answer is not the closed structure")
 	}
-
-	// A member that is missing is nil here, and nil is neither a string
-	// nor an array.
-	verdict, ok := jsonString(seen["verdict"])
-	if !ok || verdict != answerNoVeto {
-		// A category would have been found by vetoIn already.
+	switch {
+	case a.Verdict != nil && isCategory(*a.Verdict):
+		v := chunkAnswer{category: Category(*a.Verdict), quotes: []string{}}
+		if a.Quotes != nil {
+			for _, q := range *a.Quotes {
+				if q != nil && len(v.quotes) < maxQuotes {
+					v.quotes = append(v.quotes, clip(*q, maxQuoteBytes))
+				}
+			}
+		}
+		if a.Notes != nil {
+			v.notes = clip(*a.Notes, maxNotesBytes)
+		}
+		return v, nil
+	case a.Verdict == nil || *a.Verdict != answerNoVeto:
 		return chunkAnswer{}, noVerdict("verdict is not one of the answers")
-	}
-	var quotes []json.RawMessage
-	if !startsWith(seen["quotes"], '[') || json.Unmarshal(seen["quotes"], &quotes) != nil {
-		return chunkAnswer{}, noVerdict("quotes is not an array")
-	}
-	for _, q := range quotes {
-		if _, ok := jsonString(q); !ok {
-			return chunkAnswer{}, noVerdict("quotes holds something that is not a string")
-		}
-	}
-	notes, ok := jsonString(seen["notes"])
-	if !ok {
-		return chunkAnswer{}, noVerdict("notes is not a string")
+	case a.Quotes == nil || slices.Contains(*a.Quotes, nil) || a.Notes == nil:
+		return chunkAnswer{}, noVerdict("quotes is not a list of strings or notes is not a string")
 	}
 	// Quotes on a no_veto are dropped: there is no veto to explain.
-	return chunkAnswer{quotes: []string{}, notes: clip(notes, maxNotesBytes)}, nil
+	return chunkAnswer{quotes: []string{}, notes: clip(*a.Notes, maxNotesBytes)}, nil
 }
 
-// jsonString decodes raw when it is a JSON string, and only then (null
-// would otherwise decode into "" without an error).
-func jsonString(raw json.RawMessage) (string, bool) {
-	if !startsWith(raw, '"') {
-		return "", false
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", false
-	}
-	return s, true
-}
+// looseNotes stands in for the quotes and notes of a veto that was not
+// written as the closed structure: only its category is taken.
+const looseNotes = "The model's answer was cut off or was not in the agreed form; only its verdict was kept."
 
-func startsWith(raw json.RawMessage, c byte) bool {
-	return len(raw) > 0 && raw[0] == c
+// looseVeto finds the category in text that is not the closed structure:
+// an object, even one that is cut off, has a member too many, gives the
+// verdict twice or is followed by words, in which a "verdict" member
+// names a category. The members are read in order, as far as they are
+// JSON, and the first such member is the answer.
+func looseVeto(text string) (Category, bool) {
+	dec := jsontext.NewDecoder(strings.NewReader(text), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+		return "", false
+	}
+	for dec.PeekKind() == '"' {
+		name, err := dec.ReadToken()
+		if err != nil {
+			return "", false
+		}
+		isVerdict := name.String() == "verdict"
+		value, err := dec.ReadValue()
+		if err != nil {
+			return "", false
+		}
+		var verdict string
+		if isVerdict && value.Kind() == '"' && json.Unmarshal(value, &verdict) == nil && isCategory(verdict) {
+			return Category(verdict), true
+		}
+	}
+	return "", false
 }
 
 func isCategory(s string) bool {
-	for _, c := range Categories() {
-		if s == string(c) {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(Categories(), Category(s))
 }
 
 // refusalNotes is what a person is shown about a refusal: the API's own

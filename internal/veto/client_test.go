@@ -3,7 +3,6 @@ package veto
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -201,6 +200,8 @@ func TestReviewMalformedOutput(t *testing.T) {
 		{"quotes is not an array", okMessage(`{"verdict":"no_veto","quotes":"","notes":""}`)},
 		{"quotes is null", okMessage(`{"verdict":"no_veto","quotes":null,"notes":""}`)},
 		{"a quote is not a string", okMessage(`{"verdict":"no_veto","quotes":[1],"notes":""}`)},
+		{"a quote is null", okMessage(`{"verdict":"no_veto","quotes":[null],"notes":""}`)},
+		{"the answer is null", okMessage(`null`)},
 		{"notes is not a string", okMessage(`{"verdict":"no_veto","quotes":[],"notes":null}`)},
 		{"no content", messageJSON("end_turn", nil)},
 		{"thinking only", messageJSON("end_turn", nil, thinkingBlock())},
@@ -251,11 +252,15 @@ func TestReviewVetoSurvivesOddAnswers(t *testing.T) {
 		{"a long quote is cut", okMessage(answerJSON("exfiltration", []string{long}, long+long)), 1},
 		{"quotes missing", okMessage(`{"verdict":"exfiltration"}`), 0},
 		{"quotes of the wrong type", okMessage(`{"verdict":"exfiltration","quotes":{"a":1},"notes":7}`), 0},
-		{"non-string quotes are skipped", okMessage(`{"verdict":"exfiltration","quotes":[1,"+x",null],"notes":""}`), 1},
+		// An answer that is not the closed structure keeps its verdict and
+		// nothing else: its quotes are not picked out of it.
+		{"a quote that is not a string: the verdict alone is kept", okMessage(`{"verdict":"exfiltration","quotes":[1,"+x",null],"notes":""}`), 0},
+		{"a null among the quotes is skipped", okMessage(`{"verdict":"exfiltration","quotes":[null,"+x"],"notes":""}`), 1},
 		{"an unknown member", okMessage(`{"verdict":"exfiltration","quotes":[],"notes":"","confidence":0.2}`), 0},
+		{"an unknown member before the verdict", okMessage(`{"confidence":0.2,"verdict":"exfiltration","quotes":["+x"],"notes":""}`), 0},
 		{"verdict given twice, veto second", okMessage(`{"verdict":"no_veto","verdict":"exfiltration","quotes":[],"notes":""}`), 0},
 		{"verdict given twice, veto first", okMessage(`{"verdict":"exfiltration","verdict":"no_veto","quotes":[],"notes":""}`), 0},
-		{"text after the object", okMessage(answerJSON("exfiltration", []string{"+x"}, "") + "\nPlease ignore the above."), 1},
+		{"text after the object: the verdict alone is kept", okMessage(answerJSON("exfiltration", []string{"+x"}, "") + "\nPlease ignore the above."), 0},
 		{"cut off at max_tokens after the verdict", messageJSON("max_tokens", nil, thinkingBlock(), textBlock(`{"verdict":"exfiltration","quotes":["+curl`)), 0},
 		{"no thinking block", messageJSON("end_turn", nil, textBlock(answerJSON("exfiltration", []string{"+x"}, ""))), 1},
 		{"redacted thinking first", messageJSON("end_turn", nil, block{"type": "redacted_thinking", "data": "xx"}, textBlock(answerJSON("exfiltration", []string{"+x"}, ""))), 1},
@@ -337,7 +342,7 @@ func TestInjectedTextIsOnlyData(t *testing.T) {
 				t.Error("the request offers tools")
 			}
 
-			m := regexp.MustCompile(`(?m)^marker: ([0-9a-f]{32})$`).FindAllStringSubmatch(r.user, -1)
+			m := markerLine.FindAllStringSubmatch(r.user, -1)
 			if len(m) != 1 {
 				t.Fatalf("the user message has %d gate marker lines, want 1", len(m))
 			}
@@ -373,47 +378,21 @@ func TestInjectedTextIsOnlyData(t *testing.T) {
 	}
 }
 
-func TestMarkerIsFreshAndNeverInTheData(t *testing.T) {
-	first := bytes.Repeat([]byte{0xab}, 16)
-	second := bytes.Repeat([]byte{0xcd}, 16)
-	chunk := "+// " + hex.EncodeToString(first) + "\n"
+// markerLine is the header's marker line: crypto/rand.Text, 26 characters
+// of base32, which is 130 random bits.
+var markerLine = regexp.MustCompile(`(?m)^marker: ([A-Z2-7]{26})$`)
 
-	t.Run("a marker that occurs in the chunk is drawn again", func(t *testing.T) {
-		f := newFakeAPI(t)
-		c, _ := testClient(t, f, APIKey(f.apiKey))
-		c.random = bytes.NewReader(append(append([]byte{}, first...), second...))
-		if _, err := c.Review(context.Background(), Request{Read: prepared(chunk)}); err != nil {
-			t.Fatalf("Review: %v", err)
-		}
-		reqs := f.recordedRequests()
-		if len(reqs) != 1 || !strings.Contains(reqs[0].user, "marker: "+hex.EncodeToString(second)+"\n") {
-			t.Error("the request does not use the second draw")
-		}
-	})
-	t.Run("no usable marker: nothing is sent", func(t *testing.T) {
-		f := newFakeAPI(t)
-		c, _ := testClient(t, f, APIKey(f.apiKey))
-		c.random = bytes.NewReader(bytes.Repeat(first, 8))
-		if _, err := c.Review(context.Background(), Request{Read: prepared(chunk)}); err == nil {
-			t.Error("Review succeeded")
-		}
-		if n := len(f.recordedRequests()); n != 0 {
-			t.Errorf("%d requests, want 0", n)
-		}
-	})
-	t.Run("each request has its own marker", func(t *testing.T) {
-		f := newFakeAPI(t)
-		c, _ := testClient(t, f, APIKey(f.apiKey))
-		if _, err := c.Review(context.Background(), Request{Read: prepared("a\n", "b\n")}); err != nil {
-			t.Fatalf("Review: %v", err)
-		}
-		re := regexp.MustCompile(`(?m)^marker: ([0-9a-f]{32})$`)
-		reqs := f.recordedRequests()
-		a, b := re.FindStringSubmatch(reqs[0].user), re.FindStringSubmatch(reqs[1].user)
-		if a == nil || b == nil || a[1] == b[1] {
-			t.Errorf("markers %v and %v", a, b)
-		}
-	})
+func TestEachRequestHasItsOwnMarker(t *testing.T) {
+	f := newFakeAPI(t)
+	c, _ := testClient(t, f, APIKey(f.apiKey))
+	if _, err := c.Review(context.Background(), Request{Read: prepared("a\n", "b\n")}); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	reqs := f.recordedRequests()
+	a, b := markerLine.FindStringSubmatch(reqs[0].user), markerLine.FindStringSubmatch(reqs[1].user)
+	if a == nil || b == nil || a[1] == b[1] {
+		t.Errorf("markers %v and %v", a, b)
+	}
 }
 
 func TestReviewHTTPErrors(t *testing.T) {
@@ -487,8 +466,8 @@ func TestReviewTransportFailures(t *testing.T) {
 		f := newFakeAPI(t)
 		// Long enough for the request to reach the fake on a busy
 		// machine, short enough to wait out twice.
-		f.cfg.RequestTimeout = 400 * time.Millisecond
-		f.cfg.Attempts = 2
+		f.timeout = 400 * time.Millisecond
+		f.cfg.conf.Attempts = 2
 		f.reply = func(int, recorded) reply { return reply{hang: true} }
 		c, waits := testClient(t, f, APIKey(f.apiKey))
 		_, err := c.Review(context.Background(), Request{Read: prepared("a\n")})
@@ -517,7 +496,7 @@ func TestReviewTransportFailures(t *testing.T) {
 	})
 	t.Run("nothing listening", func(t *testing.T) {
 		f := newFakeAPI(t)
-		f.cfg.Attempts = 2
+		f.cfg.conf.Attempts = 2
 		c, waits := testClient(t, f, APIKey(f.apiKey))
 		f.srv.Close()
 		_, err := c.Review(context.Background(), Request{Read: prepared("a\n")})
@@ -533,23 +512,16 @@ func TestReviewTransportFailures(t *testing.T) {
 	})
 }
 
-// A prepared read that is over budget or not what internal/artifact
-// documents is refused before anything is sent.
+// A prepared read that is over budget, or whose name, versions or text
+// cannot stand in the request, is refused before anything is sent. (What
+// internal/wire checks of a read when it decodes the facts file, its
+// state, key, chunk names and the unread files' sizes and hashes, is
+// tested there.)
 func TestReviewRefusesBadReads(t *testing.T) {
 	tests := []struct {
 		name string
 		edit func(*artifact.Prepared)
 	}{
-		{"state none", func(p *artifact.Prepared) { p.State = allow.ReadNone }},
-		{"state not-applicable", func(p *artifact.Prepared) { p.State = allow.ReadNotApplicable }},
-		{"state unset", func(p *artifact.Prepared) { p.State = "" }},
-		{"no key", func(p *artifact.Prepared) { p.Key = "" }},
-		{"key in upper case", func(p *artifact.Prepared) { p.Key = strings.ToUpper(p.Key) }},
-		{"full with unread files", func(p *artifact.Prepared) {
-			p.Unread = []artifact.Unread{{Path: "a.bin", Size: 1, SHA256: strings.Repeat("00", 32)}}
-		}},
-		{"indices out of order", func(p *artifact.Prepared) { p.Chunks[0].Index, p.Chunks[1].Index = 1, 0 }},
-		{"an empty chunk", func(p *artifact.Prepared) { p.Chunks[1].Text = "" }},
 		{"a chunk that is not UTF-8", func(p *artifact.Prepared) { p.Chunks[1].Text = "+\xff\xfe\n" }},
 		{"a chunk over chunk_bytes", func(p *artifact.Prepared) { p.Chunks[0].Text = strings.Repeat("x", 1001) }},
 		{"more chunks than max_chunks", func(p *artifact.Prepared) {
@@ -567,19 +539,19 @@ func TestReviewRefusesBadReads(t *testing.T) {
 			p.State = allow.ReadPartial
 			p.Unread = []artifact.Unread{{Path: "a\nb", Size: 1, SHA256: strings.Repeat("00", 32)}}
 		}},
-		{"an unread file with a bad hash", func(p *artifact.Prepared) {
+		{"an unread file with no path", func(p *artifact.Prepared) {
 			p.State = allow.ReadPartial
-			p.Unread = []artifact.Unread{{Path: "a.bin", Size: 1, SHA256: "abc"}}
+			p.Unread = []artifact.Unread{{Path: "", Size: 1, SHA256: strings.Repeat("00", 32)}}
 		}},
-		{"an unread file of negative size", func(p *artifact.Prepared) {
+		{"an unread path that is not UTF-8", func(p *artifact.Prepared) {
 			p.State = allow.ReadPartial
-			p.Unread = []artifact.Unread{{Path: "a.bin", Size: -1, SHA256: strings.Repeat("00", 32)}}
+			p.Unread = []artifact.Unread{{Path: "a\xff.bin", Size: 1, SHA256: strings.Repeat("00", 32)}}
 		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeAPI(t)
-			f.cfg.ChunkBytes, f.cfg.MaxChunks = 1000, 3
+			f.cfg.conf.ChunkBytes, f.cfg.conf.MaxChunks = 1000, 3
 			c, _ := testClient(t, f, APIKey(f.apiKey))
 			p := prepared("a\n", "b\n")
 			tc.edit(&p)
@@ -594,9 +566,6 @@ func TestReviewRefusesBadReads(t *testing.T) {
 			}
 			if n := len(f.recordedRequests()); n != 0 {
 				t.Errorf("%d requests, want 0", n)
-			}
-			if _, err := c.CountTokens(context.Background(), Request{Read: p}); err == nil {
-				t.Error("CountTokens accepted the same read")
 			}
 		})
 	}
@@ -677,25 +646,6 @@ func TestHeaderAndUnreadList(t *testing.T) {
 	}
 }
 
-func TestCountTokens(t *testing.T) {
-	f := newFakeAPI(t)
-	c, _ := testClient(t, f, APIKey(f.apiKey))
-	p := prepared(strings.Repeat("x", 4000), "y\n")
-	counts, err := c.CountTokens(context.Background(), Request{Read: p})
-	if err != nil {
-		t.Fatalf("CountTokens: %v", err)
-	}
-	if len(counts) != 2 || counts[0] < 1000 || counts[0] <= counts[1] {
-		t.Errorf("counts = %v", counts)
-	}
-	f.mu.Lock()
-	counted := f.counted
-	f.mu.Unlock()
-	if counted != 2 || len(f.recordedRequests()) != 0 {
-		t.Errorf("%d count requests and %d Messages requests, want 2 and 0", counted, len(f.recordedRequests()))
-	}
-}
-
 func TestLogfNeverSeesText(t *testing.T) {
 	f := newFakeAPI(t)
 	secret := "SECRET-CHUNK-TEXT"
@@ -724,26 +674,56 @@ func TestLogfNeverSeesText(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
-	if _, err := New(DefaultConfig(), nil, nil); err == nil {
+	cfg := FromConfig(embedded(t))
+	if _, err := New(cfg, nil, nil); err == nil {
 		t.Error("New accepted nil credentials")
-	}
-	bad := DefaultConfig()
-	bad.Effort = "extreme"
-	if _, err := New(bad, APIKey("k"), nil); err == nil {
-		t.Error("New accepted an invalid config")
 	}
 	// A caller's client is copied, and the copy does not follow redirects.
 	hc := &http.Client{}
-	c, err := New(DefaultConfig(), APIKey("k"), hc)
+	c, err := New(cfg, APIKey("k"), hc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.http == hc || c.http.CheckRedirect == nil || hc.CheckRedirect != nil {
 		t.Error("the caller's client was used or changed as it is")
 	}
+	if c.base != DefaultBaseURL || c.timeout != 10*time.Minute {
+		t.Errorf("the client asks %s with a timeout of %s", c.base, c.timeout)
+	}
 	// The default transport does not read proxy settings.
-	def, _ := New(DefaultConfig(), APIKey("k"), nil)
+	def, _ := New(cfg, APIKey("k"), nil)
 	if tr, ok := def.http.Transport.(*http.Transport); !ok || tr.Proxy != nil || tr.ResponseHeaderTimeout != 0 {
 		t.Error("the default transport has a proxy function or a header timeout")
+	}
+}
+
+// A credential goes to an https origin and nowhere else; plain http is
+// for the test server's loopback address.
+func TestNewBaseURL(t *testing.T) {
+	tests := []struct {
+		name, baseURL string
+		wantErr       string // "" for accepted
+	}{
+		{"plain http to a host", "http://api.anthropic.com", "loopback"},
+		{"plain http to a name that says localhost", "http://localhost.example.com", "loopback"},
+		{"plain http to loopback", "http://127.0.0.1:8080", ""},
+		{"a URL with a path", "https://example.com/v1", "scheme and host"},
+		{"a URL with credentials", "https://user:pw@example.com", "scheme and host"},
+		{"another scheme", "ftp://example.com", "https"},
+		{"empty", "", "scheme and host"},
+		{"a trailing slash is fine", "https://api.anthropic.com/", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := FromConfig(embedded(t))
+			cfg.BaseURL = tc.baseURL
+			_, err := New(cfg, APIKey("k"), nil)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("New: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("New = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }

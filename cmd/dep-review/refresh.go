@@ -31,7 +31,8 @@ const refreshTimeout = 25 * time.Minute
 // itself and believes the facts only as far as it goes. No model is
 // asked: the job holds no credential but its read-only token. It appends
 // to $GITHUB_OUTPUT publish=<true|false>, whether it wrote anything, and
-// incomplete=<true|false>, whether a pull request could not be refreshed.
+// incomplete=<true|false>, whether a pull request could not be refreshed
+// or has a gate comment whose marker could not be read.
 func runRefresh(args []string) error {
 	fl := newFlagSet("refresh")
 	repoDir := fl.String("repo-dir", "", "a clone with full history and every branch; only its git objects are read (required)")
@@ -59,12 +60,18 @@ func runRefresh(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 	defer cancel()
 
-	waiting, err := land.Waiting(ctx, cfg)
+	waiting, unread, err := land.Waiting(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	log.Printf("refresh: %d pull requests are waiting", len(waiting))
-	wrote, failed := 0, 0
+	// A gate comment without a marker this version reads does not say
+	// whether its pull request waits. It counts as not refreshed, so the
+	// run ends red instead of the pull request leaving the schedule unseen.
+	for _, number := range unread {
+		log.Printf("refresh: #%d: the marker in the gate's comment could not be read, so the pull request is not evaluated again; re-run its gate workflow run", number)
+	}
+	wrote, failed := 0, len(unread)
 	if len(waiting) > 0 {
 		g, err := newGathering(ctx, cfg)
 		if err != nil {

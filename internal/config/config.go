@@ -1,35 +1,27 @@
-// Package config resolves the gate's policy (docs/v0.2-spec.md, section
-// 5): the defaults embedded in the binary, and on top of them a
-// repository's own file.
-//
-// The package does no I/O beyond the embed. The caller reads RepoFile
-// from the repository's DEFAULT BRANCH and passes the bytes in; a file
-// from the pull request's head must never reach Load, because the pull
-// request would then be choosing its own rules.
+// Package config resolves the gate's settings (docs/v0.2-spec.md, section
+// 5 and amendment 10): the defaults embedded in the binary, and on top of
+// them a repository's own file. It does no I/O beyond the embed: the
+// caller reads RepoFile from the repository's DEFAULT BRANCH and passes
+// the bytes in. A file from the pull request's head must never reach Load,
+// because the pull request would then be choosing its own rules.
 //
 // The embedded values are floors. A repository file can make the gate
-// stricter (raise an age, turn the fast path off, make companions wait)
-// and can add list entries. It cannot lower an age, cannot remove a list
-// entry, and has no key that switches a fact off: an unknown key is an
-// error, not something to ignore.
-//
-// The model settings (spec section 11, amendment 10) are built in the
-// same way, and a repository has even less say over them: it may make a
-// read smaller (chunk_bytes, max_chunks), which can only make a read
-// partial and an update wait longer, and it may not set any of the
-// others. Which model reads the code, and how hard it thinks, is not a
-// repository's choice.
+// stricter (raise an age, turn the fast path off, make companions wait,
+// make a read smaller, which at worst makes it partial) and can add list
+// entries. It cannot lower an age, remove a list entry or say which model
+// reads the code and how, and it has no key that switches a fact off: an
+// unknown key is an error, not something to ignore.
 package config
 
 import (
-	"bytes"
 	"crypto/sha256"
 	_ "embed" // for defaults.json
 	"encoding/hex"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -183,8 +175,8 @@ func (c Config) Policy() allow.Policy {
 // other settings (another list, another chunk size) are not decided on.
 func (c Config) Fingerprint() string {
 	// Config holds only strings, numbers, a flag and lists of strings, so
-	// encoding it cannot fail, and encoding/json writes a struct's fields
-	// in their declared order.
+	// encoding it cannot fail, and a struct's fields are written in their
+	// declared order.
 	b, err := json.Marshal(c)
 	if err != nil {
 		panic("config: " + err.Error())
@@ -271,18 +263,12 @@ func complete(b []byte) (Config, error) {
 	return c, nil
 }
 
-// parse decodes one file strictly: one JSON object, known keys only.
+// parse decodes one file strictly: one JSON object and nothing after it,
+// known keys only, each in its exact spelling and at most once.
 func parse(b []byte) (file, error) {
 	var f file
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&f); err != nil {
-		return file{}, err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return file{}, errors.New("more than one JSON value")
-	}
-	return f, nil
+	err := json.Unmarshal(b, &f, json.RejectUnknownMembers(true))
+	return f, err
 }
 
 // apply puts a repository's file on top of the defaults in c, refusing
@@ -415,7 +401,7 @@ func extend(have *Lists, more Lists) error {
 			if err := checkEntry(entry); err != nil {
 				return fmt.Errorf("listed.%s: %q: %w", list.key, entry, err)
 			}
-			if !contains(*list.have, entry) {
+			if !slices.Contains(*list.have, entry) {
 				*list.have = append(*list.have, entry)
 			}
 		}
@@ -434,20 +420,15 @@ func checkEntry(entry string) error {
 	if len(entry) > maxEntryBytes {
 		return fmt.Errorf("longer than %d bytes", maxEntryBytes)
 	}
-	for i := 0; i < len(entry); i++ {
-		c := entry[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case strings.IndexByte("-._~@:/", c) >= 0:
-		default:
-			// %q of a byte above 0x7f would print it as a Latin-1 letter
-			// that is not in the entry.
-			shown := fmt.Sprintf("%q", c)
-			if c >= 0x80 {
-				shown = fmt.Sprintf("%#02x", c)
-			}
-			return fmt.Errorf("byte %s at %d: an entry is a name or a prefix ending in \"/\", with letters, digits and -._~@:/ only; there are no wildcards", shown, i)
+	if at := entryBad.FindStringIndex(entry); at != nil {
+		// %q of a byte above 0x7f would print it as a Latin-1 letter that
+		// is not in the entry.
+		c := entry[at[0]]
+		shown := fmt.Sprintf("%q", c)
+		if c >= 0x80 {
+			shown = fmt.Sprintf("%#02x", c)
 		}
+		return fmt.Errorf("byte %s at %d: an entry is a name or a prefix ending in \"/\", with letters, digits and -._~@:/ only; there are no wildcards", shown, at[0])
 	}
 	if strings.HasPrefix(entry, "/") || strings.Contains(entry, "//") {
 		return errors.New("an empty path element")
@@ -455,11 +436,5 @@ func checkEntry(entry string) error {
 	return nil
 }
 
-func contains(list []string, s string) bool {
-	for _, have := range list {
-		if have == s {
-			return true
-		}
-	}
-	return false
-}
+// entryBad matches the first byte an entry may not have.
+var entryBad = regexp.MustCompile(`[^A-Za-z0-9._~@:/-]`)

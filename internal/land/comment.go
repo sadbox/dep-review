@@ -509,7 +509,7 @@ func updateRows(v view, i int) []row {
 		prepared = string(p.Status)
 		switch {
 		case p.Status == wire.Prepared:
-			prepared = fmt.Sprintf("chunks prepared: %d; changed files that are not text: %d", len(p.Chunks), len(p.Unread))
+			prepared = fmt.Sprintf("chunks prepared: %d; changed files not shown: %d", len(p.Chunks), len(p.Unread))
 		case p.Detail != "":
 			prepared += ": " + p.Detail
 		}

@@ -3,110 +3,72 @@ package allow
 // Reason is one way for a pull request to be Wait or Person. The set is
 // closed: Decide and ChecksRefused return nothing else, and nothing a
 // dependency, a pull request or the model wrote ever becomes a Reason.
+// What each one means is its row of reasonTable; a comment here says only
+// what that row does not.
 type Reason string
 
 // Reasons that concern the pull request as a whole. All are Person.
 const (
-	// ReasonPolicyInvalid: the policy handed to Decide is not usable.
-	ReasonPolicyInvalid Reason = "policy_invalid"
-	// ReasonNoRule: the ecosystem has no rule (uv, OpenTofu, submodules).
-	ReasonNoRule Reason = "no_rule"
-	// ReasonNoUpdates: the base and head manifests show no update.
-	ReasonNoUpdates Reason = "no_updates"
-	// ReasonIdentity: the Identity fact was gathered and is false.
-	ReasonIdentity Reason = "identity"
-	// ReasonShape: the Shape fact was gathered and is false.
-	ReasonShape Reason = "shape"
-	// ReasonChecksNotConfigured: the ChecksConfigured fact was gathered
-	// and is false.
+	ReasonPolicyInvalid       Reason = "policy_invalid"
+	ReasonNoRule              Reason = "no_rule"
+	ReasonNoUpdates           Reason = "no_updates"
+	ReasonIdentity            Reason = "identity"
+	ReasonShape               Reason = "shape"
 	ReasonChecksNotConfigured Reason = "checks_not_configured"
 )
 
-// Reasons that concern one update, except ReasonFactMissing, which is
-// also the reason for one of the pull request's own three facts. All are
-// Person.
+// Reasons that concern one update. All are Person. Each fact that must
+// hold has a reason for a gathered "no" (not_increase, not_bound,
+// not_clean, regress).
 const (
-	// ReasonFactMissing: a fact the decision needs was never gathered (it
-	// has no source), or the update has no name or target version. This
-	// is the gate not knowing, not the gate having found something: a
-	// source that answered "no" has its own reason, and a source that did
-	// not answer is ReasonSourceUnavailable.
+	// ReasonFactMissing: a fact the decision needs has no source, one of
+	// the pull request's own three included, or the update has no name or
+	// target version. This is the gate not knowing, not the gate having
+	// found something: a source that did not answer is
+	// ReasonSourceUnavailable.
 	ReasonFactMissing Reason = "fact_missing"
-	// ReasonListMismatch: the Listed fact disagrees with the policy
-	// Decide was given.
+	// ReasonListMismatch: the Listed fact disagrees with the policy Decide
+	// was given.
 	ReasonListMismatch Reason = "list_mismatch"
 	// ReasonInconsistent: Known contradicts its own definition. It holds
 	// for a name that is new and not listed, or does not hold for a name
 	// that is listed.
 	ReasonInconsistent Reason = "facts_inconsistent"
-	// ReasonNotKnown: Known does not hold for a name that is present at
-	// the base commit and not listed.
-	ReasonNotKnown Reason = "not_known"
-	// ReasonNewNameUnread: a new, unlisted name that was not fully read.
-	ReasonNewNameUnread Reason = "new_name_unread"
-	// ReasonNewNameYoung: a new, unlisted name created less than
-	// Policy.NewNameAge ago.
-	ReasonNewNameYoung Reason = "new_name_young"
-	// ReasonNameCreatedUnknown: a new, unlisted name whose creation time
-	// was not established.
+	// ReasonNotKnown: a name that is present at the base commit, is not
+	// listed, and is not known or is an image.
+	ReasonNotKnown           Reason = "not_known"
+	ReasonNewNameUnread      Reason = "new_name_unread"
+	ReasonNewNameYoung       Reason = "new_name_young"
 	ReasonNameCreatedUnknown Reason = "name_created_unknown"
-	// ReasonNotIncrease: the Increase fact was gathered and is false.
-	ReasonNotIncrease Reason = "not_increase"
-	// ReasonNotBound: the Bound fact was gathered and is false: the
-	// registry answered, and what it reports is not what is pinned.
-	ReasonNotBound Reason = "not_bound"
-	// ReasonNotClean: the Clean fact was gathered and is false.
-	ReasonNotClean Reason = "not_clean"
-	// ReasonRegress: the NoRegress fact was gathered and is false.
-	ReasonRegress Reason = "regress"
-	// ReasonVeto: the model raised a veto.
-	ReasonVeto Reason = "veto"
-	// ReasonModelRefused: the model refused to answer.
-	ReasonModelRefused Reason = "model_refused"
+	ReasonNotIncrease        Reason = "not_increase"
+	ReasonNotBound           Reason = "not_bound"
+	ReasonNotClean           Reason = "not_clean"
+	ReasonRegress            Reason = "regress"
+	ReasonVeto               Reason = "veto"
+	ReasonModelRefused       Reason = "model_refused"
 	// ReasonReadUnknown: Read is empty, not a known state, or
 	// not-applicable outside Docker.
-	ReasonReadUnknown Reason = "read_unknown"
-	// ReasonReadRefused: Read is ReadRefused.
-	ReasonReadRefused Reason = "read_refused"
-	// ReasonMajorUnlisted: a major update of a name that is not listed
-	// and that the repository's own manifest does not show to be an
-	// indirect dependency.
-	ReasonMajorUnlisted Reason = "major_unlisted"
-	// ReasonFirstSeenUnknown: the FirstSeen fact was not established.
+	ReasonReadUnknown      Reason = "read_unknown"
+	ReasonReadRefused      Reason = "read_refused"
+	ReasonMajorUnlisted    Reason = "major_unlisted"
 	ReasonFirstSeenUnknown Reason = "first_seen_unknown"
 )
 
 // Reasons that come from waiting too long. All are Person.
 const (
-	// ReasonReadDeadline: the model read was still missing at the wait
-	// deadline.
-	ReasonReadDeadline Reason = "read_deadline"
-	// ReasonSourceDeadline: a source had still not answered at the wait
-	// deadline.
-	ReasonSourceDeadline Reason = "source_deadline"
-	// ReasonSupersededDeadline: a superseded pin had still not been
-	// refreshed at the wait deadline.
+	ReasonReadDeadline       Reason = "read_deadline"
+	ReasonSourceDeadline     Reason = "source_deadline"
 	ReasonSupersededDeadline Reason = "superseded_deadline"
-	// ReasonChecksDeadline: GitHub was still refusing the merge at the
-	// wait deadline.
-	ReasonChecksDeadline Reason = "checks_deadline"
+	ReasonChecksDeadline     Reason = "checks_deadline"
 )
 
 // Reasons to wait. All are Wait.
 const (
-	// ReasonAge: the new version has not been public long enough.
-	ReasonAge Reason = "age"
-	// ReasonReadPending: the model read is missing and will be retried.
-	ReasonReadPending Reason = "read_pending"
-	// ReasonSourceUnavailable: a fact is unavailable. Its source was asked
-	// and did not answer; it is asked again at the next evaluation.
+	ReasonAge               Reason = "age"
+	ReasonReadPending       Reason = "read_pending"
 	ReasonSourceUnavailable Reason = "source_unavailable"
-	// ReasonSuperseded: the registry serves another digest under the
-	// pinned tag now (Docker). Dependabot refreshes the pin itself.
-	ReasonSuperseded Reason = "superseded"
-	// ReasonChecksPending: GitHub refused the merge because required
-	// checks are pending or failing.
-	ReasonChecksPending Reason = "checks_pending"
+	ReasonSuperseded        Reason = "superseded"
+	ReasonChecksPending     Reason = "checks_pending"
 )
 
 // The ways out that several reasons share.
@@ -124,6 +86,8 @@ const (
 	// nothing against the update, on purpose: these reasons are the gate
 	// failing to find out, not the gate finding a fault.
 	rerun = "Re-run the gate. If it says the same again, look at the update and merge or close the pull request by hand."
+	// sooner ends the hint of a wait that needs nobody.
+	sooner = " Merge by hand to have it sooner."
 )
 
 // reasonText is one row of the closed set.
@@ -188,7 +152,7 @@ var reasonTable = []reasonText{
 		byHand},
 	{ReasonNotBound, Person,
 		"The registry answered, and the hash, commit or digest the pull request pins is not what it reports for that version now.",
-		"Do not merge. Find out why the pin and the registry disagree; when the registry is right, ask Dependabot to recreate the pull request."},
+		"Do not merge. Find out why the two disagree; when the registry is right, ask Dependabot to recreate the pull request."},
 	{ReasonNotClean, Person,
 		"The registry or the advisory database says something against the new version: it is unpublished, retracted, yanked or deprecated, or has an advisory the old version did not have.",
 		"Do not merge this version. Close the pull request, or wait for the next release; Dependabot opens a new pull request for it. For a deprecated package or image, move to its successor."},
@@ -196,8 +160,8 @@ var reasonTable = []reasonText{
 		"The new version has a new or changed install script, lost its provenance, or (Actions) does not descend from the old commit.",
 		byHand},
 	{ReasonVeto, Person,
-		"The model objected to code in this update. The quoted lines are in this comment.",
-		"Read the quoted lines. Merge by hand if they are harmless, close the pull request if they are not."},
+		"The model objected to code in this update.",
+		"Read the lines it quoted, in the update's table. Merge by hand if they are harmless, close the pull request if they are not."},
 	{ReasonModelRefused, Person,
 		"The model refused to read this update.",
 		byHand},
@@ -217,7 +181,7 @@ var reasonTable = []reasonText{
 		"The update's code had still not been read when the wait deadline passed.",
 		rerun},
 	{ReasonSourceDeadline, Person,
-		"A source the gate depends on (a registry, an index or an API) had still not answered when the wait deadline passed. Nothing was found wrong with the update; the fact was never established.",
+		"A source the gate depends on (a registry, an index or an API) had still not answered when the wait deadline passed. Nothing was found wrong with the update.",
 		rerun},
 	{ReasonSupersededDeadline, Person,
 		"The registry serves a newer image under the pinned tag, and the pull request had not been refreshed when the wait deadline passed.",
@@ -227,13 +191,13 @@ var reasonTable = []reasonText{
 		"Fix the failing checks or close the pull request."},
 	{ReasonAge, Wait,
 		"The new version has not been public for long enough yet.",
-		"Nothing to do: the gate looks again after the time shown. Merge by hand to have it sooner."},
+		"Nothing to do: the gate looks again after the time shown." + sooner},
 	{ReasonReadPending, Wait,
-		"The update's code has not been read yet: fetching it or the model call did not complete. It is retried at the next evaluation.",
-		"Nothing to do: the gate retries until the deadline shown. Merge by hand to have it sooner."},
+		"The update's code has not been read yet: fetching it or the model call did not complete.",
+		"Nothing to do: the gate retries until the deadline shown." + sooner},
 	{ReasonSourceUnavailable, Wait,
 		"A source the gate depends on (a registry, an index or an API) was asked and did not answer, so a fact is not known yet. Nothing was found wrong with the update.",
-		"Nothing to do: the gate asks again at its next evaluation, until the deadline shown. Merge by hand to have it sooner."},
+		"Nothing to do: the gate asks again at its next evaluation, until the deadline shown." + sooner},
 	{ReasonSuperseded, Wait,
 		"The registry serves a newer image under the pinned tag, so the pinned digest is no longer the current one.",
 		"Nothing to do: Dependabot refreshes the digest on its next run, and the gate then looks at the new one."},

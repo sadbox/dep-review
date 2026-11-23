@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/classify"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/land"
@@ -232,8 +233,8 @@ func readFacts(path string) (wire.Facts, error) {
 // checkFacts ties a facts file to classify's answer. The job that wrote
 // the file reads what a pull request and its dependencies wrote, and
 // classify does not; so the facts are believed only about the pull
-// request and the head classify looked at, and never to say more for its
-// identity than classify did.
+// request and the head classify looked at, never to say more for its
+// identity than classify did, and only in the ecosystem classify named.
 func checkFacts(class model.Classification, facts wire.Facts) error {
 	if want := (wire.PullRequest{Repo: class.Repo, Number: class.PR, Head: class.HeadSHA}); facts.PullRequest != want {
 		return fmt.Errorf("publish: the facts are about %s #%d at %s, and classify looked at %s #%d at %s",
@@ -241,6 +242,19 @@ func checkFacts(class model.Classification, facts wire.Facts) error {
 	}
 	if class.Kind != model.KindDependabot && facts.Facts.Identity.Holds() {
 		return fmt.Errorf("publish: the facts say the pull request is Dependabot's alone, and classify said %q", class.Kind)
+	}
+	// The file's ecosystem alone decides whether "nothing to read" is a
+	// read (Docker), so it is not the fetch job's word alone. classify
+	// names an ecosystem only once its proof is whole, and in Dependabot's
+	// words; the file has the gate's, which differ for npm (gather).
+	if class.Ecosystem != "" {
+		want := string(class.Ecosystem)
+		if class.Ecosystem == model.NPM {
+			want = allow.NPM
+		}
+		if facts.Facts.Ecosystem != want {
+			return fmt.Errorf("publish: the facts are for the ecosystem %.40q, and classify named %q", facts.Facts.Ecosystem, want)
+		}
 	}
 	return nil
 }

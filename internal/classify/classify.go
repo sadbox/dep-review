@@ -29,12 +29,10 @@ const (
 
 // Event is the subset of a workflow_run event payload classify reads.
 type Event struct {
-	Action      string `json:"action"`
 	WorkflowRun struct {
 		Event          string `json:"event"`
 		Path           string `json:"path"`
 		HeadSHA        string `json:"head_sha"`
-		HeadBranch     string `json:"head_branch"`
 		HeadRepository *repo  `json:"head_repository"`
 		PullRequests   []struct {
 			Number int `json:"number"`
@@ -389,7 +387,6 @@ var headRefRe = regexp.MustCompile(`^dependabot/[A-Za-z0-9._/-]{1,240}$`)
 // pattern itself: a matcher of its own is a second reading of GitHub's
 // pattern rules, and v0.1.9's did not agree with them. An answer that
 // could not be read is not proof.
-
 func rulesProblem(ctx context.Context, c *gh.Client, repo, branch string) string {
 	if !headRefRe.MatchString(branch) {
 		return "the branch's name is not one the gate asks GitHub's rules about"

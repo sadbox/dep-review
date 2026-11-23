@@ -61,7 +61,7 @@ func TestPublish(t *testing.T) {
 			name:   "merge",
 			action: ActionMerged, status: "success: merged", merges: 1, cached: 1,
 			comment: []string{"### dep-review: merged", "**Merged** at head `" + headA + "`", "| ChecksConfigured | `yes` | `required: test` |",
-				"| Read | `full` | `chunks prepared: 1; changed files that are not text: 0` | `the verdicts file` |", "| Veto | `none` |  | `the model` |"},
+				"| Read | `full` | `chunks prepared: 1; changed files not shown: 0` | `the verdicts file` |", "| Veto | `none` |  | `the model` |"},
 		},
 		{
 			name: "docker merges with nothing read",
@@ -86,7 +86,7 @@ func TestPublish(t *testing.T) {
 			verdicts: noVerdicts,
 			action:   ActionWait, reason: allow.ReasonReadPending, fact: "Read",
 			status:  "pending: waiting (read_pending), at most until 2026-11-29 11:00 UTC",
-			comment: []string{"**Waiting, at most until 2026-11-29 11:00 UTC.**", "| Read | `none` | `chunks prepared: 1; changed files that are not text: 0` |"},
+			comment: []string{"**Waiting, at most until 2026-11-29 11:00 UTC.**", "| Read | `none` | `chunks prepared: 1; changed files not shown: 0` |"},
 		},
 		{
 			name: "a verdict under another fingerprint is no verdict",
@@ -728,7 +728,7 @@ func TestConfigCheck(t *testing.T) {
 		if _, err := Act(context.Background(), cfg, Evaluation{}); err == nil {
 			t.Errorf("%s: Act ran", name)
 		}
-		if _, err := Waiting(context.Background(), cfg); err == nil {
+		if _, _, err := Waiting(context.Background(), cfg); err == nil {
 			t.Errorf("%s: Waiting ran", name)
 		}
 		if _, err := Cached(context.Background(), cfg, testPR); err == nil {

@@ -10,19 +10,13 @@ import (
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
-// Reevaluation is one open Dependabot pull request the gate left waiting,
-// and what the scheduled workflow does with it:
-//
-//  1. run fetch again for Number, so the facts are fresh;
-//  2. write Verdicts as the verdicts file (wire.EncodeVerdicts). No model
-//     is called on a schedule: a read with no verdict here stays Read
-//     none, which waits until the deadline;
-//  3. run publish (Decide, then Act) on the two files.
-//
-// Nothing here is an approval. Whether the pull request merges is what
-// allow.Decide says in step 3 about the facts of step 1.
+// Reevaluation is one open Dependabot pull request the gate left waiting.
+// The scheduled workflow gathers its facts again, writes Verdicts as the
+// verdicts file (no model is called on a schedule, so a read with no
+// verdict here stays Read none) and runs publish on the two. Nothing here
+// is an approval: whether the pull request merges is what allow.Decide
+// then says about the fresh facts.
 type Reevaluation struct {
-	// Number is the pull request.
 	Number int `json:"number"`
 	// Head is its head commit now. It may be newer than the one the gate
 	// last decided for; fetch works on the head it finds.
@@ -34,10 +28,9 @@ type Reevaluation struct {
 	NotBefore time.Time `json:"not_before"`
 	Deadline  time.Time `json:"deadline"`
 	// PastDeadline: the last decision's deadline has passed and the pull
-	// request is still open and waiting. It is a report, not a decision:
-	// the pull request becomes a person's only when step 3 says so, and a
-	// pull request that stays in this list is one the scheduled workflow
-	// is failing to evaluate.
+	// request is still open and waiting. A report, not a decision: a pull
+	// request that stays in this list is one the scheduled workflow is
+	// failing to evaluate.
 	PastDeadline bool `json:"past_deadline"`
 }
 
@@ -45,59 +38,61 @@ type Reevaluation struct {
 // wait. It only reads. "Says wait" is the marker of a comment the gate app
 // wrote, never the comment's visible text and never anyone else's
 // comment.
-func Waiting(ctx context.Context, cfg Config) ([]Reevaluation, error) {
+//
+// unread are the pull requests whose gate comment has no marker this
+// version reads (a hand edit, another version's marker). Nothing says
+// whether they wait, so the caller reports them: left out silently, such a
+// pull request would never be looked at again.
+func Waiting(ctx context.Context, cfg Config) (waiting []Reevaluation, unread []int, err error) {
 	if err := cfg.check(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pulls, err := gh.List[pull](ctx, cfg.GitHub, fmt.Sprintf("repos/%s/pulls?state=open", cfg.Repo))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	now := cfg.now()
-	var out []Reevaluation
 	for _, pr := range pulls {
 		if pr.User == nil || pr.User.Login != dependabotLogin || pr.Number < 1 || !gh.ValidSHA(pr.Head.SHA) ||
 			pr.Head.Repo == nil || !strings.EqualFold(pr.Head.Repo.FullName, cfg.Repo) {
 			continue
 		}
-		m, ok, err := lastMarker(ctx, cfg, pr.Number)
+		c, err := findComment(ctx, cfg, pr.Number)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if !ok || m.Outcome != ActionWait {
-			continue
+		if c == nil {
+			continue // no run has decided it yet
 		}
-		out = append(out, Reevaluation{
-			Number: pr.Number, Head: pr.Head.SHA, Verdicts: m.verdicts(),
-			NotBefore: m.NotBefore, Deadline: m.Deadline,
-			PastDeadline: !m.Deadline.IsZero() && !now.Before(m.Deadline),
-		})
+		m, ok := parseMarker(c.Body)
+		switch {
+		case !ok:
+			unread = append(unread, pr.Number)
+		case m.Outcome == ActionWait:
+			waiting = append(waiting, Reevaluation{
+				Number: pr.Number, Head: pr.Head.SHA, Verdicts: m.verdicts(),
+				NotBefore: m.NotBefore, Deadline: m.Deadline,
+				PastDeadline: !m.Deadline.IsZero() && !now.Before(m.Deadline),
+			})
+		}
 	}
-	return out, nil
+	return waiting, unread, nil
 }
 
 // Cached returns the verdicts the gate's comment on a pull request
 // remembers, for a job that wants to spare a model call (fetch hands them
 // to review). It only reads. With no comment by the gate app, or one whose
-// marker does not parse, there are none.
-//
-// An entry counts only for a reader that computes the same reviewer
-// fingerprint and prepares a read with the same content key; wire.Join
-// checks both, so a stale or made-up entry answers nothing.
+// marker does not parse, there are none: an entry counts only under the
+// same reviewer fingerprint and content key (wire.Join), so nothing is
+// lost but a model call.
 func Cached(ctx context.Context, cfg Config, number int) (wire.Verdicts, error) {
 	if err := cfg.check(); err != nil {
 		return wire.Verdicts{}, err
 	}
-	m, _, err := lastMarker(ctx, cfg, number)
-	return m.verdicts(), err
-}
-
-// lastMarker is the marker of the gate's comment on a pull request.
-func lastMarker(ctx context.Context, cfg Config, number int) (marker, bool, error) {
+	var m marker
 	c, err := findComment(ctx, cfg, number)
-	if err != nil || c == nil {
-		return marker{}, false, err
+	if c != nil {
+		m, _ = parseMarker(c.Body)
 	}
-	m, ok := parseMarker(c.Body)
-	return m, ok, nil
+	return m.verdicts(), err
 }

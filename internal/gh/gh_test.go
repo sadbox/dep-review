@@ -32,6 +32,29 @@ func testClient(srv *httptest.Server) (*Client, *[]time.Duration) {
 	return c, &sleeps
 }
 
+// The client from the job's environment talks to api.github.com or not
+// at all.
+func TestNewFromEnv(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_API_URL", "")
+	if _, err := NewFromEnv(); err == nil {
+		t.Error("a client without a token")
+	}
+	t.Setenv("GH_TOKEN", "tok")
+	for _, u := range []string{"", "https://api.github.com", "https://api.github.com/"} {
+		t.Setenv("GITHUB_API_URL", u)
+		if c, err := NewFromEnv(); err != nil || c.BaseURL != DefaultBaseURL || c.Token != "tok" {
+			t.Errorf("GITHUB_API_URL=%q: %+v, %v", u, c, err)
+		}
+	}
+	for _, u := range []string{"http://api.github.com", "https://github.example/api/v3", "https://api.github.com.evil.example/", "api.github.com"} {
+		t.Setenv("GITHUB_API_URL", u)
+		if c, err := NewFromEnv(); err == nil {
+			t.Errorf("GITHUB_API_URL=%q: a client for %s", u, c.BaseURL)
+		}
+	}
+}
+
 func TestRetries(t *testing.T) {
 	type resp struct {
 		status int
@@ -199,6 +222,68 @@ func TestPaginationRefusesForeignHost(t *testing.T) {
 	c, _ := testClient(srv)
 	if _, err := List[json.RawMessage](context.Background(), c, "items"); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A Link header that names a next page in a form the client does not
+// follow is an error: a list cut short is never taken for a whole one.
+// One that only has the word in a URL is the last page.
+func TestPaginationNeverCutsAListShort(t *testing.T) {
+	const base = "https://api.github.com/"
+	c := New("tok")
+	for _, tt := range []struct {
+		link string
+		want string // the next path; "error" for a refusal
+	}{
+		{``, ""},
+		{`<` + base + `items?page=2>; rel="next"`, "items?page=2"},
+		{`<` + base + `items?page=1>; rel="prev", <` + base + `items?page=3>; rel="next", <` + base + `items?page=9>; rel="last"`, "items?page=3"},
+		{`<` + base + `items?after=a,b>; rel="next"`, "items?after=a,b"},
+		{`<` + base + `items?page=2>; rel=next`, "items?page=2"},
+		// The last page of a repository whose name has the word in it.
+		{`<` + base + `repos/o/next/pulls?page=1>; rel="prev", <` + base + `repos/o/next/pulls?page=1>; rel="first"`, ""},
+		{`<https://docs.example/next>; rel="deprecation"; type="text/html"`, ""},
+
+		{`<` + base + `items?page=2>; rel="Next"`, "error"},
+		{`<` + base + `items?page=2>; REL="NEXT"`, "error"},
+		{`<` + base + `items?page=2>; rel="prev next"`, "error"},
+		{`<` + base + `items?page=2>; rel="next-page"`, "error"},
+		{`<` + base + `items?page=2>; type="x"; rel="next"`, "error"},
+		{`<` + base + `items?page=2> rel="next"`, "error"},
+		{`<>; rel="next"`, "error"},
+		{base + `items?page=2; rel="next"`, "error"},
+		{`<` + base + `items?a=>b>; rel="next"`, "error"},
+	} {
+		got, err := c.nextPath(tt.link)
+		if tt.want == "error" {
+			if err == nil || !strings.Contains(err.Error(), "does not read") {
+				t.Errorf("%q: next %q, err %v; want a refusal", tt.link, got, err)
+			}
+		} else if err != nil || got != tt.want {
+			t.Errorf("%q: next %q, err %v; want %q", tt.link, got, err, tt.want)
+		}
+	}
+
+	// Through the client: the refusal fails the list, and a next link on a
+	// second Link line is followed.
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path + "?" + r.URL.Query().Get("page") {
+		case "/odd?":
+			w.Header().Set("Link", fmt.Sprintf(`<%s/odd?page=2>; rel="NEXT"`, srv.URL))
+		case "/two?":
+			w.Header().Add("Link", `<https://docs.example/x>; rel="deprecation"`)
+			w.Header().Add("Link", fmt.Sprintf(`<%s/two?page=2>; rel="next"`, srv.URL))
+		}
+		io.WriteString(w, `[{"n":1}]`)
+	}))
+	defer srv.Close()
+	c, _ = testClient(srv)
+	if got, err := List[struct{ N int }](context.Background(), c, "odd"); err == nil {
+		t.Errorf("a list whose next link was not read came back as whole: %+v", got)
+	}
+	if got, err := List[struct{ N int }](context.Background(), c, "two"); err != nil || len(got) != 2 {
+		t.Errorf("a next link on a second Link line: %+v, %v", got, err)
 	}
 }
 

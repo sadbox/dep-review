@@ -248,7 +248,7 @@ func status(res Result) (state, description string) {
 }
 
 func setStatus(ctx context.Context, cfg Config, sha, state, description string) error {
-	body := map[string]string{"state": state, "context": statusContext, "description": description}
+	body := map[string]string{"state": state, "context": gh.GateStatus, "description": description}
 	if cfg.RunURL != "" {
 		body["target_url"] = cfg.RunURL
 	}

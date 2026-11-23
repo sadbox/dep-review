@@ -2,11 +2,13 @@ package land
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +40,9 @@ func TestWaiting(t *testing.T) {
 		listed(4, "dependabot[bot]", headA, "o/r"),   // merged, by its marker
 		listed(5, "dependabot[bot]", headA, "o/r"),   // never evaluated
 		listed(6, "dependabot[bot]", headA, "o/r"),   // "wait" in somebody else's comment
-		listed(8, "dependabot[bot]", headA, "o/r"),   // the gate's comment says wait in words only
+		listed(8, "dependabot[bot]", headA, "o/r"),   // the gate's comment says wait in words only: reported
+		listed(12, "dependabot[bot]", headA, "o/r"),  // a marker with a member this version does not know: reported
+		listed(13, "dependabot[bot]", headA, "o/r"),  // a marker cut short: reported
 		listed(9, "mallory", headA, "o/r"),           // not Dependabot's
 		listed(10, "dependabot[bot]", headA, "x/r"),  // from a fork
 		listed(11, "dependabot[bot]", "main", "o/r"), // no commit ID
@@ -53,11 +57,18 @@ func TestWaiting(t *testing.T) {
 		9:  {{8, testBot, body(ActionWait, t0.Add(time.Minute))}},
 		10: {{9, testBot, body(ActionWait, t0.Add(time.Minute))}},
 		11: {{10, testBot, body(ActionWait, t0.Add(time.Minute))}},
+		12: {{11, testBot, "<!-- dep-review:v2 " + base64.RawURLEncoding.EncodeToString([]byte(`{"outcome":"wait","head":"`+headA+`","later":1}`)) + " -->\n"}},
+		13: {{12, testBot, body(ActionWait, t0.Add(time.Minute))[:60] + " -->\n"}},
 	}
 
-	got, err := Waiting(context.Background(), f.config(t0, nil))
+	got, unread, err := Waiting(context.Background(), f.config(t0, nil))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A gate comment whose marker does not parse is neither taken to wait
+	// nor silently off the schedule: it is named.
+	if !slices.Equal(unread, []int{8, 12, 13}) {
+		t.Errorf("gate comments reported as unread: %v, want #8, #12 and #13", unread)
 	}
 	if len(got) != 2 {
 		t.Fatalf("%d pull requests wait, want #1 and #2: %+v", len(got), got)
@@ -103,9 +114,9 @@ func TestScheduledReevaluation(t *testing.T) {
 	again := func(f *fakeGitHub, now time.Time, change func(*wire.Facts)) Result {
 		t.Helper()
 		before := len(f.writes())
-		waiting, err := Waiting(context.Background(), f.config(now, nil))
-		if err != nil || len(waiting) != 1 || waiting[0].Number != testPR || waiting[0].PastDeadline {
-			t.Fatalf("waiting: %+v, %v", waiting, err)
+		waiting, unread, err := Waiting(context.Background(), f.config(now, nil))
+		if err != nil || len(unread) != 0 || len(waiting) != 1 || waiting[0].Number != testPR || waiting[0].PastDeadline {
+			t.Fatalf("waiting: %+v, unread %v, %v", waiting, unread, err)
 		}
 		if len(f.writes()) != before {
 			t.Fatal("Waiting wrote something")
@@ -156,9 +167,9 @@ func TestScheduledReevaluation(t *testing.T) {
 	if posts := f.count("POST", "/issues/7/comments"); posts != 1 {
 		t.Errorf("%d comments were created over three runs, want 1", posts)
 	}
-	waiting, err := Waiting(context.Background(), f.config(due, nil))
-	if err != nil || len(waiting) != 0 {
-		t.Errorf("after the merge, still waiting: %+v, %v", waiting, err)
+	waiting, unread, err := Waiting(context.Background(), f.config(due, nil))
+	if err != nil || len(waiting) != 0 || len(unread) != 0 {
+		t.Errorf("after the merge, still waiting: %+v, unread %v, %v", waiting, unread, err)
 	}
 }
 

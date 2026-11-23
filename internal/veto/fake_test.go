@@ -19,17 +19,22 @@ import (
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/artifact"
+	"github.com/sadbox/dep-review/internal/config"
 )
 
 // fakeAPI stands in for the three services the package talks to: the
-// Messages API (with count_tokens), the Claude token exchange and
-// GitHub's OIDC endpoint. It is strict about what it is sent, like the
-// real ones: a request that is not exactly the shape this package is
-// meant to send is answered with an error and fails the test.
+// Messages API, the Claude token exchange and GitHub's OIDC endpoint. It
+// is strict about what it is sent, like the real ones: a request that is
+// not exactly the shape this package is meant to send is answered with an
+// error and fails the test.
 type fakeAPI struct {
 	t   *testing.T
 	srv *httptest.Server
+	// cfg is the embedded settings against the fake's own address.
 	cfg Config
+	// timeout is the request timeout testClient gives its client: the
+	// settings count in whole seconds, and a test cannot wait that long.
+	timeout time.Duration
 
 	// reply scripts the Messages API: n counts requests from 0.
 	reply func(n int, r recorded) reply
@@ -52,7 +57,6 @@ type fakeAPI struct {
 	usedJWT   map[string]bool
 	tokens    map[string]bool
 	exchanges int
-	counted   int
 }
 
 // recorded is one Messages request that passed the fake's checks.
@@ -84,7 +88,6 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", f.messages)
-	mux.HandleFunc("/v1/messages/count_tokens", f.countTokens)
 	mux.HandleFunc("/v1/oauth/token", f.exchange)
 	mux.HandleFunc("/oidc", f.oidc)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -100,10 +103,21 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			t.Errorf("fake API: %s", p)
 		}
 	})
-	f.cfg = DefaultConfig()
+	f.cfg = FromConfig(embedded(t))
 	f.cfg.BaseURL = f.srv.URL
-	f.cfg.RequestTimeout = 5 * time.Second
+	f.timeout = 5 * time.Second
 	return f
+}
+
+// embedded is the gate's built-in settings, which is what the review job
+// builds its client from.
+func embedded(t *testing.T) config.Config {
+	t.Helper()
+	c, err := config.Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func (f *fakeAPI) problem(format string, args ...any) {
@@ -129,9 +143,9 @@ func apiError(w http.ResponseWriter, status int, errType, message string) {
 	})
 }
 
-// authorized checks the credential of a Messages or count_tokens request:
-// the API key in x-api-key, or a token this fake minted as a bearer
-// credential together with the OAuth beta. Never both.
+// authorized checks the credential of a Messages request: the API key in
+// x-api-key, or a token this fake minted as a bearer credential together
+// with the OAuth beta. Never both.
 func (f *fakeAPI) authorized(r *http.Request) bool {
 	key, bearer := r.Header.Get("X-Api-Key"), r.Header.Get("Authorization")
 	f.mu.Lock()
@@ -213,13 +227,13 @@ func (f *fakeAPI) messages(w http.ResponseWriter, r *http.Request) {
 		bad = "body: " + err.Error()
 	case strings.Join(names, ",") != "max_tokens,messages,model,output_config,system,thinking":
 		bad = "top-level keys are " + strings.Join(names, ",")
-	case req.Model != f.cfg.Model:
+	case req.Model != f.cfg.conf.Model:
 		bad = "model " + req.Model
-	case req.MaxTokens != f.cfg.MaxOutputTokens:
+	case req.MaxTokens != f.cfg.conf.MaxOutputTokens:
 		bad = fmt.Sprintf("max_tokens %d", req.MaxTokens)
 	case req.Thinking.Type != "adaptive":
 		bad = "thinking " + req.Thinking.Type
-	case req.OutputConfig.Effort != f.cfg.Effort:
+	case req.OutputConfig.Effort != f.cfg.conf.Effort:
 		bad = "effort " + req.OutputConfig.Effort
 	case req.OutputConfig.Format.Type != "json_schema" || len(req.OutputConfig.Format.Schema) == 0:
 		bad = "output_config.format is not a json_schema"
@@ -268,34 +282,6 @@ func (f *fakeAPI) messages(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(rep.status)
 	io.WriteString(w, rep.body)
-}
-
-func (f *fakeAPI) countTokens(w http.ResponseWriter, r *http.Request) {
-	body, ok := f.checkCommon(w, r)
-	if !ok {
-		return
-	}
-	var req struct {
-		Model    string `json:"model"`
-		System   string `json:"system"`
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || req.Model != f.cfg.Model || len(req.Messages) != 1 {
-		f.problem("count_tokens: unexpected body (%v)", err)
-		apiError(w, http.StatusBadRequest, "invalid_request_error", "fake: bad count_tokens body")
-		return
-	}
-	f.mu.Lock()
-	f.counted++
-	f.mu.Unlock()
-	// One token per four bytes: an arbitrary but checkable number.
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"input_tokens": %d}`, (len(req.System)+len(req.Messages[0].Content))/4)
 }
 
 // oidc is GitHub's token endpoint: a fresh JWT per call, for the one
@@ -405,7 +391,7 @@ func messageJSON(stop string, details any, blocks ...block) string {
 		"id":            "msg_fake",
 		"type":          "message",
 		"role":          "assistant",
-		"model":         DefaultModel,
+		"model":         "claude-opus-5-5",
 		"content":       blocks,
 		"stop_reason":   stop,
 		"stop_sequence": nil,
@@ -451,6 +437,7 @@ func testClient(t *testing.T, f *fakeAPI, creds Credentials) (*Client, *[]time.D
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	c.timeout = f.timeout
 	var waits []time.Duration
 	c.sleep = func(_ context.Context, d time.Duration) error {
 		waits = append(waits, d)

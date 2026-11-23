@@ -9,6 +9,7 @@ import (
 
 	"github.com/sadbox/dep-review/internal/config"
 	"github.com/sadbox/dep-review/internal/gather"
+	"github.com/sadbox/dep-review/internal/land"
 	"github.com/sadbox/dep-review/internal/veto"
 )
 
@@ -69,7 +70,7 @@ func runReview(args []string) error {
 	}
 	client.Logf = log.Printf
 
-	cached, err := readVerdicts(filepath.Join(*facts, cachedFile))
+	cached, err := land.ReadVerdicts(filepath.Join(*facts, cachedFile))
 	if err != nil {
 		return err
 	}

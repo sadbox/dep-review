@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -11,7 +12,9 @@ import (
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/config"
+	"github.com/sadbox/dep-review/internal/gather"
 	"github.com/sadbox/dep-review/internal/gh"
+	"github.com/sadbox/dep-review/internal/land"
 	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/veto"
 	"github.com/sadbox/dep-review/internal/wire"
@@ -27,22 +30,22 @@ const (
 func TestLandConfig(t *testing.T) {
 	c := gh.New("token")
 	t.Setenv("GITHUB_REPOSITORY", "o/r")
-	t.Setenv("GITHUB_SERVER_URL", "https://github.example")
+	// Not read: the links the gate writes are github.com's.
+	t.Setenv("GITHUB_SERVER_URL", "https://github.example/)[x](https://evil.example")
 	t.Setenv("GITHUB_RUN_ID", "42")
 	cfg, err := landConfig(c, "dep-review-gate")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.GitHub != c || cfg.Repo != "o/r" || cfg.BotLogin != "dep-review-gate[bot]" ||
-		cfg.ServerURL != "https://github.example" || cfg.RunURL != "https://github.example/o/r/actions/runs/42" || cfg.Notifier != nil {
+		cfg.RunURL != "https://github.com/o/r/actions/runs/42" || cfg.Notifier != nil {
 		t.Errorf("config %+v", cfg)
 	}
 
-	// Values of another shape are left out, not escaped.
-	t.Setenv("GITHUB_SERVER_URL", "https://github.example/)[x](https://evil.example")
+	// A value of another shape is left out, not escaped.
 	t.Setenv("GITHUB_RUN_ID", "42/../../x")
 	cfg, err = landConfig(c, "gate")
-	if err != nil || cfg.ServerURL != "https://github.com" || cfg.RunURL != "" {
+	if err != nil || cfg.RunURL != "" {
 		t.Errorf("config %+v, %v", cfg, err)
 	}
 
@@ -170,6 +173,25 @@ func TestCheckFacts(t *testing.T) {
 		{name: "a kind the gate does nothing for",
 			class: func(c *model.Classification) { c.Kind = model.KindOther },
 			want:  "classify said"},
+		{name: "the ecosystem classify named", class: func(c *model.Classification) { c.Ecosystem = model.GoModules }},
+		{name: "npm, in the gate's word for it",
+			class: func(c *model.Classification) { c.Ecosystem = model.NPM },
+			facts: func(f *wire.Facts) { f.Facts.Ecosystem = allow.NPM }},
+		{name: "npm, in Dependabot's word for it",
+			class: func(c *model.Classification) { c.Ecosystem = model.NPM },
+			facts: func(f *wire.Facts) { f.Facts.Ecosystem = string(model.NPM) },
+			want:  "classify named"},
+		{name: "an image, by the facts alone",
+			class: func(c *model.Classification) { c.Ecosystem = model.GoModules },
+			facts: func(f *wire.Facts) { f.Facts.Ecosystem = allow.Docker },
+			want:  "classify named"},
+		{name: "a rule, where classify named an ecosystem without one",
+			class: func(c *model.Classification) { c.Ecosystem = model.UV },
+			want:  "classify named"},
+		{name: "no ecosystem, where classify named one",
+			class: func(c *model.Classification) { c.Ecosystem = model.Docker },
+			facts: func(f *wire.Facts) { f.Facts.Ecosystem = "" },
+			want:  "classify named"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c, f := class, goodFacts()
@@ -187,11 +209,28 @@ func TestCheckFacts(t *testing.T) {
 	}
 }
 
+// checkFacts has the gate's name for each of Dependabot's ecosystems as
+// the fetch job writes it: what gather.Fetch puts in a facts file for a
+// classification passes, for every ecosystem classify can name.
+func TestCheckFactsNamesEcosystemsAsFetchDoes(t *testing.T) {
+	for _, eco := range []model.Ecosystem{model.GoModules, model.NPM, model.GitHubActions, model.Docker, model.UV, model.GitSubmodule} {
+		// Unverified, so that fetch asks nobody and writes the file.
+		class := model.Classification{Repo: "o/r", PR: 7, HeadSHA: testHead, Kind: model.KindDependabotUnverified, Reason: "test", Ecosystem: eco}
+		facts, err := gather.Fetch{Class: class}.Run(t.Context(), filepath.Join(t.TempDir(), "out"))
+		if err != nil {
+			t.Fatalf("%s: %v", eco, err)
+		}
+		if err := checkFacts(class, facts); err != nil {
+			t.Errorf("%s: fetch wrote ecosystem %q: %v", eco, facts.Facts.Ecosystem, err)
+		}
+	}
+}
+
 // A verdicts file that is not there is no verdicts; one that is there has
 // to decode.
 func TestReadVerdicts(t *testing.T) {
 	dir := t.TempDir()
-	v, err := readVerdicts(filepath.Join(dir, "none.json"))
+	v, err := land.ReadVerdicts(filepath.Join(dir, "none.json"))
 	if err != nil || v.Version != wire.Version || len(v.Verdicts) != 0 {
 		t.Errorf("a missing file: %+v, %v", v, err)
 	}
@@ -202,15 +241,42 @@ func TestReadVerdicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(dir, "v.json"), string(b))
-	if v, err := readVerdicts(filepath.Join(dir, "v.json")); err != nil || len(v.Verdicts) != 1 || v.Verdicts[0].Key != testKey {
+	if v, err := land.ReadVerdicts(filepath.Join(dir, "v.json")); err != nil || len(v.Verdicts) != 1 || v.Verdicts[0].Key != testKey {
 		t.Errorf("a verdicts file: %+v, %v", v, err)
 	}
 	writeFile(t, filepath.Join(dir, "bad.json"), `{"version":1,"verdicts":[{"key":"x"}]}`)
-	if _, err := readVerdicts(filepath.Join(dir, "bad.json")); err == nil {
+	if _, err := land.ReadVerdicts(filepath.Join(dir, "bad.json")); err == nil {
 		t.Error("a file that does not decode was read")
 	}
+}
+
+// classify's answer is read as classify writes it and in no other
+// spelling.
+func TestReadClassification(t *testing.T) {
+	dir := t.TempDir()
 	if _, err := readClassification(filepath.Join(dir, "none.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a missing classification: %v", err)
+	}
+	want := model.Classification{Repo: "o/r", PR: 7, HeadSHA: testHead, BaseSHA: testHead, Kind: model.KindDependabot, Reason: "ok", Ecosystem: model.NPM}
+	b, err := json.MarshalIndent(want, "", "  ") // as runClassify writes it
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "classification.json")
+	writeFile(t, path, string(b))
+	if got, err := readClassification(path); err != nil || got != want {
+		t.Errorf("classify's file: %+v, %v", got, err)
+	}
+	for name, body := range map[string]string{
+		"a key classify does not write": `{"repo":"o/r","pr":7,"kind":"dependabot","merge":true}`,
+		"a key in another case":         `{"repo":"o/r","pr":7,"Kind":"dependabot"}`,
+		"a key twice":                   `{"repo":"o/r","pr":7,"kind":"other","kind":"dependabot"}`,
+		"a second value":                `{"repo":"o/r","pr":7,"kind":"dependabot"} {}`,
+	} {
+		writeFile(t, path, body)
+		if got, err := readClassification(path); err == nil {
+			t.Errorf("%s: read as %+v", name, got)
+		}
 	}
 }
 

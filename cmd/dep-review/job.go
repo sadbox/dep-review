@@ -2,15 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	json "encoding/json/v2"
 	"fmt"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/advisory"
@@ -47,41 +44,26 @@ func landConfig(c *gh.Client, slug string) (land.Config, error) {
 	if !gh.ValidRepo(repo) {
 		return land.Config{}, fmt.Errorf("GITHUB_REPOSITORY %.100q is not owner/name", repo)
 	}
-	cfg := land.Config{GitHub: c, Repo: repo, BotLogin: slug + "[bot]", ServerURL: "https://github.com"}
-	// Both go into a comment and a notification as links.
-	if u := os.Getenv("GITHUB_SERVER_URL"); strings.HasPrefix(u, "https://") && !strings.ContainsAny(u, " ()[]<>\"'") {
-		cfg.ServerURL = strings.TrimSuffix(u, "/")
-	}
+	cfg := land.Config{GitHub: c, Repo: repo, BotLogin: slug + "[bot]"}
+	// It goes into a comment and a notification as a link.
 	if run := os.Getenv("GITHUB_RUN_ID"); runIDRE.MatchString(run) {
-		cfg.RunURL = fmt.Sprintf("%s/%s/actions/runs/%s", cfg.ServerURL, repo, run)
+		cfg.RunURL = fmt.Sprintf("https://github.com/%s/actions/runs/%s", repo, run)
 	}
 	return cfg, nil
 }
 
-// readClassification reads classify's answer.
+// readClassification reads classify's answer: the keys classify writes
+// and no others.
 func readClassification(path string) (model.Classification, error) {
 	var class model.Classification
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return class, err
 	}
-	if err := json.Unmarshal(b, &class); err != nil {
+	if err := json.Unmarshal(b, &class, json.RejectUnknownMembers(true)); err != nil {
 		return class, fmt.Errorf("%s: %w", path, err)
 	}
 	return class, nil
-}
-
-// readVerdicts reads a verdicts file. One that is not there is no
-// verdicts.
-func readVerdicts(path string) (wire.Verdicts, error) {
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return wire.Verdicts{Version: wire.Version}, nil
-	}
-	if err != nil {
-		return wire.Verdicts{}, err
-	}
-	return wire.DecodeVerdicts(b)
 }
 
 // gathering is what the fetch job and the scheduled job share: the

@@ -11,6 +11,8 @@ import (
 // key. It is the experiment for what the fake cannot show: that the API
 // accepts this request as written (version header, adaptive thinking,
 // effort, the answer schema) and answers in the shape interpret reads.
+// The client's log line gives request bytes next to input tokens, which
+// is the measurement of the chunk budget's token-per-byte bound.
 //
 // It costs money and needs a credential, so it runs only when asked:
 //
@@ -25,7 +27,7 @@ func TestLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := New(DefaultConfig(), key, nil)
+	c, err := New(FromConfig(embedded(t)), key, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,12 +36,6 @@ func TestLive(t *testing.T) {
 	defer cancel()
 
 	p := prepared("diff --git a/pad.go b/pad.go\n--- a/pad.go\n+++ b/pad.go\n@@ -1,3 +1,3 @@\n package pad\n \n-const width = 8\n+const width = 10\n")
-	counts, err := c.CountTokens(ctx, Request{Read: p})
-	if err != nil {
-		t.Fatalf("CountTokens: %v", err)
-	}
-	t.Logf("input tokens: %v", counts)
-
 	v, err := c.Review(ctx, Request{Read: p})
 	if err != nil {
 		t.Fatalf("Review: %v", err)

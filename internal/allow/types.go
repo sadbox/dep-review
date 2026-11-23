@@ -1,15 +1,11 @@
 // Package allow decides what happens to a Dependabot pull request: merge,
 // wait, or hand it to a person (docs/v0.2-spec.md, sections 2 to 4).
 //
-// The default is person. A merge is granted only by facts that the gate's
-// deterministic code gathered from authoritative sources; the model's
-// reading of the code can take a merge away and can never add one. Decide
-// is a pure function of (facts, policy, now): no I/O, no clock, no
-// environment, so the same record always yields the same decision and the
-// decision can be replayed from a stored record.
-//
-// This package imports only the standard library. Everything else in v0.2
-// builds against its types.
+// The default is person. Only facts the gate's deterministic code gathered
+// grant a merge; the model's reading can take one away and never add one.
+// Decide is a pure function of (facts, policy, now), so a stored record
+// always replays to the same decision. The package imports only the
+// standard library.
 package allow
 
 import "time"
@@ -19,23 +15,18 @@ type Outcome string
 
 // The three outcomes, most permissive first.
 const (
-	// Merge: every fact holds, nothing was vetoed. Publish calls the merge
-	// API with the head commit; GitHub's rules decide whether the required
-	// checks allow it (see ChecksRefused).
+	// Merge: every fact holds and nothing was vetoed. Whether the required
+	// checks allow it is GitHub's answer to the merge call (ChecksRefused).
 	Merge Outcome = "merge"
-	// Wait: only time, CI or a retry is missing (the model call, or a
-	// source that did not answer). The pull request is evaluated again
-	// without a person.
+	// Wait: only time, CI or a retry is missing. Evaluated again later.
 	Wait Outcome = "wait"
 	// Person: a fact is false or was never gathered, or a veto was raised.
 	Person Outcome = "person"
 )
 
-// The ecosystems that have a rule. The strings are the keys of the policy
-// list ("listed" in policy/defaults.json), not Dependabot's branch names:
-// Dependabot calls npm "npm_and_yarn", and whoever reads the branch name
-// maps it. Every other ecosystem (uv, OpenTofu, submodules, anything new)
-// has no rule and is always Person.
+// The ecosystems that have a rule, by their keys in the policy list. These
+// are not Dependabot's branch names (it calls npm "npm_and_yarn"); whoever
+// reads the branch name maps it. Every other ecosystem is always Person.
 const (
 	GoModules     = "go_modules"
 	NPM           = "npm"
@@ -57,65 +48,45 @@ func HasRule(ecosystem string) bool {
 // and answered for.
 type ReadState string
 
-// The read states. The zero value ("") is none of them: an update whose
-// read was never recorded is unknown, which is Person.
+// The read states. The zero value is none of them: a read that was never
+// recorded is unknown, which is Person.
 const (
-	// ReadFull: every changed text file was sent, every chunk was
-	// answered, and no file was left unread.
+	// ReadFull: every changed text file was sent and every chunk answered.
 	ReadFull ReadState = "full"
-	// ReadPartial: every chunk that was sent was answered, but the budget
-	// was exceeded or some changed files were not text.
+	// ReadPartial: every chunk sent was answered, but the budget was
+	// exceeded or some changed files were not text.
 	ReadPartial ReadState = "partial"
-	// ReadNone: the code has not been read yet. The artifact could not be
-	// downloaded, or the model call failed, was not available or gave no
-	// complete answer. It is retried at each evaluation; see
-	// Policy.WaitDeadline.
+	// ReadNone: not read yet. The artifact could not be downloaded, or the
+	// model gave no complete answer. Retried until the wait deadline.
 	ReadNone ReadState = "none"
-	// ReadNotApplicable: there is nothing a model could read. Valid for
-	// Docker only; in any other ecosystem it is treated as unknown.
+	// ReadNotApplicable: nothing a model could read. Docker only.
 	ReadNotApplicable ReadState = "not-applicable"
-	// ReadRefused: the gate would not read the code, and asking again
-	// gives the same answer. The artifact did not match the hash the pull
-	// request is bound to, its archive was unsafe to extract, its
-	// reference was not one the gate fetches, or the reviewer called the
-	// prepared read unusable. Person at once.
+	// ReadRefused: the gate would not read the code, and asking again gives
+	// the same answer (a hash mismatch, an unsafe archive, a reference the
+	// gate does not fetch, an unusable read). Person at once.
 	ReadRefused ReadState = "refused"
 )
 
-// Fact is one thing the gate established about a pull request or about
-// one update in it, with what was observed and where, so the pull request
-// comment can show why.
-//
-// A fact is in one of four states, and only the first can contribute to a
-// merge:
-//
-//   - it holds (Yes);
-//   - it does not hold: the source answered, and the answer is no (No);
-//   - it is unavailable: the source was asked and did not answer, because
-//     of a network error, a server error or a rate limit (Unavailable).
-//     Decide waits for it and asks again, up to the wait deadline;
-//   - it was never gathered: Source is empty, whatever the other fields
-//     say. Decide answers Person. Value may still say why nothing could be
-//     established (an answer that arrived and could not be read is not an
-//     outage).
+// Fact is one thing the gate established about a pull request or an
+// update, with what was observed and where, so the comment can show why.
+// It is in one of four states, and only the first contributes to a merge:
+// it holds (Yes); it does not, because the source answered no (No); it is
+// unavailable, because the source was asked and did not answer, and Decide
+// waits and asks again up to the wait deadline (Unavailable); or it was
+// never gathered, which is an empty Source whatever the other fields say,
+// and Person. Value may still say why: an answer that arrived and could
+// not be read is not an outage.
 type Fact struct {
-	// OK: the fact holds. For Identity, Shape, ChecksConfigured, Known,
-	// Increase, Bound, Clean and NoRegress, true is the good answer. For
-	// Listed, NewName, Major, SecurityFix and Superseded it is the plain
-	// answer to a yes/no question, and "no" is a normal thing to have
-	// gathered.
+	// OK: the fact holds. For Listed, NewName, Major, SecurityFix and
+	// Superseded "no" is a normal thing to have gathered.
 	OK bool `json:"ok"`
-	// Unavailable: the source was asked and did not answer. OK then means
-	// nothing.
+	// Unavailable: OK then means nothing.
 	Unavailable bool `json:"unavailable"`
-	// Value is what was observed, in the gate's own words. It can quote
-	// what a publisher or a registry wrote (a script, a deprecation
-	// notice, a path), so it is third-party text all the same: nothing
-	// decides on it, and publish shows it only through the comment
-	// sanitiser, inside a code span, with a length cap.
+	// Value is what was observed. It can quote a publisher or a registry,
+	// so it is third-party text: nothing decides on it, and publish shows
+	// it only sanitised, in a code span, cut to a length.
 	Value string `json:"value"`
-	// Source is where it was read (an API path, a tool, a file). Empty
-	// means nothing gathered this fact.
+	// Source is where it was read. Empty means nothing gathered the fact.
 	Source string `json:"source"`
 }
 
@@ -125,10 +96,9 @@ func Yes(value, source string) Fact { return Fact{OK: true, Value: value, Source
 // No is a gathered fact that does not hold.
 func No(value, source string) Fact { return Fact{OK: false, Value: value, Source: source} }
 
-// Unavailable is a fact whose source was asked and did not answer. Use it
-// only for a request that got no usable response at all: a network error,
-// a 5xx or a rate limit. An answer that arrived and says no, or that
-// could not be understood, is not unavailable.
+// Unavailable is a fact whose source was asked and gave no usable response
+// at all: a network error, a 5xx or a rate limit. An answer that says no,
+// or that could not be understood, is not unavailable.
 func Unavailable(value, source string) Fact {
 	return Fact{Unavailable: true, Value: value, Source: source}
 }
@@ -178,13 +148,10 @@ func stateOf(f Fact) factState {
 }
 
 // TimeFact is a fact whose answer is a point in time (FirstSeen,
-// NameCreated). It is known only when OK is set, Source is not empty and
-// Time is not the zero time. Like a Fact it can be unavailable instead:
-// the clock was asked and did not answer. Build one with At or
-// UnavailableTime; any other value is a time that was not established.
+// NameCreated). Build one with At or UnavailableTime; any other value is a
+// time that was not established.
 type TimeFact struct {
-	OK bool `json:"ok"`
-	// Unavailable: the source was asked and did not answer.
+	OK          bool      `json:"ok"`
 	Unavailable bool      `json:"unavailable"`
 	Time        time.Time `json:"time"`
 	Value       string    `json:"value"`
@@ -215,127 +182,85 @@ func (t TimeFact) unavailable() bool { return t.Unavailable && t.Source != "" }
 // goes to a person. The model cannot choose this category.
 const VetoModelRefused = "model_refused"
 
-// Veto is the model's objection to one update. Any Veto is Person,
-// whatever its category says: the category and quotes are shown, never
-// interpreted.
+// Veto is the model's objection to one update. Any Veto is Person: the
+// category and quotes are shown, never interpreted.
 type Veto struct {
 	// Category is one of internal/veto's fixed categories, or
 	// VetoModelRefused.
 	Category string `json:"category"`
-	// Quotes are the lines the model pointed at. Untrusted text, shown
-	// like a Fact's Value: sanitised, in a code span, cut to a length.
+	// Quotes are the lines the model pointed at, and Notes its optional
+	// remark. Untrusted text, shown like a Fact's Value.
 	Quotes []string `json:"quotes"`
-	// Notes is the model's optional remark. Untrusted text.
-	Notes string `json:"notes"`
+	Notes  string   `json:"notes"`
 }
 
 // UpdateFacts is everything known about one package the pull request
-// moves. The change set comes from the base and head manifests, never
-// from the pull request's title, body, labels or Dependabot's metadata.
+// moves, read from the base and head manifests and never from the pull
+// request's title, body, labels or Dependabot's metadata. What each fact
+// means is spec section 3; a comment here says what that table does not.
 type UpdateFacts struct {
 	// Name is the module path, the npm package name, the action's
-	// owner/repo, or the image name with its registry
-	// (docker.io/library/golang). It is what the policy list is matched
-	// against, byte for byte.
+	// owner/repo, or the image name with its registry. The policy list is
+	// matched against it byte for byte.
 	Name string `json:"name"`
-	// From is the version at the base commit; empty for a new name.
+	// From is the version at the base commit, empty for a new name. To is
+	// the version at the head commit.
 	From string `json:"from"`
-	// To is the version at the head commit.
-	To string `json:"to"`
+	To   string `json:"to"`
 
-	// Known: the name is a dependency at the base commit, or matches the
-	// policy list. For Docker it means listed only: nothing in an image is
-	// read, so being in a Dockerfile already is not enough. It must hold
-	// whenever Listed does, and must not hold for a new name that is not
-	// listed; Decide answers person for a record that says otherwise.
+	// Known must hold whenever Listed does, and must not hold for a new
+	// name that is not listed. For Docker it means listed only: nothing in
+	// an image is read. Decide answers person for any other record.
 	Known Fact `json:"known"`
-	// Listed: the name matches the policy list (the gatherer calls
-	// Listed). Decide checks it against its own policy.
-	Listed Fact `json:"listed"`
-	// NewName: the name is absent at the base commit.
+	// Listed is the gatherer's answer from Listed. Decide checks it
+	// against its own policy.
+	Listed  Fact `json:"listed"`
 	NewName Fact `json:"new_name"`
-	// Increase: To is a plain release greater than From. For a new name
-	// there is no From: To is a plain release. A listed Go module may
-	// also move to a higher pseudo-version (spec section 11, amendment
-	// 24).
+	// Increase: for a new name there is no From, and To is a plain
+	// release.
 	Increase Fact `json:"increase"`
-	// Major: the leading version component changed.
-	Major Fact `json:"major"`
-	// Indirect: the repository's own manifest shows that it does not
-	// declare this dependency, so the update is there because another
-	// dependency asks for it. Go: the require line in go.mod is marked
-	// "// indirect". npm: the name is in none of the root package's
-	// dependency maps. It does one thing: a major update of an unlisted
-	// name that is indirect is decided like a listed one's, because the
-	// version was the parent's choice and the owner has none to make.
-	// Only a fact that holds counts. Unset, "no" and unavailable all mean
-	// the repository declares the dependency itself, and Decide never
-	// waits for it. Decide looks at it for Go modules and npm only: an
-	// action or an image is always the repository's own choice.
+	Major    Fact `json:"major"`
+	// Indirect lets a major update of an unlisted name be decided like a
+	// listed one's: the version was the parent's choice. Only a fact that
+	// holds counts, and Decide never waits for it. It is looked at for Go
+	// modules and npm only: an action or an image is always the
+	// repository's own choice.
 	Indirect Fact `json:"indirect"`
-	// Bound: the pinned hash, commit or digest equals what the registry
-	// reports now.
-	Bound Fact `json:"bound"`
-	// FirstSeen: when To became public, by a clock the publisher cannot
-	// set. Where the registry has no such clock, or it did not answer,
-	// the fetch command puts the pull request's creation time here, with
-	// the source "pull request opened" (spec section 11, amendment 4).
+	Bound    Fact `json:"bound"`
+	// FirstSeen: where the registry has no clock the publisher cannot
+	// set, or it did not answer, the fetch command puts the pull request's
+	// creation time here (spec section 11, amendment 4).
 	FirstSeen TimeFact `json:"first_seen"`
-	// NameCreated: when the package name first appeared. Needed only for
-	// a new name that is not listed.
+	// NameCreated is needed only for a new name that is not listed.
 	NameCreated TimeFact `json:"name_created"`
-	// Clean: still published; not retracted, yanked or deprecated; no
-	// malware advisory; no advisory on To that From did not have. For
-	// Docker: the registry serves the pinned digest under the tag now and
-	// does not mark it deprecated.
-	Clean Fact `json:"clean"`
-	// NoRegress: no new or changed install script; provenance identity
-	// not lost; for Actions, the new commit descends from the old one on
-	// the default or a release branch and the tag resolves to it. For
-	// Docker there is nothing to compare, and it holds.
-	NoRegress Fact `json:"no_regress"`
-	// SecurityFix: GitHub's Advisory Database has a reviewed,
-	// non-withdrawn advisory that affects From, does not affect To, and
-	// names To as the first patched version. For Docker a gathered no.
-	SecurityFix Fact `json:"security_fix"`
+	Clean       Fact     `json:"clean"`
+	NoRegress   Fact     `json:"no_regress"`
+	SecurityFix Fact     `json:"security_fix"`
 	// Superseded: the registry serves another digest under the pinned tag
-	// now, so the pin is no longer the current one (Docker only; Decide
-	// ignores it elsewhere). Dependabot refreshes the digest itself, so
-	// the update waits for that instead of going to a person: Bound,
-	// Clean and FirstSeen then describe a pin that is about to be
-	// replaced and are not looked at. It never merges while this holds.
-	// The zero Fact and a gathered "no" both mean not superseded, so only
-	// the Docker gatherer ever sets it.
-	Superseded Fact `json:"superseded"`
-	// Read: how much of the change the model read.
-	Read ReadState `json:"read"`
-	// Veto: nil, or the model's objection. Nil means "no veto" only
-	// together with Read; a model that never answered is ReadNone.
+	// now (Docker only; Decide ignores it elsewhere). Dependabot refreshes
+	// the digest itself, so the update waits for that: Bound, Clean and
+	// FirstSeen describe a pin that is about to be replaced and are not
+	// looked at. It never merges while this holds. The zero Fact and a
+	// gathered "no" both mean not superseded.
+	Superseded Fact      `json:"superseded"`
+	Read       ReadState `json:"read"`
+	// Veto: nil means "no veto" only together with Read; a model that
+	// never answered is ReadNone.
 	Veto *Veto `json:"veto"`
 }
 
 // PRFacts is everything known about one pull request at one head commit.
 type PRFacts struct {
-	// Ecosystem is the one ecosystem the pull request belongs to, as one
-	// of this package's constants, or anything else for an ecosystem with
-	// no rule.
-	Ecosystem string `json:"ecosystem"`
-	// Identity: the pull request is Dependabot's alone, its base is the
-	// default branch and the head is current.
-	Identity Fact `json:"identity"`
-	// Shape: only that ecosystem's manifest and lock files changed, and
-	// only version or hash tokens in them.
-	Shape Fact `json:"shape"`
-	// ChecksConfigured: the default branch has a required-status-checks
-	// rule.
-	ChecksConfigured Fact `json:"checks_configured"`
-	// Opened is when GitHub created the pull request (the pull request's
-	// created_at). It is not one of the spec's facts and it grants
-	// nothing: it only keeps the wait deadline from starting before the
-	// pull request existed (see Decision.Deadline). The zero time means
-	// unknown, and the deadline then runs from the latest required time
-	// alone, which is the earlier and stricter reading. When no update
-	// has a first-seen time either, there is no deadline yet.
+	// Ecosystem is one of this package's constants, or anything else for
+	// an ecosystem with no rule.
+	Ecosystem        string `json:"ecosystem"`
+	Identity         Fact   `json:"identity"`
+	Shape            Fact   `json:"shape"`
+	ChecksConfigured Fact   `json:"checks_configured"`
+	// Opened is the pull request's created_at. It is not one of the
+	// spec's facts and grants nothing: it only keeps the wait deadline
+	// from starting before the pull request existed (see
+	// Decision.Deadline). The zero time means unknown.
 	Opened time.Time `json:"opened"`
 	// Updates is every package the pull request moves. An empty list is
 	// Person: Dependabot never opens such a pull request.
@@ -356,33 +281,28 @@ const (
 	CompanionsWait Companions = "wait"
 )
 
-// Policy is the owner's settings, as internal/config resolves them from
-// the embedded defaults and the repository's file on the default branch.
-// Decide answers Person for a Policy whose ages are not all positive or
-// whose Companions is not one of the two modes, so the zero Policy can
-// never merge anything.
+// Policy is the owner's settings, as internal/config resolves them. Decide
+// answers Person for a Policy whose ages are not all positive or whose
+// Companions is not one of the two modes, so the zero Policy can never
+// merge anything.
 type Policy struct {
 	// MinAge is how long a fully read update must have been public.
 	MinAge time.Duration
-	// UnreadAge is how long an update that was only partly read must
-	// have been public. Decide never lets it be shorter than MinAge.
+	// UnreadAge is the same for an update that was only partly read.
+	// Decide never lets it be shorter than MinAge.
 	UnreadAge time.Duration
-	// MajorAge is how long a major update of a listed name, or of an
-	// indirect dependency, must have been public. Decide never lets a
-	// major need less than the same update would need as a minor.
+	// MajorAge is the same for a major update of a listed name or of an
+	// indirect dependency. Decide never lets a major need less than the
+	// same update would need as a minor.
 	MajorAge time.Duration
 	// NewNameAge is how old a package name must be before a new, unlisted
-	// dependency under that name can merge without a person.
+	// dependency under it can merge without a person.
 	NewNameAge time.Duration
-	// WaitDeadline is how long a pull request may stay unmergeable past
-	// its latest required time before it becomes Person; see
-	// Decision.Deadline.
+	// WaitDeadline: see Decision.Deadline.
 	WaitDeadline time.Duration
 	// FastPath lets a security fix merge sooner. Off, SecurityFix changes
 	// nothing.
-	FastPath bool
-	// Companions is the mode for the other updates in a fast-path pull
-	// request.
+	FastPath   bool
 	Companions Companions
 	// Listed is the owner-kept list, by ecosystem constant. See Listed
 	// for how an entry matches.
@@ -397,8 +317,7 @@ type UpdateDecision struct {
 	To   string `json:"to"`
 	// Outcome for this update alone. Merge here means "this update does
 	// not hold the pull request back".
-	Outcome Outcome `json:"outcome"`
-	// Reasons explain a Wait or Person outcome; empty for Merge.
+	Outcome Outcome  `json:"outcome"`
 	Reasons []Reason `json:"reasons"`
 	// RequiredAge is how long To must have been public. For ReadNone it
 	// is the age a full read would need, the earliest possible; for an

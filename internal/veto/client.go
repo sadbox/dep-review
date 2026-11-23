@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/config"
 )
 
 const (
 	messagesPath = "/v1/messages"
-	countPath    = "/v1/messages/count_tokens"
 	// apiVersion is the anthropic-version this client was written for.
 	apiVersion = "2026-10-21"
 	userAgent  = "dep-review-veto"
@@ -38,18 +38,20 @@ const (
 // Client is the Reviewer that asks the model over the Messages API: one
 // request per chunk, not streamed, with no tools.
 type Client struct {
-	cfg   Config
+	conf  config.Config
 	base  string
 	creds Credentials
 	http  *http.Client
+	// timeout bounds one attempt at one chunk, from sending the request
+	// to reading the whole response.
+	timeout time.Duration
 
 	// Logf, when set, receives one line per request with its size, token
 	// usage and outcome, and one per retry. Chunk text, the model's text
 	// and credentials are never passed to it.
 	Logf func(format string, args ...any)
 
-	random io.Reader                                  // the marker's randomness
-	sleep  func(context.Context, time.Duration) error // the wait between attempts
+	sleep func(context.Context, time.Duration) error // the wait between attempts
 }
 
 var _ Reviewer = (*Client)(nil)
@@ -58,9 +60,6 @@ var _ Reviewer = (*Client)(nil)
 // ignores proxy settings in the environment; either way redirects are
 // never followed, so a credential only goes to cfg.BaseURL.
 func New(cfg Config, creds Credentials, hc *http.Client) (*Client, error) {
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
 	if creds == nil {
 		return nil, errors.New("veto: no credentials")
 	}
@@ -69,12 +68,12 @@ func New(cfg Config, creds Credentials, hc *http.Client) (*Client, error) {
 		return nil, fmt.Errorf("veto: base_url: %w", err)
 	}
 	return &Client{
-		cfg:    cfg,
-		base:   base,
-		creds:  creds,
-		http:   noRedirects(hc),
-		random: rand.Reader,
-		sleep:  sleepContext,
+		conf:    cfg.conf,
+		base:    base,
+		creds:   creds,
+		http:    noRedirects(hc),
+		timeout: time.Duration(cfg.conf.RequestTimeoutSeconds) * time.Second,
+		sleep:   sleepContext,
 	}, nil
 }
 
@@ -123,13 +122,7 @@ func (c *Client) logf(format string, args ...any) {
 //
 // Chunks are asked in order, one request each. The first veto or refusal
 // ends the review: no later answer could change it, and a later failure
-// must not lose it. NoVeto is returned only after every chunk answered
-// no_veto.
-//
-// Verdict.Read is the request's Read.State when every chunk got an
-// answer from the model. When the review stopped early, or stopped on a
-// refusal, part of the text went unread and Read is allow.ReadPartial;
-// the veto sends the update to a person either way.
+// must not lose it.
 //
 // A read with no chunks (nothing readable changed) makes no request and
 // returns NoVeto with the request's Read.State: there is nothing a model
@@ -137,22 +130,19 @@ func (c *Client) logf(format string, args ...any) {
 // allow.Decide's rule for that state.
 //
 // ctx bounds the whole review. Without a deadline the worst case is
-// MaxChunks times Attempts times RequestTimeout, so the caller should
-// set one.
+// max_chunks times attempts times the request timeout, so the caller
+// should set one.
 func (c *Client) Review(ctx context.Context, req Request) (Verdict, error) {
 	p := req.Read
-	if err := checkRead(c.cfg, p); err != nil {
+	if err := checkRead(c.conf, p); err != nil {
 		// %q: the name has not passed the check that makes it printable.
 		return Verdict{}, fmt.Errorf("%w: %q: not sent: %w", ErrUnusable, clip(p.Pair.Name, 80), err)
 	}
 	total := len(p.Chunks)
 	var notes []string
 	for i := range p.Chunks {
-		marker, err := newMarker(c.random, p, i)
-		if err != nil {
-			return Verdict{}, fmt.Errorf("veto: %w", err)
-		}
-		body, err := requestBody(c.cfg, userMessage(p, i, marker))
+		// rand.Text is at least 128 random bits, new for every request.
+		body, err := requestBody(c.conf, userMessage(p, i, rand.Text()))
 		if err != nil {
 			return Verdict{}, fmt.Errorf("veto: %w", err)
 		}
@@ -181,45 +171,6 @@ func (c *Client) Review(ctx context.Context, req Request) (Verdict, error) {
 		Read:   p.State,
 		Key:    p.Key,
 	}, nil
-}
-
-// CountTokens asks the API how many input tokens each chunk's request
-// is, system prompt and header included (the answer schema is not). It
-// runs no inference. It exists to measure, on real chunks, how far the
-// one-token-per-byte bound behind Config.ChunkBytes is from the truth;
-// Review does not call it.
-func (c *Client) CountTokens(ctx context.Context, req Request) ([]int, error) {
-	p := req.Read
-	if err := checkRead(c.cfg, p); err != nil {
-		return nil, fmt.Errorf("veto: not sent: %w", err)
-	}
-	counts := make([]int, 0, len(p.Chunks))
-	for i := range p.Chunks {
-		marker, err := newMarker(c.random, p, i)
-		if err != nil {
-			return nil, fmt.Errorf("veto: %w", err)
-		}
-		body, err := encode(countRequest{
-			Model:    c.cfg.Model,
-			System:   systemPrompt,
-			Messages: []message{{Role: "user", Content: userMessage(p, i, marker)}},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("veto: %w", err)
-		}
-		raw, _, err := c.send(ctx, countPath, body)
-		if err != nil {
-			return nil, fmt.Errorf("veto: count tokens, part %d of %d: %w", i+1, len(p.Chunks), err)
-		}
-		var out struct {
-			InputTokens *int `json:"input_tokens"`
-		}
-		if err := json.Unmarshal(raw, &out); err != nil || out.InputTokens == nil {
-			return nil, fmt.Errorf("veto: count tokens, part %d of %d: response has no input_tokens", i+1, len(p.Chunks))
-		}
-		counts = append(counts, *out.InputTokens)
-	}
-	return counts, nil
 }
 
 // ask sends one chunk's request and reads the answer.
@@ -321,16 +272,16 @@ func (c *Client) send(ctx context.Context, path string, body []byte) (raw []byte
 			// unusable response is not a transient fault.
 		default:
 			// No response: a network failure, or the attempt ran into
-			// RequestTimeout.
+			// its timeout.
 			wait = retryBase << (attempt - 1)
 		}
-		if wait < 0 || attempt >= c.cfg.Attempts {
+		if wait < 0 || attempt >= c.conf.Attempts {
 			return nil, "", err
 		}
 		if wait > maxRetryAfter {
 			return nil, "", fmt.Errorf("%w; the API asks to wait %s, longer than this client waits", err, wait)
 		}
-		c.logf("veto: attempt %d of %d failed, next in %s: %v", attempt, c.cfg.Attempts, wait, err)
+		c.logf("veto: attempt %d of %d failed, next in %s: %v", attempt, c.conf.Attempts, wait, err)
 		if err := c.sleep(ctx, wait); err != nil {
 			return nil, "", err
 		}
@@ -346,7 +297,7 @@ func (e *credentialsError) Unwrap() error { return e.err }
 
 // post is one attempt. wait is the API's retry-after, when it sent one.
 func (c *Client) post(ctx context.Context, path string, body []byte) (raw []byte, requestID string, wait time.Duration, err error) {
-	ctx, cancel := context.WithTimeout(ctx, c.cfg.RequestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
 	if err != nil {

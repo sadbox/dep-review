@@ -507,12 +507,12 @@ func TestCacheNotFromAnotherAuthor(t *testing.T) {
 		if _, err := wire.EncodeVerdicts(v); err != nil {
 			t.Errorf("author %s: what Cached returned is not a verdicts file: %v", tc.author, err)
 		}
-		waiting, err := Waiting(context.Background(), cfg)
+		waiting, unread, err := Waiting(context.Background(), cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(waiting) != tc.want {
-			t.Errorf("a marker in a comment by %s made %d pull requests wait, want %d", tc.author, len(waiting), tc.want)
+		if len(waiting) != tc.want || len(unread) != 0 {
+			t.Errorf("a marker in a comment by %s made %d pull requests wait, want %d (unread %v)", tc.author, len(waiting), tc.want, unread)
 		}
 		if w := f.writes(); len(w) != 0 {
 			t.Errorf("reading the cache wrote: %+v", w)

@@ -51,14 +51,10 @@ func notification(cfg Config, pr wire.PullRequest, res Result) (Message, bool) {
 
 // message is a notification about a pull request: its name, then rest.
 func message(cfg Config, number int, rest string) Message {
-	server := "https://github.com"
-	if cfg.ServerURL != "" {
-		server = strings.TrimSuffix(cfg.ServerURL, "/")
-	}
 	return Message{
 		Title: fmt.Sprintf("dep-review: %s#%d", cfg.Repo, number),
 		Body:  fmt.Sprintf("%s#%d%s", cfg.Repo, number, rest),
-		URL:   fmt.Sprintf("%s/%s/pull/%d", server, cfg.Repo, number),
+		URL:   fmt.Sprintf("https://github.com/%s/pull/%d", cfg.Repo, number),
 	}
 }
 

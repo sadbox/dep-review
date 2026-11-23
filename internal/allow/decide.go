@@ -242,8 +242,14 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 	if answered(known, listed, newName) {
 		switch {
 		case known == factYes:
-			if newName == factYes && listed == factNo {
+			switch {
+			case newName == factYes && listed == factNo:
 				person = append(person, ReasonInconsistent)
+			case ecosystem == Docker && listed == factNo:
+				// Nothing in an image is read, so for Docker known means
+				// listed and nothing else (amendment 3). A record that calls
+				// an unlisted image known is not believed, whoever wrote it.
+				person = append(person, ReasonNotKnown)
 			}
 		case newName == factYes && listed == factNo:
 			// The new-name rule: an unlisted new name is allowed only when it
@@ -260,7 +266,8 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 			default:
 				person = append(person, ReasonNameCreatedUnknown)
 			}
-			if u.Read == ReadPartial || u.Read == ReadNotApplicable {
+			// An image is never read, whatever its record says of a read.
+			if u.Read == ReadPartial || u.Read == ReadNotApplicable || ecosystem == Docker {
 				person = append(person, ReasonNewNameUnread)
 			}
 		case listed == factYes:
@@ -384,7 +391,7 @@ func requiredAge(u UpdateFacts, read ReadState, p Policy, rideAlong bool) time.D
 	case ReadPartial:
 		// A partial read must never need less than a full one, also when
 		// a repository raised MinAge above UnreadAge.
-		age = longer(p.UnreadAge, p.MinAge)
+		age = max(p.UnreadAge, p.MinAge)
 		if securityFix {
 			age = p.MinAge
 		}
@@ -392,7 +399,7 @@ func requiredAge(u UpdateFacts, read ReadState, p Policy, rideAlong bool) time.D
 		age = p.MinAge
 	}
 	if u.Major.Holds() {
-		age = longer(age, p.MajorAge)
+		age = max(age, p.MajorAge)
 	}
 	return age
 }
@@ -440,14 +447,6 @@ func policyUsable(p Policy) bool {
 		return false
 	}
 	return p.Companions == RideAlong || p.Companions == CompanionsWait
-}
-
-// longer returns the longer of two durations.
-func longer(a, b time.Duration) time.Duration {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // appendNew appends each reason that is not in the list yet.

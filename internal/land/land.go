@@ -1,26 +1,18 @@
 // Package land is the publish job and the scheduled re-evaluation, as
-// library code (docs/v0.2-spec.md, sections 4 and 8).
-//
-// Decide reads the two files the earlier jobs wrote (internal/wire), adds
-// the two things only this job can observe (whether the default branch
-// requires status checks, and whether the pull request is still what the
-// facts describe), loads the policy from the default branch and hands
-// everything to allow.Decide. Act carries the answer out: one comment, the
-// dep-review commit status, a notification when a person is needed, and
-// for a merge a call to GitHub's merge API with the exact head.
+// library code. Decide reads the two files the earlier jobs wrote, adds
+// what only this job can observe (the default branch's required checks,
+// whether the pull request is still what the facts describe), loads the
+// policy from the default branch and asks allow.Decide. Act carries the
+// answer out.
 //
 // Nothing in this package decides. An outcome is allow.Decide's, or
-// allow.ChecksRefused's after GitHub refused a merge for required checks
-// or because the base branch moved under it; what this package adds on
-// its own is only ever "nothing was done" (the pull request changed),
+// allow.ChecksRefused's after GitHub refused a merge; what this package
+// adds is only ever "nothing was done" (the pull request changed),
 // "GitHub refused" (reported, never retried as if it were a wait) or "the
-// run failed" (Failed). The gate does not judge CI: it asks GitHub to
-// merge and GitHub's rules answer.
-//
-// There is no stored approval. The comment remembers what the last run
-// concluded and the model's verdicts by content key, so a later run can
-// skip a model call; a merge always follows a fresh allow.Decide on
-// freshly gathered facts.
+// run failed" (Failed). The gate does not judge CI: GitHub's rules answer
+// the merge call. And there is no stored approval: the comment remembers
+// the last outcome and the model's verdicts by content key, and a merge
+// always follows a fresh allow.Decide on freshly gathered facts.
 package land
 
 import (
@@ -44,14 +36,9 @@ import (
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
-const (
-	// statusContext is the commit status the gate sets. A rule that
-	// requires only this context requires no CI at all.
-	statusContext = "dep-review"
-	// dependabotLogin is the only author whose pull requests the scheduled
-	// job looks at.
-	dependabotLogin = "dependabot[bot]"
-)
+// dependabotLogin is the only author whose pull requests the scheduled
+// job looks at.
+const dependabotLogin = "dependabot[bot]"
 
 // Config is what the jobs need besides their files.
 type Config struct {
@@ -68,9 +55,6 @@ type Config struct {
 	// Notifier is told when a pull request needs a person. Nil turns
 	// notifications off.
 	Notifier Notifier
-	// ServerURL is the web origin a notification links to;
-	// https://github.com when empty.
-	ServerURL string
 	// RunURL is this workflow run, built by the caller from validated
 	// values, or "". It is the status's target and a link in the comment
 	// and in a notification about the run itself.
@@ -204,7 +188,7 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 }
 
 // readFiles reads the facts file, which must be there, and the verdicts
-// file, which is absent when the review job was skipped or failed.
+// file.
 func readFiles(factsPath, verdictsPath string) (wire.Facts, wire.Verdicts, error) {
 	b, err := os.ReadFile(factsPath)
 	if err != nil {
@@ -214,18 +198,21 @@ func readFiles(factsPath, verdictsPath string) (wire.Facts, wire.Verdicts, error
 	if err != nil {
 		return wire.Facts{}, wire.Verdicts{}, err
 	}
-	verdicts := wire.Verdicts{Version: wire.Version}
-	b, err = os.ReadFile(verdictsPath)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return wire.Facts{}, wire.Verdicts{}, fmt.Errorf("land: %w", err)
-	default:
-		if verdicts, err = wire.DecodeVerdicts(b); err != nil {
-			return wire.Facts{}, wire.Verdicts{}, err
-		}
+	verdicts, err := ReadVerdicts(verdictsPath)
+	return facts, verdicts, err
+}
+
+// ReadVerdicts reads a verdicts file. One that is not there is no
+// verdicts: the review job was skipped or failed, and every read waits.
+func ReadVerdicts(path string) (wire.Verdicts, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return wire.Verdicts{Version: wire.Version}, nil
 	}
-	return facts, verdicts, nil
+	if err != nil {
+		return wire.Verdicts{}, fmt.Errorf("land: %w", err)
+	}
+	return wire.DecodeVerdicts(b)
 }
 
 // pull is the part of GitHub's pull request object this package reads.
@@ -357,19 +344,10 @@ func loadConfig(ctx context.Context, cfg Config, branch string) (conf config.Con
 
 // checksConfigured is the ChecksConfigured fact: the default branch has an
 // active rule that requires at least one status check other than the
-// gate's own. GitHub evaluates which rules apply to the branch; this only
-// reads the answer.
+// gate's own (gh.RequiredChecks).
 func checksConfigured(ctx context.Context, cfg Config, branch string) allow.Fact {
-	type rule struct {
-		Type       string `json:"type"`
-		Parameters struct {
-			RequiredStatusChecks []struct {
-				Context string `json:"context"`
-			} `json:"required_status_checks"`
-		} `json:"parameters"`
-	}
 	path := fmt.Sprintf("repos/%s/rules/branches/%s", cfg.Repo, branch)
-	rules, err := gh.List[rule](ctx, cfg.GitHub, path)
+	contexts, err := gh.RequiredChecks(ctx, cfg.GitHub, cfg.Repo, branch)
 	switch {
 	case err != nil && gh.Unavailable(err):
 		return allow.Unavailable("GitHub did not answer", path)
@@ -377,19 +355,7 @@ func checksConfigured(ctx context.Context, cfg Config, branch string) allow.Fact
 		// An answer, but not one that says anything about the rules: left
 		// without a source, which is "never gathered".
 		return allow.Fact{Value: fmt.Sprintf("the branch rules could not be read (HTTP %d)", gh.StatusCode(err))}
-	}
-	var contexts []string
-	for _, r := range rules {
-		if r.Type != "required_status_checks" {
-			continue
-		}
-		for _, c := range r.Parameters.RequiredStatusChecks {
-			if c.Context != "" && c.Context != statusContext {
-				contexts = append(contexts, c.Context)
-			}
-		}
-	}
-	if len(contexts) == 0 {
+	case len(contexts) == 0:
 		return allow.No("no rule on "+branch+" requires a status check besides the gate's own", path)
 	}
 	return allow.Yes("required: "+strings.Join(contexts, ", "), path)

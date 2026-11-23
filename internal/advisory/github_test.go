@@ -606,29 +606,11 @@ func TestActionSpellings(t *testing.T) {
 	})
 }
 
+// Docker is here too: the database has no container image ecosystem, the
+// Docker gatherer does not call Check, and a fact that holds must have a
+// source behind it.
 func TestEcosystemWithoutLookup(t *testing.T) {
-	t.Run("docker", func(t *testing.T) {
-		api := &fakeAPI{t: t}
-		got, err := New(api).Check(context.Background(), Query{Ecosystem: allow.Docker, Name: "docker.io/library/golang", From: "1.27.3", To: "1.27.4"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(api.asked) != 0 {
-			t.Errorf("asked %q", api.asked)
-		}
-		if !got.SecurityFix.Gathered() || got.SecurityFix.OK {
-			t.Errorf("SecurityFix = %+v, want a gathered no", got.SecurityFix)
-		}
-		if !got.NoMalware.Holds() || !got.NoNewAdvisory.Holds() {
-			t.Errorf("docker must not be held back by a database that does not cover it: %+v", got)
-		}
-		for _, f := range []allow.Fact{got.NoMalware, got.NoNewAdvisory} {
-			if !strings.Contains(f.Value, "no container image ecosystem") {
-				t.Errorf("the fact does not say nothing was checked: %+v", f)
-			}
-		}
-	})
-	for _, eco := range []string{"", "uv", "pip", "opentofu", "go", "actions", "NPM", "npm_and_yarn"} {
+	for _, eco := range []string{"", allow.Docker, "uv", "pip", "opentofu", "go", "actions", "NPM", "npm_and_yarn"} {
 		t.Run("not an ecosystem with a rule: "+eco, func(t *testing.T) {
 			api := &fakeAPI{t: t}
 			got, err := New(api).Check(context.Background(), Query{Ecosystem: eco, Name: "pkg", From: "1.0.0", To: "1.0.1"})

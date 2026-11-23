@@ -31,27 +31,18 @@ const (
 // Category is why the model stopped an update.
 type Category string
 
-// The fixed list the model chooses from.
+// The fixed list the model chooses from. prompt.md defines each one for
+// the model; a test keeps the two lists the same.
 const (
-	// Exfiltration: reads credentials, environment or files and sends
-	// them somewhere.
-	Exfiltration Category = "exfiltration"
-	// RemoteCode: downloads and runs code.
-	RemoteCode Category = "remote_code"
-	// InstallTimeExecution: runs at install, import or init with effects
-	// unrelated to the package's purpose.
-	InstallTimeExecution Category = "install_time_execution"
-	// Obfuscation: an encoded, packed or eval'd payload.
-	Obfuscation Category = "obfuscation"
-	// Destructive: deletes or overwrites user data.
-	Destructive Category = "destructive"
-	// UnexplainedCapability: new process, network or filesystem use
-	// unrelated to the package's purpose.
+	Exfiltration          Category = "exfiltration"
+	RemoteCode            Category = "remote_code"
+	InstallTimeExecution  Category = "install_time_execution"
+	Obfuscation           Category = "obfuscation"
+	Destructive           Category = "destructive"
 	UnexplainedCapability Category = "unexplained_capability"
 	// InjectionText: text addressed to the reviewer, to an AI or to an
 	// automated check. Such text is itself the reason to stop.
-	InjectionText Category = "injection_text"
-	// OtherMalicious: malicious in a way no other category names.
+	InjectionText  Category = "injection_text"
 	OtherMalicious Category = "other_malicious"
 )
 
@@ -79,37 +70,31 @@ type Request struct {
 // Verdict is the answer for one update, over all of its chunks.
 type Verdict struct {
 	// Answer is NoVeto only when every chunk was answered no_veto.
-	Answer Answer `json:"answer"`
+	Answer Answer
 	// Category is set when Answer is Vetoed: one of Categories, or
 	// Refused.
-	Category Category `json:"category"`
+	Category Category
 	// Quotes are the lines the model pointed at. Untrusted text.
-	Quotes []string `json:"quotes"`
+	Quotes []string
 	// Notes is the model's optional remark (a breaking change, a file it
 	// could not judge). Shown, never acted on. Untrusted text.
-	Notes string `json:"notes"`
+	Notes string
 	// Read is what the caller records as the update's Read fact: the
-	// request's Read.State (full or partial) when every chunk was
-	// answered. When the review stopped at a veto before the last chunk,
-	// or on a refusal, part of the text went unanswered and it is
-	// allow.ReadPartial; the veto sends the update to a person either
-	// way. It is never allow.ReadNone or allow.ReadRefused here: those
-	// are what the caller records for an error; see Reviewer.
-	Read allow.ReadState `json:"read"`
+	// request's Read.State when every chunk was answered, and
+	// allow.ReadPartial when the review stopped at a veto before the last
+	// chunk or on a refusal.
+	Read allow.ReadState
 	// Key is the request's content key (Read.Key). A verdict may be
 	// stored and found again only under Key together with the
-	// Fingerprint of the Config that asked: the same read put to another
-	// prompt, schema, model or effort is another question. A NoVeto is
-	// stored only after every chunk answered.
-	Key string `json:"key"`
+	// Fingerprint of the Config that asked.
+	Key string
 }
 
 // ErrUnusable is the error of a prepared read this reviewer will not
-// send, however often it is asked: over the configured budget, without a
-// proper key, in a state a prepared read cannot have, or with a name that
-// cannot stand in the gate's header. Such a read was not produced by
-// internal/artifact under the same settings, and waiting does not mend
-// it. Test with errors.Is.
+// send, however often it is asked: over the configured budget, or with a
+// name, a version or a path that cannot stand in the request. Such a read
+// was not produced by internal/artifact under the same settings, and
+// waiting does not mend it. Test with errors.Is.
 var ErrUnusable = errors.New("veto: the prepared read is not usable")
 
 // Reviewer gets a verdict for a prepared read.
@@ -130,10 +115,5 @@ type Reviewer interface {
 	//
 	// A refusal by the model is not an error: it is a Verdict with Answer
 	// Vetoed and Category Refused.
-	//
-	// The caller turns a Verdict into facts like this: UpdateFacts.Read
-	// is Verdict.Read, and UpdateFacts.Veto is nil for NoVeto and
-	// otherwise &allow.Veto{Category: string(v.Category), Quotes:
-	// v.Quotes, Notes: v.Notes}.
 	Review(ctx context.Context, req Request) (Verdict, error)
 }

@@ -10,6 +10,11 @@ import (
 	"testing"
 )
 
+// requiredMark in a flag's usage marks it required. The subcommand still
+// checks it itself; the mark is what TestGateInvocations checks gate.yml
+// against.
+const requiredMark = "(required)"
+
 // flagsOf returns the flags subcommand cmd defines and the ones whose
 // usage marks them required, from its real FlagSet: the command runs with
 // -h, which stops it at Parse, before it does anything.
@@ -20,13 +25,16 @@ func flagsOf(t *testing.T, cmd string) (defined, required map[string]bool) {
 		t.Fatalf("gate.yml runs unknown subcommand %q", cmd)
 	}
 	var got *flag.FlagSet
-	flagSetHook = func(fs *flag.FlagSet) {
+	real := newFlagSet
+	newFlagSet = func(name string) *flag.FlagSet {
+		fs := real(name)
 		fs.SetOutput(io.Discard)
 		if got == nil {
 			got = fs
 		}
+		return fs
 	}
-	defer func() { flagSetHook = nil }()
+	defer func() { newFlagSet = real }()
 	if err := run([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("%s -h: %v", cmd, err)
 	}

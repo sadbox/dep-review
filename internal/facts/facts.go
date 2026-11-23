@@ -1,36 +1,18 @@
-// Package facts is what every ecosystem's fact gatherer has in common
-// (docs/v0.2-spec.md, sections 3 and 6): what a gatherer is given, and
-// what it hands back. The gatherers themselves are the subpackages
-// (gomod, npm, actions, docker).
+// Package facts is what the ecosystems' fact gatherers (the subpackages)
+// have in common: what a gatherer is given, what it hands back, and the
+// few helpers they word their facts with.
 //
-// This file is the package's API. A gatherer runs in a job with no
-// secrets. It reads formats with the real tool or a vetted library, or
-// matches one exact anchored line shape; anything it does not recognise
-// is a fact that does not hold, never a guess.
-//
-// Every fact a gatherer returns is in one of allow.Fact's states, and
-// which one is the gatherer's most important choice (spec section 11,
-// amendment 1):
-//
-//   - The source answered: allow.Yes or allow.No. A 404, a hash that
-//     differs and a deprecation notice are all answers.
-//   - The source was asked and did not answer (a network error, a
-//     timeout, a 429 or a 5xx on a request the gatherer made itself,
-//     after its retries): allow.Unavailable, or allow.UnavailableTime for
-//     a clock. allow.Decide waits and the next evaluation asks again. An
-//     unreachable source is this, never a Gather error and never a "no".
-//   - Nothing could be established, and asking again would not help (an
-//     answer in a shape the gatherer does not know, a name it will not
-//     put in a URL): the fact is left without a Source, with the reason
-//     in its Value. That is person.
-//
-// When several conditions make one fact they are combined with
-// allow.Fact.And, or in its order: a "no" first, then never gathered,
-// then unavailable.
+// A fact is in one of allow.Fact's states, and which one is a gatherer's
+// most important choice (docs/v0.2-spec.md, section 11, amendment 1):
+// allow.Yes or allow.No when the source answered (a 404 is an answer),
+// allow.Unavailable when it was asked and did not answer, which is a
+// wait, and NotEstablished when asking again would not help, which is
+// person. Conditions that make one fact are combined with allow.Fact.And.
 package facts
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -44,106 +26,146 @@ import (
 type File struct {
 	// Path is relative to the repository root, with "/" separators.
 	Path string
-	// BaseMode and HeadMode are git's file modes ("100644", "100755",
-	// "120000", "160000"), and empty when the path does not exist at that
-	// commit. A gatherer needs them to tell a regular file from a symlink
-	// or a submodule, which the content alone does not show.
+	// BaseMode and HeadMode are git's file modes ("100644", "120000",
+	// "160000"), empty when the path does not exist at that commit. The
+	// content alone does not tell a regular file from a symlink or a
+	// submodule, or an absent file from an empty one.
 	BaseMode string
 	HeadMode string
-	// Base and Head are the blob contents. For a path that does not exist
-	// at a commit the content is nil; use the mode, not nil, to tell
-	// "absent" from "empty".
+	// Base and Head are the blob contents, nil for an absent path.
 	Base []byte
 	Head []byte
 }
 
 // Input is what every gatherer receives.
 type Input struct {
-	// Repo is the repository, owner/name.
-	Repo string
-	// Base and Head are the two commits the pull request is between, as
-	// full hex IDs. Base is the merge base on the default branch.
-	Base string
-	Head string
-	// Files is every path that differs between Base and Head, not only
-	// the ones this ecosystem expects: Shape is about there being no
-	// others. It comes from git, never from the pull request's metadata.
+	// Repo, Base, Head and Opened describe the pull request. No gatherer
+	// reads them: the first-seen fallback (amendment 4) is the fetch
+	// command's.
+	Repo   string
+	Base   string
+	Head   string
+	Opened time.Time
+	// Files is every path that differs between the merge base and the
+	// head, not only the ones this ecosystem expects: Shape is about there
+	// being no others. It comes from git, never from the pull request's
+	// metadata.
 	Files []File
 	// Policy is the resolved policy, from the default branch. A gatherer
-	// needs it for the Listed fact (allow.Listed) and nothing else: ages
-	// and outcomes are allow.Decide's business.
+	// needs it for the Listed fact and nothing else.
 	Policy allow.Policy
 	// HTTP is the client for registries and indexes that take no
-	// credentials (the Go index, the npm registry, Docker Hub). Tests
-	// give it a transport that replays recorded fixtures.
+	// credentials.
 	HTTP *http.Client
-	// GitHub is the REST client holding the job's read-only token, for
-	// facts GitHub itself is the source of (tags, comparisons, releases).
-	// Nil for a gatherer that needs none.
+	// GitHub is the REST client holding the job's read-only token. Nil
+	// for a gatherer that needs none.
 	GitHub *gh.Client
 	// Advisories answers SecurityFix and the advisory half of Clean.
 	Advisories advisory.Checker
-	// Now is the clock. A gatherer never calls time.Now itself, so a
-	// test can pin the time a fact was read at.
+	// Now is the clock. A gatherer never calls time.Now itself.
 	Now func() time.Time
-	// Opened is when GitHub created the pull request (its created_at),
-	// and the zero time when that is not known. It is the first-seen
-	// fallback of spec section 11, amendment 4: the pinned artifact
-	// existed when Dependabot proposed it, and no publisher sets that
-	// time. The fetch command applies the fallback, not the gatherer: a
-	// gatherer returns FirstSeen as its registry's clock gave it (known,
-	// unavailable, or not established with the reason in Value), and
-	// where it is not known the fetch command puts Opened there with the
-	// source "pull request opened". A gatherer may use Opened to bound a
-	// search of its own (the Go index is read forward from a time).
-	Opened time.Time
 }
 
 // Result is what every gatherer returns.
 type Result struct {
-	// Shape is the pull request's Shape fact for this ecosystem: only its
-	// manifest and lock files changed, and only version or hash tokens in
-	// them.
+	// Shape: only this ecosystem's manifest and lock files changed, and
+	// only version or hash tokens in them.
 	Shape allow.Fact
 	// Updates is every package the pull request moves, computed from the
-	// base and head manifests. Each entry has every fact filled in except
-	// Read and Veto, which are set from the model's verdict much later,
-	// by the job that decides; the file the fetch job writes
-	// (internal/wire) cannot even carry them. A gatherer leaves both
-	// zero. For Docker, where nothing can be read, the deciding job sets
-	// Read to allow.ReadNotApplicable from the ecosystem alone. The npm
-	// gatherer leaves NoRegress unset as well; see NoRegressSoFar.
-	//
-	// When Shape does not hold the change set cannot be trusted either,
-	// and Updates may be empty.
+	// base and head manifests, with every fact filled in except Read and
+	// Veto, which the deciding job sets. When Shape does not hold the
+	// change set cannot be trusted and Updates may be empty.
 	Updates []allow.UpdateFacts
-	// NoRegressSoFar is npm's alone. Whether an npm update brings a new
-	// install step is settled only by the files in its verified tarball,
-	// which the gatherer never sees. So the npm gatherer puts what the
-	// registry and the lock say here, one fact for each of Updates in the
-	// same order, and leaves every update's NoRegress unset: nothing it
-	// returns can hold by itself. The fetch command is the one place that
-	// makes NoRegress, from this fact and the artifact reader's
-	// inspection of the tarballs (artifact.Prepared.Inspected), and
-	// without an inspection it does not hold.
+	// NoRegressSoFar is npm's alone: what the registry and the lock say
+	// about install steps, one fact for each of Updates in the same
+	// order. The npm gatherer leaves every update's NoRegress unset,
+	// because only the files in the verified tarball settle it; the fetch
+	// command makes the fact from this and the artifact reader's
+	// inspection, and without an inspection it does not hold.
 	NoRegressSoFar []allow.Fact
 	// Artifacts lists what the model is to read: for each update with
 	// something readable, the old and the new artifact, each with the
-	// hash the Bound fact was established for. An entry belongs to the
-	// update with the same Name, From and To. Empty for Docker.
+	// hash Bound was established for. An entry belongs to the update with
+	// the same Name, From and To. Empty for Docker.
 	Artifacts []artifact.Pair
 }
 
 // Gatherer establishes one ecosystem's facts for one pull request.
 type Gatherer interface {
-	// Gather reads the change set and gathers the facts.
-	//
-	// A fact that could not be established is returned as such, in the
-	// state that says why (see the package comment): unavailable when its
-	// source did not answer, without a Source when nothing can establish
-	// it. An error is for a failure of the run itself (the context ended,
-	// a tool is not installed, the Input is incomplete), where there is
-	// no result to decide on and the job should fail and be run again. A
-	// registry, an index or an API that is down is not such a failure.
+	// Gather reads the change set and gathers the facts. A source that is
+	// down is a fact in its state, never an error: an error is a failure
+	// of the run itself (the context ended, a tool is not installed, the
+	// Input is incomplete), where the job should fail and be run again.
 	Gather(ctx context.Context, in Input) (Result, error)
+}
+
+// RegularFile is git's mode of a plain, non-executable file: the only one
+// a file a gatherer reads may have, at both commits.
+const RegularFile = "100644"
+
+// NotRegular says that f is not a regular file at both commits, or "". A
+// symlink, a submodule, an executable bit, or a file that is added or
+// deleted is not a version update.
+func NotRegular(f File) string {
+	if f.BaseMode == RegularFile && f.HeadMode == RegularFile {
+		return ""
+	}
+	mode := func(m string) string {
+		if m == "" {
+			return "absent"
+		}
+		return Show(m)
+	}
+	return fmt.Sprintf("%s is not a regular file at both commits (mode %s at base, %s at head)", Show(f.Path), mode(f.BaseMode), mode(f.HeadMode))
+}
+
+// NotEstablished is a fact nothing could establish, where asking again
+// would get the same: an answer in a shape the gatherer does not know, a
+// question it has no way to put. It has no Source, which allow.Decide
+// reads as never gathered: person. A source that was asked and did not
+// answer is allow.Unavailable instead.
+func NotEstablished(why string) allow.Fact {
+	return allow.Fact{Value: "not established: " + why}
+}
+
+// Unanswered is the fact for a question that got no usable answer:
+// unavailable when the source was asked and did not answer (unreachable),
+// and not established when an answer arrived that cannot be used.
+func Unanswered(why, source string, unreachable bool) allow.Fact {
+	if unreachable {
+		return allow.Unavailable(why, source)
+	}
+	return NotEstablished(why)
+}
+
+// NotEstablishedTime is NotEstablished for a clock.
+func NotEstablishedTime(why string) allow.TimeFact {
+	return allow.TimeFact{Value: "not established: " + why}
+}
+
+// AdvisoryClean is the advisory half of Clean: no malware advisory, and
+// no advisory on the new version that the old one did not have. A fact
+// the checker left blank still has to say what is missing.
+func AdvisoryClean(adv advisory.Result) allow.Fact {
+	blank := func(f allow.Fact, what string) allow.Fact {
+		if f == (allow.Fact{}) {
+			return NotEstablished(what + " were not checked")
+		}
+		return f
+	}
+	return blank(adv.NoMalware, "malware advisories").And(blank(adv.NoNewAdvisory, "new advisories"))
+}
+
+// Show renders text the pull request, a tool or a source wrote (a path,
+// an error, a status) for a fact's Value: on one line, with control and
+// bidi characters as visible escapes, cut to a length. It is the one
+// escaper of the gatherers; the Value reaches a person and the job's log
+// and never decides anything.
+func Show(s string) string {
+	const max = 200
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	q := fmt.Sprintf("%+q", s)
+	return q[1 : len(q)-1]
 }

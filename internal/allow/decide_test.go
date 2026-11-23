@@ -99,6 +99,21 @@ func read(s ReadState) func(*UpdateFacts) {
 	return func(u *UpdateFacts) { u.Read = s }
 }
 
+// image makes the update an image on the list: no other image is known
+// (spec section 11, amendment 3).
+func image(u *UpdateFacts) {
+	u.Name = "docker.io/library/golang"
+	u.Listed = Yes("docker.io/library/", "policy")
+}
+
+// updateIn is update for an ecosystem: for Docker, of a listed image.
+func updateIn(ecosystem string, age time.Duration, mods ...func(*UpdateFacts)) UpdateFacts {
+	if ecosystem == Docker {
+		mods = append([]func(*UpdateFacts){image}, mods...)
+	}
+	return update(age, mods...)
+}
+
 // newListed makes the update a new dependency under a listed name.
 func newListed(u *UpdateFacts) {
 	listed(u)
@@ -382,7 +397,7 @@ func mergingBaselines() map[string]PRFacts {
 		"indirect major":    pr(GoModules, update(15*day, major, indirect)),
 		"security fix":      pr(GoModules, update(0, securityFix)),
 		"partial read":      pr(NPM, update(15*day, read(ReadPartial))),
-		"docker":            pr(Docker, update(100*hour, read(ReadNotApplicable))),
+		"docker":            pr(Docker, update(100*hour, image, read(ReadNotApplicable))),
 		"seasoned new name": pr(NPM, update(100*hour, newUnlisted(400*day))),
 		"ride-along":        pr(GoModules, update(0, securityFix), update(hour)),
 	}
@@ -530,7 +545,9 @@ func TestUnavailableFact(t *testing.T) {
 func TestMergeNeedsEveryFact(t *testing.T) {
 	r := rand.New(rand.NewPCG(2, 11))
 	merges := 0
-	for i := 0; i < 60000; i++ {
+	// 70000 records, so that the floor of 3000 merges below still stands
+	// now that an unlisted image never merges.
+	for i := 0; i < 70000; i++ {
 		f, p := randomPR(r), randomPolicy(r)
 		now := t0.Add(time.Duration(r.Int64N(int64(30*day))) - 10*day)
 		if Decide(f, p, now).Outcome != Merge {
@@ -560,6 +577,8 @@ func TestMergeNeedsEveryFact(t *testing.T) {
 				t.Fatalf("merged an unlisted new name without its conditions: %+v", u)
 			case !u.Known.Holds() && !(u.NewName.Holds() && !u.Listed.Holds()):
 				t.Fatalf("merged a name that is not known: %+v", u)
+			case f.Ecosystem == Docker && !u.Listed.Holds():
+				t.Fatalf("merged an image that is not listed: %+v", u)
 			}
 		}
 	}
@@ -854,9 +873,9 @@ func TestAgeTable(t *testing.T) {
 		{"read full", GoModules, nil, nil, 72 * hour},
 		{"read partial, security fix", GoModules, []func(*UpdateFacts){securityFix, read(ReadPartial)}, nil, 72 * hour},
 		{"read partial", GoModules, []func(*UpdateFacts){read(ReadPartial)}, nil, 14 * day},
-		{"read not-applicable (docker)", Docker, []func(*UpdateFacts){read(ReadNotApplicable)}, nil, 72 * hour},
-		{"read not-applicable has no fast path", Docker, []func(*UpdateFacts){securityFix, read(ReadNotApplicable)}, nil, 72 * hour},
-		{"docker, read full", Docker, nil, nil, 72 * hour},
+		{"read not-applicable (docker)", Docker, []func(*UpdateFacts){image, read(ReadNotApplicable)}, nil, 72 * hour},
+		{"read not-applicable has no fast path", Docker, []func(*UpdateFacts){image, securityFix, read(ReadNotApplicable)}, nil, 72 * hour},
+		{"docker, read full", Docker, []func(*UpdateFacts){image}, nil, 72 * hour},
 		{"major, listed, read full", GoModules, []func(*UpdateFacts){listed, major}, nil, 14 * day},
 		{"major, listed, read partial", GoModules, []func(*UpdateFacts){listed, major, read(ReadPartial)}, nil, 14 * day},
 		{"major, listed, security fix", GoModules, []func(*UpdateFacts){listed, major, securityFix}, nil, 14 * day},
@@ -933,7 +952,7 @@ func TestReadStates(t *testing.T) {
 	}
 	for _, s := range []ReadState{"", "Full", "complete", "n/a"} {
 		for _, eco := range []string{GoModules, Docker} {
-			wantOutcome(t, Decide(pr(eco, update(400*day, read(s))), p, t0), Person, ReasonReadUnknown)
+			wantOutcome(t, Decide(pr(eco, updateIn(eco, 400*day, read(s))), p, t0), Person, ReasonReadUnknown)
 		}
 	}
 
@@ -957,7 +976,7 @@ func TestReadStates(t *testing.T) {
 	// unusable read) is person at once, in every ecosystem, however old
 	// and however listed the update is: asking again gives the same.
 	for _, eco := range []string{GoModules, NPM, GitHubActions, Docker} {
-		wantOutcome(t, Decide(pr(eco, update(400*day, read(ReadRefused))), p, t0), Person, ReasonReadRefused)
+		wantOutcome(t, Decide(pr(eco, updateIn(eco, 400*day, read(ReadRefused))), p, t0), Person, ReasonReadRefused)
 	}
 	wantOutcome(t, Decide(pr(GoModules, update(400*day, listed, securityFix, read(ReadRefused))), p, t0), Person, ReasonReadRefused)
 }
@@ -975,7 +994,7 @@ func TestSuperseded(t *testing.T) {
 		u.Clean = No("the registry no longer serves the pinned digest under tag 1.27", "HEAD registry")
 		u.FirstSeen = TimeFact{Value: "not asked: the tag has moved on", Source: "HEAD registry"}
 	}
-	f := pr(Docker, update(0, moved))
+	f := pr(Docker, update(0, image, moved))
 	d := Decide(f, p, t0)
 	wantOutcome(t, d, Wait, ReasonSuperseded)
 	if want := f.Opened.Add(7 * day); !d.Deadline.Equal(want) || !d.NotBefore.IsZero() {
@@ -987,23 +1006,31 @@ func TestSuperseded(t *testing.T) {
 
 	// Superseded never merges, even with every other fact holding and the
 	// version old enough: it can only take a merge away.
-	old := pr(Docker, update(400*day, read(ReadNotApplicable)))
+	old := pr(Docker, update(400*day, image, read(ReadNotApplicable)))
 	wantOutcome(t, Decide(old, p, t0), Merge)
 	old.Updates[0].Superseded = Yes("the tag has moved on", "HEAD registry")
 	wantOutcome(t, Decide(old, p, t0), Wait, ReasonSuperseded)
 	old.Updates[0].Superseded = No("the tag still resolves to the pin", "HEAD registry")
 	wantOutcome(t, Decide(old, p, t0), Merge)
 
-	// What a refresh would not change is still person, at once.
-	for reason, breakIt := range map[Reason]func(*UpdateFacts){
-		ReasonNotKnown:      func(u *UpdateFacts) { u.Known = No("image is not listed", "policy") },
-		ReasonNotIncrease:   func(u *UpdateFacts) { u.Increase = No("a lower tag", "tags") },
-		ReasonRegress:       func(u *UpdateFacts) { u.NoRegress = No("no", "test") },
-		ReasonMajorUnlisted: major,
-		ReasonFactMissing:   func(u *UpdateFacts) { u.Major = Fact{} },
-		ReasonReadUnknown:   read(ReadFull + "?"),
+	// What a refresh would not change is still person, at once. An image
+	// that is not listed is not known, and its major is nobody's choice.
+	unlisted := func(u *UpdateFacts) {
+		u.Name = unlistedName
+		u.Listed, u.Known = No("matches no list entry", "policy"), No("image is not listed", "policy")
+	}
+	for _, tc := range []struct {
+		breakIt func(*UpdateFacts)
+		reasons []Reason
+	}{
+		{unlisted, []Reason{ReasonNotKnown}},
+		{func(u *UpdateFacts) { u.Increase = No("a lower tag", "tags") }, []Reason{ReasonNotIncrease}},
+		{func(u *UpdateFacts) { u.NoRegress = No("no", "test") }, []Reason{ReasonRegress}},
+		{func(u *UpdateFacts) { unlisted(u); major(u) }, []Reason{ReasonNotKnown, ReasonMajorUnlisted}},
+		{func(u *UpdateFacts) { u.Major = Fact{} }, []Reason{ReasonFactMissing}},
+		{read(ReadFull + "?"), []Reason{ReasonReadUnknown}},
 	} {
-		wantOutcome(t, Decide(pr(Docker, update(0, moved, breakIt)), p, t0), Person, reason)
+		wantOutcome(t, Decide(pr(Docker, update(0, image, moved, tc.breakIt)), p, t0), Person, tc.reasons...)
 	}
 
 	// It is a Docker state. Elsewhere a version is immutable and nothing
@@ -1322,8 +1349,36 @@ func TestNoRule(t *testing.T) {
 		}
 	}
 	for _, eco := range []string{GoModules, NPM, GitHubActions, Docker} {
-		wantOutcome(t, Decide(pr(eco, update(400*day)), p, t0), Merge)
+		wantOutcome(t, Decide(pr(eco, updateIn(eco, 400*day)), p, t0), Merge)
 	}
+}
+
+// For Docker, Known means listed and nothing else (spec section 11,
+// amendment 3), and Decide holds every record to that: the gatherer's word
+// that an image is known does not grant.
+func TestImageMustBeListed(t *testing.T) {
+	p := testPolicy()
+	// An image the Dockerfile already had, which its record calls known.
+	atBase := update(400*day, read(ReadNotApplicable))
+	wantOutcome(t, Decide(pr(Docker, atBase), p, t0), Person, ReasonNotKnown)
+	wantOutcome(t, Decide(pr(Docker, update(400*day)), p, t0), Person, ReasonNotKnown)
+	wantOutcome(t, Decide(pr(Docker, atBase, update(400*day, image, read(ReadNotApplicable))), p, t0), Person, ReasonNotKnown)
+	// The same record elsewhere is an established dependency, and the
+	// image merges once the list names it.
+	wantOutcome(t, Decide(pr(GoModules, update(400*day)), p, t0), Merge)
+	wantOutcome(t, Decide(pr(Docker, update(400*day, image, read(ReadNotApplicable))), p, t0), Merge)
+	p.Listed[Docker] = append(p.Listed[Docker], unlistedName)
+	atBase.Listed = Yes(unlistedName, "policy")
+	wantOutcome(t, Decide(pr(Docker, atBase), p, t0), Merge)
+
+	// A new image that is not listed has no way in: the new-name rule
+	// asks for a full read, and an image is never read, whatever its
+	// record says. The same record is a seasoned new name elsewhere.
+	p = testPolicy()
+	for _, s := range []ReadState{ReadFull, ReadPartial, ReadNotApplicable} {
+		wantOutcome(t, Decide(pr(Docker, update(400*day, newUnlisted(400*day), read(s))), p, t0), Person, ReasonNewNameUnread)
+	}
+	wantOutcome(t, Decide(pr(NPM, update(400*day, newUnlisted(400*day))), p, t0), Merge)
 }
 
 func TestPolicyUnusable(t *testing.T) {
@@ -1469,7 +1524,7 @@ func TestNoDeadlineWithoutAStart(t *testing.T) {
 		{"no clock answered", pr(GoModules, update(hour, noClock)), ReasonSourceUnavailable, ReasonSourceDeadline},
 		{"no clock answered, read missing", pr(GoModules, update(hour, noClock, read(ReadNone))), ReasonSourceUnavailable, ReasonSourceDeadline},
 		{"two updates, neither has a time", pr(GoModules, update(hour, noClock), update(hour, noClock)), ReasonSourceUnavailable, ReasonSourceDeadline},
-		{"a superseded pin, whose time is not looked at", pr(Docker, update(hour, superseded)), ReasonSuperseded, ReasonSupersededDeadline},
+		{"a superseded pin, whose time is not looked at", pr(Docker, update(hour, image, superseded)), ReasonSuperseded, ReasonSupersededDeadline},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -151,8 +151,8 @@ func TestRepoFileAndTheModel(t *testing.T) {
 		{"a shorter timeout", `{"request_timeout_seconds": 1}`, "request_timeout_seconds is built in"},
 		{"one attempt", `{"attempts": 1}`, "attempts is built in"},
 		{"a good key does not carry a bad one", `{"max_chunks": 4, "model": "x"}`, "model is built in"},
-		{"the endpoint is not a setting", `{"base_url": "https://example.com"}`, "unknown field"},
-		{"a string for a number", `{"max_chunks": "4"}`, "cannot unmarshal"},
+		{"the endpoint is not a setting", `{"base_url": "https://example.com"}`, "unknown object member name"},
+		{"a string for a number", `{"max_chunks": "4"}`, "unmarshal JSON"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := Load([]byte(tc.repoFile))
@@ -349,22 +349,27 @@ func TestRepoFileCannotLower(t *testing.T) {
 		{"empty companion mode", `{"fast_path_companions": ""}`, "fast_path_companions"},
 
 		// There is no key that disables a fact, a check or the model.
-		{"disable a fact", `{"require_bound": false}`, "unknown field"},
-		{"disable a fact by name", `{"facts": {"clean": false}}`, "unknown field"},
-		{"skip the model", `{"veto": "off"}`, "unknown field"},
-		{"skip the age", `{"min_age": 0}`, "unknown field"},
-		{"an ecosystem with no rule", `{"listed": {"uv": ["requests"]}}`, "unknown field"},
-		{"design B's key", `{"soak_days": 1}`, "unknown field"},
-		{"remove from the list", `{"unlisted": {"go_modules": ["golang.org/x/"]}}`, "unknown field"},
+		{"disable a fact", `{"require_bound": false}`, "unknown object member name"},
+		{"disable a fact by name", `{"facts": {"clean": false}}`, "unknown object member name"},
+		{"skip the model", `{"veto": "off"}`, "unknown object member name"},
+		{"skip the age", `{"min_age": 0}`, "unknown object member name"},
+		{"an ecosystem with no rule", `{"listed": {"uv": ["requests"]}}`, "unknown object member name"},
+		{"design B's key", `{"soak_days": 1}`, "unknown object member name"},
+		{"remove from the list", `{"unlisted": {"go_modules": ["golang.org/x/"]}}`, "unknown object member name"},
 
 		{"not JSON", `min_age_hours: 96`, "invalid character"},
-		{"not an object", `[72]`, "cannot unmarshal"},
-		{"a string for a number", `{"min_age_hours": "96"}`, "cannot unmarshal"},
-		{"a fraction", `{"min_age_hours": 72.5}`, "cannot unmarshal"},
-		{"a number for a flag", `{"fast_path": 0}`, "cannot unmarshal"},
-		{"a string for a list", `{"listed": {"npm": "esbuild"}}`, "cannot unmarshal"},
-		{"two documents", `{} {"min_age_hours": 1}`, "more than one JSON value"},
-		{"trailing text", `{} x`, "more than one JSON value"},
+		{"not an object", `[72]`, "unmarshal JSON"},
+		{"a string for a number", `{"min_age_hours": "96"}`, "unmarshal JSON"},
+		{"a fraction", `{"min_age_hours": 72.5}`, "unmarshal JSON"},
+		{"a number for a flag", `{"fast_path": 0}`, "unmarshal JSON"},
+		{"a string for a list", `{"listed": {"npm": "esbuild"}}`, "unmarshal JSON"},
+		{"two documents", `{} {"min_age_hours": 1}`, "after top-level value"},
+		{"trailing text", `{} x`, "after top-level value"},
+		// A key is itself only in its exact spelling, and only once: the
+		// second of two would otherwise be the one that counts.
+		{"a key in another case", `{"Min_Age_Hours": 96}`, "unknown object member name"},
+		{"a key twice", `{"min_age_hours": 96, "min_age_hours": 97}`, "duplicate object member name"},
+		{"a list twice", `{"listed": {"npm": ["a"], "npm": ["b"]}}`, "duplicate object member name"},
 		{"whitespace only", ` `, "EOF"},
 		{"too large", `{"listed": {"npm": ["` + strings.Repeat("a", maxFileBytes) + `"]}}`, "more than 65536"},
 
@@ -510,7 +515,7 @@ func TestComplete(t *testing.T) {
 		want string
 	}{
 		{"a missing key", edit(func(m map[string]any) { delete(m, "major_age_days") }), "a key is missing"},
-		{"an unknown key", edit(func(m map[string]any) { m["allow_everything"] = true }), "unknown field"},
+		{"an unknown key", edit(func(m map[string]any) { m["allow_everything"] = true }), "unknown object member name"},
 		{"an age of zero", edit(func(m map[string]any) { m["min_age_hours"] = 0 }), "min_age_hours"},
 		{"a bad list entry", edit(func(m map[string]any) { m["listed"].(map[string]any)["npm"] = []string{"/"} }), "listed.npm"},
 		{"empty", nil, "EOF"},

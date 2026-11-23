@@ -62,20 +62,19 @@ func New(token string) *Client {
 	}
 }
 
-// NewFromEnv reads the token from GH_TOKEN, and GITHUB_API_URL if set.
+// NewFromEnv returns a client for api.github.com with the token in
+// GH_TOKEN. The gate runs on github.com only: where the runner names
+// another API it stops, and does not send that server's token to
+// api.github.com.
 func NewFromEnv() (*Client, error) {
 	tok := os.Getenv("GH_TOKEN")
 	if tok == "" {
 		return nil, errors.New("GH_TOKEN is not set")
 	}
-	c := New(tok)
-	if u := os.Getenv("GITHUB_API_URL"); u != "" {
-		if !strings.HasPrefix(u, "https://") {
-			return nil, fmt.Errorf("GITHUB_API_URL must be https")
-		}
-		c.BaseURL = strings.TrimSuffix(u, "/") + "/"
+	if u := os.Getenv("GITHUB_API_URL"); u != "" && strings.TrimSuffix(u, "/")+"/" != DefaultBaseURL {
+		return nil, fmt.Errorf("GITHUB_API_URL is %.100q, and the gate runs on github.com only", u)
 	}
-	return c, nil
+	return New(tok), nil
 }
 
 // Error is a non-2xx response.
@@ -186,7 +185,9 @@ func (c *Client) Pages(ctx context.Context, path string, fn func(body []byte) er
 		if err := fn(raw); err != nil {
 			return err
 		}
-		next, err = c.nextPath(h.Get("Link"))
+		// Every Link line: Get would return the first and miss a next link
+		// on a second.
+		next, err = c.nextPath(strings.Join(h.Values("Link"), ", "))
 		if err != nil {
 			return err
 		}
@@ -218,23 +219,29 @@ func withPerPage(path string) string {
 	return path + "?per_page=100"
 }
 
-var linkNextRe = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="?next"?`)
+var (
+	// linkNextRe is the one form of a next link the client follows: the
+	// URL, then rel="next" as its first parameter.
+	linkNextRe = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="?next"?\s*(?:[,;]|$)`)
+	linkURLRe  = regexp.MustCompile(`<[^>]*>`)
+)
 
 // nextPath extracts rel="next" and turns it back into a path, refusing any
 // URL outside BaseURL so the token is never sent elsewhere.
+//
+// A header that names a next page in any other form is an error, not the
+// last page: a list cut short must never be taken for a whole one. "Names"
+// is the word next outside the URLs, so a repository called next does not
+// end its own lists with an error.
 func (c *Client) nextPath(link string) (string, error) {
-	if link == "" {
-		return "", nil
-	}
-	for _, part := range strings.Split(link, ",") {
-		m := linkNextRe.FindStringSubmatch(part)
-		if m == nil {
-			continue
-		}
-		if !strings.HasPrefix(m[1], c.BaseURL) {
-			return "", fmt.Errorf("github: next page %q is outside %s", m[1], c.BaseURL)
-		}
+	m := linkNextRe.FindStringSubmatch(link)
+	switch {
+	case m != nil && strings.HasPrefix(m[1], c.BaseURL):
 		return strings.TrimPrefix(m[1], c.BaseURL), nil
+	case m != nil:
+		return "", fmt.Errorf("github: next page %q is outside %s", m[1], c.BaseURL)
+	case strings.Contains(strings.ToLower(linkURLRe.ReplaceAllString(link, "")), "next"):
+		return "", fmt.Errorf("github: Link header %.300q names a next page in a form this client does not read", link)
 	}
 	return "", nil
 }
@@ -378,6 +385,45 @@ func (c *Client) once(ctx context.Context, method, u string, payload []byte) (ht
 // caller reads those lines (internal/land), so the cap is well above a
 // rule violation with a dozen checks.
 const MaxMessage = 2000
+
+// GateStatus is the commit status the gate itself sets. A rule that
+// requires only this one requires no CI at all: the gate would be vouching
+// for its own merge.
+const GateStatus = "dep-review"
+
+// RequiredChecks returns the status checks, other than the gate's own,
+// that an active rule on branch requires. GitHub's rules/branches answer
+// lists every active rule that applies to the branch, whichever ruleset it
+// comes from, and leaves out rulesets that are disabled or only evaluated.
+// Classic branch protection is not a rule and does not count: the spec
+// names this source. Both jobs that establish ChecksConfigured read it
+// here, so they cannot come to disagree on what counts.
+func RequiredChecks(ctx context.Context, c *Client, repo, branch string) ([]string, error) {
+	type rule struct {
+		Type       string `json:"type"`
+		Parameters struct {
+			RequiredStatusChecks []struct {
+				Context string `json:"context"`
+			} `json:"required_status_checks"`
+		} `json:"parameters"`
+	}
+	rules, err := List[rule](ctx, c, fmt.Sprintf("repos/%s/rules/branches/%s", repo, branch))
+	if err != nil {
+		return nil, err
+	}
+	var contexts []string
+	for _, r := range rules {
+		if r.Type != "required_status_checks" {
+			continue
+		}
+		for _, check := range r.Parameters.RequiredStatusChecks {
+			if check.Context != "" && check.Context != GateStatus {
+				contexts = append(contexts, check.Context)
+			}
+		}
+	}
+	return contexts, nil
+}
 
 func apiMessage(body []byte) string {
 	var m struct {

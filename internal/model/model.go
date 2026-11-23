@@ -20,38 +20,27 @@ const (
 	GitSubmodule  Ecosystem = "submodules"
 )
 
-// Kind is classify's verdict on who the PR belongs to.
+// Kind is classify's verdict on who the PR belongs to. What each check is
+// and why is in internal/classify.
 type Kind string
 
 // The kinds. The gate gathers facts for the first three and does nothing
 // at all for the others.
 const (
-	// KindDependabot: authored by dependabot[bot], same-repo branch under
-	// dependabot/, every commit authored by dependabot[bot] with a valid
-	// GitHub signature, AND the branch's activity log shows that only
-	// dependabot[bot] created and pushed the branch since its last
-	// creation, ending at the head, AND GitHub's rules for the branch
-	// restrict creating, updating and deleting it (the bypass list,
-	// Dependabot only, is the owner's to keep; a read-only token cannot
-	// see it). The commits alone cannot prove this: Dependabot's own
-	// commits and a person's squash-merge of another Dependabot PR into
-	// the branch both read author dependabot[bot], committer web-flow,
-	// signed by GitHub. The PR's base must also never have been changed
-	// (its timeline has no base_ref_changed). Only these PRs can merge.
+	// KindDependabot: every check of classify's proof passed. Only these
+	// PRs can merge.
 	KindDependabot Kind = "dependabot"
 	// KindDependabotUnverified: looks like a Dependabot PR (author or
-	// branch) but fails a check above, e.g. someone pushed to the branch.
-	// Always goes to a person; never treated as "not Dependabot".
+	// branch) but fails a check, e.g. someone pushed to the branch. Always
+	// goes to a person; never treated as "not Dependabot".
 	KindDependabotUnverified Kind = "dependabot-unverified"
 	// KindPending: everything checked so far is Dependabot's, but the
-	// branch's activity log has not caught up with the head yet (GitHub
-	// records it shortly after the push; classify waits about two
-	// minutes). The proof is unfinished, not failed: the PR waits, and the
-	// scheduled job runs the proof again.
+	// branch's activity log has not caught up with the head yet. The proof
+	// is unfinished, not failed: the PR waits, and the scheduled job runs
+	// the proof again.
 	KindPending Kind = "dependabot-pending"
 	// KindIgnored: a KindDependabot PR in an ecosystem the caller listed
-	// in ignore_ecosystems (another trusted process owns those PRs).
-	// Every check above still passed; only then is a PR ignored: no
+	// in ignore_ecosystems (another trusted process owns those PRs): no
 	// status, no comment, no notification.
 	KindIgnored Kind = "dependabot-ignored"
 	// KindOther: neither authored by dependabot[bot] nor on a dependabot/
@@ -75,6 +64,7 @@ type Classification struct {
 	BaseSHA string `json:"base_sha"`
 	Kind    Kind   `json:"kind"`
 	Reason  string `json:"reason"` // why this kind; shown to the person
-	// Ecosystem is the one the branch name names, when the gate knows it.
+	// Ecosystem is the one the branch name names. classify sets it only
+	// for a pull request that passed its whole proof.
 	Ecosystem Ecosystem `json:"ecosystem,omitempty"`
 }

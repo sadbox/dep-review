@@ -73,8 +73,8 @@ func TestFailed(t *testing.T) {
 
 	// The scheduled job asks no model and could not finish the run: it
 	// does not take the pull request up.
-	if waiting, err := Waiting(context.Background(), cfg); err != nil || len(waiting) != 0 {
-		t.Errorf("waiting: %+v, %v", waiting, err)
+	if waiting, unread, err := Waiting(context.Background(), cfg); err != nil || len(waiting) != 0 || len(unread) != 0 {
+		t.Errorf("waiting: %+v, unread %v, %v", waiting, unread, err)
 	}
 	// The run again decides, and what it decides is told although the
 	// head was told about before.

@@ -46,11 +46,8 @@ type Query struct {
 //     is not what the API documents. That is person. It is never
 //     reported as a "no advisory" answer.
 //
-// For Docker nothing is asked, because the database has no container
-// image ecosystem: SecurityFix is a gathered "no", and NoMalware and
-// NoNewAdvisory are gathered as holding, with a Value that says nothing
-// was asked. For an ecosystem that is not one of allow's four, the two
-// are left ungathered.
+// For an ecosystem other than Go, npm and Actions nothing is asked:
+// SecurityFix is a gathered "no" and the other two are never gathered.
 type Result struct {
 	// SecurityFix holds when the database has a reviewed, non-withdrawn
 	// advisory that affects From, does not affect To, and names To as the

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/artifact"
+	"github.com/sadbox/dep-review/internal/config"
 )
 
 // systemPrompt is the whole system prompt, the same for every request.
@@ -27,27 +27,23 @@ var systemPrompt string
 // category.
 const answerNoVeto = "no_veto"
 
-// requestLayout names the layout of the user message (userMessage). The
-// text around the data is code, which a fingerprint cannot hash, so this
-// stands in for it: whoever changes that layout raises the number, and
-// every stored verdict stops being reused.
-const requestLayout = "1"
-
 // Fingerprint identifies everything about the question that is not the
-// read itself: the system prompt, the description of the diff format, the
-// layout of the user message, the answer schema, the model and the effort
-// (lower-case hex SHA-256). A verdict is stored and reused under the
-// read's Key together with this, so a clean verdict does not survive a
-// change to any of them (spec section 11, amendment 11). Settings that do
-// not change what the model is asked (timeouts, attempts, the chunk
-// budget, which already shapes the read's Key) are not part of it.
+// read itself (lower-case hex SHA-256): the system prompt, the answer
+// schema, the model, the effort, and the user message as userMessage
+// writes it for one made-up read, which carries the header's wording, the
+// layout of the blocks and artifact.TextFormat. A verdict is stored and
+// reused under the read's Key together with this, so a clean verdict does
+// not survive a change to any of them (spec section 11, amendment 11).
+// Settings that do not change what the model is asked (timeouts,
+// attempts, the chunk budget, which already shapes the read's Key) are
+// not part of it.
 func (c Config) Fingerprint() string {
 	schema, err := encode(newAnswerSchema())
 	if err != nil {
 		// The schema is a fixed struct of strings and lists of strings.
 		panic("veto: " + err.Error())
 	}
-	return fingerprint(systemPrompt, artifact.TextFormat, requestLayout, string(schema), c.Model, c.Effort)
+	return fingerprint(systemPrompt, string(schema), c.conf.Model, c.conf.Effort, userMessage(sampleRead(), 0, sampleMarker))
 }
 
 // fingerprint hashes its parts, each behind its length so that no two
@@ -60,6 +56,26 @@ func fingerprint(parts ...string) string {
 		io.WriteString(h, p)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+const sampleMarker = "MARKER"
+
+// sampleRead is the made-up read whose user message Fingerprint hashes.
+// It makes userMessage write every line it can: a new name, more unread
+// files than are listed, a path that is cut, a chunk without a final
+// newline. The request's wording is code, and this is how a change to it
+// reaches the fingerprint without a number someone has to remember to
+// raise. A branch added to userMessage must be reachable from this read;
+// TestFingerprint lists the lines it expects.
+func sampleRead() artifact.Prepared {
+	p := artifact.Prepared{
+		Pair:   artifact.Pair{Ecosystem: "ecosystem", Name: "name", To: "to"},
+		Chunks: []artifact.Chunk{{Text: "chunk"}},
+	}
+	for range maxUnreadListed + 1 {
+		p.Unread = append(p.Unread, artifact.Unread{Path: strings.Repeat("p", maxUnreadPathBytes+1), SHA256: "sha256"})
+	}
+	return p
 }
 
 const (
@@ -153,17 +169,15 @@ func newAnswerSchema() answerSchema {
 }
 
 // checkRead refuses a prepared read this client must not send: one that
-// is over the configured budget, or one that is not what internal/artifact
-// documents. Nothing is repaired or cut to fit, because the verdict is
-// stored under the read's key and must be about exactly that read. Review
-// returns what this function says as ErrUnusable.
-func checkRead(cfg Config, p artifact.Prepared) error {
-	if p.State != allow.ReadFull && p.State != allow.ReadPartial {
-		return fmt.Errorf("read state is %q, want %q or %q", p.State, allow.ReadFull, allow.ReadPartial)
-	}
-	if !isSHA256Hex(p.Key) {
-		return errors.New("content key is not a lower-case hex SHA-256")
-	}
+// is over the configured budget, or one whose name, versions or text
+// cannot stand in the request. Nothing is repaired or cut to fit, because
+// the verdict is stored under the read's key and must be about exactly
+// that read. Review returns what this function says as ErrUnusable.
+//
+// The read's state, key, chunk order and the unread files' sizes and
+// hashes are not looked at again: internal/wire refused a facts file
+// that had them wrong, and the review job builds every read from one.
+func checkRead(conf config.Config, p artifact.Prepared) error {
 	for _, f := range []struct{ name, value string }{
 		{"ecosystem", p.Pair.Ecosystem}, {"name", p.Pair.Name}, {"to", p.Pair.To},
 	} {
@@ -175,32 +189,21 @@ func checkRead(cfg Config, p artifact.Prepared) error {
 	if p.Pair.From != "" && !headerSafe(p.Pair.From) {
 		return errors.New("update from is longer than 256 bytes or not printable ASCII")
 	}
-	if p.State == allow.ReadFull && len(p.Unread) > 0 {
-		return fmt.Errorf("read state is %q with %d unread files", p.State, len(p.Unread))
-	}
-	if len(p.Chunks) > cfg.MaxChunks {
-		return fmt.Errorf("%d chunks, more than max_chunks (%d)", len(p.Chunks), cfg.MaxChunks)
+	if len(p.Chunks) > conf.MaxChunks {
+		return fmt.Errorf("%d chunks, more than max_chunks (%d)", len(p.Chunks), conf.MaxChunks)
 	}
 	for i, c := range p.Chunks {
 		switch {
-		case c.Index != i:
-			return fmt.Errorf("chunk at position %d has index %d", i, c.Index)
-		case c.Text == "":
-			return fmt.Errorf("chunk %d is empty", i)
-		case len(c.Text) > cfg.ChunkBytes:
-			return fmt.Errorf("chunk %d is %d bytes, more than chunk_bytes (%d)", i, len(c.Text), cfg.ChunkBytes)
+		case len(c.Text) > conf.ChunkBytes:
+			return fmt.Errorf("chunk %d is %d bytes, more than chunk_bytes (%d)", i, len(c.Text), conf.ChunkBytes)
 		case !utf8.ValidString(c.Text):
 			return fmt.Errorf("chunk %d is not valid UTF-8", i)
 		}
 	}
 	for i, u := range p.Unread {
-		switch {
-		case u.Path == "" || !utf8.ValidString(u.Path) || strings.ContainsFunc(u.Path, isControl):
+		// The facts file's check does not look inside a path.
+		if u.Path == "" || !utf8.ValidString(u.Path) || strings.ContainsFunc(u.Path, isControl) {
 			return fmt.Errorf("unread file %d: path is empty or not escaped", i)
-		case u.Size < 0:
-			return fmt.Errorf("unread file %d: size is %d", i, u.Size)
-		case !isSHA256Hex(u.SHA256):
-			return fmt.Errorf("unread file %d: sha256 is not lower-case hex", i)
 		}
 	}
 	return nil
@@ -208,55 +211,12 @@ func checkRead(cfg Config, p artifact.Prepared) error {
 
 func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
 
-func isSHA256Hex(s string) bool {
-	if len(s) != 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if !(s[i] >= '0' && s[i] <= '9' || s[i] >= 'a' && s[i] <= 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-// newMarker returns the one-time marker for a request: 128 random bits
-// as hex, drawn again in the (never seen) case that the publisher's text
-// already contains it. The publisher cannot know it when writing the
-// package, so text inside a data block cannot close the block.
-func newMarker(random io.Reader, p artifact.Prepared, chunk int) (string, error) {
-	for range 4 {
-		var b [16]byte
-		if _, err := io.ReadFull(random, b[:]); err != nil {
-			return "", fmt.Errorf("random marker: %w", err)
-		}
-		marker := hex.EncodeToString(b[:])
-		if !containsMarker(p, chunk, marker) {
-			return marker, nil
-		}
-	}
-	return "", errors.New("random marker: every draw occurs in the data")
-}
-
-func containsMarker(p artifact.Prepared, chunk int, marker string) bool {
-	if strings.Contains(p.Chunks[chunk].Text, marker) {
-		return true
-	}
-	for _, u := range p.Unread {
-		if strings.Contains(u.Path, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 // userMessage is the one user turn: a header in the gate's own words,
-// then the publisher's text inside blocks that begin and end with the
-// marker. The header's values passed checkRead, so no line of it can be
-// something the publisher shaped beyond a name or a version.
-//
-// A change to what this function writes around the data changes what the
-// model is asked: raise requestLayout with it.
+// then the publisher's text inside blocks that begin and end with marker,
+// which is random for each request: the publisher cannot know it when
+// writing the package, so text inside a block cannot close the block. The
+// header's values passed checkRead, so no line of it can be something the
+// publisher shaped beyond a name or a version.
 func userMessage(p artifact.Prepared, chunk int, marker string) string {
 	var b strings.Builder
 	from := p.Pair.From
@@ -314,26 +274,18 @@ func clip(s string, max int) string {
 }
 
 // requestBody encodes the Messages request for one chunk.
-func requestBody(cfg Config, user string) ([]byte, error) {
+func requestBody(conf config.Config, user string) ([]byte, error) {
 	return encode(messagesRequest{
-		Model:     cfg.Model,
-		MaxTokens: cfg.MaxOutputTokens,
+		Model:     conf.Model,
+		MaxTokens: conf.MaxOutputTokens,
 		System:    systemPrompt,
 		Thinking:  thinking{Type: "adaptive"},
 		OutputConfig: outputConfig{
-			Effort: cfg.Effort,
+			Effort: conf.Effort,
 			Format: outputFormat{Type: "json_schema", Schema: newAnswerSchema()},
 		},
 		Messages: []message{{Role: "user", Content: user}},
 	})
-}
-
-// countRequest is the body of POST /v1/messages/count_tokens: the parts
-// of a request whose tokens are the input.
-type countRequest struct {
-	Model    string    `json:"model"`
-	System   string    `json:"system"`
-	Messages []message `json:"messages"`
 }
 
 // encode is json.Marshal without the HTML escaping, which would triple

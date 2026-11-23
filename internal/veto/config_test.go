@@ -2,6 +2,7 @@ package veto
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -11,82 +12,91 @@ import (
 	"github.com/sadbox/dep-review/internal/config"
 )
 
-// The numbers live in two places: internal/config embeds them, and
-// DefaultConfig documents how they follow from the model's window. They
-// are the same numbers, and the embedded ones are a valid client config.
+// What a repository lowered reaches the artifact limits the fetch job
+// takes, and is still a budget the client and the artifact reader accept.
 func TestFromConfig(t *testing.T) {
-	embedded, err := config.Load(nil)
-	if err != nil {
-		t.Fatal(err)
+	builtIn := FromConfig(embedded(t))
+	if builtIn.BaseURL != "https://api.anthropic.com" {
+		t.Errorf("the gate asks %q", builtIn.BaseURL)
 	}
-	got := FromConfig(embedded)
-	if got != DefaultConfig() {
-		t.Errorf("the embedded model settings are not DefaultConfig:\n got %+v\nwant %+v", got, DefaultConfig())
-	}
-	if err := got.Validate(); err != nil {
-		t.Errorf("the embedded model settings are not valid: %v", err)
+	if got, want := builtIn.Limits(), (artifact.Limits{ChunkBytes: embedded(t).ChunkBytes, MaxChunks: embedded(t).MaxChunks}); got != want {
+		t.Errorf("Limits = %+v, want %+v", got, want)
 	}
 
-	// What a repository lowered reaches the client, and the artifact
-	// limits the fetch job takes from the same value.
 	lowered, err := config.Load([]byte(`{"chunk_bytes": 1000, "max_chunks": 2}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := FromConfig(lowered)
-	if err := c.Validate(); err != nil {
-		t.Fatalf("a lowered budget is not valid: %v", err)
-	}
 	if got, want := c.Limits(), (artifact.Limits{ChunkBytes: 1000, MaxChunks: 2}); got != want {
 		t.Errorf("Limits = %+v, want %+v", got, want)
 	}
-	// The smallest read a repository may ask for is still one the client
-	// and the artifact reader accept.
+	// A lowered budget is the same question to the model: a stored
+	// verdict is found by the read's key, which the budget shapes.
+	if c.Fingerprint() != builtIn.Fingerprint() {
+		t.Error("the chunk budget changed the fingerprint")
+	}
+	// The smallest read a repository may ask for.
 	floor, err := config.Load([]byte(`{"chunk_bytes": 256, "max_chunks": 1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := FromConfig(floor).Validate(); err != nil || FromConfig(floor).Limits().ChunkBytes != artifact.MinChunkBytes {
+	if _, err := New(FromConfig(floor), APIKey("k"), nil); err != nil || FromConfig(floor).Limits().ChunkBytes != artifact.MinChunkBytes {
 		t.Errorf("the floor: %v, %+v", err, FromConfig(floor).Limits())
-	}
-	// A lowered budget is the same question to the model: a stored
-	// verdict is found by the read's key, which the budget shapes.
-	if c.Fingerprint() != DefaultConfig().Fingerprint() {
-		t.Error("the chunk budget changed the fingerprint")
 	}
 }
 
 // The fingerprint covers what the model is asked and nothing else (spec
 // section 11, amendment 11).
 func TestFingerprint(t *testing.T) {
-	base := DefaultConfig()
-	fp := base.Fingerprint()
-	if !isSHA256Hex(fp) || fp != DefaultConfig().Fingerprint() {
+	conf := embedded(t)
+	fp := FromConfig(conf).Fingerprint()
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(fp) || fp != FromConfig(embedded(t)).Fingerprint() {
 		t.Fatalf("fingerprint %q is not a stable SHA-256", fp)
 	}
-	for name, edit := range map[string]func(*Config){
-		"model":  func(c *Config) { c.Model = "claude-haiku-4-5" },
-		"effort": func(c *Config) { c.Effort = "medium" },
+	for name, edit := range map[string]func(*config.Config){
+		"model":  func(c *config.Config) { c.Model = "claude-haiku-4-5" },
+		"effort": func(c *config.Config) { c.Effort = "medium" },
 	} {
-		c := base
+		c := conf
 		edit(&c)
-		if c.Fingerprint() == fp {
+		if FromConfig(c).Fingerprint() == fp {
 			t.Errorf("a change of %s leaves the fingerprint as it was", name)
 		}
 	}
 	for name, edit := range map[string]func(*Config){
-		"chunk_bytes":       func(c *Config) { c.ChunkBytes = 1000 },
-		"max_chunks":        func(c *Config) { c.MaxChunks = 1 },
-		"request_timeout":   func(c *Config) { c.RequestTimeout = time.Second },
-		"attempts":          func(c *Config) { c.Attempts = 1 },
+		"chunk_bytes":       func(c *Config) { c.conf.ChunkBytes = 1000 },
+		"max_chunks":        func(c *Config) { c.conf.MaxChunks = 1 },
+		"request_timeout":   func(c *Config) { c.conf.RequestTimeoutSeconds = 1 },
+		"attempts":          func(c *Config) { c.conf.Attempts = 1 },
 		"base_url":          func(c *Config) { c.BaseURL = "http://127.0.0.1:1" },
-		"context_tokens":    func(c *Config) { c.ContextTokens = 200_000 },
-		"max_output_tokens": func(c *Config) { c.MaxOutputTokens = 8000 },
+		"context_tokens":    func(c *Config) { c.conf.ContextTokens = 200_000 },
+		"max_output_tokens": func(c *Config) { c.conf.MaxOutputTokens = 8000 },
+		"min_age_hours":     func(c *Config) { c.conf.MinAgeHours = 200 },
+		"the list":          func(c *Config) { c.conf.Listed.NPM = []string{"left-pad"} },
 	} {
-		c := base
+		c := FromConfig(conf)
 		edit(&c)
 		if c.Fingerprint() != fp {
 			t.Errorf("a change of %s changes the fingerprint", name)
+		}
+	}
+
+	// The wording and layout of the request are code. They are in the
+	// fingerprint by way of the message for one made-up read, which must
+	// therefore make userMessage write every line it can.
+	sample := userMessage(sampleRead(), 0, sampleMarker)
+	for _, lines := range []string{
+		"This header was written by the gate.\n\n",
+		"\necosystem: ecosystem\n", "\npackage: name\n", "\nfrom: (none: a new dependency)\n", "\nto: to\n",
+		"\npart: 1 of 1\n", "\nchanged files not shown: 101\n", "\nmarker: MARKER\n",
+		"\ndiff format:\n" + artifact.TextFormat + "\n",
+		"\n=====BEGIN UNREAD FILES MARKER=====\n0 bytes, sha256 sha256, ppp",
+		"ppp...\n=====END UNREAD FILES MARKER=====\n(1 more files are not listed.)\n",
+		"\n=====BEGIN DIFF MARKER=====\nchunk\n=====END DIFF MARKER=====\n",
+	} {
+		if !strings.Contains(sample, lines) {
+			t.Errorf("the sample message lacks %q, so a change to it would not reach the fingerprint", lines)
 		}
 	}
 
@@ -95,9 +105,9 @@ func TestFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parts := []string{systemPrompt, artifact.TextFormat, requestLayout, string(schema), base.Model, base.Effort}
+	parts := []string{systemPrompt, string(schema), conf.Model, conf.Effort, sample}
 	if fingerprint(parts...) != fp {
-		t.Fatal("Fingerprint is not the hash of the prompt, the diff format, the layout, the schema, the model and the effort")
+		t.Fatal("Fingerprint is not the hash of the prompt, the schema, the model, the effort and the sample message")
 	}
 	for i := range parts {
 		changed := append([]string(nil), parts...)
@@ -106,88 +116,97 @@ func TestFingerprint(t *testing.T) {
 			t.Errorf("part %d is not in the fingerprint", i)
 		}
 	}
+	// So a change to the header's text is a change to the fingerprint: no
+	// stored verdict answers a question that was worded differently.
+	reworded := strings.Replace(sample, "This header was written by the gate.", "The gate wrote this header.", 1)
+	if reworded == sample || fingerprint(systemPrompt, string(schema), conf.Model, conf.Effort, reworded) == fp {
+		t.Error("a reworded header leaves the fingerprint as it was")
+	}
 	// Parts are framed: text moved from one to the next is another hash.
 	if fingerprint("ab", "c") == fingerprint("a", "bc") || fingerprint("a", "") == fingerprint("a") {
 		t.Error("the parts are not length-framed")
 	}
 }
 
-func TestDefaultConfig(t *testing.T) {
-	c := DefaultConfig()
-	if err := c.Validate(); err != nil {
-		t.Fatalf("the default config is not valid: %v", err)
+const (
+	// outputTokensCeiling is the most any current model writes in one
+	// response; a larger max_tokens is refused by the API.
+	outputTokensCeiling = 128_000
+	// requestOverheadBytes is an upper bound on everything in one request
+	// that is not chunk text: the system prompt, the answer schema, the
+	// header and the list of unread files (at most maxUnreadListed lines
+	// of at most maxUnreadPathBytes of path each). TestRequestOverhead
+	// builds the largest such request and checks it against this number.
+	requestOverheadBytes = 64_000
+)
+
+// The model settings are internal/config's embedded values, and a
+// repository can only lower chunk_bytes and max_chunks. Nothing checks
+// them when the gate runs, so this test is the check that they are
+// settings the API takes and that a chunk fits the model's window.
+//
+// How the chunk budget follows from the window (Anthropic's model table
+// as the claude-api skill carried it on 2026-11-03; whoever changes the
+// model sets context_tokens from that model's max_input_tokens in GET
+// /v1/models/{id}, not from memory):
+//
+//	context window                         1,000,000 tokens
+//	- max_tokens (answer and thinking)        16,000 tokens
+//	- everything but chunk text               64,000 bytes (requestOverheadBytes)
+//	= room for chunk text                    920,000 tokens
+//
+// Thinking is always on for this model and counts toward max_tokens. The
+// request is not streamed, and max_tokens near 16,000 keeps the response
+// inside the usual ten-minute HTTP timeout. How many tokens a byte of
+// diff costs is not documented and there is no local tokenizer, so the
+// check assumes the worst a tokenizer can do, one token per byte: a chunk
+// of up to 920,000 bytes then always fits. The embedded 400,000 is well
+// under half of that, for two reasons that are judgement: the bound is
+// itself an assumption (the client's log line gives request bytes next
+// to input tokens, to measure it), and a smaller request is likelier to
+// stay inside per-minute input limits and the request timeout.
+//
+// Twelve chunks make 4.8 MB of diff text per update. That covers the
+// largest diff the design review measured (setup-go 7.0.0 to 7.1.0,
+// dist/setup/index.js, 4.28 MB) even before internal/artifact's bundle
+// rule shrinks it.
+func TestEmbeddedSettings(t *testing.T) {
+	c := embedded(t)
+	if c.Model != "claude-opus-5-5" || !headerSafe(c.Model) {
+		t.Errorf("model %q", c.Model)
 	}
-	if c.Model != "claude-opus-5-5" || c.BaseURL != "https://api.anthropic.com" {
-		t.Errorf("model %q at %q", c.Model, c.BaseURL)
+	// The API's default for this model is medium. Reading a diff for a
+	// hidden payload is the kind of work the guidance asks at least high
+	// for, and the calls are few.
+	if c.Effort != "high" {
+		t.Errorf("effort %q, want high (the API takes low, medium, high, xhigh and max)", c.Effort)
 	}
-	if got := c.Limits(); got != (artifact.Limits{ChunkBytes: c.ChunkBytes, MaxChunks: c.MaxChunks}) {
-		t.Errorf("Limits = %+v", got)
+	if c.MaxOutputTokens < 1 || c.MaxOutputTokens > outputTokensCeiling {
+		t.Errorf("max_output_tokens is %d, want 1 to %d", c.MaxOutputTokens, outputTokensCeiling)
 	}
-	// The arithmetic in DefaultConfig's comment.
-	if room := c.ContextTokens - c.MaxOutputTokens - requestOverheadBytes; room != 920_000 {
+	if c.Attempts < 1 || c.Attempts > 10 {
+		t.Errorf("attempts is %d, want 1 to 10", c.Attempts)
+	}
+	if got := time.Duration(c.RequestTimeoutSeconds) * time.Second; got != 10*time.Minute {
+		t.Errorf("request timeout is %s", got)
+	}
+	room := c.ContextTokens - c.MaxOutputTokens - requestOverheadBytes
+	if room != 920_000 {
 		t.Errorf("room for chunk text is %d, the comment says 920,000", room)
 	}
-	if c.ChunkBytes*2 > 920_000 {
-		t.Errorf("chunk_bytes %d is not under half of the worst-case room", c.ChunkBytes)
+	if c.ChunkBytes < 1 || c.ChunkBytes*2 > room {
+		t.Errorf("chunk_bytes %d is not under half of the worst-case room (%d)", c.ChunkBytes, room)
 	}
 	// The red team's example must fit the default budget.
-	if total := c.ChunkBytes * c.MaxChunks; total < 4_280_000 {
+	if total := c.ChunkBytes * c.MaxChunks; c.MaxChunks < 1 || total < 4_280_000 {
 		t.Errorf("the default budget is %d bytes, less than the 4.28 MB setup-go diff", total)
 	}
 }
 
-func TestConfigValidate(t *testing.T) {
-	tests := []struct {
-		name    string
-		edit    func(*Config)
-		wantErr string // "" for valid
-	}{
-		{"the largest chunk the window allows", func(c *Config) { c.ChunkBytes = 920_000 }, ""},
-		{"one byte more", func(c *Config) { c.ChunkBytes = 920_001 }, "leaves room for 920000 bytes"},
-		{"a larger answer leaves less room", func(c *Config) { c.MaxOutputTokens, c.ChunkBytes = 64_000, 880_000 }, "leaves room for 872000 bytes"},
-		{"a model with a 200K window", func(c *Config) { c.Model, c.ContextTokens = "claude-haiku-4-5", 200_000 }, "leaves room for 120000 bytes"},
-		{"a 200K window with a chunk that fits", func(c *Config) { c.ContextTokens, c.ChunkBytes = 200_000, 100_000 }, ""},
-		{"context window not set", func(c *Config) { c.ContextTokens = 0 }, "context_tokens"},
-		{"no model", func(c *Config) { c.Model = "" }, "model"},
-		{"a model with a space", func(c *Config) { c.Model = "claude opus" }, "model"},
-		{"effort unset", func(c *Config) { c.Effort = "" }, "effort"},
-		{"effort unknown", func(c *Config) { c.Effort = "extreme" }, "effort"},
-		{"effort medium", func(c *Config) { c.Effort = "medium" }, ""},
-		{"max_tokens over the model's ceiling", func(c *Config) { c.MaxOutputTokens = 128_001 }, "max_output_tokens"},
-		{"max_tokens zero", func(c *Config) { c.MaxOutputTokens = 0 }, "max_output_tokens"},
-		{"chunk_bytes zero", func(c *Config) { c.ChunkBytes = 0 }, "chunk_bytes"},
-		{"max_chunks zero", func(c *Config) { c.MaxChunks = 0 }, "max_chunks"},
-		{"no timeout", func(c *Config) { c.RequestTimeout = 0 }, "request_timeout"},
-		{"no attempts", func(c *Config) { c.Attempts = 0 }, "attempts"},
-		{"one attempt", func(c *Config) { c.Attempts = 1 }, ""},
-		{"plain http to a host", func(c *Config) { c.BaseURL = "http://api.anthropic.com" }, "loopback"},
-		{"plain http to a name that says localhost", func(c *Config) { c.BaseURL = "http://localhost.example.com" }, "loopback"},
-		{"plain http to loopback", func(c *Config) { c.BaseURL = "http://127.0.0.1:8080" }, ""},
-		{"a URL with a path", func(c *Config) { c.BaseURL = "https://example.com/v1" }, "scheme and host"},
-		{"a URL with credentials", func(c *Config) { c.BaseURL = "https://user:pw@example.com" }, "scheme and host"},
-		{"another scheme", func(c *Config) { c.BaseURL = "ftp://example.com" }, "https"},
-		{"empty", func(c *Config) { c.BaseURL = "" }, "scheme and host"},
-		{"a trailing slash is fine", func(c *Config) { c.BaseURL = "https://api.anthropic.com/" }, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			c := DefaultConfig()
-			tc.edit(&c)
-			err := c.Validate()
-			switch {
-			case tc.wantErr == "" && err != nil:
-				t.Errorf("Validate: %v", err)
-			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
-				t.Errorf("Validate = %v, want an error containing %q", err, tc.wantErr)
-			}
-		})
-	}
-}
-
 // requestOverheadBytes must cover the largest request that carries no
-// chunk text: the budget check in Validate subtracts it from the model's
-// window. What is measured is the text the model reads (the system
-// prompt, the schema and the user message), not its JSON encoding.
+// chunk text: TestEmbeddedSettings subtracts it from the model's window.
+// What is measured is the text the model reads (the system prompt, the
+// schema and the user message), not its JSON encoding.
 func TestRequestOverhead(t *testing.T) {
 	long := strings.Repeat("x", 256)
 	p := artifact.Prepared{
@@ -200,7 +219,7 @@ func TestRequestOverhead(t *testing.T) {
 		// Paths far over the cap, and the widest size there is.
 		p.Unread = append(p.Unread, artifact.Unread{Path: strings.Repeat("p", 4000), Size: 1<<62 + int64(i), SHA256: strings.Repeat("f", 64)})
 	}
-	if err := checkRead(DefaultConfig(), p); err != nil {
+	if err := checkRead(embedded(t), p); err != nil {
 		t.Fatalf("checkRead: %v", err)
 	}
 	user := userMessage(p, 0, strings.Repeat("f", 32))

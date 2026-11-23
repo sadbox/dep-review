@@ -56,7 +56,7 @@ const (
 )
 
 // The database's ecosystem names for the ecosystems it shares with the
-// gate. It has none for container images.
+// gate.
 const (
 	ecoGo      = "go"
 	ecoNPM     = "npm"
@@ -89,25 +89,25 @@ func New(api Pager) *GitHub {
 // Check implements Checker.
 //
 // It makes three requests for Go and npm (reviewed advisories on From,
-// reviewed on To, malware on To), two for a new name, and none for
-// Docker. Actions costs two more (four for an action in a directory), to
-// find how the database spells the action's name, and makes no request
-// about a version when the database has no advisory under the name at
-// all.
+// reviewed on To, malware on To) and two for a new name. Actions costs
+// two more (four for an action in a directory), to find how the database
+// spells the action's name, and makes no request about a version when
+// the database has no advisory under the name at all.
 //
 // A request that fails, after the client's own retries, settles all
 // three facts at once, since nothing can be said from half the answers.
-// When GitHub did not answer (no response, a server error, a rate limit)
-// they are unavailable, which is a wait. When it answered with an error
-// that asking again would not change, they are left ungathered. An answer
-// that arrived but is not what the API documents, or a name or version
-// the API cannot be asked about, leaves the facts that depend on it
-// ungathered too: their Source is empty and their Value says why. The
-// error return is the context's.
 func (g *GitHub) Check(ctx context.Context, q Query) (Result, error) {
 	eco, covered := databaseEcosystem(q.Ecosystem)
 	if !covered {
-		return notCovered(q.Ecosystem), nil
+		// Not Go, npm or Actions: nothing is asked, and nothing vouches
+		// for the new version. That includes Docker, whose gatherer does
+		// not call Check: the database has no container image ecosystem.
+		const why = "this ecosystem has no advisory lookup; nothing was asked"
+		return Result{
+			SecurityFix:   allow.No(why, "internal/advisory: ecosystems with a lookup"),
+			NoMalware:     unknown(why),
+			NoNewAdvisory: unknown(why),
+		}, nil
 	}
 	if why := unaskable(eco, q); why != "" {
 		return Result{SecurityFix: unknown(why), NoMalware: unknown(why), NoNewAdvisory: unknown(why)}, nil
@@ -184,34 +184,6 @@ func databaseEcosystem(ecosystem string) (string, bool) {
 		return ecoActions, true
 	}
 	return "", false
-}
-
-// notCovered is the answer for an ecosystem the database is never asked
-// about.
-func notCovered(ecosystem string) Result {
-	if ecosystem == allow.Docker {
-		// The database has no container ecosystem, so there is nothing it
-		// could say against an image, and that is known without asking.
-		// The two Clean inputs are gathered as holding and say so: left
-		// ungathered, a Docker update could never be Clean and the Docker
-		// row of the decision table could never be reached.
-		const value = "GitHub's Advisory Database has no container image ecosystem; nothing was asked"
-		const source = "GitHub Advisory Database: its list of ecosystems"
-		return Result{
-			SecurityFix:   allow.No(value, source),
-			NoMalware:     allow.Yes(value, source),
-			NoNewAdvisory: allow.Yes(value, source),
-		}
-	}
-	// Not one of allow's ecosystems. The database may well cover it, but
-	// the gate has no rule for it and this package no name for it, so
-	// nothing vouches for the new version.
-	const why = "this ecosystem has no advisory lookup; nothing was asked"
-	return Result{
-		SecurityFix:   allow.No(why, "internal/advisory: ecosystems with a lookup"),
-		NoMalware:     unknown(why),
-		NoNewAdvisory: unknown(why),
-	}
 }
 
 // unknown is a fact that could not be established, for a reason that
