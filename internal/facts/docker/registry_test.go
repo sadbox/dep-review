@@ -100,6 +100,40 @@ func healthyHub(t *testing.T) *fakeRegistry {
 	}}
 }
 
+// okListUpload is okList's timeUploadedMs for digestB, as a fact's value
+// shows it.
+const okListUpload = "2026-08-21T18:12:16Z"
+
+// uploadOnly reports whether seen is what the gatherer makes of GCR's
+// answer for a manifest uploaded at upload: no time, because the upload
+// dates the manifest and not the tag (spec section 11, amendment 49),
+// with the list as its source and the upload in its value, and not an
+// outage. That is the form the publish job dates from its own clock.
+func uploadOnly(seen allow.TimeFact, upload string) bool {
+	return !seen.Known() && !seen.OK && seen.Time.IsZero() && !seen.Unavailable &&
+		strings.HasSuffix(seen.Source, "/tags/list (timeUploadedMs)") &&
+		strings.Contains(seen.Value, "dates the upload of the pinned manifest ("+upload+"), not the moment the tag was pointed at it")
+}
+
+// datedByPublish is res as the publish job hands it to allow.Decide when
+// it first evaluates the pull request's pins at the given time. It does
+// what land.dateUnseen does on a first evaluation (spec section 11,
+// amendment 38): an update with no first-seen time gets the gate's own
+// clock, unless its registry was asked and did not answer, which is
+// waited for. A time a registry gave stays.
+func datedByPublish(res facts.Result, at time.Time) facts.Result {
+	updates := append([]allow.UpdateFacts(nil), res.Updates...)
+	for i := range updates {
+		seen := updates[i].FirstSeen
+		if seen.Known() || (seen.Unavailable && seen.Source != "") {
+			continue
+		}
+		updates[i].FirstSeen = allow.At(at, "the gate's own clock")
+	}
+	res.Updates = updates
+	return res
+}
+
 func healthyGCR(t *testing.T) *fakeRegistry {
 	return &fakeRegistry{t: t, answers: map[string][]fakeAnswer{
 		gcrHeadURL: {okHead}, gcrListURL: {okList},
@@ -172,7 +206,7 @@ func TestHealthyFakes(t *testing.T) {
 
 	gcr := healthyGCR(t)
 	u = oneUpdate(t, gcr, distrolessRefresh)
-	if !u.Bound.Holds() || !u.Clean.Holds() || !u.FirstSeen.Known() {
+	if !u.Bound.Holds() || !u.Clean.Holds() || !uploadOnly(u.FirstSeen, okListUpload) {
 		t.Errorf("gcr: %+v", u)
 	}
 	if want := []string{gcrHeadURL, gcrListURL}; !reflect.DeepEqual(gcr.asked, want) {
@@ -319,8 +353,13 @@ func TestBound(t *testing.T) {
 }
 
 // FirstSeen is a time only when the registry's own clock said so about
-// the pinned digest. Everything else is unknown, which is person: a
-// placeholder read as a time would be decades old and satisfy every age.
+// the tag at the pinned digest, which is Docker Hub's push time of the
+// tag. GCR's upload time dates the manifest whatever tag points at it,
+// and is never one (spec section 11, amendment 49). Everything else is
+// unknown too, and as gathered that is person: a placeholder read as a
+// time would be decades old and satisfy every age. An answer without a
+// time keeps its source and is no outage, so the publish job dates the
+// pin from its own clock.
 func TestFirstSeen(t *testing.T) {
 	hubTag := func(body string) fakeAnswer { return fakeAnswer{status: 200, body: body} }
 	hubPushed := func(pushed string) fakeAnswer {
@@ -365,7 +404,7 @@ func TestFirstSeen(t *testing.T) {
 		{name: "hub, redirect", files: golangRefresh, key: hubTagURL,
 			ans: fakeAnswer{status: 301, header: map[string]string{"Location": "https://example.com/"}}, why: "Docker Hub answered HTTP 301"},
 
-		{name: "gcr", files: distrolessRefresh, key: gcrListURL, ans: okList, seen: "2026-08-21T18:12:16.959Z"},
+		{name: "gcr", files: distrolessRefresh, key: gcrListURL, ans: okList, why: "the registry dates the upload of the pinned manifest (" + okListUpload + "), not the moment the tag was pointed at it"},
 		{name: "gcr, zero", files: distrolessRefresh, key: gcrListURL, ans: gcrUploaded(`"0"`), why: "no usable timeUploadedMs"},
 		{name: "gcr, year 1", files: distrolessRefresh, key: gcrListURL, ans: gcrUploaded(`"-62135596800000"`), why: "no usable timeUploadedMs"},
 		{name: "gcr, one millisecond", files: distrolessRefresh, key: gcrListURL, ans: gcrUploaded(`"1"`), why: "no usable timeUploadedMs"},
@@ -404,6 +443,9 @@ func TestFirstSeen(t *testing.T) {
 			if tc.seen == "" {
 				if u.FirstSeen.Known() || u.FirstSeen.OK || !u.FirstSeen.Time.IsZero() {
 					t.Fatalf("FirstSeen is known: %+v", u.FirstSeen)
+				}
+				if u.FirstSeen.Unavailable || u.FirstSeen.Source == "" {
+					t.Errorf("FirstSeen = %+v, want an answer with its source and no time, which publish dates itself", u.FirstSeen)
 				}
 				if !strings.Contains(u.FirstSeen.Value, tc.why) {
 					t.Errorf("FirstSeen says %q, want it to say %q", u.FirstSeen.Value, tc.why)
@@ -515,10 +557,11 @@ func TestGCRDeprecated(t *testing.T) {
 				t.Errorf("Clean: %+v, want a gathered %v", u.Clean, tc.clean)
 			}
 			// The mark does not change what else is known.
-			if !u.Bound.Holds() || !u.FirstSeen.Known() {
+			if !u.Bound.Holds() || !uploadOnly(u.FirstSeen, okListUpload) {
 				t.Errorf("Bound %+v, FirstSeen %+v", u.Bound, u.FirstSeen)
 			}
-			d := decide(res, defaultPolicy(t), time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+			// Long after publish first evaluated the pin.
+			d := decide(datedByPublish(res, mustTime(t, "2026-11-23T04:00:00Z")), defaultPolicy(t), time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 			want, reasons := allow.Merge, []allow.Reason(nil)
 			if !tc.clean {
 				want, reasons = allow.Person, []allow.Reason{allow.ReasonNotClean}
@@ -569,7 +612,12 @@ func TestTransient(t *testing.T) {
 					t.Fatal(err)
 				}
 				u := res.Updates[0]
-				if !u.Bound.Holds() || !u.Clean.Holds() || !u.FirstSeen.Known() {
+				// Docker Hub's answer has a time, GCR's the upload only.
+				seen := u.FirstSeen.Known()
+				if strings.Contains(key, "gcr.io") {
+					seen = uploadOnly(u.FirstSeen, okListUpload)
+				}
+				if !u.Bound.Holds() || !u.Clean.Holds() || !seen {
 					t.Errorf("facts: %+v", u)
 				}
 				if reg.count(key) != 3 || !reflect.DeepEqual(waits, []time.Duration{time.Second, 2 * time.Second}) {
@@ -819,7 +867,7 @@ func TestKnownIsListed(t *testing.T) {
 	if !u.Listed.Holds() || !u.Known.Holds() || u.NewName.OK {
 		t.Errorf("listed: %+v", u)
 	}
-	if d := decide(res, policy, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)); d.Outcome != allow.Merge {
+	if d := decide(datedByPublish(res, mustTime(t, "2026-11-23T04:00:00Z")), policy, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)); d.Outcome != allow.Merge {
 		t.Errorf("decision %s %v", d.Outcome, d.Reasons)
 	}
 
@@ -863,11 +911,9 @@ func TestAskedOncePerRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Updates) != 2 || !res.Updates[0].FirstSeen.Known() || !res.Updates[1].FirstSeen.Known() {
+	// Each update is told its own manifest's upload, from the one list.
+	if len(res.Updates) != 2 || !uploadOnly(res.Updates[0].FirstSeen, okListUpload) || !uploadOnly(res.Updates[1].FirstSeen, "2023-11-14T22:13:20Z") {
 		t.Fatalf("updates: %+v", res.Updates)
-	}
-	if res.Updates[0].FirstSeen.Time.Equal(res.Updates[1].FirstSeen.Time) {
-		t.Errorf("both updates have the same upload time")
 	}
 	if gcr.count(gcrListURL) != 1 {
 		t.Errorf("tag list asked %d times", gcr.count(gcrListURL))

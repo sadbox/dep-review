@@ -32,10 +32,13 @@ const (
 	// No image has this digest.
 	madeUpDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
-	golang127Pushed   = "2026-11-10T18:33:44.343824Z"
-	node24Pushed      = "2026-11-11T20:39:58.583762Z"
-	debian12Upload    = "2026-08-21T18:12:16.959Z"
-	debian13Upload    = "2026-11-22T21:10:10.799Z"
+	golang127Pushed = "2026-11-10T18:33:44.343824Z"
+	node24Pushed    = "2026-11-11T20:39:58.583762Z"
+	// GCR's upload times of the two current distroless manifests, as a
+	// fact's value shows them. They date the manifests and are no
+	// first-seen times (spec section 11, amendment 49).
+	debian12Upload    = "2026-08-21T18:12:16Z"
+	debian13Upload    = "2026-11-22T21:10:10Z"
 	recordedAtRFC3339 = "2026-11-23T04:00:00Z"
 )
 
@@ -188,28 +191,39 @@ type recordedCase struct {
 }
 
 type decisionAt struct {
-	now     string
-	outcome allow.Outcome
-	reasons []allow.Reason
+	// evaluated is when the publish job first evaluated the pull
+	// request's pins, which is the first-seen time of an update no
+	// registry dates (datedByPublish). Empty decides the facts as they
+	// were gathered, with no time from the gate's own clock.
+	evaluated string
+	now       string
+	outcome   allow.Outcome
+	reasons   []allow.Reason
 	// notBefore is the decision's NotBefore; empty for person.
 	notBefore string
 }
 
 var recordedCases = []recordedCase{
 	{
-		// The distroless tag was rebuilt seven hours before the recording,
-		// so the pull request waits for it.
+		// The distroless manifest was uploaded seven hours before the
+		// recording. GCR does not say since when the tag has pointed at
+		// it, so no registry dates that update: the pull request waits 72
+		// h from the gate's first evaluation of the pin, not from the
+		// upload.
 		name:  "golang minor and distroless refresh in one Dockerfile",
 		files: []facts.File{dockerfile("Dockerfile", appBase, appHead)},
 		updates: []string{
 			"docker.io/library/golang 1.26-bookworm@dc40a13b6130 -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + golang127Pushed,
-			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + debian13Upload,
+			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=unknown",
 		},
 		decisions: []decisionAt{
-			{now: recordedAtRFC3339, outcome: allow.Wait, reasons: []allow.Reason{allow.ReasonAge}, notBefore: "2026-11-25T21:10:10.799Z"},
-			// 72 h after the upload, to the millisecond.
-			{now: "2026-11-25T21:10:10.798Z", outcome: allow.Wait, reasons: []allow.Reason{allow.ReasonAge}, notBefore: "2026-11-25T21:10:10.799Z"},
-			{now: "2026-11-25T21:10:10.799Z", outcome: allow.Merge},
+			// As gathered, nothing dates the distroless pin.
+			{now: recordedAtRFC3339, outcome: allow.Person, reasons: []allow.Reason{allow.ReasonFirstSeenUnknown}},
+			{evaluated: recordedAtRFC3339, now: recordedAtRFC3339, outcome: allow.Wait, reasons: []allow.Reason{allow.ReasonAge}, notBefore: "2026-11-26T04:00:00Z"},
+			// 72 h after the upload is not enough.
+			{evaluated: recordedAtRFC3339, now: "2026-11-25T21:10:10.799Z", outcome: allow.Wait, reasons: []allow.Reason{allow.ReasonAge}, notBefore: "2026-11-26T04:00:00Z"},
+			{evaluated: recordedAtRFC3339, now: "2026-11-26T03:59:59Z", outcome: allow.Wait, reasons: []allow.Reason{allow.ReasonAge}, notBefore: "2026-11-26T04:00:00Z"},
+			{evaluated: recordedAtRFC3339, now: "2026-11-26T04:00:00Z", outcome: allow.Merge},
 		},
 	},
 	{
@@ -220,9 +234,9 @@ var recordedCases = []recordedCase{
 		},
 		updates: []string{
 			"docker.io/library/golang 1.26-bookworm@dc40a13b6130 -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + golang127Pushed,
-			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + debian13Upload,
+			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=unknown",
 		},
-		decisions: []decisionAt{{now: "2026-11-26T00:00:00Z", outcome: allow.Merge}},
+		decisions: []decisionAt{{evaluated: recordedAtRFC3339, now: "2026-11-26T04:00:00Z", outcome: allow.Merge}},
 	},
 	{
 		name: "golang same-tag digest refresh",
@@ -240,16 +254,19 @@ var recordedCases = []recordedCase{
 		},
 	},
 	{
-		// Bound, three months old, and a person's: GCR marks every
-		// manifest of static-debian12's last build deprecated.
+		// Bound, uploaded three months ago, and a person's: GCR marks
+		// every manifest of static-debian12's last build deprecated.
 		name: "distroless refresh of an image the registry marks deprecated",
 		files: []facts.File{dockerfile("Dockerfile",
 			"FROM gcr.io/distroless/static-debian12:nonroot@"+debian12NonrootOld+"\n",
 			"FROM gcr.io/distroless/static-debian12:nonroot@"+debian12Nonroot+"\n")},
 		updates: []string{
-			"gcr.io/distroless/static-debian12 nonroot@1b7b9f0f0e0a -> nonroot@afa5c872c891: listed=yes known=yes new=no increase=yes major=no bound=yes clean=no noregress=yes securityfix=no superseded=no firstseen=" + debian12Upload,
+			"gcr.io/distroless/static-debian12 nonroot@1b7b9f0f0e0a -> nonroot@afa5c872c891: listed=yes known=yes new=no increase=yes major=no bound=yes clean=no noregress=yes securityfix=no superseded=no firstseen=unknown",
 		},
-		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Person, reasons: []allow.Reason{allow.ReasonNotClean}}},
+		decisions: []decisionAt{
+			{now: recordedAtRFC3339, outcome: allow.Person, reasons: []allow.Reason{allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}},
+			{evaluated: recordedAtRFC3339, now: recordedAtRFC3339, outcome: allow.Person, reasons: []allow.Reason{allow.ReasonNotClean}},
+		},
 	},
 	{
 		name: "node major with a platform flag",
@@ -332,9 +349,13 @@ func TestRecorded(t *testing.T) {
 			}
 
 			for _, want := range tc.decisions {
-				d := decide(res, policy, mustTime(t, want.now))
+				decided := res
+				if want.evaluated != "" {
+					decided = datedByPublish(res, mustTime(t, want.evaluated))
+				}
+				d := decide(decided, policy, mustTime(t, want.now))
 				if d.Outcome != want.outcome || !reflect.DeepEqual(d.Reasons, want.reasons) {
-					t.Errorf("at %s: %s %v, want %s %v", want.now, d.Outcome, d.Reasons, want.outcome, want.reasons)
+					t.Errorf("at %s (first evaluated %q): %s %v, want %s %v", want.now, want.evaluated, d.Outcome, d.Reasons, want.outcome, want.reasons)
 				}
 				if want.notBefore != "" && !d.NotBefore.Equal(mustTime(t, want.notBefore)) {
 					t.Errorf("at %s: not before %s, want %s", want.now, d.NotBefore.UTC().Format(time.RFC3339Nano), want.notBefore)
@@ -411,7 +432,11 @@ func TestRecordedValues(t *testing.T) {
 
 	distroless := res.Updates[1]
 	const list = "GET https://gcr.io/v2/distroless/static-debian13/tags/list"
-	wantSeen := allow.At(mustTime(t, debian13Upload), list+" (timeUploadedMs)")
+	// No time: GCR dates the manifest, not the tag. The upload is shown.
+	wantSeen := allow.TimeFact{
+		Value:  "the registry dates the upload of the pinned manifest (" + debian13Upload + "), not the moment the tag was pointed at it",
+		Source: list + " (timeUploadedMs)",
+	}
 	if distroless.FirstSeen != wantSeen {
 		t.Errorf("distroless FirstSeen:\n got  %+v\n want %+v", distroless.FirstSeen, wantSeen)
 	}
@@ -436,5 +461,46 @@ func TestRecordedValues(t *testing.T) {
 		"GET https://gcr.io/v2/distroless/static-debian12/tags/list")
 	if len(res.Updates) != 1 || res.Updates[0].Clean != wantClean {
 		t.Errorf("deprecated distroless:\n got  %+v\n want Clean %+v", res.Updates, wantClean)
+	}
+	if len(res.Updates) == 1 && !uploadOnly(res.Updates[0].FirstSeen, debian12Upload) {
+		t.Errorf("deprecated distroless FirstSeen = %+v, want no time and the upload (%s) in the value", res.Updates[0].FirstSeen, debian12Upload)
+	}
+}
+
+// A tag pointed just now at a manifest that was uploaded a month ago:
+// the upload is old and the tag's serving of it is not. GCR has no time
+// for the second, so the gatherer gives no first-seen time at all, and
+// the age runs from the publish job's first evaluation of the pin (spec
+// section 11, amendment 49). With the upload as FirstSeen this merged at
+// the gate's first look.
+func TestGCRUploadIsNotFirstSeen(t *testing.T) {
+	now := mustTime(t, recordedAtRFC3339)
+	uploaded := now.Add(-30 * 24 * time.Hour)
+	reg := healthyGCR(t)
+	reg.answers[gcrListURL] = []fakeAnswer{{status: 200, body: gcrListBody(fmt.Sprintf(`"%d"`, uploaded.UnixMilli()), `"nonroot"`)}}
+	res, err := gatherWith(t, reg, distrolessRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := res.Updates[0]
+	checkExplained(t, u)
+	if !u.Bound.Holds() || !u.Clean.Holds() {
+		t.Fatalf("Bound %+v, Clean %+v", u.Bound, u.Clean)
+	}
+	if !uploadOnly(u.FirstSeen, uploaded.Format(time.RFC3339)) {
+		t.Fatalf("FirstSeen = %+v, want no time, the list as its source and the upload in its value", u.FirstSeen)
+	}
+	policy := defaultPolicy(t)
+	// Never a merge on what the gatherer returns.
+	if d := decide(res, policy, now); d.Outcome != allow.Person || !reflect.DeepEqual(d.Reasons, []allow.Reason{allow.ReasonFirstSeenUnknown}) {
+		t.Errorf("as gathered: %s %v, want person [first_seen_unknown]", d.Outcome, d.Reasons)
+	}
+	// First evaluated now: 72 h from now, whatever the upload's age.
+	dated := datedByPublish(res, now)
+	if d := decide(dated, policy, now); d.Outcome != allow.Wait || !reflect.DeepEqual(d.Reasons, []allow.Reason{allow.ReasonAge}) || !d.NotBefore.Equal(now.Add(72*time.Hour)) {
+		t.Errorf("at the first evaluation: %s %v until %s, want a wait for age until %s", d.Outcome, d.Reasons, d.NotBefore, now.Add(72*time.Hour))
+	}
+	if d := decide(dated, policy, now.Add(72*time.Hour)); d.Outcome != allow.Merge {
+		t.Errorf("72 h after the first evaluation: %s %v, want merge", d.Outcome, d.Reasons)
 	}
 }

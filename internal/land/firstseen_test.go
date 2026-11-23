@@ -42,6 +42,24 @@ func image(t *testing.T, to string) wire.Facts {
 	return f
 }
 
+// gcrImage is a facts file for a listed gcr.io image at tag@digest, with
+// the first-seen fact the Docker gatherer makes of GCR's answer: no time,
+// and the manifest's upload in the value (spec section 11, amendment 49).
+func gcrImage(t *testing.T, to string, uploaded time.Time) wire.Facts {
+	t.Helper()
+	f := goodFacts(t)
+	u := goodUpdate("gcr.io/distroless/static-debian13")
+	u.Listed = allow.Yes("gcr.io/distroless/", "policy")
+	u.From, u.To = "nonroot@sha256:"+strings.Repeat("0", 64), to
+	u.FirstSeen = allow.TimeFact{
+		Value:  "the registry dates the upload of the pinned manifest (" + uploaded.UTC().Format(time.RFC3339) + "), not the moment the tag was pointed at it",
+		Source: "GET https://gcr.io/v2/distroless/static-debian13/tags/list (timeUploadedMs)",
+	}
+	f.Facts.Ecosystem = allow.Docker
+	f.Facts.Updates = []wire.Update{wire.NewUpdate(u, wire.Read{Status: wire.Nothing})}
+	return f
+}
+
 // evaluate is one run of publish at now, and what the gate's comment
 // remembers afterwards.
 func evaluate(t *testing.T, f *fakeGitHub, now time.Time, facts wire.Facts) (Result, []seen) {
@@ -111,6 +129,37 @@ func TestFirstSeenIsTheGatesClock(t *testing.T) {
 	}
 	if got := f.count("PUT", "/merge"); got != 1 {
 		t.Errorf("%d merge calls, want 1", got)
+	}
+}
+
+// TestFirstSeenOfAGCRImage: GCR dates a manifest's upload and not the
+// moment a tag was pointed at it, so the gatherer gives no time and the
+// age runs from the gate's first evaluation (spec section 11, amendment
+// 49). A manifest uploaded a month ago, under a tag that may have been
+// pointed at it a minute ago, waits its 72 hours like any other pin, and
+// the comment still shows the upload.
+func TestFirstSeenOfAGCRImage(t *testing.T) {
+	conf, _ := defaults(t)
+	age := conf.Policy().MinAge
+	f := newFake(t)
+	uploaded := t0.Add(-30 * 24 * time.Hour)
+	facts := gcrImage(t, "nonroot@sha256:"+strings.Repeat("a", 64), uploaded)
+	pin := facts.Facts.Updates[0]
+
+	res, remembered := evaluate(t, f, t0, facts)
+	wantWait(t, "the first evaluation", res, t0.Add(age))
+	wantSeen(t, "the first evaluation", remembered, allow.Docker, pin, t0)
+	body := f.gateComment(testPR)
+	if want := "the registry's clock: the registry dates the upload of the pinned manifest (" + uploaded.Format(time.RFC3339) + ")"; !strings.Contains(body, want) {
+		t.Errorf("the comment lacks %q:\n%s", want, body)
+	}
+	if got := f.count("PUT", "/merge"); got != 0 {
+		t.Errorf("%d merge calls at the first evaluation, want none", got)
+	}
+
+	res, _ = evaluate(t, f, t0.Add(age), facts)
+	if res.Action != ActionMerged {
+		t.Errorf("at the age: %s %v, want merged", res.Action, res.Decision.Reasons)
 	}
 }
 

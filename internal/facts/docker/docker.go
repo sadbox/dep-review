@@ -3,10 +3,10 @@
 // content is opaque to the gate: nothing here downloads or inspects it,
 // and no model reads it. What can grant a merge is only who publishes the
 // image (Known is the owner's list alone, spec section 11, amendment 3),
-// that the pin is what the registry serves under that tag now and for how
-// long (registry.go), and the line shape (shape.go). A tag that resolves to
-// another digest has moved on since Dependabot wrote the pin, which is a
-// wait (amendment 2).
+// that the pin is what the registry serves under that tag now, for how
+// long where the registry dates the tag (registry.go), and the line shape
+// (shape.go). A tag that resolves to another digest has moved on since
+// Dependabot wrote the pin, which is a wait (amendment 2).
 package docker
 
 import (

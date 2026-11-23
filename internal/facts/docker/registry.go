@@ -18,9 +18,11 @@ import (
 )
 
 // What the gatherer asks a registry: which digest a tag resolves to (a
-// HEAD, which Docker Hub does not count as a pull), when that became
-// public, and on GCR whether the manifest is marked deprecated. It never
-// downloads a manifest body, a config, a layer or any other blob.
+// HEAD, which Docker Hub does not count as a pull), on Docker Hub when
+// the tag was last pushed, and on GCR whether the manifest is marked
+// deprecated and when it was uploaded, which is shown and is no
+// first-seen time. It never downloads a manifest body, a config, a layer
+// or any other blob.
 //
 // Every URL is one of a fixed few, built here from parts that passed
 // fromLineRe. Nothing a registry answers chooses where the next request
@@ -403,10 +405,20 @@ type gcrList struct {
 
 // gcrCleanAndFirstSeen reads GCR's tag list for the two things it knows
 // about the manifest with the pinned digest: whether it is marked
-// deprecated, and when GCR received it. The time is GCR's own clock. It
-// is the upload of the manifest, not the moment a tag was pointed at it;
-// that the tag points at it now is the Bound fact. served is what Bound
-// established, for Clean's value.
+// deprecated, and when GCR received it. served is what Bound established,
+// for Clean's value.
+//
+// The upload time is GCR's own clock, and it is never the update's
+// FirstSeen. It dates the manifest, and GCR has no time for the moment a
+// tag was pointed at it: a manifest can be uploaded by digest and tagged
+// days later, and a tag can go back to a build it served before. An age
+// counted from the upload would then have run while nobody was served
+// the image under the tag, and a tag pointed at an old manifest would
+// merge at the gate's first look. So the fact is unknown, with the list
+// as its Source and the upload time in its Value, and the publish job
+// dates the pin from its own first evaluation (spec section 11,
+// amendments 38 and 49). That is never earlier than the upload: Bound
+// holds only for a manifest the registry has.
 func (a *asker) gcrCleanAndFirstSeen(ctx context.Context, repo, digest, served string) (allow.Fact, allow.TimeFact, error) {
 	listURL := "https://gcr.io/v2/" + repo + "/tags/list"
 	source := "GET " + listURL
@@ -443,7 +455,7 @@ func (a *asker) gcrCleanAndFirstSeen(ctx context.Context, repo, digest, served s
 	if err != nil || ms <= 0 || time.UnixMilli(ms).Before(earliestClock) {
 		return clean, unknownTime("the registry's tag list has no usable timeUploadedMs for the pinned digest", seenSource), nil
 	}
-	return clean, allow.At(time.UnixMilli(ms).UTC(), seenSource), nil
+	return clean, unknownTime(fmt.Sprintf("the registry dates the upload of the pinned manifest (%s), not the moment the tag was pointed at it", time.UnixMilli(ms).UTC().Format(time.RFC3339)), seenSource), nil
 }
 
 // readGCRList decodes a tags/list answer.

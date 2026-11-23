@@ -109,7 +109,13 @@ func TestLive(t *testing.T) {
 			if tc.clean && !u.Clean.Holds() {
 				t.Errorf("Clean: %+v", u.Clean)
 			}
-			if !u.FirstSeen.Known() || u.FirstSeen.Time.After(now.Add(5*time.Minute)) || u.FirstSeen.Time.Before(now.AddDate(-3, 0, 0)) {
+			if tc.registry == "gcr.io" {
+				// GCR dates the manifest, not the tag: no time, and the
+				// upload in the value (spec section 11, amendment 49).
+				if u.FirstSeen.Known() || u.FirstSeen.Unavailable || u.FirstSeen.Source == "" || !strings.Contains(u.FirstSeen.Value, "dates the upload of the pinned manifest (20") {
+					t.Errorf("FirstSeen: %+v", u.FirstSeen)
+				}
+			} else if !u.FirstSeen.Known() || u.FirstSeen.Time.After(now.Add(5*time.Minute)) || u.FirstSeen.Time.Before(now.AddDate(-3, 0, 0)) {
 				t.Errorf("FirstSeen: %+v", u.FirstSeen)
 			}
 

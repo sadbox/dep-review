@@ -123,11 +123,12 @@ advisory was reviewed. The comment still names the advisory, so the fix
 can be merged by hand. An image has no advisory source at all.
 
 Where a registry has no such clock (an Action release that is not
-immutable, most of all), the age runs from the gate's first evaluation of
-the pin, not from the day the pull request was opened: Dependabot
-rewrites a grouped pull request in place, and a version it adds today is
-new today. A rebase keeps the pin's time; another version or hash starts
-again.
+immutable, most of all, and every gcr.io image: GCR dates the upload of
+a manifest, not the moment a tag was pointed at it), the age runs from
+the gate's first evaluation of the pin, not from the day the pull request
+was opened: Dependabot rewrites a grouped pull request in place, and a
+version it adds today is new today. A rebase keeps the pin's time;
+another version or hash starts again.
 
 For Go the registry's clock has a limit of its own. The index has no
 lookup by module: it is read forward from the version's commit time, 50
@@ -145,7 +146,7 @@ needs no age and is not held up.
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
 | npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install steps: npm's NoRegress holds only once they were |
 | GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
-| Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`, GCR `timeUploadedMs` | nothing |
+| Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`; for a gcr.io image the gate's first evaluation of the pin | nothing |
 
 Limits that send real pull requests to a person:
 
