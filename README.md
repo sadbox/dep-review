@@ -67,7 +67,7 @@ For the pull request:
 | Fact | Meaning | Source |
 |---|---|---|
 | Identity | Dependabot's alone, on the default branch, at its current head | `internal/classify`: author, signed commits, the branch's activity log, the pull request's timeline, GitHub's rules for the branch |
-| Shape | only that ecosystem's manifest and lock files changed, and only version or hash tokens | the real tool's reading of base and head, or exact line shapes |
+| Shape | only that ecosystem's manifest and lock files changed, each a plain file (mode 100644) at both commits, and only version or hash tokens | the real tool's reading of base and head, or exact line shapes |
 | ChecksConfigured | the default branch has an active rule requiring a status check other than `dep-review` | GitHub `rules/branches` |
 
 For every update, computed from the base and head manifests and never
@@ -85,7 +85,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the pull request was opened |
 | NameCreated | when the package name first appeared (new names only) |
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have |
-| NoRegress | no new or changed install script, and for npm no new or changed `binding.gyp` and none left to build by itself; provenance not lost; Actions: the new commit descends from the old one |
+| NoRegress | no new or changed install script; npm: in the tarball the install scripts, `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone; provenance not lost; Actions: the new commit descends from the old one |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version |
 | Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker) |
 | Veto | none, or a category and the lines the model quoted |
@@ -116,20 +116,30 @@ either (`fast_path_companions: ride-along`).
 
 | Ecosystem | Shape and change set | Bound | FirstSeen | Read |
 |---|---|---|---|---|
-| Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips |
-| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install scripts: npm's NoRegress holds only once they were |
-| GitHub Actions | changed lines must be pin lines (`uses: owner/repo@<40 hex> # vX.Y.Z`, or a tag line in a workflow onboarded to `actions.lock`) and `actions.lock` entries | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
-| Docker | changed lines must be `FROM` lines, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`, GCR `timeUploadedMs` | nothing |
+| Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
+| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install steps: npm's NoRegress holds only once they were |
+| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`) | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
+| Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`, GCR `timeUploadedMs` | nothing |
 
 Limits that send real pull requests to a person:
 
 - uv, OpenTofu, submodules and every other ecosystem have no rule.
-- An Actions update needs `actions.lock`: without it there is no recorded
-  repository and owner ID to compare with.
+- An Actions update needs a tag pin (`@vX.Y.Z`) and `actions.lock`:
+  without the lock entry there is no recorded repository and owner ID to
+  compare with. A line that pins a commit (`@<40 hex> # vX.Y.Z`) and a
+  local `action.yml` are not read.
 - A changed `uses:` line that points at a reusable workflow never merges.
   That includes a caller's pin of this gate.
-- Docker images merge only from the list, and only from docker.io and
-  gcr.io.
+- Docker images merge only from the list, and only when written as an
+  official Docker Hub image by its bare name or as a gcr.io image. Any
+  other spelling (`library/golang`, `grafana/grafana`, another registry)
+  is not read, whatever the list says.
+- A Go update that removes a requirement (a move from `example.com/m/v2`
+  to `/v3` does) or changes the `toolchain` line.
+- An npm update whose tarball drops an install script, a `gypfile` or a
+  `binding.gyp`, or whose lock has an entry with a member npm 9 to 11 do
+  not write.
+- The gate runs on github.com only.
 - A pre-release is never an increase. A pseudo-version is one only for
   a listed Go module, and such an update still goes to a person: the
   retraction check and the advisory lookup have no rule for a version
@@ -255,8 +265,8 @@ a scheduled run does not ask the model again for the same content.
 5. Give the default branch a ruleset rule that requires at least one
    status check besides `dep-review`. Classic branch protection does not
    count.
-6. Onboard the workflows to `.github/workflows/actions.lock` if Actions
-   updates should merge.
+6. Pin actions by tag and onboard the workflows to
+   `.github/workflows/actions.lock` if Actions updates should merge.
 7. Give the Anthropic workspace a workload identity federation rule that
    admits the review job: the repository's immutable OIDC subject, event
    `workflow_run`, and a `job_workflow_ref` of this repository's
