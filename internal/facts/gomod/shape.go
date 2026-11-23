@@ -16,9 +16,6 @@ import (
 )
 
 const (
-	// regularFile is git's mode for a plain, non-executable file. A go.mod
-	// or go.sum that is a symlink, a submodule or executable is not one.
-	regularFile = "100644"
 	// maxManifest bounds a go.mod or go.sum the gatherer parses. Real ones
 	// are a few hundred kilobytes at most.
 	maxManifest = 8 << 20
@@ -37,22 +34,17 @@ type update struct {
 	// require the module.
 	from string
 	to   string
-	// indirect: the require line is marked "// indirect" at head, which
-	// is how go.mod says the repository's own code does not import the
-	// module. Where base has the line too it carries the same marker:
-	// diffRequires refuses a marker that changes.
+	// indirect: the require line is marked "// indirect" at head. Where
+	// base has the line too it carries the same marker: diffRequires
+	// refuses a marker that changes.
 	indirect bool
 }
 
 // changeSet is what base and head go.mod and go.sum say the pull request
-// does. It is computed from the two files alone.
+// does.
 type changeSet struct {
-	// updates is every moved and added require, direct and indirect,
-	// sorted by module path.
+	// updates is every moved and added require, sorted by module path.
 	updates []update
-	// removed is every module base requires and head does not, sorted.
-	// Nothing new runs because of a removal, so it has no facts.
-	removed []string
 	// baseSum and headSum are the hashes go.sum pins at each commit, by
 	// sumKey. Both are nil when the pull request does not change go.sum:
 	// the gatherer is only given files that differ.
@@ -79,7 +71,7 @@ func readChange(files []facts.File) (cs changeSet, problem string) {
 	if problem := otherChanges(base, head); problem != "" {
 		return cs, problem
 	}
-	cs.updates, cs.removed, problem = diffRequires(base, head)
+	cs.updates, problem = diffRequires(base, head)
 	if problem != "" {
 		return cs, problem
 	}
@@ -96,9 +88,9 @@ func readChange(files []facts.File) (cs changeSet, problem string) {
 	return cs, sumProblem(cs)
 }
 
-// manifests picks go.mod and go.sum out of the changed files. Shape is
-// about there being nothing else: one directory's go.mod, with or without
-// its go.sum, both plain files at both commits.
+// manifests picks go.mod and go.sum out of the changed files: one
+// directory's go.mod, with or without its go.sum, both plain files at
+// both commits, and nothing else.
 func manifests(files []facts.File) (mod, sum *facts.File, problem string) {
 	if len(files) == 0 {
 		return nil, nil, "the pull request changes no file"
@@ -109,15 +101,15 @@ func manifests(files []facts.File) (mod, sum *facts.File, problem string) {
 		name := path.Base(f.Path)
 		switch {
 		case name != "go.mod" && name != "go.sum":
-			return nil, nil, fmt.Sprintf("changes %s, which is not go.mod or go.sum", show(f.Path))
+			return nil, nil, fmt.Sprintf("changes %s, which is not go.mod or go.sum", facts.Show(f.Path))
 		case path.Dir(f.Path) != dir:
-			return nil, nil, fmt.Sprintf("changes Go files in more than one directory (%s and %s)", show(dir), show(path.Dir(f.Path)))
-		case f.BaseMode != regularFile || f.HeadMode != regularFile:
-			return nil, nil, fmt.Sprintf("%s is not a regular file at both commits (mode %s at base, %s at head)", show(f.Path), show(f.BaseMode), show(f.HeadMode))
+			return nil, nil, fmt.Sprintf("changes Go files in more than one directory (%s and %s)", facts.Show(dir), facts.Show(path.Dir(f.Path)))
+		case facts.NotRegular(*f) != "":
+			return nil, nil, facts.NotRegular(*f)
 		case len(f.Base) > maxManifest || len(f.Head) > maxManifest:
-			return nil, nil, fmt.Sprintf("%s is larger than the gate reads", show(f.Path))
+			return nil, nil, fmt.Sprintf("%s is larger than the gate reads", facts.Show(f.Path))
 		case name == "go.mod" && mod != nil, name == "go.sum" && sum != nil:
-			return nil, nil, fmt.Sprintf("%s is listed twice", show(f.Path))
+			return nil, nil, fmt.Sprintf("%s is listed twice", facts.Show(f.Path))
 		case name == "go.mod":
 			mod = f
 		default:
@@ -140,14 +132,11 @@ type require struct {
 type modFile struct {
 	// requires is every require line by module path.
 	requires map[string]require
-	// goVersion and toolchain are the go and toolchain lines, without
-	// the directive; empty when the line is absent.
+	// goVersion is the go line without the directive; empty when absent.
 	goVersion string
-	toolchain string
-	// rest is the file with every require, go and toolchain line taken
-	// out, as x/mod formats it. Base and head must agree on it byte for
-	// byte, so a directive this package never heard of cannot change
-	// unseen.
+	// rest is the file with every require line and the go line taken out,
+	// as x/mod formats it. Base and head must agree on it byte for byte,
+	// so no other directive, the toolchain line included, can change.
 	rest []byte
 }
 
@@ -167,7 +156,7 @@ func canonicalVersion(path, version string) (string, error) {
 func parseMod(data []byte) (modFile, error) {
 	f, err := modfile.Parse("go.mod", data, canonicalVersion)
 	if err != nil {
-		return modFile{}, fmt.Errorf("does not parse: %s", show(err.Error()))
+		return modFile{}, fmt.Errorf("does not parse: %s", facts.Show(err.Error()))
 	}
 	if f.Module == nil {
 		return modFile{}, fmt.Errorf("has no module line")
@@ -176,87 +165,37 @@ func parseMod(data []byte) (modFile, error) {
 	if f.Go != nil {
 		m.goVersion = f.Go.Version
 	}
-	if f.Toolchain != nil {
-		m.toolchain = f.Toolchain.Name
-	}
 	for _, r := range f.Require {
 		// The go command keeps the last of two lines for one module; the
 		// gate does not guess which one the author meant.
 		if _, dup := m.requires[r.Mod.Path]; dup {
-			return modFile{}, fmt.Errorf("requires %s twice", show(r.Mod.Path))
+			return modFile{}, fmt.Errorf("requires %s twice", facts.Show(r.Mod.Path))
 		}
 		if err := module.Check(r.Mod.Path, r.Mod.Version); err != nil {
-			return modFile{}, fmt.Errorf("has an invalid require: %s", show(err.Error()))
+			return modFile{}, fmt.Errorf("has an invalid require: %s", facts.Show(err.Error()))
 		}
 		m.requires[r.Mod.Path] = require{version: r.Mod.Version, indirect: r.Indirect}
 	}
 
 	f.SetRequire(nil)
 	f.DropGoStmt()
-	f.DropToolchainStmt()
 	f.Cleanup()
 	m.rest = modfile.Format(f.Syntax)
 	return m, nil
 }
 
 // otherChanges reports a change outside the require versions: anything
-// in the rest of the file, or a go or toolchain line that does not only
-// go up.
+// in the rest of the file, or a go line that does not stay or go up.
 func otherChanges(base, head modFile) string {
 	if !bytes.Equal(base.rest, head.rest) {
-		return "go.mod changes something other than require lines and the go and toolchain lines" + firstDifference(base.rest, head.rest)
+		return "go.mod changes something other than require lines and the go line"
 	}
-
 	baseGo, headGo := "go"+base.goVersion, "go"+head.goVersion
 	if !version.IsValid(baseGo) || version.Compare(baseGo, oldestGo) < 0 {
-		return fmt.Sprintf("go.mod at base has go line %s; below 1.17 go.mod does not list every module the build uses", show(base.goVersion))
+		return fmt.Sprintf("go.mod at base has go line %s; below 1.17 go.mod does not list every module the build uses", facts.Show(base.goVersion))
 	}
 	if !version.IsValid(headGo) || version.Compare(headGo, baseGo) < 0 {
-		return fmt.Sprintf("the go line does not stay or go up (%s to %s)", show(base.goVersion), show(head.goVersion))
-	}
-	if head.toolchain == base.toolchain {
-		return ""
-	}
-	// A new toolchain name must be a plain release: a name with a suffix
-	// selects a custom toolchain.
-	if head.toolchain != "" && (!version.IsValid(head.toolchain) || strings.Contains(head.toolchain, "-")) {
-		return fmt.Sprintf("the toolchain line changes to %s, which is not a plain go release", show(head.toolchain))
-	}
-	// The go command drops the toolchain line once the go line has caught
-	// up with it, so the line itself may disappear. What must not go down
-	// is the toolchain the file asks for: the newer of the two lines.
-	if version.Compare(minimumToolchain(head), minimumToolchain(base)) < 0 {
-		return fmt.Sprintf("the toolchain go.mod asks for goes down (%s to %s)", show(minimumToolchain(base)), show(minimumToolchain(head)))
-	}
-	return ""
-}
-
-// minimumToolchain is the toolchain a go.mod asks for: the newer of its
-// go line and its toolchain line.
-func minimumToolchain(m modFile) string {
-	g := "go" + m.goVersion
-	if m.toolchain != "" && version.Compare(m.toolchain, g) > 0 {
-		return m.toolchain
-	}
-	return g
-}
-
-// firstDifference names the first line two formatted files disagree on,
-// for the Shape fact's value.
-func firstDifference(base, head []byte) string {
-	b := strings.Split(string(base), "\n")
-	h := strings.Split(string(head), "\n")
-	for i := 0; i < len(b) || i < len(h); i++ {
-		var bl, hl string
-		if i < len(b) {
-			bl = b[i]
-		}
-		if i < len(h) {
-			hl = h[i]
-		}
-		if bl != hl {
-			return fmt.Sprintf(": base has %s where head has %s", show(bl), show(hl))
-		}
+		return fmt.Sprintf("the go line does not stay or go up (%s to %s)", facts.Show(base.goVersion), facts.Show(head.goVersion))
 	}
 	return ""
 }
@@ -265,7 +204,16 @@ func firstDifference(base, head []byte) string {
 // versions may differ on a module both commits require: its indirect
 // marker says whether the repository's own code imports it, which a pull
 // request that touches no code cannot change.
-func diffRequires(base, head modFile) (updates []update, removed []string, problem string) {
+func diffRequires(base, head modFile) (updates []update, problem string) {
+	// A requirement that head drops is most often the old half of a move
+	// to another module path (example.com/m/v2 to example.com/m/v3). The
+	// gate does not follow a requirement across paths: the new path would
+	// read as a new name and not as the major update it is.
+	for _, name := range sortedKeys(base.requires) {
+		if _, atHead := head.requires[name]; !atHead {
+			return nil, fmt.Sprintf("go.mod no longer requires %s; a pull request that removes a requirement is not read", facts.Show(name))
+		}
+	}
 	for _, name := range sortedKeys(head.requires) {
 		h := head.requires[name]
 		b, atBase := base.requires[name]
@@ -273,17 +221,12 @@ func diffRequires(base, head modFile) (updates []update, removed []string, probl
 		case !atBase:
 			updates = append(updates, update{name: name, to: h.version, indirect: h.indirect})
 		case b.indirect != h.indirect:
-			return nil, nil, fmt.Sprintf("go.mod changes the // indirect marker of %s", show(name))
+			return nil, fmt.Sprintf("go.mod changes the // indirect marker of %s", facts.Show(name))
 		case b.version != h.version:
 			updates = append(updates, update{name: name, from: b.version, to: h.version, indirect: h.indirect})
 		}
 	}
-	for _, name := range sortedKeys(base.requires) {
-		if _, atHead := head.requires[name]; !atHead {
-			removed = append(removed, name)
-		}
-	}
-	return updates, removed, ""
+	return updates, ""
 }
 
 // sumLine is the one shape a go.sum line may have: a module path, a
@@ -324,7 +267,7 @@ func parseSum(data []byte) (map[string]string, error) {
 		}
 		key := sumKey(name, ver, m[3] != "")
 		if old, ok := sums[key]; ok && old != hash {
-			return nil, fmt.Errorf("has two hashes for %s", show(key))
+			return nil, fmt.Errorf("has two hashes for %s", facts.Show(key))
 		}
 		sums[key] = hash
 	}
@@ -342,7 +285,7 @@ func parseSum(data []byte) (map[string]string, error) {
 func sumProblem(cs changeSet) string {
 	for _, key := range sortedKeys(cs.headSum) {
 		if old, atBase := cs.baseSum[key]; atBase && old != cs.headSum[key] {
-			return fmt.Sprintf("go.sum changes the hash it pins for %s", show(key))
+			return fmt.Sprintf("go.sum changes the hash it pins for %s", facts.Show(key))
 		}
 	}
 	return ""
@@ -357,16 +300,4 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// show quotes text that came from the pull request or from a tool for a
-// fact's value: one line, control characters escaped, clipped. The value
-// is shown to a person; it never decides anything.
-func show(s string) string {
-	const max = 200
-	if len(s) > max {
-		s = s[:max] + "..."
-	}
-	q := fmt.Sprintf("%+q", s)
-	return q[1 : len(q)-1]
 }

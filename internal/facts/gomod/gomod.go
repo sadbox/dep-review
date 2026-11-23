@@ -1,28 +1,8 @@
-// Package gomod gathers the facts for a Go modules pull request
-// (docs/v0.2-spec.md, sections 3, 4 and 6).
-//
-// The change set and the Shape fact come from go.mod and go.sum at the
-// base and head commits: go.mod through golang.org/x/mod/modfile, go.sum
-// by one exact line shape. Everything about a module version itself is
-// the go command's answer or the module index's, never this package's
-// reading of a module:
-//
-//   - Bound: "go mod download -json" in an empty module with an empty
-//     module cache, so sum.golang.org vouches for both hashes go.sum pins.
-//   - FirstSeen and NameCreated: the Timestamp of the version's line in
-//     index.golang.org, which is the proxy's clock. The commit time only
-//     chooses where in the index to start reading.
-//   - Clean: "go list -m -u -retracted -json" for the retraction and the
-//     deprecation notice, "go list -m -versions -json" as the proof that
-//     the retractions were really loaded, and the advisory checker.
-//
-// A fact the package could not establish is never guessed. It is returned
-// in the state that says why (see internal/facts): unavailable when the
-// proxy, the index or the advisory database was asked and did not answer,
-// which is a wait; and without a source, with a value that starts
-// "unknown:", when the go command printed nothing about the module. What
-// the go command reports as an error for a module is a gathered "no"
-// unless it has the one shape of a proxy outage (proxyOutageRE).
+// Package gomod gathers the facts for a Go modules pull request. The
+// change set and Shape come from go.mod (golang.org/x/mod/modfile) and
+// go.sum (one exact line shape) at the base and head commits. Everything
+// about a module version is the go command's answer (gotool.go) or the
+// module index's (index.go), never this package's reading of a module.
 package gomod
 
 import (
@@ -51,30 +31,19 @@ import (
 // oldest date.
 const nameCandidates = 3
 
-// Gatherer gathers the Go modules facts. The zero value is ready to use.
+// Gatherer gathers the Go modules facts with the go command on PATH.
 type Gatherer struct {
-	// Go is the go command to run. Empty means the one on PATH.
-	Go string
-
-	// tool replaces the go command in tests.
-	tool goTool
-	// indexURL and indexLimit replace the module index and its page size
-	// in tests.
+	// tool, indexURL and indexLimit replace the go command, the module
+	// index and its page size in tests.
+	tool       goTool
 	indexURL   string
 	indexLimit int
 }
 
-var _ facts.Gatherer = (*Gatherer)(nil)
-
-// New returns a Gatherer that runs the go command found on PATH.
+// New returns a Gatherer.
 func New() *Gatherer { return &Gatherer{} }
 
 // Gather implements facts.Gatherer.
-//
-// It returns an error only when the run itself failed: the input is
-// incomplete, the go command is missing or printed nothing usable, or
-// the context ended. A registry that did not answer is an unknown fact,
-// not an error.
 func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
 	if in.HTTP == nil || in.Advisories == nil || in.Now == nil {
 		return facts.Result{}, errors.New("gomod: Input.HTTP, Input.Advisories and Input.Now must be set")
@@ -88,12 +57,9 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 
 	tool := g.tool
 	if tool == nil {
-		bin := g.Go
-		if bin == "" {
-			var err error
-			if bin, err = exec.LookPath("go"); err != nil {
-				return facts.Result{}, fmt.Errorf("gomod: %w", err)
-			}
+		bin, err := exec.LookPath("go")
+		if err != nil {
+			return facts.Result{}, fmt.Errorf("gomod: %w", err)
 		}
 		// A scratch directory per run: the module cache in it starts
 		// empty, so the checksum database is asked about every module.
@@ -159,13 +125,15 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 		u.SecurityFix = adv.SecurityFix
 		u.Clean = cleanFact(up, d, downloadedOK, info, infoOK, versions, versionsOK, adv)
 
+		// The commit time go list reports only chooses where the reading
+		// of the index starts; the publisher sets it.
 		switch {
 		case infoOK && info.Error == nil && info.Time != nil:
 			u.FirstSeen = seenFact(ctx, ix, up.name, up.to, *info.Time, now)
 		case infoOK && info.Error != nil && proxyOutageRE.MatchString(info.Error.Err):
 			u.FirstSeen = allow.UnavailableTime("the module proxy did not answer, so there is no commit time to start reading the index from", sourceList)
 		default:
-			u.FirstSeen = unknownTime("go list reported no commit time to start reading the index from")
+			u.FirstSeen = facts.NotEstablishedTime("go list reported no commit time to start reading the index from")
 		}
 		// The age of the name is asked for only where the decision needs
 		// it: a new name that is not on the list.
@@ -189,11 +157,8 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 }
 
 // Changes is the half of Gather that reads nothing but the pull request's
-// files: the Shape fact, and every update with the facts no registry is
-// ever asked for (Known, Listed, NewName, Increase, Major, Indirect and
-// NoRegress).
-// Every other fact is left unset. Gather starts from the same reading;
-// the replay command runs this half alone.
+// files: Shape, and every update with the facts go.mod alone establishes.
+// The replay command runs this half alone.
 func Changes(files []facts.File, policy allow.Policy) facts.Result {
 	_, res := changes(files, policy)
 	return res
@@ -207,31 +172,18 @@ func changes(files []facts.File, policy allow.Policy) (changeSet, facts.Result) 
 	if problem != "" {
 		return changeSet{}, facts.Result{Shape: allow.No(problem, sourceManifests)}
 	}
-	res := facts.Result{Shape: allow.Yes(shapeValue(cs), sourceManifests)}
+	res := facts.Result{Shape: allow.Yes(fmt.Sprintf("only go.mod and go.sum change: %d require lines moved or added", len(cs.updates)), sourceManifests)}
 	for _, up := range cs.updates {
 		u := allow.UpdateFacts{Name: up.name, From: up.from, To: up.to}
-		setManifestFacts(&u, up, cs, policy)
+		setManifestFacts(&u, up, policy)
 		res.Updates = append(res.Updates, u)
 	}
 	return cs, res
 }
 
-// shapeValue describes a change set that has the Go shape.
-func shapeValue(cs changeSet) string {
-	v := fmt.Sprintf("only go.mod and go.sum change: %d require lines moved or added, %d removed", len(cs.updates), len(cs.removed))
-	if len(cs.removed) > 0 {
-		shown := cs.removed
-		if len(shown) > 5 {
-			shown = shown[:5]
-		}
-		v += " (" + show(strings.Join(shown, ", ")) + ")"
-	}
-	return v
-}
-
 // setManifestFacts fills in the facts that come from go.mod alone:
 // NewName, Listed, Known, Increase, Major, Indirect and NoRegress.
-func setManifestFacts(u *allow.UpdateFacts, up update, cs changeSet, policy allow.Policy) {
+func setManifestFacts(u *allow.UpdateFacts, up update, policy allow.Policy) {
 	isNew := up.from == ""
 	if isNew {
 		u.NewName = allow.Yes("not required by go.mod at base", sourceManifests)
@@ -258,16 +210,10 @@ func setManifestFacts(u *allow.UpdateFacts, up update, cs changeSet, policy allo
 	u.Increase = increaseFact(up, listed)
 
 	// A module's path carries its major version from v2 on, so a major
-	// update of something go.mod already required shows up as one path
-	// removed and another added. The added one has no old version to
-	// compare with; it is recognised by the path it replaces.
-	replaced := ""
-	if isNew {
-		replaced = replacedPath(up.name, cs.removed)
-	}
+	// update of a requirement removes one path and adds another, and
+	// Shape refuses the removal (diffRequires). A new path added beside
+	// the old one is a new name here, under the new-name rules.
 	switch {
-	case replaced != "" && pathMajor(replaced) != pathMajor(up.name):
-		u.Major = allow.Yes(fmt.Sprintf("replaces %s: the major version in the module path changed", replaced), sourceManifests)
 	case isNew:
 		u.Major = allow.No("a new requirement has no previous version", sourceManifests)
 	case semver.Major(up.from) != semver.Major(up.to):
@@ -276,25 +222,15 @@ func setManifestFacts(u *allow.UpdateFacts, up update, cs changeSet, policy allo
 		u.Major = allow.No("stays on "+semver.Major(up.to), sourceManifests)
 	}
 
-	// A path that takes another's place is not followed back to what the
-	// old path was: such an update goes to a person anyway (NoRegress).
-	switch {
-	case replaced != "":
-		u.Indirect = allow.No(fmt.Sprintf("takes the place of %s, and the marker of a requirement is not followed across a change of module path", replaced), sourceManifests)
-	case up.indirect:
+	if up.indirect {
 		u.Indirect = allow.Yes("its require line in go.mod is marked // indirect: the repository's own code does not import it", sourceManifests)
-	default:
+	} else {
 		u.Indirect = allow.No("go.mod requires it directly", sourceManifests)
 	}
 
 	// Go modules run nothing at install time and carry no provenance
-	// attestation, so there is nothing of that kind to lose. What can
-	// change under an existing requirement is which module it is.
-	if replaced != "" {
-		u.NoRegress = allow.No(fmt.Sprintf("the module path of an existing requirement changed: %s to %s", replaced, up.name), sourceManifests)
-	} else {
-		u.NoRegress = allow.Yes("Go modules have no install scripts, and no existing requirement changed its module path", sourceManifests)
-	}
+	// attestation, so there is nothing of that kind to lose.
+	u.NoRegress = allow.Yes("Go modules have no install scripts, and no requirement was removed", sourceManifests)
 }
 
 // increaseFact is the Increase fact (spec section 11, amendment 24): what
@@ -336,30 +272,6 @@ func plainRelease(v string) bool {
 	return semver.IsValid(v) && semver.Prerelease(v) == "" && (build == "" || build == "+incompatible")
 }
 
-// replacedPath returns the base requirement that name takes the place
-// of: one that head no longer has and that is the same module at another
-// major version (example.com/m/v2 and example.com/m/v3) or in another
-// spelling (upper and lower case). Empty when there is none.
-func replacedPath(name string, removed []string) string {
-	prefix, _, ok := module.SplitPathVersion(name)
-	if !ok {
-		return ""
-	}
-	for _, old := range removed {
-		if oldPrefix, _, ok := module.SplitPathVersion(old); ok && strings.EqualFold(prefix, oldPrefix) {
-			return old
-		}
-	}
-	return ""
-}
-
-// pathMajor is the major version suffix of a module path ("/v2", ".v2"
-// for gopkg.in), empty for v0 and v1.
-func pathMajor(name string) string {
-	_, major, _ := module.SplitPathVersion(name)
-	return major
-}
-
 // boundFact is the Bound fact: both hashes go.sum pins at head for the
 // new version are the ones the go command got from the proxy and checked
 // against the checksum database just now.
@@ -376,13 +288,13 @@ func boundFact(up update, cs changeSet, d downloaded, reported bool) allow.Fact 
 	case !haveMod:
 		return allow.No("go.sum at head has no hash for the go.mod of "+target, sourceManifests)
 	case !reported:
-		return unknownFact("go mod download did not report " + target)
+		return facts.NotEstablished("go mod download did not report " + target)
 	case d.Error != "":
 		return goFailure("go mod download failed", d.Error, sourceDownload)
 	case d.Sum != zip:
-		return allow.No(fmt.Sprintf("go.sum pins %s for the module zip; the go command got %s", zip, show(d.Sum)), sourceDownload)
+		return allow.No(fmt.Sprintf("go.sum pins %s for the module zip; the go command got %s", zip, facts.Show(d.Sum)), sourceDownload)
 	case d.GoModSum != mod:
-		return allow.No(fmt.Sprintf("go.sum pins %s for go.mod; the go command got %s", mod, show(d.GoModSum)), sourceDownload)
+		return allow.No(fmt.Sprintf("go.sum pins %s for go.mod; the go command got %s", mod, facts.Show(d.GoModSum)), sourceDownload)
 	}
 	return allow.Yes(zip+" (zip) and "+mod+" (go.mod) match the checksum database", sourceDownload)
 }
@@ -409,26 +321,20 @@ var proxyOutageRE = regexp.MustCompile(`^(?:loading module retractions for )?[^ 
 // a "no" that says what failed.
 func goFailure(what, text, source string) allow.Fact {
 	if proxyOutageRE.MatchString(text) {
-		return allow.Unavailable("the module proxy did not answer: "+show(text), source)
+		return allow.Unavailable("the module proxy did not answer: "+facts.Show(text), source)
 	}
-	return allow.No(what+": "+show(text), source)
+	return allow.No(what+": "+facts.Show(text), source)
 }
-
-// unknownFact is a fact nothing established: the go command, or the
-// advisory checker, said nothing about the module. It has no source,
-// which allow reads as never gathered.
-func unknownFact(why string) allow.Fact { return allow.Fact{Value: "unknown: " + why} }
 
 // cleanFact is the Clean fact: the proxy still serves the version, it is
 // not retracted, the module is not deprecated, and the advisory database
-// has nothing new against it. Each of the four is a fact of its own and
-// they are combined with allow.Fact.And, so a "no" from any of them is
-// the answer whatever else went unanswered.
+// has nothing new against it. A "no" from any of them is the answer
+// whatever else went unanswered (allow.Fact.And).
 func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK bool, versions listed, versionsOK bool, adv advisory.Result) allow.Fact {
 	served := allow.Yes("served by the proxy", sourceDownload)
 	switch {
 	case !downloadedOK:
-		served = unknownFact("go mod download did not report the version")
+		served = facts.NotEstablished("go mod download did not report the version")
 	case d.Error != "":
 		served = goFailure("the proxy did not serve the version", d.Error, sourceDownload)
 	}
@@ -436,17 +342,17 @@ func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK b
 	current := allow.Yes("not retracted, not deprecated", sourceList)
 	switch {
 	case !infoOK:
-		current = unknownFact("go list did not report the version")
+		current = facts.NotEstablished("go list did not report the version")
 	case info.Error != nil:
 		current = goFailure("go list failed", info.Error.Err, sourceList)
 	case len(info.Retracted) > 0:
-		current = allow.No("retracted: "+show(strings.Join(info.Retracted, "; ")), sourceList)
+		current = allow.No("retracted: "+facts.Show(strings.Join(info.Retracted, "; ")), sourceList)
 	case info.Deprecated != "":
-		current = allow.No("the module is deprecated: "+show(info.Deprecated), sourceList)
+		current = allow.No("the module is deprecated: "+facts.Show(info.Deprecated), sourceList)
 
 	// An empty Retracted is not enough: see the comment in Gather.
 	case !versionsOK:
-		current = unknownFact("go list did not report the module's versions")
+		current = facts.NotEstablished("go list did not report the module's versions")
 	case versions.Error != nil:
 		current = goFailure("the module's retractions could not be loaded", versions.Error.Err, sourceList)
 	case module.IsPseudoVersion(up.to):
@@ -455,29 +361,12 @@ func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK b
 		current = allow.No(up.to+" is not in the module's list of versions that are not retracted", sourceList)
 	}
 
-	clean := served.And(current).
-		And(advised(adv.NoMalware, "malware advisories were not checked")).
-		And(advised(adv.NoNewAdvisory, "new advisories were not checked"))
+	clean := served.And(current).And(facts.AdvisoryClean(adv))
 	if clean.Holds() {
 		return allow.Yes("served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory",
 			"go mod download, go list -m -u -retracted, go list -m -versions, advisory database")
 	}
 	return clean
-}
-
-// advised is one of the advisory checker's facts as a part of Clean. A
-// fact the checker left blank still has to say what is missing.
-func advised(f allow.Fact, blank string) allow.Fact {
-	if f == (allow.Fact{}) {
-		return unknownFact(blank)
-	}
-	return f
-}
-
-// unknownTime is a time fact that could not be established, by a clock
-// that was asked and answered.
-func unknownTime(why string) allow.TimeFact {
-	return allow.TimeFact{Value: "unknown: " + why, Source: sourceIndex}
 }
 
 // seenFact looks a version up in the index, starting a little before its
@@ -488,9 +377,9 @@ func seenFact(ctx context.Context, ix *index, name, version string, commit, now 
 	case down:
 		return allow.UnavailableTime(why, sourceIndex)
 	case seen.IsZero():
-		return unknownTime(why)
+		return facts.NotEstablishedTime(why)
 	case seen.After(now):
-		return unknownTime("the index dates it " + seen.UTC().Format(time.RFC3339) + ", which is in the future")
+		return facts.NotEstablishedTime("the index dates it " + seen.UTC().Format(time.RFC3339) + ", which is in the future")
 	}
 	return allow.At(seen, sourceIndex)
 }
@@ -504,7 +393,7 @@ func nameCreated(ctx context.Context, tool goTool, ix *index, name string, versi
 		return allow.UnavailableTime("the module proxy did not answer for the module's version list", sourceList), nil
 	}
 	if !versionsOK || versions.Error != nil || len(versions.Versions) == 0 {
-		return unknownTime("the module's version list could not be read"), nil
+		return facts.NotEstablishedTime("the module's version list could not be read"), nil
 	}
 	earliest := slices.Clone(versions.Versions)
 	semver.Sort(earliest)
@@ -536,13 +425,13 @@ func nameCreated(ctx context.Context, tool goTool, ix *index, name string, versi
 			f.Value += " (" + q.Version + ", the earliest version found in the index)"
 			return f, nil
 		}
-		why = q.Version + ": " + strings.TrimPrefix(f.Value, "unknown: ")
+		why = q.Version + ": " + strings.TrimPrefix(f.Value, "not established: ")
 		down = down || f.Unavailable
 	}
 	if down {
 		return allow.UnavailableTime(why, sourceIndex), nil
 	}
-	return unknownTime(why), nil
+	return facts.NotEstablishedTime(why), nil
 }
 
 // artifactPair names the two module zips the model is to read for one

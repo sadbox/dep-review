@@ -29,8 +29,6 @@ const (
 	debian12Nonroot    = "sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab"
 	debian13NonrootOld = "sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931"
 	debian13Nonroot    = "sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5"
-	grafana131Slim     = "sha256:016f985170123bf396f568c4d1cea18f0a16cee0477ace26dda0fc5e8039348a"
-	grafana132Slim     = "sha256:c0bd9bb5ea9b9c33926eaa3ed3edfad31075865e359d0df5363458a9af8466b9"
 	// No image has this digest.
 	madeUpDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -38,7 +36,6 @@ const (
 	node24Pushed      = "2026-11-11T20:39:58.583762Z"
 	debian12Upload    = "2026-08-21T18:12:16.959Z"
 	debian13Upload    = "2026-11-22T21:10:10.799Z"
-	grafana132Pushed  = "2026-11-10T17:48:43.383832Z"
 	recordedAtRFC3339 = "2026-11-23T04:00:00Z"
 )
 
@@ -293,18 +290,6 @@ var recordedCases = []recordedCase{
 		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Person,
 			reasons: []allow.Reason{allow.ReasonNotBound, allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}}},
 	},
-	{
-		// Bound, old enough and a plain minor, and still a person: the
-		// image is not on the list.
-		name: "image that is not listed",
-		files: []facts.File{dockerfile("Dockerfile",
-			"FROM grafana/grafana:13.1-slim@"+grafana131Slim+"\n",
-			"FROM grafana/grafana:13.2-slim@"+grafana132Slim+"\n")},
-		updates: []string{
-			"docker.io/grafana/grafana 13.1-slim@016f98517012 -> 13.2-slim@c0bd9bb5ea9b: listed=no known=no new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + grafana132Pushed,
-		},
-		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Person, reasons: []allow.Reason{allow.ReasonNotKnown}}},
-	},
 }
 
 func TestRecorded(t *testing.T) {
@@ -321,7 +306,6 @@ func TestRecorded(t *testing.T) {
 				}}
 			}
 			in := facts.Input{
-				Repo:   "example/app",
 				Files:  tc.files,
 				Policy: policy,
 				HTTP:   &http.Client{Transport: transport},

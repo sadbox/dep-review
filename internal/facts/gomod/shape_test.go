@@ -26,7 +26,6 @@ go 1.22
 require golang.org/x/text v0.3.2
 
 require (
-	example.com/dropped v1.0.0 // indirect
 	example.com/kept v1.4.0 // indirect
 )
 
@@ -41,11 +40,11 @@ const headSum = "golang.org/x/mod v0.5.1 " + hMod051 + "\n" +
 	"golang.org/x/text v0.3.3 " + hText033 + "\n" +
 	"golang.org/x/text v0.3.3/go.mod " + hText033Mod + "\n"
 
-// headMod is baseMod with x/text moved, x/mod added and one require
-// dropped: everything a pull request may do.
+// headMod is baseMod with x/text moved and x/mod added: everything a
+// pull request may do.
 var headMod = edit(baseMod,
 	"golang.org/x/text v0.3.2", "golang.org/x/text v0.3.3",
-	"\texample.com/dropped v1.0.0 // indirect\n", "\tgolang.org/x/mod v0.5.1 // indirect\n")
+	"\texample.com/kept v1.4.0 // indirect\n", "\texample.com/kept v1.4.0 // indirect\n\tgolang.org/x/mod v0.5.1 // indirect\n")
 
 // edit applies old/new replacements in pairs; each old must be present.
 func edit(s string, pairs ...string) string {
@@ -62,8 +61,8 @@ func edit(s string, pairs ...string) string {
 // one go.sum.
 func pr(baseMod, headMod, baseSum, headSum string) []facts.File {
 	return []facts.File{
-		{Path: "go.mod", BaseMode: regularFile, HeadMode: regularFile, Base: []byte(baseMod), Head: []byte(headMod)},
-		{Path: "go.sum", BaseMode: regularFile, HeadMode: regularFile, Base: []byte(baseSum), Head: []byte(headSum)},
+		{Path: "go.mod", BaseMode: facts.RegularFile, HeadMode: facts.RegularFile, Base: []byte(baseMod), Head: []byte(headMod)},
+		{Path: "go.sum", BaseMode: facts.RegularFile, HeadMode: facts.RegularFile, Base: []byte(baseSum), Head: []byte(headSum)},
 	}
 }
 
@@ -78,9 +77,6 @@ func TestReadChangeSet(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cs.updates, wantUpdates) {
 		t.Errorf("updates = %+v, want %+v", cs.updates, wantUpdates)
-	}
-	if want := []string{"example.com/dropped"}; !reflect.DeepEqual(cs.removed, want) {
-		t.Errorf("removed = %v, want %v", cs.removed, want)
 	}
 	if got := cs.headSum["golang.org/x/text v0.3.3"]; got != hText033 {
 		t.Errorf("head zip hash = %q", got)
@@ -110,10 +106,10 @@ func TestShapeFiles(t *testing.T) {
 		{"no files", nil, "changes no file"},
 		{"go.sum alone", ok[1:], "go.sum changes and go.mod does not"},
 		{"another file", with(func(fs []facts.File) []facts.File {
-			return append(fs, facts.File{Path: "main.go", BaseMode: regularFile, HeadMode: regularFile})
+			return append(fs, facts.File{Path: "main.go", BaseMode: facts.RegularFile, HeadMode: facts.RegularFile})
 		}), "main.go"},
 		{"a vendored file", with(func(fs []facts.File) []facts.File {
-			return append(fs, facts.File{Path: "vendor/modules.txt", BaseMode: regularFile, HeadMode: regularFile})
+			return append(fs, facts.File{Path: "vendor/modules.txt", BaseMode: facts.RegularFile, HeadMode: facts.RegularFile})
 		}), "vendor/modules.txt"},
 		{"a workflow that only looks like go.mod", with(func(fs []facts.File) []facts.File {
 			fs[0].Path = "go.mod.bak"
@@ -180,7 +176,7 @@ func TestShapeGoMod(t *testing.T) {
 		base, head string
 		want       string
 	}{
-		{"versions move, a require is added and one removed", baseMod, headMod, ""},
+		{"versions move and a require is added", baseMod, headMod, ""},
 		{"comment on a require line changes too", baseMod, edit(headMod, "golang.org/x/text v0.3.3", "golang.org/x/text v0.3.3 // pinned"), ""},
 		{"require block is regrouped", baseMod, edit(headMod, "require golang.org/x/text v0.3.3\n\nrequire (\n", "require (\n\tgolang.org/x/text v0.3.3\n"), ""},
 
@@ -208,14 +204,22 @@ func TestShapeGoMod(t *testing.T) {
 		{"base without a go line", edit(baseMod, "go 1.22\n", ""), edit(headMod, "go 1.22\n", ""), "below 1.17"},
 		{"base at go 1.17", edit(baseMod, "go 1.22", "go 1.17"), edit(headMod, "go 1.22", "go 1.17"), ""},
 
-		{"toolchain added", baseMod, edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), ""},
-		{"toolchain goes up", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.23.1\n"), ""},
-		{"toolchain goes down", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.4\n"), "goes down"},
-		{"toolchain dropped, go line caught up", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), edit(headMod, "go 1.22", "go 1.23.0"), ""},
-		{"toolchain dropped, go line behind", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), headMod, "goes down"},
-		{"toolchain with a suffix", baseMod, edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5-custom\n"), "not a plain go release"},
-		{"toolchain default", baseMod, edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain default\n"), "not a plain go release"},
-		{"toolchain with a suffix, unchanged", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5-custom\n"), edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5-custom\n"), ""},
+		// The toolchain line is not read: it must not change.
+		{"toolchain added", baseMod, edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), "something other than require lines"},
+		{"toolchain goes up", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.23.1\n"), "something other than require lines"},
+		{"toolchain goes down", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.4\n"), "something other than require lines"},
+		{"toolchain dropped, go line caught up", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), edit(headMod, "go 1.22", "go 1.23.0"), "something other than require lines"},
+		{"toolchain dropped, go line behind", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5\n"), headMod, "something other than require lines"},
+		{"toolchain with a suffix", baseMod, edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5-custom\n"), "something other than require lines"},
+		{"toolchain default", baseMod, edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain default\n"), "something other than require lines"},
+		{"toolchain unchanged, versions move", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5-custom\n"), edit(headMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.22.5-custom\n"), ""},
+		{"toolchain unchanged, go line goes up", edit(baseMod, "go 1.22\n", "go 1.22\n\ntoolchain go1.23.1\n"), edit(headMod, "go 1.22\n", "go 1.23.0\n\ntoolchain go1.23.1\n"), ""},
+
+		// A removed requirement is not read, whatever takes its place.
+		{"a require is removed", baseMod, edit(headMod, "\texample.com/kept v1.4.0 // indirect\n", ""), "no longer requires example.com/kept"},
+		{"major by path: v2 removed, v3 added", edit(baseMod, "example.com/kept v1.4.0", "example.com/kept/v2 v2.4.0"), edit(headMod, "example.com/kept v1.4.0", "example.com/kept/v3 v3.0.0"), "no longer requires example.com/kept/v2"},
+		{"major by path, gopkg.in", edit(baseMod, "example.com/kept v1.4.0", "gopkg.in/yaml.v2 v2.4.0"), edit(headMod, "example.com/kept v1.4.0", "gopkg.in/yaml.v3 v3.0.1"), "no longer requires gopkg.in/yaml.v2"},
+		{"path changes case", edit(baseMod, "example.com/kept v1.4.0", "github.com/Sirupsen/logrus v1.9.0"), edit(headMod, "example.com/kept v1.4.0", "github.com/sirupsen/logrus v1.9.3"), "no longer requires github.com/Sirupsen/logrus"},
 
 		{"indirect marker dropped", baseMod, edit(headMod, "example.com/kept v1.4.0 // indirect", "example.com/kept v1.4.0"), "// indirect marker of example.com/kept"},
 		{"indirect marker added on a moved require", baseMod, edit(headMod, "golang.org/x/text v0.3.3", "golang.org/x/text v0.3.3 // indirect"), "// indirect marker of golang.org/x/text"},
@@ -242,8 +246,8 @@ func TestShapeGoModNoUpdate(t *testing.T) {
 	// nothing; allow.Decide sends a pull request with no updates to a
 	// person.
 	cs, problem := readChange(pr(baseMod, edit(baseMod, "go 1.22", "go 1.23.0"), "", "")[:1])
-	if problem != "" || len(cs.updates) != 0 || len(cs.removed) != 0 {
-		t.Errorf("problem %q, updates %v, removed %v", problem, cs.updates, cs.removed)
+	if problem != "" || len(cs.updates) != 0 {
+		t.Errorf("problem %q, updates %v", problem, cs.updates)
 	}
 }
 
@@ -283,20 +287,5 @@ func TestShapeGoSum(t *testing.T) {
 			_, problem := readChange(pr(baseMod, headMod, tc.base, tc.head))
 			checkProblem(t, problem, tc.want)
 		})
-	}
-}
-
-func TestShow(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"plain", "plain"},
-		{"two\nlines\tand a tab", `two\nlines\tand a tab`},
-		{"bidi " + string(rune(0x202e)) + " override", "bidi " + `\` + "u202e override"},
-		{"nul \x00 byte", `nul \x00 byte`},
-		{strings.Repeat("a", 300), strings.Repeat("a", 200) + "..."},
-	}
-	for _, tc := range tests {
-		if got := show(tc.in); got != tc.want {
-			t.Errorf("show(%q) = %q, want %q", tc.in, got, tc.want)
-		}
 	}
 }

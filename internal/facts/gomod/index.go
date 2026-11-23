@@ -12,22 +12,18 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/sadbox/dep-review/internal/facts"
 )
 
 // The Go module index (index.golang.org) is a feed of every module
-// version proxy.golang.org has cached, in the order it first cached them.
-// Each line is {"Path","Version","Timestamp"}, and Timestamp is the
-// proxy's own clock at that moment. That is the first-seen time the gate
-// wants: the commit time in a version's .info is whatever the publisher
-// wrote into the commit, and a tag made today on a commit dated 2018 is
-// indexed today.
-//
-// The feed can only be read forward from a point in time ("since", which
-// is inclusive), at most 2000 lines a request, and has no lookup by
-// module. So a version is found by reading forward from its commit time.
-// The commit time only chooses where to start: a publisher who lies
-// about it makes the version impossible to find, which is unknown and
-// goes to a person, and never makes it look older.
+// version proxy.golang.org has cached, in the order it first cached them,
+// each with the proxy's own clock at that moment. That is the first-seen
+// time the gate wants: a version's commit time is whatever the publisher
+// wrote into the commit. The feed has no lookup by module and is read
+// forward from a point in time, so the commit time chooses where to
+// start: a publisher who lies about it makes the version impossible to
+// find, which goes to a person, and never makes it look older.
 
 const (
 	// defaultIndexURL is the feed.
@@ -108,9 +104,9 @@ func (ix *index) firstSeen(ctx context.Context, path, version string, since time
 			ix.left--
 			var err error
 			if entries, err = ix.page(ctx, since); errors.Is(err, errIndexDown) {
-				return time.Time{}, show(err.Error()), true
+				return time.Time{}, facts.Show(err.Error()), true
 			} else if err != nil {
-				return time.Time{}, "the index could not be read: " + show(err.Error()), false
+				return time.Time{}, "the index could not be read: " + facts.Show(err.Error()), false
 			}
 			if ix.pages == nil {
 				ix.pages = map[string][]indexEntry{}

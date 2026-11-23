@@ -41,7 +41,7 @@ dependencies:
 }
 
 // commitBump is a pull request that moves one commit-pinned line and has
-// no lockfile.
+// no lockfile: the form the gate does not read.
 func commitBump(name, from, to, oldCommit, newCommit string) []facts.File {
 	workflow := func(tag, commit string) string {
 		return "jobs:\n  build:\n    steps:\n      - uses: " + name + "@" + commit + " # " + tag + "\n"
@@ -215,15 +215,6 @@ func TestGatherThenDecide(t *testing.T) {
 			t.Errorf("with an observation 80 h old: %s %v, want merge", d.Outcome, d.Reasons)
 		}
 	})
-
-	t.Run("commit pin with no lockfile: person, not bound", func(t *testing.T) {
-		res, _ := run(t, commitBump("docker/login-action", "v4.7.0", "v4.8.0", loginV470, loginV480), nil, noAdvisories())
-		u := one(t, res)
-		d := decide(u, published.Add(1000*time.Hour))
-		if d.Outcome != allow.Person || len(d.Reasons) != 1 || d.Reasons[0] != allow.ReasonNotBound {
-			t.Errorf("%s %v, want person for not_bound alone", d.Outcome, d.Reasons)
-		}
-	})
 }
 
 // More recorded updates, each for the one thing it shows.
@@ -279,14 +270,14 @@ func TestGatherRecorded(t *testing.T) {
 		}
 	})
 
-	t.Run("commit pin with no lockfile has no IDs to compare, and nothing is given to the model", func(t *testing.T) {
-		res, _ := run(t, commitBump("docker/login-action", "v4.7.0", "v4.8.0", loginV470, loginV480), nil, noAdvisories())
-		u := one(t, res)
-		mustBeNo(t, "Bound", u.Bound, "no actions.lock entry records the repository's IDs")
-		mustHold(t, "NoRegress", u.NoRegress)
-		mustHold(t, "Clean", u.Clean)
-		if len(res.Artifacts) != 0 {
-			t.Errorf("Artifacts = %+v, want none for an update that is not bound", res.Artifacts)
+	// A workflow line records no repository IDs for Bound to compare, so
+	// a commit pin is refused where the files are read (spec section 11,
+	// amendment 7): nothing is asked and nothing is given to the model.
+	t.Run("commit pin with no lockfile does not have the shape", func(t *testing.T) {
+		res, net := run(t, commitBump("docker/login-action", "v4.7.0", "v4.8.0", loginV470, loginV480), nil, noAdvisories())
+		mustBeNo(t, "Shape", res.Shape, "the line pins a commit; only a tag pin that actions.lock records is read")
+		if len(res.Updates) != 0 || len(res.Artifacts) != 0 || len(net.seen) != 0 {
+			t.Errorf("updates %+v, artifacts %+v, requests %v; want none", res.Updates, res.Artifacts, net.seen)
 		}
 	})
 
@@ -461,6 +452,8 @@ func TestGatherRefuses(t *testing.T) {
 			[]check{regress("one of them is not in the repository")}},
 		{"comparison status GitHub does not document", map[string]canned{aheadPath: compareJSON("<b>ahead</b>", 1, 0)}, nil,
 			[]check{regress("unrecognised status")}},
+		{"new commit is the old one", map[string]canned{aheadPath: compareJSON("identical", 0, 0)}, nil,
+			[]check{regress("does not descend from the old one (identical: 0 ahead, 0 behind)"), holds("Bound", "Clean")}},
 		{"comparison fails", map[string]canned{aheadPath: {503, ``}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
 				mustBeUnavailable(t, "NoRegress", u.NoRegress, "could not be compared: GitHub answered HTTP 503")
@@ -523,14 +516,14 @@ func TestGatherRefuses(t *testing.T) {
 			SecurityFix:   allow.No("none", "advisories"),
 			NoMalware:     allow.No("GHSA-xxxx-xxxx-xxxx", "advisories"),
 			NoNewAdvisory: allow.Yes("none", "advisories"),
-		}}, []check{notClean("malware advisory: GHSA-xxxx-xxxx-xxxx"), holds("Bound", "NoRegress")}},
+		}}, []check{notClean("GHSA-xxxx-xxxx-xxxx"), holds("Bound", "NoRegress")}},
 		{"new advisory on the new version", nil, &advisories{result: advisory.Result{
 			SecurityFix:   allow.No("none", "advisories"),
 			NoMalware:     allow.Yes("none", "advisories"),
 			NoNewAdvisory: allow.No("GHSA-yyyy-yyyy-yyyy", "advisories"),
-		}}, []check{notClean("new advisory: GHSA-yyyy-yyyy-yyyy")}},
+		}}, []check{notClean("GHSA-yyyy-yyyy-yyyy")}},
 		{"advisory checker could not tell", nil, &advisories{result: advisory.Result{}}, []check{func(t *testing.T, u allow.UpdateFacts) {
-			mustBeUnknown(t, "Clean", u.Clean, "whether there is a malware advisory is not known")
+			mustBeUnknown(t, "Clean", u.Clean, "not established: malware advisories were not checked")
 			if u.SecurityFix.Gathered() {
 				t.Errorf("SecurityFix = %+v, want it left as the checker returned it", u.SecurityFix)
 			}
@@ -540,7 +533,7 @@ func TestGatherRefuses(t *testing.T) {
 			NoMalware:     allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
 			NoNewAdvisory: allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
 		}}, []check{func(t *testing.T, u allow.UpdateFacts) {
-			mustBeUnavailable(t, "Clean", u.Clean, "malware advisory: GitHub's Advisory Database did not answer (HTTP 503")
+			mustBeUnavailable(t, "Clean", u.Clean, "GitHub's Advisory Database did not answer (HTTP 503")
 			mustBeUnavailable(t, "SecurityFix", u.SecurityFix, "did not answer")
 		}, holds("Bound", "NoRegress")}},
 		{"advisory database did not answer, and the release is a draft", map[string]canned{releasePath: releaseJSON("v7.1.0", true, false, true, `null`)}, &advisories{result: advisory.Result{
@@ -553,10 +546,10 @@ func TestGatherRefuses(t *testing.T) {
 			NoMalware:     allow.Fact{Value: "the answer is not a list"},
 			NoNewAdvisory: allow.Yes("none", "advisories"),
 		}}, []check{func(t *testing.T, u allow.UpdateFacts) {
-			mustBeUnknown(t, "Clean", u.Clean, "malware advisory: the answer is not a list")
+			mustBeUnknown(t, "Clean", u.Clean, "the answer is not a list")
 		}}},
 		{"a checker that fails without the context ending", nil, &advisories{err: errors.New("down"), result: advisory.Result{SecurityFix: allow.Yes("stale", "advisories")}}, []check{func(t *testing.T, u allow.UpdateFacts) {
-			mustBeUnknown(t, "Clean", u.Clean, "whether there is a malware advisory is not known")
+			mustBeUnknown(t, "Clean", u.Clean, "not established: malware advisories were not checked")
 			if u.SecurityFix != (allow.Fact{}) {
 				t.Errorf("SecurityFix = %+v, want it blank after an error", u.SecurityFix)
 			}
@@ -621,28 +614,22 @@ func TestTagChainIsBounded(t *testing.T) {
 	}
 }
 
-// Moves the line shapes admit and the facts refuse.
-func TestGatherOddMoves(t *testing.T) {
+// A move the line shapes admit and the facts refuse.
+func TestGatherDowngrade(t *testing.T) {
 	const repoPath = "repos/actions/setup-go"
-	t.Run("same version, new commit: not an increase", func(t *testing.T) {
-		// A tag that was moved, as a commit line shows it. The answers
-		// for v7.0.0 are not recorded; say the tag now is the new commit.
-		res, _ := run(t, commitBump("actions/setup-go", "v7.0.0", "v7.0.0", setupGoV700, setupGoV710), map[string]canned{
-			repoPath + "/git/ref/tags/v7.0.0":  {200, `{"ref":"refs/tags/v7.0.0","object":{"type":"commit","sha":"` + setupGoV710 + `"}}`},
-			repoPath + "/releases/tags/v7.0.0": {200, `{"tag_name":"v7.0.0","draft":false,"prerelease":false,"immutable":false,"published_at":"2026-07-16T02:50:50Z"}`},
-		}, noAdvisories())
-		u := one(t, res)
-		mustBeNo(t, "Increase", u.Increase, "v7.0.0 -> v7.0.0 is not an increase")
-		mustBeNo(t, "Major", u.Major, "both v7")
-	})
-	t.Run("new version, same commit: not ahead", func(t *testing.T) {
-		res, _ := run(t, commitBump("actions/setup-go", "v7.0.0", "v7.1.0", setupGoV710, setupGoV710), map[string]canned{
-			repoPath + "/compare/" + setupGoV710 + "..." + setupGoV710: {200, `{"status":"identical","ahead_by":0,"behind_by":0}`},
-		}, noAdvisories())
-		u := one(t, res)
-		mustHold(t, "Increase", u.Increase)
-		mustBeNo(t, "NoRegress", u.NoRegress, "does not descend from the old one (identical: 0 ahead, 0 behind)")
-	})
+	// The answers for v7.0.0 as a new version are not recorded; say what
+	// GitHub would for the real tag and release.
+	res, _ := run(t, lockedBump("actions/setup-go", "v7.1.0", "v7.0.0", setupGoV710, setupGoV700, actionsOwnerID, setupGoRepoID), map[string]canned{
+		repoPath + "/git/ref/tags/v7.0.0":                          {200, `{"ref":"refs/tags/v7.0.0","object":{"type":"commit","sha":"` + setupGoV700 + `"}}`},
+		repoPath + "/compare/" + setupGoV710 + "..." + setupGoV700: {200, `{"status":"behind","ahead_by":0,"behind_by":20}`},
+		repoPath + "/compare/main..." + setupGoV700:                {200, `{"status":"behind","ahead_by":0,"behind_by":25}`},
+		repoPath + "/releases/tags/v7.0.0":                         {200, `{"tag_name":"v7.0.0","draft":false,"prerelease":false}`},
+	}, noAdvisories())
+	u := one(t, res)
+	mustBeNo(t, "Increase", u.Increase, "v7.1.0 -> v7.0.0 is not an increase")
+	mustBeNo(t, "Major", u.Major, "both v7")
+	mustHold(t, "Bound", u.Bound)
+	mustBeNo(t, "NoRegress", u.NoRegress, "does not descend from the old one (behind: 0 ahead, 20 behind)")
 }
 
 func TestVersionFacts(t *testing.T) {
@@ -724,22 +711,25 @@ func TestGatherShapeFailureAsksNothing(t *testing.T) {
 }
 
 func TestGatherSeveralUpdates(t *testing.T) {
-	files := append(
-		commitBump("actions/setup-go", "v7.0.0", "v7.1.0", setupGoV700, setupGoV710),
-		file(".github/workflows/release.yaml",
-			"    steps:\n      - uses: docker/login-action@"+loginV470+" # v4.7.0\n",
-			"    steps:\n      - uses: docker/login-action@"+loginV480+" # v4.8.0\n"),
-	)
+	files := []facts.File{
+		file(lockPath, lockText, edit(t, lockText,
+			"setup-go@v7.0.0", "setup-go@v7.1.0", "ref: 'v7.0.0'\n        commit: 'sha1-"+setupGoV700, "ref: 'v7.1.0'\n        commit: 'sha1-"+setupGoV710,
+			"checkout@v7.0.0", "checkout@v7.0.1", "ref: 'v7.0.0'\n        commit: 'sha1-"+checkoutV700, "ref: 'v7.0.1'\n        commit: 'sha1-"+checkoutV701)),
+		file(ciPath, ciTags, edit(t, ciTags, "setup-go@v7.0.0", "setup-go@v7.1.0", "checkout@v7.0.0", "checkout@v7.0.1")),
+	}
 	adv := noAdvisories()
 	res, _ := run(t, files, nil, adv)
 	if !res.Shape.Holds() || len(res.Updates) != 2 {
 		t.Fatalf("Shape %+v, %d updates", res.Shape, len(res.Updates))
 	}
-	if res.Updates[0].Name != "actions/setup-go" || res.Updates[1].Name != "docker/login-action" {
+	if res.Updates[0].Name != "actions/checkout" || res.Updates[1].Name != "actions/setup-go" {
 		t.Errorf("updates are %s, %s; want them sorted by name", res.Updates[0].Name, res.Updates[1].Name)
 	}
-	if len(adv.asked) != 2 {
-		t.Errorf("%d advisory queries, want one per update", len(adv.asked))
+	for _, u := range res.Updates {
+		mustHold(t, u.Name+" Bound", u.Bound)
+	}
+	if len(adv.asked) != 2 || len(res.Artifacts) != 2 {
+		t.Errorf("%d advisory queries and %d artifact pairs, want one of each per update", len(adv.asked), len(res.Artifacts))
 	}
 }
 

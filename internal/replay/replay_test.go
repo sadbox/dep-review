@@ -292,7 +292,7 @@ func TestAbsentFileHasNoContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Decision.Outcome != allow.Person || !strings.Contains(res.Shape.Value, "not an ordinary file at both commits") {
+	if res.Decision.Outcome != allow.Person || !strings.Contains(res.Shape.Value, "not a regular file at both commits") {
 		t.Errorf("outcome %s, shape %q; want person for a file added by the pull request", res.Decision.Outcome, res.Shape.Value)
 	}
 }

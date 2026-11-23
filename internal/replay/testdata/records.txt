@@ -2,7 +2,7 @@ actions-major-unlisted	github_actions	person	major_unlisted	example/setup-tool v
 actions-pin	github_actions	merge	-	needs 72h after creation
 actions-short-tag	github_actions	person	shape,no_updates	shape: .github/workflows/ci.yml:7: the changed line is not an action pin in an accepted shape at both commits
 docker-listed	docker	merge	-	needs 72h after creation
-docker-unlisted	docker	person	not_known	docker.io/example/app 2.1.0@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc -> 2.2.0@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd: not_known
+docker-unlisted	docker	person	not_known	gcr.io/example-project/app 2.1.0@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc -> 2.2.0@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd: not_known
 go-major-listed	go_modules	merge	-	needs 336h after creation
 go-major-unlisted	go_modules	person	major_unlisted	example.com/lib v0.9.0 -> v1.0.0: major_unlisted
 go-new-name	go_modules	person	name_created_unknown	example.com/helper (new) -> v1.0.0: name_created_unknown

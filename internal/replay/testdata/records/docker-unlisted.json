@@ -6,8 +6,8 @@
       "path": "Dockerfile",
       "base_mode": "100644",
       "head_mode": "100644",
-      "base": "FROM example/app:2.1.0@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc AS build\nWORKDIR /src\nCOPY . .\nRUN make\n",
-      "head": "FROM example/app:2.2.0@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd AS build\nWORKDIR /src\nCOPY . .\nRUN make\n"
+      "base": "FROM gcr.io/example-project/app:2.1.0@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc AS build\nWORKDIR /src\nCOPY . .\nRUN make\n",
+      "head": "FROM gcr.io/example-project/app:2.2.0@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd AS build\nWORKDIR /src\nCOPY . .\nRUN make\n"
     }
   ]
 }

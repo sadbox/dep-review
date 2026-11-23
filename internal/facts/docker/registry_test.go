@@ -117,28 +117,21 @@ var (
 	distrolessRefresh = oneLine("gcr.io/distroless/static:nonroot@"+digestA, "gcr.io/distroless/static:nonroot@"+digestB)
 )
 
-// gatherWith runs the gatherer against a fake registry, without waiting
-// between tries. It returns the waits that were asked for.
-func gatherWith(t *testing.T, reg http.RoundTripper, files []facts.File) (facts.Result, []time.Duration, error) {
+// gatherWith runs the gatherer against a fake registry.
+func gatherWith(t *testing.T, reg http.RoundTripper, files []facts.File) (facts.Result, error) {
 	t.Helper()
-	var waits []time.Duration
-	g := &Gatherer{sleep: func(_ context.Context, d time.Duration) error {
-		waits = append(waits, d)
-		return nil
-	}}
-	res, err := g.Gather(context.Background(), facts.Input{
+	return New().Gather(context.Background(), facts.Input{
 		Files:  files,
 		Policy: defaultPolicy(t),
 		HTTP:   &http.Client{Transport: reg},
 	})
-	return res, waits, err
 }
 
 // oneUpdate is gatherWith for a pull request with exactly one update and
 // no error.
 func oneUpdate(t *testing.T, reg http.RoundTripper, files []facts.File) allow.UpdateFacts {
 	t.Helper()
-	res, _, err := gatherWith(t, reg, files)
+	res, err := gatherWith(t, reg, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +227,7 @@ func TestBound(t *testing.T) {
 				reg = healthyGCR(t)
 			}
 			reg.answers[tc.key] = []fakeAnswer{tc.ans}
-			res, waits, err := gatherWith(t, reg, tc.files)
+			res, err := gatherWith(t, reg, tc.files)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,8 +241,8 @@ func TestBound(t *testing.T) {
 			if u.Clean.OK || u.FirstSeen.Known() {
 				t.Errorf("Clean %+v, FirstSeen %+v", u.Clean, u.FirstSeen)
 			}
-			if reg.count(tc.key) != 1 || len(waits) != 0 {
-				t.Errorf("asked %v, waited %v: a definitive answer is not asked again", reg.asked, waits)
+			if reg.count(tc.key) != 1 {
+				t.Errorf("asked %v: no request is made twice", reg.asked)
 			}
 			if last := reg.asked[len(reg.asked)-1]; last != tc.key {
 				t.Errorf("asked %s after the failed %s", last, tc.key)
@@ -296,11 +289,10 @@ func TestBound(t *testing.T) {
 
 	// A superseded pin of an image that is not listed is a person's at
 	// once: no refresh puts it on the list.
-	grafana := &fakeRegistry{t: t, answers: map[string][]fakeAnswer{
-		"GET https://auth.docker.io/token?scope=repository%3Agrafana%2Fgrafana%3Apull&service=registry.docker.io": {okToken},
-		"HEAD https://registry-1.docker.io/v2/grafana/grafana/manifests/1.27":                                     {{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}}},
+	unlisted := &fakeRegistry{t: t, answers: map[string][]fakeAnswer{
+		"HEAD https://gcr.io/v2/example-project/app/manifests/1.27": {{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}}},
 	}}
-	res, _, err := gatherWith(t, grafana, oneLine("grafana/grafana:1.26@"+digestA, "grafana/grafana:1.27@"+digestB))
+	res, err := gatherWith(t, unlisted, oneLine("gcr.io/example-project/app:1.26@"+digestA, "gcr.io/example-project/app:1.27@"+digestB))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +373,7 @@ func TestFirstSeen(t *testing.T) {
 				reg = healthyGCR(t)
 			}
 			reg.answers[tc.key] = []fakeAnswer{tc.ans}
-			res, _, err := gatherWith(t, reg, tc.files)
+			res, err := gatherWith(t, reg, tc.files)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -418,6 +410,38 @@ func TestFirstSeen(t *testing.T) {
 	}
 }
 
+// A GCR tag list that does not say what the gate reads from it leaves
+// Clean not established, which is person: asking again would get the same
+// list. Bound, which the list is not asked for, stands.
+func TestGCRListUnread(t *testing.T) {
+	tests := []struct {
+		name string
+		ans  fakeAnswer
+		why  string
+	}{
+		{"digest not in the list", fakeAnswer{status: 200, body: `{"manifest":{"` + digestA + `":{"tag":["nonroot"],"timeUploadedMs":"1787335936959"}}}`}, "no manifest with the pinned digest"},
+		{"empty list", fakeAnswer{status: 200, body: `{}`}, "no manifest with the pinned digest"},
+		{"not JSON", fakeAnswer{status: 200, body: `<html><script>`}, "could not be read"},
+		{"tags in another form", fakeAnswer{status: 200, body: `{"manifest":{"` + digestB + `":{"tag":"nonroot"}}}`}, "could not be read"},
+		{"entries in another form", fakeAnswer{status: 200, body: gcrListBody(`1787335936959`, `"nonroot"`)}, "could not be read"},
+		{"no list", fakeAnswer{status: 404}, "answered HTTP 404 for its tag list"},
+		{"redirect", fakeAnswer{status: 301, header: map[string]string{"Location": "https://example.com/"}}, "answered HTTP 301 for its tag list"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := healthyGCR(t)
+			reg.answers[gcrListURL] = []fakeAnswer{tc.ans}
+			u := oneUpdate(t, reg, distrolessRefresh)
+			if !u.Bound.Holds() {
+				t.Fatalf("Bound: %+v", u.Bound)
+			}
+			if u.Clean.OK || u.Clean.Gathered() || u.Clean.Unavailable || !strings.Contains(u.Clean.Value, tc.why) || strings.Contains(u.Clean.Value, "script") {
+				t.Errorf("Clean = %+v, want it not established and to say %q", u.Clean, tc.why)
+			}
+		})
+	}
+}
+
 func contains(reasons []allow.Reason, r allow.Reason) bool {
 	for _, have := range reasons {
 		if have == r {
@@ -435,8 +459,11 @@ func TestGCRListTooLarge(t *testing.T) {
 	reg := healthyGCR(t)
 	reg.answers[gcrListURL] = []fakeAnswer{{status: 200, body: `{"pad":"` + strings.Repeat("a", maxGCRListBytes) + `"}`}}
 	u := oneUpdate(t, reg, distrolessRefresh)
-	if u.FirstSeen.Known() || !strings.Contains(u.FirstSeen.Value, "larger than 64 MB") || u.Clean.OK {
-		t.Errorf("FirstSeen %+v, Clean %+v", u.FirstSeen, u.Clean)
+	if u.Clean.OK || u.Clean.Gathered() || u.Clean.Unavailable || !strings.Contains(u.Clean.Value, "larger than 64 MB") {
+		t.Errorf("Clean %+v, want it not established", u.Clean)
+	}
+	if u.FirstSeen.Known() || !strings.Contains(u.FirstSeen.Value, "larger than 64 MB") {
+		t.Errorf("FirstSeen %+v", u.FirstSeen)
 	}
 }
 
@@ -464,14 +491,14 @@ func TestGCRDeprecated(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := healthyGCR(t)
 			reg.answers[gcrListURL] = []fakeAnswer{{status: 200, body: gcrListBody(`"1787335936959"`, tc.tags)}}
-			res, _, err := gatherWith(t, reg, distrolessRefresh)
+			res, err := gatherWith(t, reg, distrolessRefresh)
 			if err != nil {
 				t.Fatal(err)
 			}
 			u := res.Updates[0]
 			checkExplained(t, u)
-			if u.Clean.OK != tc.clean {
-				t.Errorf("Clean: %+v, want %v", u.Clean, tc.clean)
+			if u.Clean.OK != tc.clean || !u.Clean.Gathered() {
+				t.Errorf("Clean: %+v, want a gathered %v", u.Clean, tc.clean)
 			}
 			// The mark does not change what else is known.
 			if !u.Bound.Holds() || !u.FirstSeen.Known() {
@@ -489,12 +516,12 @@ func TestGCRDeprecated(t *testing.T) {
 	}
 }
 
-// A registry that cannot be asked is tried again. One that still has no
-// answer leaves what depended on it unavailable, which is a wait and
-// never a person before the deadline (spec section 11, amendment 1): the
-// run does not fail, nothing else it learned is lost, and nothing is said
-// against the pin.
-func TestTransient(t *testing.T) {
+// A registry that cannot be asked is not asked again in the same run:
+// what depended on it is unavailable, which is a wait and never a person
+// before the deadline (spec section 11, amendment 1), and the next
+// evaluation asks again. The run does not fail, nothing else it learned
+// is lost, and nothing is said against the pin.
+func TestOutage(t *testing.T) {
 	down := errors.New("connection refused: <script>")
 	tests := []struct {
 		key string
@@ -518,28 +545,11 @@ func TestTransient(t *testing.T) {
 		good := registry(t).answers[key][0]
 
 		for _, bad := range []fakeAnswer{{status: 429}, {status: 500}, {status: 502}, {status: 503}, {status: 504}, {err: down}} {
-			name := fmt.Sprintf("%s/%d", strings.SplitN(key, "?", 2)[0], bad.status)
-
-			t.Run(name+"/twice, then an answer", func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%d", strings.SplitN(key, "?", 2)[0], bad.status), func(t *testing.T) {
 				reg := registry(t)
-				reg.answers[key] = []fakeAnswer{bad, bad, good}
-				res, waits, err := gatherWith(t, reg, files)
-				if err != nil {
-					t.Fatal(err)
-				}
-				u := res.Updates[0]
-				if !u.Bound.Holds() || !u.Clean.Holds() || !u.FirstSeen.Known() {
-					t.Errorf("facts: %+v", u)
-				}
-				if reg.count(key) != 3 || !reflect.DeepEqual(waits, []time.Duration{time.Second, 2 * time.Second}) {
-					t.Errorf("asked %d times, waited %v", reg.count(key), waits)
-				}
-			})
-
-			t.Run(name+"/every time", func(t *testing.T) {
-				reg := registry(t)
-				reg.answers[key] = []fakeAnswer{bad}
-				res, waits, err := gatherWith(t, reg, files)
+				// The answer after the outage is there, and is not asked for.
+				reg.answers[key] = []fakeAnswer{bad, good}
+				res, err := gatherWith(t, reg, files)
 				if err != nil {
 					t.Fatalf("the run failed: %v", err)
 				}
@@ -565,19 +575,19 @@ func TestTransient(t *testing.T) {
 				if u.Superseded.Holds() {
 					t.Errorf("an unreachable registry is not a superseded pin: %+v", u.Superseded)
 				}
-				if reg.count(key) != maxTries || len(waits) != maxTries-1 {
-					t.Errorf("asked %d times, waited %v", reg.count(key), waits)
+				if reg.count(key) != 1 {
+					t.Errorf("asked %d times", reg.count(key))
 				}
 				if last := reg.asked[len(reg.asked)-1]; last != key {
-					t.Errorf("asked %s after giving up on %s", last, key)
+					t.Errorf("asked %s after %s went unanswered", last, key)
 				}
 
-				// The value says that the registry was not asked, with the
+				// The value says that the registry did not answer, with the
 				// status when there was one, and never the error's text.
 				said := u.Bound.Value + "\n" + u.Clean.Value + "\n" + u.FirstSeen.Value
-				want := fmt.Sprintf("could not be asked (HTTP %d, %d tries)", bad.status, maxTries)
+				want := fmt.Sprintf("did not answer (HTTP %d)", bad.status)
 				if bad.err != nil {
-					want = fmt.Sprintf("could not be reached (%d tries)", maxTries)
+					want = "could not be reached"
 				}
 				if !strings.Contains(said, want) {
 					t.Errorf("the values do not say %q:\n%s", want, said)
@@ -626,62 +636,50 @@ func TestContextEnds(t *testing.T) {
 		}
 	}
 
-	// While waiting to try again.
-	ctx, cancel := context.WithCancel(context.Background())
-	reg := healthyHub(t)
-	reg.answers[hubHeadURL] = []fakeAnswer{{status: 503}}
-	g := &Gatherer{sleep: func(ctx context.Context, d time.Duration) error {
-		cancel()
-		return ctx.Err()
-	}}
-	_, err := g.Gather(ctx, facts.Input{Files: golangRefresh, Policy: defaultPolicy(t), HTTP: &http.Client{Transport: reg}})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error %v, want the context's", err)
-	}
-	if reg.count(hubHeadURL) != 1 {
-		t.Errorf("asked %d times after the context ended", reg.count(hubHeadURL))
-	}
-
 	// Already ended before the first request.
-	reg = healthyHub(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reg := healthyHub(t)
 	reg.answers[hubTokenURL] = []fakeAnswer{{err: context.Canceled}}
-	_, err = New().Gather(ctx, facts.Input{Files: golangRefresh, Policy: defaultPolicy(t), HTTP: &http.Client{Transport: reg}})
+	_, err := New().Gather(ctx, facts.Input{Files: golangRefresh, Policy: defaultPolicy(t), HTTP: &http.Client{Transport: reg}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error %v, want the context's", err)
 	}
 }
 
-// Nothing is asked when there is nothing the gate could ask well: a
-// registry it does not know, a pin without a tag, a Shape that does not
-// hold.
+// Nothing is asked when there is nothing the gate could ask well: an
+// image whose registry it does not work out, a pin without a tag, a Shape
+// that does not hold.
 func TestNotAsked(t *testing.T) {
+	const notRead = "it is not a FROM line pinned by digest in the accepted shape (an official Docker Hub image by its bare name, or a gcr.io image)"
 	tests := []struct {
 		name  string
 		files []facts.File
 		// bound is part of Bound's value; empty means Shape must not hold
-		// and there are no updates.
+		// and there are no updates, and shape is then part of its value.
 		bound string
 		name2 string
+		shape string
 	}{
-		{"ghcr.io", oneLine("ghcr.io/example/app:1.2@"+digestA, "ghcr.io/example/app:1.3@"+digestB),
-			"ghcr.io is not a registry the gate knows how to ask", "ghcr.io/example/app"},
-		{"quay.io", oneLine("quay.io/prometheus/prometheus:3.1@"+digestA, "quay.io/prometheus/prometheus:3.2@"+digestB),
-			"quay.io is not a registry", "quay.io/prometheus/prometheus"},
-		{"a private registry with a port", oneLine("registry.example.com:5000/app:1@"+digestA, "registry.example.com:5000/app:2@"+digestB),
-			"registry.example.com:5000 is not a registry", "registry.example.com:5000/app"},
-		{"an alias of Docker Hub", oneLine("index.docker.io/library/golang:1.26@"+digestA, "index.docker.io/library/golang:1.27@"+digestB),
-			"index.docker.io is not a registry", "index.docker.io/library/golang"},
-		{"localhost", oneLine("localhost/app:1@"+digestA, "localhost/app:2@"+digestB),
-			"localhost is not a registry", "localhost/app"},
-		{"no tag at head", oneLine("golang:1.27@"+digestA, "golang@"+digestB), "pinned without a tag", "docker.io/library/golang"},
-		{"no tag at either", oneLine("golang@"+digestA, "golang@"+digestB), "pinned without a tag", "docker.io/library/golang"},
-		{name: "shape does not hold", files: []facts.File{dockerfile("Dockerfile", "FROM golang:1.26@"+digestA+"\nRUN a\n", "FROM golang:1.27@"+digestB+"\nRUN b\n")}},
-		{name: "not a Dockerfile", files: []facts.File{dockerfile("go.mod", "a\n", "b\n")}},
+		// Which registry these names mean is Docker's to say: the lines are
+		// not of the shape.
+		{name: "ghcr.io", files: oneLine("ghcr.io/example/app:1.2@"+digestA, "ghcr.io/example/app:1.3@"+digestB), shape: notRead},
+		{name: "quay.io", files: oneLine("quay.io/prometheus/prometheus:3.1@"+digestA, "quay.io/prometheus/prometheus:3.2@"+digestB), shape: notRead},
+		{name: "a private registry with a port", files: oneLine("registry.example.com:5000/app:1@"+digestA, "registry.example.com:5000/app:2@"+digestB), shape: notRead},
+		{name: "an alias of Docker Hub", files: oneLine("index.docker.io/library/golang:1.26@"+digestA, "index.docker.io/library/golang:1.27@"+digestB), shape: notRead},
+		{name: "Docker Hub written out", files: oneLine("docker.io/library/golang:1.26@"+digestA, "docker.io/library/golang:1.27@"+digestB), shape: notRead},
+		{name: "an official image with its namespace", files: oneLine("library/golang:1.26@"+digestA, "library/golang:1.27@"+digestB), shape: notRead},
+		{name: "a Docker Hub image that is not official", files: oneLine("grafana/grafana:13.1@"+digestA, "grafana/grafana:13.2@"+digestB), shape: notRead},
+		{name: "localhost", files: oneLine("localhost/app:1@"+digestA, "localhost/app:2@"+digestB), shape: notRead},
+		{name: "no tag at head", files: oneLine("golang:1.27@"+digestA, "golang@"+digestB), bound: "pinned without a tag", name2: "docker.io/library/golang"},
+		{name: "no tag at either", files: oneLine("golang@"+digestA, "golang@"+digestB), bound: "pinned without a tag", name2: "docker.io/library/golang"},
+		{name: "shape does not hold", files: []facts.File{dockerfile("Dockerfile", "FROM golang:1.26@"+digestA+"\nRUN a\n", "FROM golang:1.27@"+digestB+"\nRUN b\n")}, shape: "line 2 changed"},
+		{name: "not a Dockerfile", files: []facts.File{dockerfile("go.mod", "a\n", "b\n")}, shape: "not a file named Dockerfile*"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := &fakeRegistry{t: t} // any request fails the test
-			res, _, err := gatherWith(t, reg, tc.files)
+			res, err := gatherWith(t, reg, tc.files)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -690,8 +688,8 @@ func TestNotAsked(t *testing.T) {
 			}
 			far := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 			if tc.bound == "" {
-				if res.Shape.Holds() || !res.Shape.Gathered() || len(res.Updates) != 0 || len(res.Artifacts) != 0 {
-					t.Errorf("result: %+v", res)
+				if res.Shape.Holds() || !res.Shape.Gathered() || !strings.Contains(res.Shape.Value, tc.shape) || len(res.Updates) != 0 || len(res.Artifacts) != 0 {
+					t.Errorf("result: %+v, want Shape not to hold and to say %q", res, tc.shape)
 				}
 				if d := decide(res, defaultPolicy(t), far); d.Outcome != allow.Person || d.Reasons[0] != allow.ReasonShape {
 					t.Errorf("decision %s %v", d.Outcome, d.Reasons)
@@ -750,15 +748,14 @@ func TestVersions(t *testing.T) {
 // Known is the list and nothing else: an image is in the Dockerfile at
 // the base commit by construction, and that does not make it known.
 func TestKnownIsListed(t *testing.T) {
-	grafana := &fakeRegistry{t: t, answers: map[string][]fakeAnswer{
-		"GET https://auth.docker.io/token?scope=repository%3Agrafana%2Fgrafana%3Apull&service=registry.docker.io": {okToken},
-		"HEAD https://registry-1.docker.io/v2/grafana/grafana/manifests/1.27":                                     {okHead},
-		"GET https://hub.docker.com/v2/repositories/grafana/grafana/tags/1.27":                                    {okTag},
+	other := &fakeRegistry{t: t, answers: map[string][]fakeAnswer{
+		"HEAD https://gcr.io/v2/example-project/app/manifests/1.27": {okHead},
+		"GET https://gcr.io/v2/example-project/app/tags/list":       {okList},
 	}}
-	files := oneLine("grafana/grafana:1.26@"+digestA, "grafana/grafana:1.27@"+digestB)
+	files := oneLine("gcr.io/example-project/app:1.26@"+digestA, "gcr.io/example-project/app:1.27@"+digestB)
 
-	u := oneUpdate(t, grafana, files)
-	if u.Name != "docker.io/grafana/grafana" || u.Listed.OK || u.Known.OK || u.NewName.OK {
+	u := oneUpdate(t, other, files)
+	if u.Name != "gcr.io/example-project/app" || u.Listed.OK || u.Known.OK || u.NewName.OK {
 		t.Errorf("unlisted: %+v", u)
 	}
 	if !u.Listed.Gathered() || !u.Known.Gathered() || !u.NewName.Gathered() {
@@ -767,9 +764,9 @@ func TestKnownIsListed(t *testing.T) {
 
 	// The owner lists the publisher: the same pull request is now known.
 	policy := defaultPolicy(t)
-	policy.Listed[allow.Docker] = append(policy.Listed[allow.Docker], "docker.io/grafana/")
-	grafana.asked = nil
-	res, err := New().Gather(context.Background(), facts.Input{Files: files, Policy: policy, HTTP: &http.Client{Transport: grafana}})
+	policy.Listed[allow.Docker] = append(policy.Listed[allow.Docker], "gcr.io/example-project/")
+	other.asked = nil
+	res, err := New().Gather(context.Background(), facts.Input{Files: files, Policy: policy, HTTP: &http.Client{Transport: other}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -798,7 +795,7 @@ func TestAskedOncePerRepository(t *testing.T) {
 	hub.answers["HEAD https://registry-1.docker.io/v2/library/golang/manifests/1.27-alpine"] = []fakeAnswer{okHead}
 	hub.answers["GET https://hub.docker.com/v2/repositories/library/golang/tags/1.27-alpine"] = []fakeAnswer{
 		{status: 200, body: `{"name":"1.27-alpine","digest":"` + digestB + `","tag_last_pushed":"2026-11-16T07:23:27.867505Z"}`}}
-	res, _, err := gatherWith(t, hub, []facts.File{dockerfile("Dockerfile",
+	res, err := gatherWith(t, hub, []facts.File{dockerfile("Dockerfile",
 		"FROM golang:1.27@"+digestA+" AS build\nFROM golang:1.27-alpine@"+digestA+"\n",
 		"FROM golang:1.27@"+digestB+" AS build\nFROM golang:1.27-alpine@"+digestB+"\n")})
 	if err != nil {
@@ -811,12 +808,13 @@ func TestAskedOncePerRepository(t *testing.T) {
 		t.Errorf("token asked %d times", hub.count(hubTokenURL))
 	}
 
+	twoTags := []facts.File{dockerfile("Dockerfile",
+		"FROM gcr.io/distroless/static:nonroot@"+digestA+"\nFROM gcr.io/distroless/static:debug@"+digestB+"\n",
+		"FROM gcr.io/distroless/static:nonroot@"+digestB+"\nFROM gcr.io/distroless/static:debug@"+digestA+"\n")}
 	gcr := healthyGCR(t)
 	gcr.answers["HEAD https://gcr.io/v2/distroless/static/manifests/debug"] = []fakeAnswer{
 		{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}}}
-	res, _, err = gatherWith(t, gcr, []facts.File{dockerfile("Dockerfile",
-		"FROM gcr.io/distroless/static:nonroot@"+digestA+"\nFROM gcr.io/distroless/static:debug@"+digestB+"\n",
-		"FROM gcr.io/distroless/static:nonroot@"+digestB+"\nFROM gcr.io/distroless/static:debug@"+digestA+"\n")})
+	res, err = gatherWith(t, gcr, twoTags)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,13 +833,11 @@ func TestAskedOncePerRepository(t *testing.T) {
 	gcr.answers["HEAD https://gcr.io/v2/distroless/static/manifests/debug"] = []fakeAnswer{
 		{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}}}
 	gcr.answers[gcrListURL] = []fakeAnswer{{status: 404}}
-	res, _, err = gatherWith(t, gcr, []facts.File{dockerfile("Dockerfile",
-		"FROM gcr.io/distroless/static:nonroot@"+digestA+"\nFROM gcr.io/distroless/static:debug@"+digestB+"\n",
-		"FROM gcr.io/distroless/static:nonroot@"+digestB+"\nFROM gcr.io/distroless/static:debug@"+digestA+"\n")})
+	res, err = gatherWith(t, gcr, twoTags)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gcr.count(gcrListURL) != 1 || res.Updates[0].FirstSeen.Known() || res.Updates[1].FirstSeen.Known() {
+	if gcr.count(gcrListURL) != 1 || res.Updates[0].Clean.Gathered() || res.Updates[1].Clean.Gathered() || res.Updates[0].FirstSeen.Known() || res.Updates[1].FirstSeen.Known() {
 		t.Errorf("tag list asked %d times; %+v", gcr.count(gcrListURL), res.Updates)
 	}
 }
@@ -930,55 +926,27 @@ type brokenBody struct{}
 func (brokenBody) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
 func (brokenBody) Close() error             { return nil }
 
-// A body that breaks off is a registry that could not be asked: tried
-// again, and never read as a short answer.
+// A body that breaks off is a registry that did not answer, never read as
+// a short answer: what depended on it is unavailable, the rest stands,
+// and the error's text is not shown.
 func TestBodyBreaksOff(t *testing.T) {
-	reg := healthyHub(t)
-	broken := 2
+	reg := healthyGCR(t)
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		resp, err := reg.RoundTrip(req)
-		if err == nil && req.URL.Host == "hub.docker.com" && broken > 0 {
-			broken--
+		if err == nil && req.Method == http.MethodGet {
 			resp.Body = brokenBody{}
 		}
 		return resp, err
 	})
-	res, waits, err := gatherWith(t, rt, golangRefresh)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.Updates[0].FirstSeen.Known() || len(waits) != 2 || reg.count(hubTagURL) != 3 {
-		t.Errorf("FirstSeen %+v, waited %v, asked %d times", res.Updates[0].FirstSeen, waits, reg.count(hubTagURL))
-	}
-
-	// Every time: the time is unknown, the rest stands, and the error's
-	// text is not shown.
-	broken = maxTries
-	reg = healthyHub(t)
-	res, _, err = gatherWith(t, rt, golangRefresh)
+	res, err := gatherWith(t, rt, distrolessRefresh)
 	if err != nil {
 		t.Fatal(err)
 	}
 	u := res.Updates[0]
-	if !u.Bound.Holds() || !u.Clean.Holds() || u.FirstSeen.Known() {
-		t.Errorf("Bound %+v, Clean %+v, FirstSeen %+v", u.Bound, u.Clean, u.FirstSeen)
+	if !u.Bound.Holds() || !u.Clean.Unavailable || u.Clean.OK || u.Clean.Source == "" || reg.count(gcrListURL) != 1 {
+		t.Errorf("Bound %+v, Clean %+v, list asked %d times", u.Bound, u.Clean, reg.count(gcrListURL))
 	}
-	if want := "Docker Hub could not be reached (3 tries)"; u.FirstSeen.Value != want {
-		t.Errorf("FirstSeen says %q, want %q", u.FirstSeen.Value, want)
-	}
-}
-
-func TestSleepCtx(t *testing.T) {
-	if err := sleepCtx(context.Background(), time.Millisecond); err != nil {
-		t.Errorf("a wait that ran out: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	start := time.Now()
-	if err := sleepCtx(ctx, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Errorf("a wait whose context ended: %v", err)
-	}
-	if time.Since(start) > 10*time.Second {
-		t.Error("the wait did not end with its context")
+	if want := "the registry's tag list could not be reached"; u.Clean.Value != want {
+		t.Errorf("Clean says %q, want %q", u.Clean.Value, want)
 	}
 }

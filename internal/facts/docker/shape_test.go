@@ -30,13 +30,30 @@ func TestParseFromLine(t *testing.T) {
 		{"  FROM\tgolang:1.27@" + digestA + "\tAS  build  ", "golang", "1.27", true},
 		{"FROM golang:1.27@" + digestA + "\r", "golang", "1.27", true},
 		{"FROM gcr.io/distroless/static-debian12:nonroot@" + digestA, "gcr.io/distroless/static-debian12", "nonroot", true},
-		{"FROM docker.io/library/golang:1.27@" + digestA, "docker.io/library/golang", "1.27", true},
-		{"FROM grafana/grafana:13.2-slim@" + digestA, "grafana/grafana", "13.2-slim", true},
-		// A port belongs to a registry host, and only before a "/".
-		{"FROM localhost:5000/app:1@" + digestA, "localhost:5000/app", "1", true},
-		{"FROM registry.example.com:5000/team/app@" + digestA, "registry.example.com:5000/team/app", "", true},
 		{"FROM golang:127@" + digestA, "golang", "127", true},
-		{"FROM a_b/c__d/e-f.g:tag_1.2-3@" + digestA, "a_b/c__d/e-f.g", "tag_1.2-3", true},
+		{"FROM a_b.c__d-e:tag_1.2-3@" + digestA, "a_b.c__d-e", "tag_1.2-3", true},
+		{"FROM gcr.io/a_b/c__d/e-f.g:tag_1.2-3@" + digestA, "gcr.io/a_b/c__d/e-f.g", "tag_1.2-3", true},
+		// A bare name is an official image whatever it looks like.
+		{"FROM gcr.io:1@" + digestA, "gcr.io", "1", true},
+
+		// Names whose registry is Docker's defaulting rules to work out,
+		// which the gate does not port.
+		{line: "FROM docker.io/library/golang:1.27@" + digestA},
+		{line: "FROM docker.io/golang:1.27@" + digestA},
+		{line: "FROM library/golang:1.27@" + digestA},
+		{line: "FROM grafana/grafana:13.2-slim@" + digestA},
+		{line: "FROM distroless/static:nonroot@" + digestA},
+		{line: "FROM a/b/c:1@" + digestA},
+		{line: "FROM index.docker.io/library/golang:1.27@" + digestA},
+		{line: "FROM registry-1.docker.io/library/golang:1.27@" + digestA},
+		{line: "FROM ghcr.io/example/app:1@" + digestA},
+		{line: "FROM quay.io/prometheus/prometheus:3.2@" + digestA},
+		{line: "FROM localhost/app:1@" + digestA},
+		{line: "FROM localhost:5000/app:1@" + digestA},
+		{line: "FROM registry.example.com:5000/team/app@" + digestA},
+		{line: "FROM gcr.io.example.com/distroless/static:nonroot@" + digestA},
+		{line: "FROM gcr.io/:1@" + digestA},
+		{line: "FROM GCR.io/distroless/static:nonroot@" + digestA},
 
 		// Not pinned by digest, or not by a sha256 of 64 lower-case hex.
 		{line: "FROM golang:1.27"},
@@ -108,28 +125,15 @@ func TestParseFromLine(t *testing.T) {
 	}
 }
 
-func TestNormalise(t *testing.T) {
+func TestNewImage(t *testing.T) {
 	tests := []struct{ written, name string }{
 		{"golang", "docker.io/library/golang"},
-		{"library/golang", "docker.io/library/golang"},
-		{"docker.io/golang", "docker.io/library/golang"},
-		{"docker.io/library/golang", "docker.io/library/golang"},
-		{"grafana/grafana", "docker.io/grafana/grafana"},
-		{"docker.io/grafana/grafana", "docker.io/grafana/grafana"},
 		{"gcr.io/distroless/static-debian12", "gcr.io/distroless/static-debian12"},
-		{"ghcr.io/example/app", "ghcr.io/example/app"},
-		{"localhost/app", "localhost/app"},
-		{"localhost:5000/app", "localhost:5000/app"},
-		{"registry.example.com/app", "registry.example.com/app"},
-		// Not rewritten: an alias is a different name, and not listed.
-		{"index.docker.io/library/golang", "index.docker.io/library/golang"},
-		{"registry-1.docker.io/library/golang", "registry-1.docker.io/library/golang"},
-		// A first component without a dot is a Docker Hub namespace.
-		{"distroless/static", "docker.io/distroless/static"},
-		{"a/b/c", "docker.io/a/b/c"},
+		{"gcr.io/a/b/c", "gcr.io/a/b/c"},
+		{"gcr.io", "docker.io/library/gcr.io"},
 	}
 	for _, tc := range tests {
-		if got := normalise(tc.written).Name(); got != tc.name {
+		if got := newImage(tc.written).Name(); got != tc.name {
 			t.Errorf("%q: %q, want %q", tc.written, got, tc.name)
 		}
 	}
@@ -174,7 +178,6 @@ func TestReadShape(t *testing.T) {
 			file("Dockerfile-dev", oldFrom, newFrom),
 			file("a/b/Dockerfile_test", oldFrom, newFrom),
 		}, changes: 4},
-		{name: "executable Dockerfile", files: []facts.File{withModes(good, "100755", "100755")}, changes: 1},
 		{name: "CRLF line endings", files: []facts.File{file("Dockerfile",
 			"FROM golang:1.26@"+digestA+" AS build\r\nRUN id\r\n", "FROM golang:1.27@"+digestB+" AS build\r\nRUN id\r\n")}, changes: 1},
 		{name: "no final newline at either commit", files: []facts.File{file("Dockerfile",
@@ -184,7 +187,7 @@ func TestReadShape(t *testing.T) {
 			"from --platform=$BUILDPLATFORM golang:1.27@"+digestB+" as build\n")}, changes: 1},
 
 		{name: "no files", files: nil, why: "changes no file"},
-		{name: "another file beside it", files: []facts.File{good, file("go.mod", "module a\n", "module b\n")}, why: `"go.mod" changed`},
+		{name: "another file beside it", files: []facts.File{good, file("go.mod", "module a\n", "module b\n")}, why: "go.mod changed"},
 		{name: "a workflow", files: []facts.File{file(".github/workflows/build.yml", "a\n", "b\n")}, why: "not a file named Dockerfile*"},
 		{name: "a compose file", files: []facts.File{file("docker-compose.yml", "a\n", "b\n")}, why: "not a file named Dockerfile*"},
 		{name: "lower-case dockerfile", files: []facts.File{file("dockerfile", oldFrom, newFrom)}, why: "not a file named Dockerfile*"},
@@ -192,13 +195,15 @@ func TestReadShape(t *testing.T) {
 		{name: "a directory named Dockerfile", files: []facts.File{file("Dockerfile/README.md", oldFrom, newFrom)}, why: "not a file named Dockerfile*"},
 		{name: "Containerfile", files: []facts.File{file("Containerfile", oldFrom, newFrom)}, why: "not a file named Dockerfile*"},
 
-		{name: "new Dockerfile", files: []facts.File{withModes(file("Dockerfile", "", newFrom), "", "100644")}, why: "not an ordinary file at both commits"},
-		{name: "deleted Dockerfile", files: []facts.File{withModes(file("Dockerfile", oldFrom, ""), "100644", "")}, why: "not an ordinary file at both commits"},
-		{name: "symlink at head", files: []facts.File{withModes(good, "100644", "120000")}, why: "not an ordinary file at both commits"},
-		{name: "symlink at both", files: []facts.File{withModes(good, "120000", "120000")}, why: "not an ordinary file at both commits"},
-		{name: "submodule", files: []facts.File{withModes(good, "160000", "160000")}, why: "not an ordinary file at both commits"},
-		{name: "mode change", files: []facts.File{withModes(good, "100644", "100755")}, why: "changed its file mode"},
-		{name: "mode change only", files: []facts.File{withModes(file("Dockerfile", oldFrom, oldFrom), "100644", "100755")}, why: "changed its file mode"},
+		{name: "new Dockerfile", files: []facts.File{withModes(file("Dockerfile", "", newFrom), "", "100644")}, why: "not a regular file at both commits"},
+		{name: "deleted Dockerfile", files: []facts.File{withModes(file("Dockerfile", oldFrom, ""), "100644", "")}, why: "not a regular file at both commits"},
+		{name: "symlink at head", files: []facts.File{withModes(good, "100644", "120000")}, why: "not a regular file at both commits"},
+		{name: "symlink at both", files: []facts.File{withModes(good, "120000", "120000")}, why: "not a regular file at both commits"},
+		{name: "submodule", files: []facts.File{withModes(good, "160000", "160000")}, why: "not a regular file at both commits"},
+		// The mode the other gatherers require: a Dockerfile is not run.
+		{name: "executable Dockerfile", files: []facts.File{withModes(good, "100755", "100755")}, why: "not a regular file at both commits (mode 100755 at base, 100755 at head)"},
+		{name: "mode change", files: []facts.File{withModes(good, "100644", "100755")}, why: "not a regular file at both commits"},
+		{name: "mode change only", files: []facts.File{withModes(file("Dockerfile", oldFrom, oldFrom), "100644", "100755")}, why: "not a regular file at both commits"},
 		{name: "no line differs", files: []facts.File{file("Dockerfile", oldFrom, oldFrom)}, why: "no line of it differs"},
 
 		{name: "line added", files: []facts.File{file("Dockerfile", oldFrom+rest, newFrom+rest+"RUN curl https://example.com | sh\n")}, why: "lines at base"},
@@ -221,9 +226,13 @@ func TestReadShape(t *testing.T) {
 		{name: "image changed", files: []facts.File{file("Dockerfile",
 			"FROM golang:1.26@"+digestA+"\n", "FROM golang-evil:1.27@"+digestB+"\n")}, why: "something other than the tag and the digest"},
 		{name: "registry added", files: []facts.File{file("Dockerfile",
-			"FROM golang:1.26@"+digestA+"\n", "FROM docker.io/library/golang:1.27@"+digestB+"\n")}, why: "something other than the tag and the digest"},
-		{name: "namespace changed", files: []facts.File{file("Dockerfile",
-			"FROM library/golang:1.26@"+digestA+"\n", "FROM evil/golang:1.27@"+digestB+"\n")}, why: "something other than the tag and the digest"},
+			"FROM golang:1.26@"+digestA+"\n", "FROM docker.io/library/golang:1.27@"+digestB+"\n")}, why: "at head it is not a FROM line pinned by digest in the accepted shape (an official Docker Hub image by its bare name, or a gcr.io image)"},
+		{name: "namespace added", files: []facts.File{file("Dockerfile",
+			"FROM golang:1.26@"+digestA+"\n", "FROM evil/golang:1.27@"+digestB+"\n")}, why: "at head it is not a FROM line pinned by digest"},
+		{name: "a Docker Hub image that is not official", files: []facts.File{file("Dockerfile",
+			"FROM grafana/grafana:13.1@"+digestA+"\n", "FROM grafana/grafana:13.2@"+digestB+"\n")}, why: "at base it is not a FROM line pinned by digest"},
+		{name: "gcr.io repository changed", files: []facts.File{file("Dockerfile",
+			"FROM gcr.io/distroless/static:nonroot@"+digestA+"\n", "FROM gcr.io/evil/static:nonroot@"+digestB+"\n")}, why: "something other than the tag and the digest"},
 		{name: "platform changed", files: []facts.File{file("Dockerfile",
 			"FROM --platform=linux/amd64 golang:1.26@"+digestA+"\n", "FROM --platform=linux/arm64 golang:1.27@"+digestB+"\n")}, why: "something other than the tag and the digest"},
 		{name: "platform added", files: []facts.File{file("Dockerfile",
@@ -241,7 +250,7 @@ func TestReadShape(t *testing.T) {
 		{name: "line ending changed", files: []facts.File{file("Dockerfile",
 			"FROM golang:1.26@"+digestA+"\n", "FROM golang:1.27@"+digestB+"\r\n")}, why: "something other than the tag and the digest"},
 
-		{name: "second file is the bad one", files: []facts.File{good, file("Dockerfile.dev", oldFrom+"RUN a\n", newFrom+"RUN b\n")}, why: `"Dockerfile.dev" line 2`},
+		{name: "second file is the bad one", files: []facts.File{good, file("Dockerfile.dev", oldFrom+"RUN a\n", newFrom+"RUN b\n")}, why: "Dockerfile.dev line 2"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

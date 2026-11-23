@@ -269,7 +269,9 @@ func TestFirstSeenDown(t *testing.T) {
 			// And the fact built from it.
 			ix = &index{client: client, url: defaultIndexURL, limit: 3, perVersion: 2, left: 10}
 			f := seenFact(context.Background(), ix, "example.com/m", "v1.0.0", ts("2024-01-01T00:10:00Z"), testNow)
-			if f.Known() || f.Unavailable != tc.down || f.Source == "" {
+			// Unavailable names the index as its source; a time nothing
+			// established has none.
+			if f.Known() || f.Unavailable != tc.down || (f.Source != "") != tc.down {
 				t.Errorf("fact %+v, want unavailable = %v", f, tc.down)
 			}
 		})

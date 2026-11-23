@@ -175,7 +175,7 @@ func TestLiveIndexNotFound(t *testing.T) {
 	if got.Known() {
 		t.Errorf("found within 3 pages: %+v; the experiment's premise no longer holds", got)
 	}
-	if got.OK || !got.Time.IsZero() || !strings.HasPrefix(got.Value, "unknown:") {
-		t.Errorf("FirstSeen = %+v, want unknown with no time", got)
+	if got.OK || !got.Time.IsZero() || !strings.HasPrefix(got.Value, "not established:") {
+		t.Errorf("FirstSeen = %+v, want it not established, with no time", got)
 	}
 }

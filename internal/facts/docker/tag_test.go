@@ -96,46 +96,38 @@ func TestCompareTags(t *testing.T) {
 	}
 }
 
-func TestParseVersionTag(t *testing.T) {
+func TestVersionOf(t *testing.T) {
 	tests := []struct {
 		tag     string
-		numbers []int
+		version string // what x/mod/semver is given
 		suffix  string
 		ok      bool
 	}{
-		{"1", []int{1}, "", true},
-		{"0", []int{0}, "", true},
-		{"1.27", []int{1, 27}, "", true},
-		{"1.27.3", []int{1, 27, 3}, "", true},
-		{"1.27-bookworm", []int{1, 27}, "-bookworm", true},
-		{"22.11.0-bookworm-slim", []int{22, 11, 0}, "-bookworm-slim", true},
-		{"1-2", []int{1}, "-2", true},
-		{"999999999", []int{999999999}, "", true},
-		{"1000000000", nil, "", false},
-		{"00", nil, "", false},
-		{"1.07", nil, "", false},
-		{"", nil, "", false},
-		{"nonroot", nil, "", false},
-		{"1.27 ", nil, "", false},
-		{"1.27\n", nil, "", false},
+		{"1", "v1", "", true},
+		{"0", "v0", "", true},
+		{"1.27", "v1.27", "", true},
+		{"1.27.3", "v1.27.3", "", true},
+		{"1.27-bookworm", "v1.27", "-bookworm", true},
+		{"22.11.0-bookworm-slim", "v22.11.0", "-bookworm-slim", true},
+		{"1-2", "v1", "-2", true},
+		{"999999999", "v999999999", "", true},
+		{"1000000000", "", "", false},
+		{"1.1000000000", "", "", false},
+		{"00", "", "", false},
+		{"1.07", "", "", false},
+		{"", "", "", false},
+		{"nonroot", "", "", false},
+		{"1.27 ", "", "", false},
+		{"1.27\n", "", "", false},
+		{"1.2.3.4", "", "", false},
+		{"1.2.3+build", "", "", false},
+		{"1.27-", "", "", false},
+		{"v1.27", "", "", false},
 	}
 	for _, tc := range tests {
-		got, ok := parseVersionTag(tc.tag)
-		if ok != tc.ok {
-			t.Errorf("%q: ok %v, want %v", tc.tag, ok, tc.ok)
-			continue
-		}
-		if !ok {
-			continue
-		}
-		if len(got.numbers) != len(tc.numbers) || got.suffix != tc.suffix {
-			t.Errorf("%q: %+v, want %v %q", tc.tag, got, tc.numbers, tc.suffix)
-			continue
-		}
-		for i := range got.numbers {
-			if got.numbers[i] != tc.numbers[i] {
-				t.Errorf("%q: %+v, want %v", tc.tag, got, tc.numbers)
-			}
+		version, suffix, ok := versionOf(tc.tag)
+		if ok != tc.ok || version != tc.version || suffix != tc.suffix {
+			t.Errorf("%q: %q %q %v, want %q %q %v", tc.tag, version, suffix, ok, tc.version, tc.suffix, tc.ok)
 		}
 	}
 }

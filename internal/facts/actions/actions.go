@@ -1,50 +1,10 @@
-// Package actions gathers the facts for a GitHub Actions pull request
-// (docs/v0.2-spec.md, sections 3, 4 and 6).
-//
-// The change set is read without a YAML parser (shape.go): the changed
-// files must be workflows, local action.yml files or
-// .github/workflows/actions.lock, base and head must have the same number
-// of lines, and every changed line must be one exact pin shape that
-// differs only in its commit and version tokens. Anything else makes the
-// Shape fact not hold, and nothing further is asked.
-//
-// The facts about each pin come from GitHub's REST API (github.go):
-//
-//   - Bound: the new tag resolves to the pinned commit, and the
-//     repository and owner IDs GitHub reports are the ones actions.lock
-//     recorded at the base commit. A commit-pinned line that no changed
-//     lockfile entry records has no recorded IDs to compare with, so its
-//     Bound does not hold and the update goes to a person.
-//   - NoRegress: the new commit is ahead of the old one, a branch releases
-//     are cut from (the default branch or releases/v<major>) holds it, and
-//     the tag resolves to it.
-//   - Clean: the tag has a published release that is not a draft or a
-//     prerelease, and the advisory database has nothing against it.
-//   - FirstSeen: the release's published_at, when the release is
-//     immutable. For any other release it is left unknown with its Source
-//     set to the release that was read: GitHub was asked and has no clock
-//     for this version that the publisher cannot set again. The fetch
-//     command then uses the pull request's creation time (spec section
-//     11, amendment 4).
-//
-// Two kinds of change never merge, by rule (spec section 11, amendments 6
-// and 7). A changed line that pins a reusable workflow makes Shape not
-// hold, the gate's own pin included: the gate never approves its
-// successor. And a commit pin that no changed actions.lock entry records
-// has no baseline for the repository's IDs, so its Bound does not hold.
-//
-// A question GitHub did not answer (a server error, a rate limit, the
-// network) leaves the facts that depend on it unavailable, which is a
-// wait; an answer that could not be read leaves them without a source,
-// which is person.
-//
-// The gatherer holds no state and makes only GET requests. It changes no
-// setting anywhere. Where one of these facts depends on a setting of a
-// repository the owner controls (immutable releases on an action or
-// reusable-workflow repository of their own, so that FirstSeen can come
-// from GitHub), that setting is applied like every other repository
-// setting: where the owner keeps them as code, not with gh and not by
-// hand.
+// Package actions gathers the facts for a GitHub Actions pull request.
+// The change set is read without a YAML parser (shape.go): tag pins in
+// workflows and their entries in actions.lock, by exact line shape. The
+// facts about each pin come from GitHub's REST API (github.go), with GET
+// requests only. A pin of a reusable workflow, a commit pin and a
+// workflow without actions.lock make Shape not hold (spec section 11,
+// amendments 6 and 7).
 package actions
 
 import (
@@ -52,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/semver"
 
@@ -62,14 +23,11 @@ import (
 	"github.com/sadbox/dep-review/internal/gh"
 )
 
-// Gatherer is the GitHub Actions fact gatherer. The zero value is ready
-// to use.
+// Gatherer is the GitHub Actions fact gatherer.
 type Gatherer struct{}
 
 // New returns the GitHub Actions gatherer.
 func New() *Gatherer { return &Gatherer{} }
-
-var _ facts.Gatherer = (*Gatherer)(nil)
 
 // shapeSource is the Source of the Shape fact: it is read from the two
 // commits' file contents and nothing else.
@@ -78,14 +36,8 @@ const shapeSource = "changed files at the base and head commits"
 // policySource is the Source of the Listed fact.
 const policySource = "policy list " + allow.GitHubActions
 
-// Gather reads the change set from in.Files and gathers the facts of
-// every pin it moves. It uses in.GitHub, in.Advisories and in.Policy.
-//
-// The error is for a run that cannot produce a result: no GitHub client
-// or advisory checker, or a context that ended. A question GitHub did not
-// answer is not an error: the facts that depend on it are returned
-// unavailable, with the reason in their Value, and the next evaluation
-// asks again.
+// Gather implements facts.Gatherer with in.GitHub, in.Advisories and
+// in.Policy.
 func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
 	if in.GitHub == nil {
 		return facts.Result{}, errors.New("actions: no GitHub client")
@@ -116,12 +68,9 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 }
 
 // Changes is the half of Gather that reads nothing but the pull request's
-// files: the Shape fact, and every pin the pull request moves with the
-// facts the files and the policy list establish (Known, Listed, NewName,
-// Increase and Major). Every other fact is left unset, Bound included:
-// that a pin has no actions.lock entry is said by Gather, with what GitHub
-// reports. Gather starts from the same reading; the replay command runs
-// this half alone.
+// files: Shape, and every pin with the facts the files and the policy
+// list establish (Known, Listed, NewName, Increase and Major). The replay
+// command runs this half alone.
 func Changes(files []facts.File, policy allow.Policy) facts.Result {
 	_, res := readFiles(files, policy)
 	return res
@@ -175,7 +124,7 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 	if err != nil {
 		return err
 	}
-	branch, err := findBranch(ctx, c, p.name, repo, "releases/"+semver.Major(p.to), p.newCommit)
+	branch, err := onBranch(ctx, c, p.name, repo, "releases/"+semver.Major(p.to), p.newCommit)
 	if err != nil {
 		return err
 	}
@@ -194,9 +143,13 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 		advice = advisory.Result{}
 	}
 
-	u.Bound = bound(p, repo, tag)
-	u.NoRegress = noRegress(p, tag, ahead, branch)
-	u.Clean = clean(p, rel, advice)
+	// Each fact is its conditions combined with allow.Fact.And: a "no"
+	// first, then an answer that could not be read, then an outage, so a
+	// fact is a wait only when waiting could still make it hold.
+	tagged := tagFact(p, tag)
+	u.Bound = tagged.And(repoFact(p, repo))
+	u.NoRegress = aheadFact(p, ahead).And(branch).And(tagged)
+	u.Clean = releaseFact(p, rel).And(facts.AdvisoryClean(advice))
 	u.FirstSeen = firstSeen(p, rel)
 	// As the checker returned it: unavailable or never gathered when it
 	// could not tell.
@@ -236,109 +189,58 @@ func major(p pin) allow.Fact {
 	return allow.No("both "+to, p.where)
 }
 
-// parts collects the conditions of one fact, in the order allow.Fact.And
-// combines facts. A condition that is false makes the fact a gathered
-// "no". Otherwise a condition whose answer could not be read leaves the
-// fact ungathered: its Value says why and its Source stays empty, which
-// allow reads as never gathered. Otherwise a condition GitHub did not
-// answer for makes it unavailable, so the fact is a wait only when
-// waiting could still make it hold.
-type parts struct {
-	yes, no, unknown, unavailable []string
-}
-
-func (p *parts) fact(source string) allow.Fact {
-	switch {
-	case len(p.no) > 0:
-		return allow.No(strings.Join(p.no, "; "), source)
-	case len(p.unknown) > 0:
-		return allow.Fact{Value: "not established: " + strings.Join(p.unknown, "; ")}
-	case len(p.unavailable) > 0:
-		return allow.Unavailable(strings.Join(p.unavailable, "; "), source)
-	}
-	return allow.Yes(strings.Join(p.yes, "; "), source)
-}
-
-// unanswered files a lookup that has no usable answer under the bucket
-// its state calls for.
-func (p *parts) unanswered(state lookup, what string) {
-	if state == unreachable {
-		p.unavailable = append(p.unavailable, what)
-	} else {
-		p.unknown = append(p.unknown, what)
-	}
-}
-
-// tagPart adds "the new tag resolves to the pinned commit" to a fact. It
-// is part of Bound and of NoRegress.
-func tagPart(ps *parts, p pin, tag tagAnswer) {
+// tagFact is "the new tag resolves to the pinned commit", a part of Bound
+// and of NoRegress.
+func tagFact(p pin, tag tagAnswer) allow.Fact {
+	source := "GitHub: repos/" + p.name + "/git/ref/tags/" + p.to
 	switch {
 	case tag.state == failed || tag.state == unreachable:
-		ps.unanswered(tag.state, "tag "+p.to+" could not be read: "+tag.why())
+		return tag.unanswered("tag "+p.to+" could not be read", source)
 	case tag.state == missing:
-		ps.no = append(ps.no, "tag "+p.to+" does not exist")
+		return allow.No("tag "+p.to+" does not exist", source)
 	case tag.problem != "":
-		ps.no = append(ps.no, tag.problem)
+		return allow.No(tag.problem, source)
 	case tag.commit != p.newCommit:
-		ps.no = append(ps.no, "tag "+p.to+" is commit "+tag.commit+", the pin is "+p.newCommit)
-	default:
-		ps.yes = append(ps.yes, "tag "+p.to+" is commit "+p.newCommit)
+		return allow.No("tag "+p.to+" is commit "+tag.commit+", the pin is "+p.newCommit, source)
 	}
+	return allow.Yes("tag "+p.to+" is commit "+p.newCommit, source)
 }
 
-// bound is the Bound fact: the tag resolves to the pinned commit, and the
-// repository behind the name is the one the old pin was taken from.
-func bound(p pin, repo repoAnswer, tag tagAnswer) allow.Fact {
-	var ps parts
-	tagPart(&ps, p, tag)
-
+// repoFact is the other part of Bound: the repository behind the name is
+// the one the old pin was taken from, by the IDs actions.lock recorded.
+// The IDs are the defence against a name that was registered again by
+// someone else.
+func repoFact(p pin, repo repoAnswer) allow.Fact {
+	source := "GitHub: repos/" + p.name
 	switch {
 	case repo.state == failed || repo.state == unreachable:
-		ps.unanswered(repo.state, "the repository could not be read: "+repo.why())
+		return repo.unanswered("the repository could not be read", source)
 	case repo.state == missing:
-		ps.no = append(ps.no, "the repository was not found")
+		return allow.No("the repository was not found", source)
 	case !strings.EqualFold(repo.FullName, p.name):
 		// GitHub followed a redirect: the repository was renamed or
 		// transferred, and the name in the workflow is free for someone
 		// else to register.
-		ps.no = append(ps.no, "the name leads to a repository that is now called something else (renamed or transferred)")
-	case !p.locked:
-		// The IDs are the defence against a name that was registered
-		// again by someone else, and a workflow line records none. Only
-		// actions.lock does.
-		ps.no = append(ps.no, fmt.Sprintf("no actions.lock entry records the repository's IDs for the old pin, so GitHub's (repository %d, owner %d) cannot be compared", repo.ID, repo.Owner.ID))
+		return allow.No("the name leads to a repository that is now called something else (renamed or transferred)", source)
 	case repo.ID != p.repoID || repo.Owner.ID != p.ownerID:
-		ps.no = append(ps.no, fmt.Sprintf("actions.lock records repository %d of owner %d, GitHub reports repository %d of owner %d", p.repoID, p.ownerID, repo.ID, repo.Owner.ID))
-	default:
-		ps.yes = append(ps.yes, fmt.Sprintf("repository %d of owner %d, as actions.lock records", repo.ID, repo.Owner.ID))
+		return allow.No(fmt.Sprintf("actions.lock records repository %d of owner %d, GitHub reports repository %d of owner %d", p.repoID, p.ownerID, repo.ID, repo.Owner.ID), source)
 	}
-	return ps.fact("GitHub: repos/" + p.name + " and git/ref/tags/" + p.to)
+	return allow.Yes(fmt.Sprintf("repository %d of owner %d, as actions.lock records", repo.ID, repo.Owner.ID), source)
 }
 
-// noRegress is the NoRegress fact: the new commit descends from the old
-// one, a default or release branch holds it, and the tag resolves to it.
-func noRegress(p pin, tag tagAnswer, ahead compareAnswer, branch reach) allow.Fact {
-	var ps parts
+// aheadFact is the first part of NoRegress: the new commit descends from
+// the old one.
+func aheadFact(p pin, ahead compareAnswer) allow.Fact {
+	source := "GitHub: repos/" + p.name + "/compare/" + p.oldCommit + "..." + p.newCommit
 	switch {
 	case ahead.state == failed || ahead.state == unreachable:
-		ps.unanswered(ahead.state, "the old and new commits could not be compared: "+ahead.why())
+		return ahead.unanswered("the old and new commits could not be compared", source)
 	case ahead.state == missing:
-		ps.no = append(ps.no, "GitHub cannot compare the old and new commits: one of them is not in the repository")
+		return allow.No("GitHub cannot compare the old and new commits: one of them is not in the repository", source)
 	case !ahead.isAhead():
-		ps.no = append(ps.no, fmt.Sprintf("the new commit does not descend from the old one (%s: %d ahead, %d behind)", compareStatus(ahead.Status), ahead.AheadBy, ahead.BehindBy))
-	default:
-		ps.yes = append(ps.yes, fmt.Sprintf("%d commit(s) ahead of the old pin", ahead.AheadBy))
+		return allow.No(fmt.Sprintf("the new commit does not descend from the old one (%s: %d ahead, %d behind)", compareStatus(ahead.Status), ahead.AheadBy, ahead.BehindBy), source)
 	}
-	switch branch.state {
-	case failed, unreachable:
-		ps.unanswered(branch.state, branch.detail)
-	case missing:
-		ps.no = append(ps.no, branch.detail)
-	default:
-		ps.yes = append(ps.yes, "on branch "+branch.branch)
-	}
-	tagPart(&ps, p, tag)
-	return ps.fact("GitHub: repos/" + p.name + "/compare and git/ref/tags/" + p.to)
+	return allow.Yes(fmt.Sprintf("%d commit(s) ahead of the old pin", ahead.AheadBy), source)
 }
 
 // compareStatus returns GitHub's comparison status when it is one of the
@@ -351,45 +253,23 @@ func compareStatus(s string) string {
 	return "unrecognised status"
 }
 
-// clean is the Clean fact: the version is a published release, and the
-// advisory database has no malware advisory and no new advisory for it.
-func clean(p pin, rel releaseAnswer, adv advisory.Result) allow.Fact {
-	var ps parts
+// releaseFact is the release part of Clean: the version is a published
+// release, not a draft or a prerelease.
+func releaseFact(p pin, rel releaseAnswer) allow.Fact {
+	source := "GitHub: repos/" + p.name + "/releases/tags/" + p.to
 	switch {
 	case rel.state == failed || rel.state == unreachable:
-		ps.unanswered(rel.state, "the release could not be read: "+rel.why())
+		return rel.unanswered("the release could not be read", source)
 	case rel.state == missing:
-		ps.no = append(ps.no, "tag "+p.to+" has no release")
+		return allow.No("tag "+p.to+" has no release", source)
 	case rel.TagName != p.to:
-		ps.no = append(ps.no, "GitHub answered with the release of another tag")
+		return allow.No("GitHub answered with the release of another tag", source)
 	case rel.Draft:
-		ps.no = append(ps.no, "release "+p.to+" is a draft")
+		return allow.No("release "+p.to+" is a draft", source)
 	case rel.Prerelease:
-		ps.no = append(ps.no, "release "+p.to+" is a prerelease")
-	default:
-		ps.yes = append(ps.yes, "release "+p.to+" is published, not a draft or a prerelease")
+		return allow.No("release "+p.to+" is a prerelease", source)
 	}
-	advisoryPart(&ps, adv.NoMalware, "malware advisory")
-	advisoryPart(&ps, adv.NoNewAdvisory, "new advisory")
-	return ps.fact("GitHub: repos/" + p.name + "/releases/tags/" + p.to + " and the advisory database")
-}
-
-// advisoryPart adds one of the advisory checker's facts to Clean. Its
-// Value is the checker's own text (advisory IDs, or why it could not
-// tell).
-func advisoryPart(ps *parts, f allow.Fact, what string) {
-	switch {
-	case f.Unavailable && f.Source != "":
-		ps.unavailable = append(ps.unavailable, what+": "+f.Value)
-	case !f.Gathered() && f.Value != "":
-		ps.unknown = append(ps.unknown, what+": "+f.Value)
-	case !f.Gathered():
-		ps.unknown = append(ps.unknown, "whether there is a "+what+" is not known")
-	case !f.OK:
-		ps.no = append(ps.no, what+": "+f.Value)
-	default:
-		ps.yes = append(ps.yes, "no "+what)
-	}
+	return allow.Yes("release "+p.to+" is published, not a draft or a prerelease", source)
 }
 
 // firstSeen is the FirstSeen fact. published_at of an immutable release
@@ -402,22 +282,21 @@ func advisoryPart(ps *parts, f allow.Fact, what string) {
 // was opened.
 func firstSeen(p pin, rel releaseAnswer) allow.TimeFact {
 	source := "GitHub: repos/" + p.name + "/releases/tags/" + p.to
-	switch rel.state {
-	case unreachable:
-		return allow.UnavailableTime("the release could not be read: "+rel.why(), source)
-	case failed:
+	switch {
+	case rel.state == unreachable:
+		return allow.UnavailableTime("the release could not be read: GitHub did not answer", source)
+	case rel.state == failed:
 		// An answer that could not be read: no Source either.
-		return allow.TimeFact{Value: "not established: the release could not be read: " + rel.why()}
-	}
-	if !rel.published(p.to) {
+		return facts.NotEstablishedTime("the release could not be read")
+	case rel.state != found || rel.TagName != p.to || rel.Draft || rel.Prerelease:
 		return allow.TimeFact{Value: "tag " + p.to + " has no published release", Source: source}
 	}
-	at, ok := rel.publishedAt()
-	if !ok {
+	at, err := time.Parse(time.RFC3339, rel.PublishedAt)
+	if err != nil || at.IsZero() {
 		return allow.TimeFact{Value: "release " + p.to + " has no readable published_at", Source: source}
 	}
 	if !rel.Immutable {
-		return allow.TimeFact{Value: "release " + p.to + " is not immutable, so its published_at (" + at.Format("2006-01-02T15:04:05Z") + ") is not a time the publisher cannot set", Source: source}
+		return allow.TimeFact{Value: "release " + p.to + " is not immutable, so its published_at (" + at.UTC().Format("2006-01-02T15:04:05Z") + ") is not a time the publisher cannot set", Source: source}
 	}
-	return allow.At(at, source+" published_at (immutable release)")
+	return allow.At(at.UTC(), source+" published_at (immutable release)")
 }

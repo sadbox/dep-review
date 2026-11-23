@@ -101,7 +101,7 @@ func TestGather(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !res.Shape.Holds() || !strings.Contains(res.Shape.Value, "2 require lines moved or added, 1 removed (example.com/dropped)") {
+	if !res.Shape.Holds() || !strings.Contains(res.Shape.Value, "2 require lines moved or added") {
 		t.Errorf("Shape = %+v", res.Shape)
 	}
 	if len(res.Updates) != 2 {
@@ -248,7 +248,7 @@ func TestGatherBound(t *testing.T) {
 		files   []facts.File
 		tool    func(*fakeTool)
 		want    string // substring of x/text's Bound value; empty: it holds
-		unknown bool   // never gathered: no source, and the value says "unknown:"
+		unknown bool   // never gathered: no source, and the value says "not established:"
 	}{
 		{"go.sum pins what the checksum database has", pr(baseMod, headMod, baseSum, headSum), nil, "", false},
 		{"go.sum pins another zip hash", pr(baseMod, headMod, baseSum, strings.Replace(headSum, hText033, hText032, 1)), nil,
@@ -297,7 +297,7 @@ func TestGatherBound(t *testing.T) {
 			}
 			// A "no" has a source; a fact nothing established has none.
 			// Neither is an outage.
-			if bound.OK || bound.Unavailable || bound.Gathered() == tc.unknown || !strings.Contains(bound.Value, tc.want) || strings.HasPrefix(bound.Value, "unknown:") != tc.unknown {
+			if bound.OK || bound.Unavailable || bound.Gathered() == tc.unknown || !strings.Contains(bound.Value, tc.want) || strings.HasPrefix(bound.Value, "not established:") != tc.unknown {
 				t.Errorf("Bound = %+v, want it not to hold with %q (never gathered: %v)", bound, tc.want, tc.unknown)
 			}
 			if hasArtifact(res, "golang.org/x/text") {
@@ -330,7 +330,7 @@ func TestGatherStopsAtShape(t *testing.T) {
 		files []facts.File
 	}{
 		{"a replace is added", pr(baseMod, headMod+"replace golang.org/x/text => example.com/evil v0.3.3\n", baseSum, headSum)},
-		{"another file changes", append(pr(baseMod, headMod, baseSum, headSum), facts.File{Path: ".github/workflows/ci.yml", BaseMode: regularFile, HeadMode: regularFile})},
+		{"another file changes", append(pr(baseMod, headMod, baseSum, headSum), facts.File{Path: ".github/workflows/ci.yml", BaseMode: facts.RegularFile, HeadMode: facts.RegularFile})},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -481,7 +481,7 @@ func TestGatherUnknowns(t *testing.T) {
 		}
 		// An answer arrived. Asking again would get the same one.
 		for _, u := range res.Updates {
-			if u.FirstSeen.Known() || u.FirstSeen.Unavailable || !strings.Contains(u.FirstSeen.Value, "unknown: the index could not be read") || u.FirstSeen.Source == "" {
+			if u.FirstSeen.Known() || u.FirstSeen.Unavailable || !strings.Contains(u.FirstSeen.Value, "not established: the index could not be read") || u.FirstSeen.Source != "" {
 				t.Errorf("%s FirstSeen = %+v", u.Name, u.FirstSeen)
 			}
 		}
@@ -554,7 +554,7 @@ func TestGatherUnknowns(t *testing.T) {
 		// Whatever came with the error is not used: nothing was
 		// established, which is person.
 		text := find(t, res, "golang.org/x/text")
-		if text.Clean.Gathered() || text.Clean.Unavailable || !strings.Contains(text.Clean.Value, "unknown: malware advisories were not checked") {
+		if text.Clean.Gathered() || text.Clean.Unavailable || !strings.Contains(text.Clean.Value, "not established: malware advisories were not checked") {
 			t.Errorf("Clean = %+v", text.Clean)
 		}
 		if text.SecurityFix != (allow.Fact{}) {
@@ -599,54 +599,47 @@ func TestManifestFacts(t *testing.T) {
 		no  = "no"
 	)
 	tests := []struct {
-		name    string
-		up      update
-		removed []string
+		name string
+		up   update
 		// expected answers, in order: NewName Listed Known Increase Major NoRegress
 		want [6]string
 	}{
-		{"patch of an existing module", update{name: "example.com/m", from: "v1.2.3", to: "v1.2.4"}, nil, [6]string{no, no, yes, yes, no, yes}},
-		{"minor of a listed module", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.31.0"}, nil, [6]string{no, yes, yes, yes, no, yes}},
-		{"v0 to v1", update{name: "example.com/m", from: "v0.9.0", to: "v1.0.0"}, nil, [6]string{no, no, yes, yes, yes, yes}},
-		{"incompatible major", update{name: "example.com/m", from: "v2.1.0+incompatible", to: "v3.0.0+incompatible"}, nil, [6]string{no, no, yes, yes, yes, yes}},
-		{"incompatible minor", update{name: "example.com/m", from: "v2.1.0+incompatible", to: "v2.2.0+incompatible"}, nil, [6]string{no, no, yes, yes, no, yes}},
-		{"downgrade", update{name: "example.com/m", from: "v1.2.4", to: "v1.2.3"}, nil, [6]string{no, no, yes, no, no, yes}},
+		{"patch of an existing module", update{name: "example.com/m", from: "v1.2.3", to: "v1.2.4"}, [6]string{no, no, yes, yes, no, yes}},
+		{"minor of a listed module", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.31.0"}, [6]string{no, yes, yes, yes, no, yes}},
+		{"v0 to v1", update{name: "example.com/m", from: "v0.9.0", to: "v1.0.0"}, [6]string{no, no, yes, yes, yes, yes}},
+		{"incompatible major", update{name: "example.com/m", from: "v2.1.0+incompatible", to: "v3.0.0+incompatible"}, [6]string{no, no, yes, yes, yes, yes}},
+		{"incompatible minor", update{name: "example.com/m", from: "v2.1.0+incompatible", to: "v2.2.0+incompatible"}, [6]string{no, no, yes, yes, no, yes}},
+		{"downgrade", update{name: "example.com/m", from: "v1.2.4", to: "v1.2.3"}, [6]string{no, no, yes, no, no, yes}},
 		// Pseudo-versions (spec section 11, amendment 24). To a plain
 		// release the old version's form does not matter.
-		{"from a pseudo-version to a higher release", update{name: "example.com/m", from: "v0.0.0-20240101000000-aaaaaaaaaaaa", to: "v0.1.0"}, nil, [6]string{no, no, yes, yes, no, yes}},
-		{"from a pseudo-version to the release it is based on", update{name: "example.com/m", from: "v1.2.4-0.20240101000000-aaaaaaaaaaaa", to: "v1.2.3"}, nil, [6]string{no, no, yes, no, no, yes}},
-		{"from a pseudo-version to the release it leads up to", update{name: "example.com/m", from: "v1.2.4-0.20240101000000-aaaaaaaaaaaa", to: "v1.2.4"}, nil, [6]string{no, no, yes, yes, no, yes}},
-		{"from a pre-release to its release", update{name: "example.com/m", from: "v1.3.0-rc.1", to: "v1.3.0"}, nil, [6]string{no, no, yes, yes, no, yes}},
+		{"from a pseudo-version to a higher release", update{name: "example.com/m", from: "v0.0.0-20240101000000-aaaaaaaaaaaa", to: "v0.1.0"}, [6]string{no, no, yes, yes, no, yes}},
+		{"from a pseudo-version to the release it is based on", update{name: "example.com/m", from: "v1.2.4-0.20240101000000-aaaaaaaaaaaa", to: "v1.2.3"}, [6]string{no, no, yes, no, no, yes}},
+		{"from a pseudo-version to the release it leads up to", update{name: "example.com/m", from: "v1.2.4-0.20240101000000-aaaaaaaaaaaa", to: "v1.2.4"}, [6]string{no, no, yes, yes, no, yes}},
+		{"from a pre-release to its release", update{name: "example.com/m", from: "v1.3.0-rc.1", to: "v1.3.0"}, [6]string{no, no, yes, yes, no, yes}},
 		// To a pseudo-version: a listed module only, and only upwards.
-		{"listed, to a later pseudo-version", update{name: "golang.org/x/exp", from: "v0.0.0-20240101000000-aaaaaaaaaaaa", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, nil, [6]string{no, yes, yes, yes, no, yes}},
-		{"listed, to an earlier pseudo-version", update{name: "golang.org/x/exp", from: "v0.0.0-20240201000000-bbbbbbbbbbbb", to: "v0.0.0-20240101000000-aaaaaaaaaaaa"}, nil, [6]string{no, yes, yes, no, no, yes}},
-		{"listed, the same time and another commit", update{name: "golang.org/x/exp", from: "v0.0.0-20240201000000-bbbbbbbbbbbb", to: "v0.0.0-20240201000000-aaaaaaaaaaaa"}, nil, [6]string{no, yes, yes, no, no, yes}},
-		{"listed, from a release to a pseudo-version above it", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.30.1-0.20240201000000-bbbbbbbbbbbb"}, nil, [6]string{no, yes, yes, yes, no, yes}},
-		{"listed, from a release to a pseudo-version below it", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, nil, [6]string{no, yes, yes, no, no, yes}},
-		{"not listed, to a later pseudo-version", update{name: "example.com/m", from: "v0.0.0-20240101000000-aaaaaaaaaaaa", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, nil, [6]string{no, no, yes, no, no, yes}},
-		{"not listed, from a release to a pseudo-version above it", update{name: "example.com/m", from: "v1.2.3", to: "v1.2.4-0.20240201000000-bbbbbbbbbbbb"}, nil, [6]string{no, no, yes, no, no, yes}},
+		{"listed, to a later pseudo-version", update{name: "golang.org/x/exp", from: "v0.0.0-20240101000000-aaaaaaaaaaaa", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, [6]string{no, yes, yes, yes, no, yes}},
+		{"listed, to an earlier pseudo-version", update{name: "golang.org/x/exp", from: "v0.0.0-20240201000000-bbbbbbbbbbbb", to: "v0.0.0-20240101000000-aaaaaaaaaaaa"}, [6]string{no, yes, yes, no, no, yes}},
+		{"listed, the same time and another commit", update{name: "golang.org/x/exp", from: "v0.0.0-20240201000000-bbbbbbbbbbbb", to: "v0.0.0-20240201000000-aaaaaaaaaaaa"}, [6]string{no, yes, yes, no, no, yes}},
+		{"listed, from a release to a pseudo-version above it", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.30.1-0.20240201000000-bbbbbbbbbbbb"}, [6]string{no, yes, yes, yes, no, yes}},
+		{"listed, from a release to a pseudo-version below it", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, [6]string{no, yes, yes, no, no, yes}},
+		{"not listed, to a later pseudo-version", update{name: "example.com/m", from: "v0.0.0-20240101000000-aaaaaaaaaaaa", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, [6]string{no, no, yes, no, no, yes}},
+		{"not listed, from a release to a pseudo-version above it", update{name: "example.com/m", from: "v1.2.3", to: "v1.2.4-0.20240201000000-bbbbbbbbbbbb"}, [6]string{no, no, yes, no, no, yes}},
 		// A pre-release that is not a pseudo-version is never moved to.
-		{"to a pre-release", update{name: "example.com/m", from: "v1.2.3", to: "v1.3.0-rc.1"}, nil, [6]string{no, no, yes, no, no, yes}},
-		{"listed, to a pre-release", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.31.0-rc.1"}, nil, [6]string{no, yes, yes, no, no, yes}},
-		{"new and listed", update{name: "golang.org/x/sync", from: "", to: "v0.8.0"}, nil, [6]string{yes, yes, yes, yes, no, yes}},
-		{"new and listed by exact name", update{name: "example.com/listed", from: "", to: "v1.0.0"}, nil, [6]string{yes, yes, yes, yes, no, yes}},
-		{"new, not listed", update{name: "example.com/new", from: "", to: "v1.0.0"}, nil, [6]string{yes, no, no, yes, no, yes}},
-		{"new, not listed, name only resembles a listed one", update{name: "example.com/listed-not", from: "", to: "v1.0.0"}, nil, [6]string{yes, no, no, yes, no, yes}},
-		{"new at a pseudo-version", update{name: "example.com/new", from: "", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, nil, [6]string{yes, no, no, no, no, yes}},
-		{"new and listed at a pseudo-version", update{name: "golang.org/x/exp", from: "", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, nil, [6]string{yes, yes, yes, no, no, yes}},
-		{"new while an unrelated module is removed", update{name: "example.com/new", from: "", to: "v1.0.0"}, []string{"example.com/old"}, [6]string{yes, no, no, yes, no, yes}},
-		{"major by path: v2 removed, v3 added", update{name: "example.com/m/v3", from: "", to: "v3.0.0"}, []string{"example.com/m/v2"}, [6]string{yes, no, no, yes, yes, no}},
-		{"major by path: v1 removed, v2 added", update{name: "example.com/m/v2", from: "", to: "v2.0.0"}, []string{"example.com/m"}, [6]string{yes, no, no, yes, yes, no}},
-		{"major by path on a listed module", update{name: "golang.org/x/m/v3", from: "", to: "v3.0.0"}, []string{"golang.org/x/m/v2"}, [6]string{yes, yes, yes, yes, yes, no}},
-		{"major by path, gopkg.in", update{name: "gopkg.in/yaml.v3", from: "", to: "v3.0.1"}, []string{"gopkg.in/yaml.v2"}, [6]string{yes, no, no, yes, yes, no}},
-		{"another major added beside the old one", update{name: "example.com/m/v3", from: "", to: "v3.0.0"}, nil, [6]string{yes, no, no, yes, no, yes}},
-		{"path changes case", update{name: "github.com/sirupsen/logrus", from: "", to: "v1.9.3"}, []string{"github.com/Sirupsen/logrus"}, [6]string{yes, no, no, yes, no, no}},
-		{"a longer path is another module", update{name: "example.com/m/sub", from: "", to: "v1.0.0"}, []string{"example.com/m"}, [6]string{yes, no, no, yes, no, yes}},
+		{"to a pre-release", update{name: "example.com/m", from: "v1.2.3", to: "v1.3.0-rc.1"}, [6]string{no, no, yes, no, no, yes}},
+		{"listed, to a pre-release", update{name: "golang.org/x/net", from: "v0.30.0", to: "v0.31.0-rc.1"}, [6]string{no, yes, yes, no, no, yes}},
+		{"new and listed", update{name: "golang.org/x/sync", from: "", to: "v0.8.0"}, [6]string{yes, yes, yes, yes, no, yes}},
+		{"new and listed by exact name", update{name: "example.com/listed", from: "", to: "v1.0.0"}, [6]string{yes, yes, yes, yes, no, yes}},
+		{"new, not listed", update{name: "example.com/new", from: "", to: "v1.0.0"}, [6]string{yes, no, no, yes, no, yes}},
+		{"new, not listed, name only resembles a listed one", update{name: "example.com/listed-not", from: "", to: "v1.0.0"}, [6]string{yes, no, no, yes, no, yes}},
+		{"new at a pseudo-version", update{name: "example.com/new", from: "", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, [6]string{yes, no, no, no, no, yes}},
+		{"new and listed at a pseudo-version", update{name: "golang.org/x/exp", from: "", to: "v0.0.0-20240201000000-bbbbbbbbbbbb"}, [6]string{yes, yes, yes, no, no, yes}},
+		// A removed requirement never gets this far: Shape refuses it.
+		{"another major added beside the old one", update{name: "example.com/m/v3", from: "", to: "v3.0.0"}, [6]string{yes, no, no, yes, no, yes}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var u allow.UpdateFacts
-			setManifestFacts(&u, tc.up, changeSet{removed: tc.removed}, policy)
+			setManifestFacts(&u, tc.up, policy)
 			got := [6]allow.Fact{u.NewName, u.Listed, u.Known, u.Increase, u.Major, u.NoRegress}
 			names := [6]string{"NewName", "Listed", "Known", "Increase", "Major", "NoRegress"}
 			for i, f := range got {
@@ -711,10 +704,10 @@ require (
 		{"a new indirect requirement", edit(base, "\texample.com/behind v1.0.0 // indirect\n", "\texample.com/behind v1.0.0 // indirect\n\texample.com/new v1.0.0 // indirect\n"), "example.com/new", true, ""},
 		{"a new direct requirement", edit(base, "\texample.com/direct v1.0.0\n", "\texample.com/direct v1.0.0\n\texample.com/new v1.0.0\n"), "example.com/new", false, ""},
 		{"a comment that only looks like the marker", edit(base, "example.com/direct v1.0.0", "example.com/direct v1.1.0 // indirectly"), "example.com/direct", false, ""},
-		// The new path of an existing requirement is not followed back.
-		{"a direct requirement comes back indirect under a new major path", edit(base, "\texample.com/old/v2 v2.3.0\n", "", "\texample.com/behind v1.0.0 // indirect\n", "\texample.com/behind v1.0.0 // indirect\n\texample.com/old/v3 v3.0.0 // indirect\n"), "example.com/old/v3", false, ""},
-		{"an indirect requirement moves to a new major path", edit(base, "example.com/other/v2 v2.0.0 //", "example.com/other/v3 v3.0.0 //"), "example.com/other/v3", false, ""},
-		// Shape's, not this fact's.
+		// Shape's, not this fact's. The new path of an existing requirement
+		// is not followed back: the removal is refused.
+		{"a direct requirement comes back indirect under a new major path", edit(base, "\texample.com/old/v2 v2.3.0\n", "", "\texample.com/behind v1.0.0 // indirect\n", "\texample.com/behind v1.0.0 // indirect\n\texample.com/old/v3 v3.0.0 // indirect\n"), "", false, "no longer requires example.com/old/v2"},
+		{"an indirect requirement moves to a new major path", edit(base, "example.com/other/v2 v2.0.0 //", "example.com/other/v3 v3.0.0 //"), "", false, "no longer requires example.com/other/v2"},
 		{"a direct requirement gains the marker as it moves", edit(base, "example.com/direct v1.0.0", "example.com/direct v2.0.0+incompatible // indirect"), "", false, "changes the // indirect marker of example.com/direct"},
 		{"an indirect requirement loses the marker as it moves", edit(base, "example.com/behind v1.0.0 // indirect", "example.com/behind v1.1.0"), "", false, "changes the // indirect marker of example.com/behind"},
 	}
@@ -821,7 +814,7 @@ func TestClean(t *testing.T) {
 	}
 
 	// What a fact that does not hold is: a gathered no, a fact nothing
-	// established (no source, "unknown:"), or an unavailable one.
+	// established (no source, "not established:"), or an unavailable one.
 	const (
 		no          = "no"
 		unknown     = "unknown"
@@ -838,7 +831,7 @@ func TestClean(t *testing.T) {
 		}, "", "served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory"},
 		{"not downloaded", func() allow.Fact {
 			return cleanFact(up, downloaded{}, false, info, true, versions, true, nothingKnown())
-		}, unknown, "unknown: go mod download did not report"},
+		}, unknown, "not established: go mod download did not report"},
 		{"download failed", func() allow.Fact {
 			return cleanFact(up, downloaded{Error: "410 Gone"}, true, info, true, versions, true, nothingKnown())
 		}, no, "the proxy did not serve the version: 410 Gone"},
@@ -847,7 +840,7 @@ func TestClean(t *testing.T) {
 		}, unavailable, "the module proxy did not answer: example.com/m@v1.1.0: reading"},
 		{"go list silent", func() allow.Fact {
 			return cleanFact(up, good, true, listed{}, false, versions, true, nothingKnown())
-		}, unknown, "unknown: go list did not report the version"},
+		}, unknown, "not established: go list did not report the version"},
 		{"go list error", func() allow.Fact {
 			return cleanFact(up, good, true, listed{Error: goErr}, true, versions, true, nothingKnown())
 		}, no, "go list failed: boom"},
@@ -865,7 +858,7 @@ func TestClean(t *testing.T) {
 		}, no, "the module is deprecated: use v2"},
 		{"no version list", func() allow.Fact {
 			return cleanFact(up, good, true, info, true, listed{}, false, nothingKnown())
-		}, unknown, "unknown: go list did not report the module's versions"},
+		}, unknown, "not established: go list did not report the module's versions"},
 		{"version list error", func() allow.Fact {
 			return cleanFact(up, good, true, info, true, listed{Error: goErr}, true, nothingKnown())
 		}, no, "the module's retractions could not be loaded: boom"},
@@ -888,7 +881,7 @@ func TestClean(t *testing.T) {
 		}, unavailable, "GitHub's Advisory Database did not answer (HTTP 503"},
 		{"the checker returned nothing", func() allow.Fact {
 			return cleanFact(up, good, true, info, true, versions, true, advisory.Result{})
-		}, unknown, "unknown: malware advisories were not checked"},
+		}, unknown, "not established: malware advisories were not checked"},
 		{"malware", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.No("GHSA-mal", "advisories")
@@ -898,7 +891,7 @@ func TestClean(t *testing.T) {
 			adv := nothingKnown()
 			adv.NoMalware = allow.Fact{}
 			return cleanFact(up, good, true, info, true, versions, true, adv)
-		}, unknown, "unknown: malware advisories were not checked"},
+		}, unknown, "not established: malware advisories were not checked"},
 		{"malware could not be asked about", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.Fact{Value: "the package name is not one the advisory query can carry; nothing was asked"}
@@ -913,7 +906,7 @@ func TestClean(t *testing.T) {
 			adv := nothingKnown()
 			adv.NoNewAdvisory = allow.Fact{}
 			return cleanFact(up, good, true, info, true, versions, true, adv)
-		}, unknown, "unknown: new advisories were not checked"},
+		}, unknown, "not established: new advisories were not checked"},
 
 		// A "no" is the answer whatever else went unanswered, and an
 		// outage is never reported where waiting could not help.
@@ -927,7 +920,7 @@ func TestClean(t *testing.T) {
 		}, no, "GHSA-mal"},
 		{"the advisory database is down, and go list said nothing", func() allow.Fact {
 			return cleanFact(up, good, true, listed{}, false, versions, true, advisoriesDown)
-		}, unknown, "unknown: go list did not report the version"},
+		}, unknown, "not established: go list did not report the version"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -945,8 +938,8 @@ func TestClean(t *testing.T) {
 			if state != tc.state || !strings.Contains(got.Value, tc.want) {
 				t.Errorf("fact = %+v (%s), want %q with %q", got, state, tc.state, tc.want)
 			}
-			if (state == unknown) != strings.HasPrefix(got.Value, "unknown: ") && !strings.Contains(got.Value, "nothing was asked") {
-				t.Errorf("the value's \"unknown:\" does not go with its state %q: %q", state, got.Value)
+			if (state == unknown) != strings.HasPrefix(got.Value, "not established: ") && !strings.Contains(got.Value, "nothing was asked") {
+				t.Errorf("the value's \"not established:\" does not go with its state %q: %q", state, got.Value)
 			}
 		})
 	}
@@ -1038,7 +1031,7 @@ func TestNameCreated(t *testing.T) {
 {"Path":"golang.org/x/mod","Version":"v0.2.0","Time":"2020-01-02T17:33:45Z"}
 {"Path":"golang.org/x/mod","Version":"v0.3.0","Time":"2020-04-29T17:28:58Z"}`
 		got, err := nameCreated(ctx, tool, ix, "golang.org/x/mod", versions, true, testNow)
-		if err != nil || got.Known() || !strings.Contains(got.Value, "unknown: v0.3.0: the index could not be read") {
+		if err != nil || got.Known() || !strings.Contains(got.Value, "not established: v0.3.0: the index could not be read") {
 			t.Errorf("got %+v, %v", got, err)
 		}
 		if len(fixtures.requests) != 2 {
@@ -1063,7 +1056,7 @@ func TestNameCreated(t *testing.T) {
 			ok bool
 		}{{listed{}, false}, {listed{Error: &struct{ Err string }{"x"}}, true}, {listed{Path: "golang.org/x/mod"}, true}} {
 			got, err := nameCreated(ctx, &fakeTool{t: t}, ix, "golang.org/x/mod", v.l, v.ok, testNow)
-			if err != nil || got.Known() || got.Source == "" || !strings.Contains(got.Value, "version list could not be read") {
+			if err != nil || got.Known() || got.Unavailable || got.Source != "" || !strings.Contains(got.Value, "version list could not be read") {
 				t.Errorf("got %+v, %v", got, err)
 			}
 		}

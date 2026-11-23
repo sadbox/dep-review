@@ -1,38 +1,12 @@
 // Package docker gathers the facts for Dependabot's docker ecosystem: a
-// base image moved to another tag or digest in a Dockerfile
-// (docs/v0.2-spec.md, sections 3, 4 and 6).
-//
-// An image's content is opaque to the gate: nothing here downloads or
-// inspects it, and no model reads it (Read is not-applicable). What can
-// grant a merge is therefore only who publishes the image, that the pin
-// is what the registry serves under that tag now, and for how long:
-//
-//   - Shape: only files named Dockerfile* changed, and in them only the
-//     tag and digest of FROM lines of one anchored shape (shape.go).
-//     There is no Dockerfile parser.
-//   - Known: the image is on the owner's list, and only that (spec
-//     section 11, amendment 3). For the other ecosystems being a
-//     dependency at the base commit is enough to be known; for an image
-//     that nothing reads it is not.
-//   - Increase and Major: a comparator for dotted numeric tags with an
-//     identical suffix; the same tag with a new digest is an increase
-//     (tag.go).
-//   - Bound, Clean and FirstSeen: the registry, asked now (registry.go).
-//     Clean is "the registry serves this digest under this tag", and on
-//     GCR also "and does not mark it deprecated". Nothing else exists to
-//     ask: no advisory source covers images, so SecurityFix is a
-//     gathered "no" and Input.Advisories is not called, and NoRegress
-//     holds with nothing to compare.
-//
-// Only docker.io and gcr.io are asked. An image anywhere else has no
-// Bound and no FirstSeen, which is person.
-//
-// Two outcomes are a wait and not a person (spec section 11, amendments 1
-// and 2). A registry that could not be asked after a few tries leaves the
-// facts it is the source of unavailable, and the next evaluation asks
-// again. And a tag that resolves to another digest than the pinned one
-// has moved on since Dependabot wrote the pin: the update is Superseded,
-// and Dependabot refreshes the digest itself.
+// base image moved to another tag or digest in a Dockerfile. An image's
+// content is opaque to the gate: nothing here downloads or inspects it,
+// and no model reads it. What can grant a merge is only who publishes the
+// image (Known is the owner's list alone, spec section 11, amendment 3),
+// that the pin is what the registry serves under that tag now and for how
+// long (registry.go), and the line shape (shape.go). A tag that resolves to
+// another digest has moved on since Dependabot wrote the pin, which is a
+// wait (amendment 2).
 package docker
 
 import (
@@ -40,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/facts"
@@ -49,25 +22,14 @@ import (
 // listSource is the Source of the facts read from the policy list.
 const listSource = `"listed.docker" in the policy`
 
-// Gatherer is the Docker fact gatherer. The zero value is ready to use.
-type Gatherer struct {
-	// sleep waits between tries of one registry request. Nil means a
-	// real wait; tests replace it.
-	sleep func(ctx context.Context, d time.Duration) error
-}
-
-var _ facts.Gatherer = (*Gatherer)(nil)
+// Gatherer is the Docker fact gatherer.
+type Gatherer struct{}
 
 // New returns the Docker fact gatherer.
 func New() *Gatherer { return &Gatherer{} }
 
-// Gather reads the change set from the Dockerfiles at base and head and
-// asks the registries about each image the pull request moves.
-//
-// When Shape does not hold nothing is asked and Updates is empty. A
-// registry that could not be asked leaves the facts it is the source of
-// unavailable. An error means there is no HTTP client to ask with, or the
-// context ended.
+// Gather implements facts.Gatherer. When Shape does not hold nothing is
+// asked and Updates is empty.
 func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
 	moved, res := changes(in.Files, in.Policy)
 	if !res.Shape.OK {
@@ -82,15 +44,7 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 	// one would let an answer choose the next host.
 	client := *in.HTTP
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	a := &asker{
-		client:    &client,
-		sleep:     g.sleep,
-		hubTokens: map[string]string{},
-		gcrLists:  map[string]gcrList{},
-	}
-	if a.sleep == nil {
-		a.sleep = sleepCtx
-	}
+	a := &asker{client: &client, hubTokens: map[string]string{}, gcrLists: map[string]gcrList{}}
 
 	for i, c := range moved {
 		f, err := a.ask(ctx, c)
@@ -104,11 +58,9 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 }
 
 // Changes is the half of Gather that reads nothing but the pull request's
-// files: the Shape fact, and every image the pull request moves with the
-// facts no registry is ever asked for (Known, Listed, NewName, Increase,
-// Major, NoRegress and SecurityFix). Bound, Clean, FirstSeen and
-// Superseded are left unset. Gather starts from the same reading; the
-// replay command runs this half alone.
+// files: Shape, and every image the pull request moves with the facts no
+// registry is asked for (Known, Listed, NewName, Increase, Major,
+// NoRegress and SecurityFix). The replay command runs this half alone.
 func Changes(files []facts.File, policy allow.Policy) facts.Result {
 	_, res := changes(files, policy)
 	return res
@@ -143,9 +95,6 @@ func fileFacts(c change, policy allow.Policy) allow.UpdateFacts {
 		// The Advisory Database has no container image ecosystem, and
 		// with nothing read there is no fast path to take anyway.
 		SecurityFix: allow.No("no advisory source covers container images", "not applicable to Docker"),
-		// Read is not set here: that nothing of an image is read is the
-		// deciding job's to say (allow.ReadNotApplicable, from the
-		// ecosystem), like every other read state.
 	}
 
 	if allow.Listed(policy, allow.Docker, name) {

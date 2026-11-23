@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,45 +222,35 @@ func TestList(t *testing.T) {
 	})
 }
 
-func TestGoArg(t *testing.T) {
-	tests := []struct {
-		path, version string
-		want          string // empty: refused
-	}{
-		{"golang.org/x/text", "v0.3.3", "golang.org/x/text@v0.3.3"},
-		{"golang.org/x/text", "", "golang.org/x/text"},
-		{"github.com/Azure/azure-sdk-for-go", "v68.0.0+incompatible", "github.com/Azure/azure-sdk-for-go@v68.0.0+incompatible"},
-		{"example.com/m/v2", "v2.1.0", "example.com/m/v2@v2.1.0"},
-		{"-modfile=/etc/passwd", "v1.0.0", ""},
-		{"-json", "", ""},
-		{"all", "", ""},
-		{"example.com/...", "", ""},
-		{"example.com/m", "latest", ""},
-		{"example.com/m", "v1.0", ""},
-		{"example.com/m", "v1.0.0@v2.0.0", ""},
-		{"example.com/m v1.0.0", "", ""},
-		{"example.com/m", "v1.0.0 -x", ""},
-		{"example.com/m/v2", "v1.0.0", ""},
-		{"../escape", "v1.0.0", ""},
-		{"", "v1.0.0", ""},
-	}
-	for _, tc := range tests {
-		got, err := goArg(tc.path, tc.version)
-		if (err != nil) != (tc.want == "") || got != tc.want {
-			t.Errorf("goArg(%q, %q) = %q, %v; want %q", tc.path, tc.version, got, err, tc.want)
+// The paths and versions of a go.mod become arguments of the go command
+// as they are, so what must never get there has to be refused where the
+// file is read: parseMod runs module.Check and the canonical-version
+// check on every require.
+func TestHostileRequiresDoNotParse(t *testing.T) {
+	for _, tc := range []struct{ path, version string }{
+		{"-modfile=/etc/passwd", "v1.0.0"},
+		{"-json", "v1.0.0"},
+		{"all", "v1.0.0"},
+		{"example.com/...", "v1.0.0"},
+		{"example.com/m", "latest"},
+		{"example.com/m", "v1.0"},
+		{"example.com/m", "v1.0.0@v2.0.0"},
+		{"example.com/m v1.0.0", "v1.0.0"},
+		{"example.com/m", "v1.0.0 -x"},
+		{"example.com/m/v2", "v1.0.0"},
+		{"../escape", "v1.0.0"},
+		{"", "v1.0.0"},
+	} {
+		mod := "module example.com/app\n\ngo 1.22\n\nrequire " + strconv.Quote(tc.path) + " " + tc.version + "\n"
+		if m, err := parseMod([]byte(mod)); err == nil {
+			t.Errorf("require %q %s parsed: %+v", tc.path, tc.version, m.requires)
 		}
 	}
-}
-
-func TestCappedBuffer(t *testing.T) {
-	b := &cappedBuffer{max: 5}
-	for _, s := range []string{"abc", "defg", "h"} {
-		if n, err := b.Write([]byte(s)); n != len(s) || err != nil {
-			t.Fatalf("Write(%q) = %d, %v", s, n, err)
-		}
-	}
-	if string(b.b) != "abcde" || !b.over {
-		t.Errorf("buffer = %q, over = %v", b.b, b.over)
+	// And what does parse is passed on unchanged.
+	got := goArgs([]module.Version{mv("golang.org/x/text", "v0.3.3"), mv("golang.org/x/text", ""), mv("github.com/Azure/azure-sdk-for-go", "v68.0.0+incompatible")})
+	want := []string{"golang.org/x/text@v0.3.3", "golang.org/x/text", "github.com/Azure/azure-sdk-for-go@v68.0.0+incompatible"}
+	if !slices.Equal(got, want) {
+		t.Errorf("goArgs = %q, want %q", got, want)
 	}
 }
 

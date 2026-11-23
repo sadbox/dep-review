@@ -15,11 +15,12 @@ import (
 // case letters and digits, separated by ".", "_", "__" or dashes.
 const nameComponent = `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`
 
-// An image name as written: an optional first component with a port
-// (which only a registry host can have, and which must be followed by a
-// "/" so that "golang:127" is a name and a tag, never a host and a port),
-// then one or more components.
-const imageName = `(?:` + nameComponent + `(?::[0-9]+)?/)?` + nameComponent + `(?:/` + nameComponent + `)*`
+// The two ways of writing an image name that are read: a gcr.io image by
+// its full name, and an official Docker Hub image by its bare name. Which
+// registry and repository any other spelling means is for Docker's own
+// defaulting rules to say, and they are not ported here: such a line does
+// not match.
+const imageName = `(?:gcr\.io/` + nameComponent + `(?:/` + nameComponent + `)*|` + nameComponent + `)`
 
 // fromLineRe is the one line shape the gatherer reads:
 //
@@ -41,6 +42,11 @@ var fromLineRe = regexp.MustCompile(
 // shapeSource is the Source of the Shape fact and of the facts that come
 // from the two Dockerfiles alone.
 const shapeSource = "Dockerfile lines at the base and head commits"
+
+// notFromLine is the refusal of a changed line that does not match. It
+// names the images that are read, the part of the shape a person is
+// least likely to guess.
+const notFromLine = "it is not a FROM line pinned by digest in the accepted shape (an official Docker Hub image by its bare name, or a gcr.io image)"
 
 // fromLine is one line that matched fromLineRe.
 type fromLine struct {
@@ -68,30 +74,20 @@ func parseFromLine(line []byte) (fromLine, bool) {
 
 // image is an image name split the way a registry is asked for it.
 type image struct {
-	registry string // "docker.io", "gcr.io", ...
+	registry string // "docker.io" or "gcr.io"
 	repo     string // "library/golang", "distroless/static-debian12"
 }
 
 // Name is registry/repository: what the policy list is matched against.
 func (im image) Name() string { return im.registry + "/" + im.repo }
 
-// normalise turns a name as written in a FROM line into registry and
-// repository. The first component is a registry host only when it has a
-// "." or a ":" or is "localhost"; otherwise the image is on Docker Hub,
-// where a single-component name is an official image under "library/".
-// These are Docker's own defaults. Nothing else is rewritten: an alias
-// such as index.docker.io stays what it says, is not listed, and goes to
-// a person.
-func normalise(name string) image {
-	first, rest, found := strings.Cut(name, "/")
-	im := image{registry: "docker.io", repo: name}
-	if found && (strings.ContainsAny(first, ".:") || first == "localhost") {
-		im = image{registry: first, repo: rest}
+// newImage is the image a name that fromLineRe matched stands for: a
+// bare name is an official image, under "library/" on Docker Hub.
+func newImage(name string) image {
+	if repo, ok := strings.CutPrefix(name, "gcr.io/"); ok {
+		return image{registry: "gcr.io", repo: repo}
 	}
-	if im.registry == "docker.io" && !strings.Contains(im.repo, "/") {
-		im.repo = "library/" + im.repo
-	}
-	return im
+	return image{registry: "docker.io", repo: "library/" + name}
 }
 
 // change is one image reference that differs between base and head.
@@ -113,25 +109,11 @@ func version(tag, digest string) string {
 	return tag + "@" + digest
 }
 
-// regularFile reports whether mode is git's mode of an ordinary file.
-func regularFile(mode string) bool { return mode == "100644" || mode == "100755" }
-
-// showPath is a path made safe to put in a fact's Value, which ends up in
-// the pull request comment: quoted, and cut short. A path is chosen by
-// whoever wrote the pull request.
-func showPath(p string) string {
-	const max = 80
-	if len(p) > max {
-		return fmt.Sprintf("%q...", p[:max])
-	}
-	return fmt.Sprintf("%q", p)
-}
-
 // readShape establishes the Shape fact and the change set from the files
-// the pull request changes: only files named Dockerfile*, each an
-// ordinary file at both commits with the same number of lines, and every
-// line that differs a FROM line of the one shape at both commits, equal
-// in everything but tag and digest.
+// the pull request changes: only files named Dockerfile*, each a regular
+// file at both commits with the same number of lines, and every line
+// that differs a FROM line of the one shape at both commits, equal in
+// everything but tag and digest.
 //
 // When the fact does not hold the returned change set is nil.
 func readShape(files []facts.File) ([]change, allow.Fact) {
@@ -146,18 +128,15 @@ func readShape(files []facts.File) ([]change, allow.Fact) {
 	changedLines := 0
 	for _, f := range files {
 		if !strings.HasPrefix(path.Base(f.Path), "Dockerfile") {
-			return no("%s changed, and it is not a file named Dockerfile*", showPath(f.Path))
+			return no("%s changed, and it is not a file named Dockerfile*", facts.Show(f.Path))
 		}
-		if !regularFile(f.BaseMode) || !regularFile(f.HeadMode) {
-			return no("%s is not an ordinary file at both commits (mode %q at base, %q at head)", showPath(f.Path), f.BaseMode, f.HeadMode)
-		}
-		if f.BaseMode != f.HeadMode {
-			return no("%s changed its file mode from %s to %s", showPath(f.Path), f.BaseMode, f.HeadMode)
+		if problem := facts.NotRegular(f); problem != "" {
+			return no("%s", problem)
 		}
 		base := bytes.Split(f.Base, []byte("\n"))
 		head := bytes.Split(f.Head, []byte("\n"))
 		if len(base) != len(head) {
-			return no("%s has %d lines at base and %d at head; only FROM lines may change, in place", showPath(f.Path), len(base), len(head))
+			return no("%s has %d lines at base and %d at head; only FROM lines may change, in place", facts.Show(f.Path), len(base), len(head))
 		}
 		changedHere := 0
 		for i := range base {
@@ -167,18 +146,18 @@ func readShape(files []facts.File) ([]change, allow.Fact) {
 			line := i + 1
 			old, ok := parseFromLine(base[i])
 			if !ok {
-				return no("%s line %d changed, and at base it is not a FROM line pinned by digest in the accepted shape", showPath(f.Path), line)
+				return no("%s line %d changed, and at base %s", facts.Show(f.Path), line, notFromLine)
 			}
 			cur, ok := parseFromLine(head[i])
 			if !ok {
-				return no("%s line %d changed, and at head it is not a FROM line pinned by digest in the accepted shape", showPath(f.Path), line)
+				return no("%s line %d changed, and at head %s", facts.Show(f.Path), line, notFromLine)
 			}
 			if old.prefix != cur.prefix || old.suffix != cur.suffix {
-				return no("%s line %d changed something other than the tag and the digest", showPath(f.Path), line)
+				return no("%s line %d changed something other than the tag and the digest", facts.Show(f.Path), line)
 			}
 			changedHere++
 			changes = append(changes, change{
-				image:      normalise(cur.name),
+				image:      newImage(cur.name),
 				fromTag:    old.tag,
 				fromDigest: old.digest,
 				toTag:      cur.tag,
@@ -186,7 +165,7 @@ func readShape(files []facts.File) ([]change, allow.Fact) {
 			})
 		}
 		if changedHere == 0 {
-			return no("%s is listed as changed, and no line of it differs", showPath(f.Path))
+			return no("%s is listed as changed, and no line of it differs", facts.Show(f.Path))
 		}
 		changedLines += changedHere
 	}
