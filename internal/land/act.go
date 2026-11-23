@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/sadbox/dep-review/internal/allow"
@@ -18,7 +17,7 @@ import (
 // comment remembers, and what the scheduled job reads back.
 type Action string
 
-// The five things that can happen.
+// The six things that can happen.
 const (
 	// ActionMerged: allow.Decide said merge and GitHub merged the head.
 	ActionMerged Action = "merged"
@@ -34,18 +33,22 @@ const (
 	// ActionStale: the pull request was closed or changed under the gate.
 	// Nothing was merged and no comment was written.
 	ActionStale Action = "stale"
+	// ActionFailed is never Act's: it is what Failed leaves in the comment
+	// for a run that ended without a decision.
+	ActionFailed Action = "failed"
 )
 
 // Result is what Act did.
 type Result struct {
-	// Action is which of the five it was.
+	// Action is which it was; never ActionFailed.
 	Action Action
 	// Decision is the decision acted on: allow.Decide's, or
 	// allow.ChecksRefused's when GitHub refused the merge because
-	// required checks are pending or failing.
+	// required checks are pending or failing, or the base branch moved.
 	Decision allow.Decision
 	// Note says more about a stale pull request (the gate's words) or a
-	// refusal (GitHub's words: third-party text).
+	// refusal, also one the gate waits on because the base branch moved
+	// (GitHub's words: third-party text).
 	Note string
 }
 
@@ -59,10 +62,17 @@ type Result struct {
 // call, before the comment is touched. That success outlives an unmerged
 // head in two cases only, both of which fail the job: the merge call got
 // no answer and the pull request does not read as merged, or the status
-// call that would replace it failed.
+// call that would replace it failed. On an event's run publish then calls
+// Failed, which sets the status again.
+//
+// On an event's run (Config.ModelAsked) a wait with a prepared read the
+// model left without a verdict is also notified, once per head: the
+// scheduled job asks no model, so only a person running the review job
+// again ends that wait before its deadline.
 //
 // A failed notification is returned as an error after everything else was
-// written, and is not remembered as sent: the next run sends it.
+// written, and is not remembered as sent: the next run sends it. It is
+// the one error that comes with a Result whose Action is set.
 func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	if err := cfg.check(); err != nil {
 		return Result{}, err
@@ -89,6 +99,11 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 			res.Action = ActionMerged
 		case mergeChecks:
 			res.Decision = allow.ChecksRefused(ev.Decision, ev.now)
+		case mergeBase:
+			// allow has one decision for "GitHub will not merge yet", and
+			// it fits: a wait the scheduled job tries again, a person's
+			// at the deadline. The note keeps what GitHub said.
+			res.Decision, res.Note = allow.ChecksRefused(ev.Decision, ev.now), note
 		case mergeRefused:
 			res.Action, res.Note = ActionRefused, note
 		case mergeStale:
@@ -122,21 +137,89 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	}
 	if prev != nil {
 		old, _ := parseMarker(prev.Body)
-		mk.Notified = old.Notified
+		mk.Notified, mk.NotifiedFailed, mk.NotifiedUnread = old.Notified, old.NotifiedFailed, old.NotifiedUnread
 	}
 	var notifyErr error
-	if msg, ok := notification(cfg, pr, res); ok && cfg.Notifier != nil && !slices.Contains(mk.Notified, pr.Head) {
-		if err := cfg.Notifier.Notify(ctx, msg); err != nil {
-			notifyErr = fmt.Errorf("land: notify: %w", err)
-		} else if mk.Notified = append(mk.Notified, pr.Head); len(mk.Notified) > maxNotified {
-			mk.Notified = mk.Notified[len(mk.Notified)-maxNotified:]
-		}
+	if msg, ok := notification(cfg, pr, res); ok {
+		notifyErr = notifyOnce(ctx, cfg, &mk.Notified, pr.Head, msg)
+	}
+	if cfg.ModelAsked && res.Action == ActionWait && unanswered(ev) {
+		notifyErr = errors.Join(notifyErr, notifyOnce(ctx, cfg, &mk.NotifiedUnread, pr.Head, message(cfg, pr.Number,
+			" waits unread: the model did not answer for code the gate prepared, and the scheduled job asks no model. Re-run the review job"+runLink(cfg))))
 	}
 
 	if err := upsertComment(ctx, cfg, pr.Number, prev, render(view{res: res, ev: ev, marker: mk, runURL: cfg.RunURL})); err != nil {
 		return Result{}, err
 	}
 	return res, notifyErr
+}
+
+// unanswered reports whether fetch prepared a read that has no verdict.
+func unanswered(ev Evaluation) bool {
+	for i, u := range ev.file.Facts.Updates {
+		if u.Prepared.Status == wire.Prepared && ev.Facts.Updates[i].Read == allow.ReadNone {
+			return true
+		}
+	}
+	return false
+}
+
+// Failed is for an event's run that ended without a decision: the fetch
+// job left no facts, or Decide or Act returned an error before anything
+// was written. Without it such a pull request has no comment and no
+// status, the scheduled job (which looks only at what the gate left
+// waiting) never comes to it, and nobody is told.
+//
+// It sets the dep-review status to error, replaces the gate's comment by
+// one that says the run failed and how to run it again, and notifies once
+// per head, remembered apart from a decision's notification. The marker's
+// outcome is ActionFailed, which the scheduled job does not pick up: it
+// asks no model, and could not finish what this run did not.
+//
+// A pull request that is closed or has a newer head is left alone: the
+// newer head has a run of its own, whose comment this must not replace.
+// what is the gate's own sentence about the run, never an error's text.
+func Failed(ctx context.Context, cfg Config, number int, head, what string) error {
+	if err := cfg.check(); err != nil {
+		return err
+	}
+	if number < 1 || !gh.ValidSHA(head) {
+		return fmt.Errorf("land: #%d at %.80q is not a pull request and a commit ID", number, head)
+	}
+	cur, err := getPull(ctx, cfg, number)
+	if err != nil || cur.changed(head) != "" {
+		return err // nil for a pull request that changed
+	}
+	if err := setStatus(ctx, cfg, head, "error", "the gate's run failed before it could decide; re-run the failed jobs"); err != nil {
+		return err
+	}
+	prev, err := findComment(ctx, cfg, number)
+	if err != nil {
+		return err
+	}
+	mk := marker{Outcome: ActionFailed, Head: head}
+	if prev != nil {
+		// What earlier runs read, and whom they told, is still true.
+		old, _ := parseMarker(prev.Body)
+		mk.Notified, mk.NotifiedFailed, mk.NotifiedUnread = old.Notified, old.NotifiedFailed, old.NotifiedUnread
+		mk.Fingerprint, mk.Cache = old.Fingerprint, old.Cache
+	}
+	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number,
+		": the gate's run failed before it could decide. Re-run the failed jobs"+runLink(cfg)))
+
+	run := "this pull request's dep-review workflow run"
+	if cfg.RunURL != "" {
+		run = "the [workflow run](" + cfg.RunURL + ")"
+	}
+	body := fmt.Sprintf("%s\n### dep-review: the run failed\n\n"+
+		"**The gate's run failed before it could decide.** Nothing was judged, merged or refused for head %s. %s\n\n"+
+		"**Way out:** open %s and re-run the failed jobs. If it fails the same way, re-run all jobs. "+
+		"Until a run decides, the gate does not look at this pull request again by itself.\n",
+		mk.String(), code(head), inline(what), run)
+	if err := upsertComment(ctx, cfg, number, prev, body); err != nil {
+		return err
+	}
+	return notifyErr
 }
 
 // status is the commit status for a result, in the gate's own words: a
@@ -176,6 +259,7 @@ const (
 	mergeDone    mergeKind = iota // merged, by this call or by another run
 	mergeStale                    // the pull request is not what was decided on
 	mergeChecks                   // GitHub refused: required checks pending or failing
+	mergeBase                     // GitHub refused: the base branch moved while it merged
 	mergeRefused                  // GitHub refused for another reason
 )
 
@@ -225,11 +309,19 @@ func merge(ctx context.Context, cfg Config, pr wire.PullRequest, branch string) 
 		return 0, "", putErr
 	case refusal.StatusCode == http.StatusConflict || after.changed(pr.Head) != "":
 		return mergeStale, "the pull request changed before the merge", nil
+	case refusal.StatusCode == http.StatusMethodNotAllowed && strings.TrimSpace(refusal.Message) == baseModified:
+		return mergeBase, baseModified, nil
 	case refusal.StatusCode == http.StatusMethodNotAllowed && (aboutChecksOnly(refusal.Message) || after.MergeableState == "blocked"):
 		return mergeChecks, "", nil
 	}
 	return mergeRefused, fmt.Sprintf("HTTP %d: %s", refusal.StatusCode, refusal.Message), nil
 }
+
+// baseModified is GitHub's whole answer when the base branch got a commit
+// between its own check and its merge, which is what two merges at the
+// same moment look like to the second. It says to try again, so the gate
+// does, at its next scheduled run; any other sentence is not guessed at.
+const baseModified = "Base branch was modified. Review and try the merge again."
 
 // GitHub has no field that says why a merge was refused, only a sentence.
 // These are the two shapes of a line about required status checks
@@ -254,9 +346,10 @@ func aboutChecksOnly(message string) bool {
 	if len(lines) > 0 && lines[0] == rulesHeader {
 		lines = lines[1:]
 	}
-	// internal/gh keeps the first 200 bytes of a message, so the last line
-	// of a long one may be cut short. It is judged by the lines before it.
-	if len(message) >= 200 && len(lines) > 1 {
+	// internal/gh keeps the first gh.MaxMessage bytes of a message, so the
+	// last line of a long one may be cut short. It is judged by the lines
+	// before it.
+	if len(message) >= gh.MaxMessage && len(lines) > 1 {
 		lines = lines[:len(lines)-1]
 	}
 	for _, l := range lines {

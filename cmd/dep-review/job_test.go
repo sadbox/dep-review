@@ -140,9 +140,9 @@ func TestPrepared(t *testing.T) {
 	}
 }
 
-// On an event's run the facts are believed only about the pull request
-// and head classify proved, and never to say more for its identity than
-// classify did: fetch reads what a pull request wrote, classify does not.
+// The facts are believed only about the pull request and head classify
+// proved, and never to say more for its identity than classify did: the
+// job that wrote them reads what a pull request wrote, classify does not.
 func TestCheckFacts(t *testing.T) {
 	class := model.Classification{Repo: "o/r", PR: 7, HeadSHA: testHead, Kind: model.KindDependabot}
 	for _, tt := range []struct {
@@ -179,106 +179,12 @@ func TestCheckFacts(t *testing.T) {
 			if tt.facts != nil {
 				tt.facts(&f)
 			}
-			path := filepath.Join(t.TempDir(), wire.FactsFile)
-			writeFacts(t, path, f)
-			err := checkFacts(c, path)
+			err := checkFacts(c, f)
 			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
 				t.Errorf("err = %v, want %q", err, tt.want)
 			}
 		})
 	}
-	t.Run("no facts file", func(t *testing.T) {
-		err := checkFacts(class, filepath.Join(t.TempDir(), wire.FactsFile))
-		if err == nil || !strings.Contains(err.Error(), "left no facts") {
-			t.Errorf("err = %v", err)
-		}
-	})
-	t.Run("a facts file that does not decode", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), wire.FactsFile)
-		writeFile(t, path, `{"version":1,"read":"full"}`)
-		if err := checkFacts(class, path); err == nil {
-			t.Error("no error")
-		}
-	})
-}
-
-// What publish finds in the artifacts directory: the one pull request of
-// an event's run, tied to its classification, or the scheduled job's
-// directories, one for each pull request.
-func TestPublishWork(t *testing.T) {
-	classJSON := `{"repo":"o/r","pr":7,"head_sha":"` + testHead + `","kind":"dependabot"}`
-
-	t.Run("an event's run", func(t *testing.T) {
-		in := t.TempDir()
-		writeFile(t, filepath.Join(in, "classification", "classification.json"), classJSON)
-		writeFacts(t, filepath.Join(in, "facts", "facts.json"), goodFacts())
-		work, err := publishWork(in)
-		want := decidable{facts: filepath.Join(in, "facts", "facts.json"), verdicts: filepath.Join(in, "verdicts", "verdicts.json")}
-		if err != nil || len(work) != 1 || work[0] != want {
-			t.Errorf("work %+v, %v", work, err)
-		}
-	})
-	t.Run("an event's run whose facts are about another pull request", func(t *testing.T) {
-		in := t.TempDir()
-		writeFile(t, filepath.Join(in, "classification", "classification.json"), classJSON)
-		f := goodFacts()
-		f.PullRequest.Number = 8
-		writeFacts(t, filepath.Join(in, "facts", "facts.json"), f)
-		if work, err := publishWork(in); err == nil {
-			t.Errorf("work %+v", work)
-		}
-	})
-	t.Run("an event's run takes nothing from a refreshed directory", func(t *testing.T) {
-		in := t.TempDir()
-		writeFile(t, filepath.Join(in, "classification", "classification.json"), classJSON)
-		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
-		if work, err := publishWork(in); err == nil {
-			t.Errorf("work %+v", work)
-		}
-	})
-	t.Run("a classification that does not decode", func(t *testing.T) {
-		in := t.TempDir()
-		writeFile(t, filepath.Join(in, "classification", "classification.json"), `{"repo":`)
-		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
-		if work, err := publishWork(in); err == nil {
-			t.Errorf("work %+v", work)
-		}
-	})
-	t.Run("a scheduled run", func(t *testing.T) {
-		in := t.TempDir()
-		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
-		writeFacts(t, filepath.Join(in, "refreshed", "12", "facts.json"), goodFacts())
-		writeFile(t, filepath.Join(in, "gate-bin", "dep-review"), "binary")
-		work, err := publishWork(in)
-		if err != nil || len(work) != 2 {
-			t.Fatalf("work %+v, %v", work, err)
-		}
-		for i, n := range []string{"12", "7"} {
-			dir := filepath.Join(in, "refreshed", n)
-			if want := (decidable{facts: filepath.Join(dir, "facts.json"), verdicts: filepath.Join(dir, "verdicts.json")}); work[i] != want {
-				t.Errorf("work[%d] = %+v, want %+v", i, work[i], want)
-			}
-		}
-	})
-	t.Run("a scheduled run with something else in the directory", func(t *testing.T) {
-		for _, name := range []string{"seven", "0", "-1", "7x"} {
-			in := t.TempDir()
-			writeFacts(t, filepath.Join(in, "refreshed", name, "facts.json"), goodFacts())
-			if work, err := publishWork(in); err == nil {
-				t.Errorf("%s: work %+v", name, work)
-			}
-		}
-		in := t.TempDir()
-		writeFile(t, filepath.Join(in, "refreshed", "7"), "a file, not a directory")
-		if work, err := publishWork(in); err == nil {
-			t.Errorf("work %+v", work)
-		}
-	})
-	t.Run("nothing", func(t *testing.T) {
-		if work, err := publishWork(t.TempDir()); err == nil || !strings.Contains(err.Error(), "neither") {
-			t.Errorf("work %+v, %v", work, err)
-		}
-	})
 }
 
 // A verdicts file that is not there is no verdicts; one that is there has

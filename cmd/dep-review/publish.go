@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/sadbox/dep-review/internal/classify"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/land"
 	"github.com/sadbox/dep-review/internal/model"
@@ -30,24 +32,26 @@ const (
 	classificationFile     = "classification.json"
 )
 
-// runPublish: dep-review publish --in <dir>
+// runPublish: dep-review publish --in <dir> [--ignore-ecosystems <list>]
 //
 // Decides and acts (internal/land): for the one pull request of an
 // event's run, or for every pull request the scheduled job refreshed. It
 // is the only command that holds the gate app's token, which it takes
-// from GH_TOKEN, with the app's slug in DEP_REVIEW_APP_SLUG.
+// from GH_TOKEN, with the app's slug in DEP_REVIEW_APP_SLUG. On an
+// event's run FETCH_RESULT and REVIEW_RESULT are how those jobs ended.
 func runPublish(args []string) error {
 	fl := newFlagSet("publish")
 	in := fl.String("in", "", "directory holding the artifacts, each in a directory of its name: classification, facts and verdicts from an event's run, or refreshed from a scheduled one (required)")
+	ignoreList := fl.String("ignore-ecosystems", "", ignoreUsage)
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
 	if *in == "" || fl.NArg() > 0 {
 		return errors.New("publish: --in is required")
 	}
-	work, err := publishWork(*in)
+	ignore, err := model.ParseEcosystems(*ignoreList)
 	if err != nil {
-		return err
+		return fmt.Errorf("--ignore-ecosystems: %w", err)
 	}
 	c, err := gh.NewFromEnv()
 	if err != nil {
@@ -63,27 +67,16 @@ func runPublish(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
 
-	// One pull request that cannot be decided does not keep the others
-	// from being decided.
-	failed := 0
-	for _, w := range work {
-		ev, err := land.Decide(ctx, cfg, w.facts, w.verdicts)
-		if err == nil {
-			var res land.Result
-			res, err = land.Act(ctx, cfg, ev)
-			if res.Action != "" {
-				log.Printf("publish: #%d: %s %v %q", ev.PullRequest.Number, res.Action, res.Decision.Reasons, res.Note)
-			}
-		}
-		if err != nil {
-			failed++
-			log.Printf("publish: %s: %v", w.facts, err)
-		}
+	// An event's run has a classification; a scheduled one has a
+	// directory for each pull request the refresh job wrote.
+	class, err := readClassification(filepath.Join(*in, classificationArtifact, classificationFile))
+	switch {
+	case err == nil:
+		return publishEvent(ctx, cfg, *in, class)
+	case errors.Is(err, fs.ErrNotExist):
+		return publishRefreshed(ctx, cfg, *in, ignore)
 	}
-	if failed > 0 {
-		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on", failed, len(work))
-	}
-	return nil
+	return err
 }
 
 // decidable is one pull request's two files.
@@ -93,62 +86,147 @@ type decidable struct {
 	facts, verdicts string
 }
 
-// publishWork finds what there is to decide in the artifacts directory.
-// An event's run has a classification, and its facts must be about the
-// pull request classify proved. A scheduled run has one directory for
-// each pull request the refresh job wrote.
-func publishWork(in string) ([]decidable, error) {
-	class, err := readClassification(filepath.Join(in, classificationArtifact, classificationFile))
-	switch {
-	case err == nil:
-		w := decidable{
-			facts:    filepath.Join(in, factsArtifact, wire.FactsFile),
-			verdicts: filepath.Join(in, verdictsArtifact, wire.VerdictsFile),
-		}
-		if err := checkFacts(class, w.facts); err != nil {
-			return nil, err
-		}
-		return []decidable{w}, nil
-	case !errors.Is(err, fs.ErrNotExist):
-		return nil, err
-	}
-
-	entries, err := os.ReadDir(filepath.Join(in, refreshedArtifact))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("publish: %s holds neither a classification nor refreshed pull requests", in)
-	}
-	if err != nil {
-		return nil, err
-	}
-	var work []decidable
-	for _, e := range entries {
-		// The refresh job names a directory by its pull request's number.
-		if n, err := strconv.Atoi(e.Name()); err != nil || n < 1 || !e.IsDir() {
-			return nil, fmt.Errorf("publish: %s is not a refreshed pull request's directory", filepath.Join(in, refreshedArtifact, e.Name()))
-		}
-		dir := filepath.Join(in, refreshedArtifact, e.Name())
-		work = append(work, decidable{facts: filepath.Join(dir, wire.FactsFile), verdicts: filepath.Join(dir, wire.VerdictsFile)})
-	}
-	return work, nil
+// handled reports whether kind is one the gate gathers facts for and
+// decides. For every other kind it writes nothing at all.
+func handled(kind model.Kind) bool {
+	return kind == model.KindDependabot || kind == model.KindDependabotUnverified || kind == model.KindPending
 }
 
-// checkFacts ties the facts file to classify's answer. The fetch job
-// reads what a pull request and its dependencies wrote, and classify does
-// not; so the facts are believed only about the pull request and the head
-// classify looked at, and never to say more for its identity than
-// classify did.
-func checkFacts(class model.Classification, factsPath string) error {
-	b, err := os.ReadFile(factsPath)
+// publishEvent decides the one pull request of an event's run. A run that
+// cannot (the fetch job left no facts, or deciding or acting failed
+// before anything was written) says so on the pull request: nothing else
+// would, and the scheduled job looks only at what was left waiting.
+func publishEvent(ctx context.Context, cfg land.Config, in string, class model.Classification) error {
+	if !handled(class.Kind) || !strings.EqualFold(class.Repo, cfg.Repo) {
+		return fmt.Errorf("publish: classify said %q of %.100q, and this job decides Dependabot's pull requests in %s", class.Kind, class.Repo, cfg.Repo)
+	}
+	// The review job ran, or should have.
+	cfg.ModelAsked = true
+	w := decidable{
+		facts:    filepath.Join(in, factsArtifact, wire.FactsFile),
+		verdicts: filepath.Join(in, verdictsArtifact, wire.VerdictsFile),
+	}
+	facts, err := readFacts(w.facts)
+	if err == nil {
+		err = checkFacts(class, facts)
+	}
+	written := false
+	if err == nil {
+		written, err = decide(ctx, cfg, w)
+	}
+	if err != nil && !written {
+		what := fmt.Sprintf("In this run the fetch job ended %s and the review job %s.", jobResult("FETCH_RESULT"), jobResult("REVIEW_RESULT"))
+		if ferr := land.Failed(ctx, cfg, class.PR, class.HeadSHA, what); ferr != nil {
+			log.Printf("publish: #%d: the failed run could not be reported on the pull request: %v", class.PR, ferr)
+		}
+	}
+	return err
+}
+
+// jobResult is how a job this one needs ended, as gate.yml hands it over
+// in the environment: one of GitHub's four words, or "unknown".
+func jobResult(env string) string {
+	switch r := os.Getenv(env); r {
+	case "success", "failure", "cancelled", "skipped":
+		return r
+	}
+	return "unknown"
+}
+
+// publishRefreshed decides every pull request the scheduled job
+// refreshed. One that cannot be decided does not keep the others from
+// being decided. Nothing is written about it: its comment still says
+// wait, so the next scheduled run takes it up again.
+func publishRefreshed(ctx context.Context, cfg land.Config, in string, ignore map[model.Ecosystem]bool) error {
+	entries, err := os.ReadDir(filepath.Join(in, refreshedArtifact))
 	if errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("publish: the fetch job left no facts for #%d, so nothing is decided; run the gate again", class.PR)
+		return fmt.Errorf("publish: %s holds neither a classification nor refreshed pull requests", in)
 	}
 	if err != nil {
 		return err
 	}
-	facts, err := wire.DecodeFacts(b)
+	failed := 0
+	for _, e := range entries {
+		if err := refreshed(ctx, cfg, filepath.Join(in, refreshedArtifact), e, ignore); err != nil {
+			failed++
+			log.Printf("publish: %s: %v", e.Name(), err)
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on", failed, len(entries))
+	}
+	return nil
+}
+
+// refreshed decides one pull request of a scheduled run. The refresh job
+// ran the identity proof and read what the pull request and its
+// dependencies wrote in one process, so its word for the identity is not
+// taken: the proof is run again here, and the facts are believed only as
+// far as it goes (checkFacts), as on an event.
+func refreshed(ctx context.Context, cfg land.Config, dir string, e fs.DirEntry, ignore map[model.Ecosystem]bool) error {
+	// The refresh job names a directory by its pull request's number.
+	number, err := strconv.Atoi(e.Name())
+	if err != nil || number < 1 || !e.IsDir() {
+		return errors.New("not a refreshed pull request's directory")
+	}
+	w := decidable{facts: filepath.Join(dir, e.Name(), wire.FactsFile), verdicts: filepath.Join(dir, e.Name(), wire.VerdictsFile)}
+	facts, err := readFacts(w.facts)
 	if err != nil {
 		return err
 	}
+	if facts.PullRequest.Number != number {
+		return fmt.Errorf("the directory's facts are about #%d", facts.PullRequest.Number)
+	}
+	class, err := classify.Pull(ctx, cfg.GitHub, cfg.Repo, number, facts.PullRequest.Head, classify.Options{IgnoreEcosystems: ignore})
+	if err != nil {
+		return err
+	}
+	if !handled(class.Kind) {
+		// Closed, moved on (the new head has a run of its own) or
+		// ignored: no longer the gate's to decide.
+		log.Printf("publish: #%d: %s now, nothing to do", number, class.Kind)
+		return nil
+	}
+	if err := checkFacts(class, facts); err != nil {
+		return err
+	}
+	_, err = decide(ctx, cfg, w)
+	return err
+}
+
+// decide is Decide and Act for one pull request. written says Act wrote
+// the comment and the status, which it also has when it returns an error
+// for a notification that failed.
+func decide(ctx context.Context, cfg land.Config, w decidable) (written bool, err error) {
+	ev, err := land.Decide(ctx, cfg, w.facts, w.verdicts)
+	if err != nil {
+		return false, err
+	}
+	res, err := land.Act(ctx, cfg, ev)
+	if res.Action != "" {
+		log.Printf("publish: #%d: %s %v %q", ev.PullRequest.Number, res.Action, res.Decision.Reasons, res.Note)
+	}
+	return res.Action != "", err
+}
+
+// readFacts reads a facts file.
+func readFacts(path string) (wire.Facts, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return wire.Facts{}, errors.New("publish: there is no facts file, so nothing is decided; run the gate again")
+	}
+	if err != nil {
+		return wire.Facts{}, err
+	}
+	return wire.DecodeFacts(b)
+}
+
+// checkFacts ties a facts file to classify's answer. The job that wrote
+// the file reads what a pull request and its dependencies wrote, and
+// classify does not; so the facts are believed only about the pull
+// request and the head classify looked at, and never to say more for its
+// identity than classify did.
+func checkFacts(class model.Classification, facts wire.Facts) error {
 	if want := (wire.PullRequest{Repo: class.Repo, Number: class.PR, Head: class.HeadSHA}); facts.PullRequest != want {
 		return fmt.Errorf("publish: the facts are about %s #%d at %s, and classify looked at %s #%d at %s",
 			facts.PullRequest.Repo, facts.PullRequest.Number, facts.PullRequest.Head, want.Repo, want.Number, want.Head)

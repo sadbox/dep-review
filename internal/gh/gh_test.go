@@ -118,6 +118,28 @@ func TestErrorMessage(t *testing.T) {
 	}
 }
 
+// A refused merge lists every required check on a line of its own: the
+// message is kept long enough for a dozen of them, and no longer.
+func TestErrorMessageCap(t *testing.T) {
+	line := "Required status check \"a long name / with a matrix (ubuntu-26.04)\" is expected.\n\n"
+	for _, lines := range []int{12, 100} {
+		message := strings.Repeat(line, lines)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(405)
+			json.NewEncoder(w).Encode(map[string]string{"message": message})
+		}))
+		c, _ := testClient(srv)
+		var e *Error
+		if err := c.Put(context.Background(), "repos/o/r/pulls/1/merge", nil, nil); !errors.As(err, &e) {
+			t.Fatal(err)
+		}
+		srv.Close()
+		if want := message[:min(len(message), MaxMessage)]; e.Message != want {
+			t.Errorf("%d lines: the error keeps %d bytes of the message, want %d", lines, len(e.Message), len(want))
+		}
+	}
+}
+
 func TestErrNotFound(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

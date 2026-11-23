@@ -3,9 +3,11 @@ package replay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -145,13 +147,18 @@ func TestPrint(t *testing.T) {
 }
 
 // An npm record is read by npm itself, offline. The test needs an npm the
-// gatherer was tested with: with none installed it is skipped, and with
-// another version it fails, as the gate's fetch job would.
+// gatherer was tested with: with none installed, or one of another major,
+// it is skipped, as internal/facts/npm's own tests with the real npm are.
 func TestRunNPM(t *testing.T) {
 	if _, err := exec.LookPath("npm"); err != nil {
 		t.Skip("npm is not installed")
 	}
 	results, err := Run(context.Background(), filepath.Join("testdata", "npm"), Options{Policy: builtIn(t), Now: later})
+	// The gatherer's own refusal of an npm it was not tested with; the
+	// check behind it is not exported.
+	if err != nil && strings.Contains(err.Error(), "is not a version the gate was tested with") {
+		t.Skip(err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +168,77 @@ func TestRunNPM(t *testing.T) {
 	r := results[0]
 	if r.Decision.Outcome != allow.Merge || !r.Shape.Holds() || len(r.Decision.PerUpdate) != 3 {
 		t.Errorf("outcome %s (%v), shape %q, %d updates; want a merge of three", r.Decision.Outcome, r.Decision.Reasons, r.Shape.Value, len(r.Decision.PerUpdate))
+	}
+}
+
+// A whole policy file is read with no floor under it, and has to set
+// every key the built-in file sets.
+func TestReadPolicy(t *testing.T) {
+	builtInFile, err := os.ReadFile(filepath.Join("..", "config", "policy", "defaults.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := func(change func(m map[string]any)) []byte {
+		var m map[string]any
+		if err := json.Unmarshal(builtInFile, &m); err != nil {
+			t.Fatal(err)
+		}
+		change(m)
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	listed := func(m map[string]any) map[string]any { return m["listed"].(map[string]any) }
+
+	if got, err := ReadPolicy(builtInFile); err != nil || !reflect.DeepEqual(got, builtIn(t)) {
+		t.Errorf("the built-in file: %+v, %v; want the built-in policy", got, err)
+	}
+	got, err := ReadPolicy(edit(func(m map[string]any) {
+		m["min_age_hours"] = 24
+		listed(m)["docker"] = []string{"gcr.io/distroless/"}
+		listed(m)["npm"] = []string{}
+	}))
+	want := noOfficialImages(t)
+	want.MinAge, want.Listed[allow.NPM] = 24*time.Hour, nil
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("a file below the built-in values: %+v, %v; want what it says", got, err)
+	}
+
+	// Every key, left out one at a time.
+	var all map[string]any
+	if err := json.Unmarshal(builtInFile, &all); err != nil {
+		t.Fatal(err)
+	}
+	missing := map[string][]byte{}
+	for key := range all {
+		missing[key] = edit(func(m map[string]any) { delete(m, key) })
+	}
+	for key := range listed(all) {
+		missing["listed."+key] = edit(func(m map[string]any) { delete(listed(m), key) })
+	}
+	for key, file := range missing {
+		if _, err := ReadPolicy(file); err == nil || !strings.Contains(err.Error(), "a key is missing") {
+			t.Errorf("without %s: %v, want an error that says a key is missing", key, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		file []byte
+		want string
+	}{
+		{"an unknown key", edit(func(m map[string]any) { m["allow_everything"] = true }), "unknown field"},
+		{"an age of zero", edit(func(m map[string]any) { m["min_age_hours"] = 0 }), allow.ReasonPolicyInvalid.Explain()},
+		{"a companion mode that is none", edit(func(m map[string]any) { m["fast_path_companions"] = "sometimes" }), allow.ReasonPolicyInvalid.Explain()},
+		{"a second value", append(edit(func(map[string]any) {}), '1'), "more than one JSON value"},
+		{"not JSON", []byte("min_age_hours: 24"), "invalid character"},
+		{"empty", nil, "EOF"},
+	} {
+		if _, err := ReadPolicy(tc.file); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error that says %q", tc.name, err, tc.want)
+		}
 	}
 }
 

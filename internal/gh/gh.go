@@ -83,7 +83,7 @@ type Error struct {
 	Method     string
 	Path       string
 	StatusCode int
-	Message    string // GitHub's "message" field, if any
+	Message    string // GitHub's "message" field, if any, up to MaxMessage bytes
 	// RateLimited: GitHub refused the request for a rate limit: a 429, or
 	// a 403 that carries one of its rate-limit signals (see retryable).
 	// The client has retried it already.
@@ -373,6 +373,12 @@ func (c *Client) once(ctx context.Context, method, u string, payload []byte) (ht
 	return resp.Header, body, resp.StatusCode, nil
 }
 
+// MaxMessage is how many bytes of GitHub's "message" an Error keeps. A
+// refused merge names every required check on a line of its own, and a
+// caller reads those lines (internal/land), so the cap is well above a
+// rule violation with a dozen checks.
+const MaxMessage = 2000
+
 func apiMessage(body []byte) string {
 	var m struct {
 		Message string `json:"message"`
@@ -380,8 +386,8 @@ func apiMessage(body []byte) string {
 	if json.Unmarshal(body, &m) != nil {
 		return ""
 	}
-	if len(m.Message) > 200 {
-		return m.Message[:200]
+	if len(m.Message) > MaxMessage {
+		return m.Message[:MaxMessage]
 	}
 	return m.Message
 }

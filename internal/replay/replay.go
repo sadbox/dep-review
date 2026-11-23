@@ -45,12 +45,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/config"
 	"github.com/sadbox/dep-review/internal/facts"
 	"github.com/sadbox/dep-review/internal/facts/actions"
 	"github.com/sadbox/dep-review/internal/facts/docker"
@@ -160,26 +163,69 @@ func Run(ctx context.Context, dir string, opt Options) ([]Result, error) {
 	return results, nil
 }
 
-// readRecord decodes one record strictly: one JSON object, known keys
-// only, with an ecosystem and a creation time.
+// readRecord decodes one record strictly, with an ecosystem and a
+// creation time.
 func readRecord(path string) (Record, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return Record{}, err
 	}
 	var rec Record
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&rec); err != nil {
+	if err := strict(b, &rec); err != nil {
 		return Record{}, err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return Record{}, errors.New("more than one JSON value")
 	}
 	if rec.Ecosystem == "" || rec.Created.IsZero() {
 		return Record{}, errors.New("the record needs an ecosystem and a created time")
 	}
 	return rec, nil
+}
+
+// strict decodes one JSON object into v: known keys only, and nothing
+// after it.
+func strict(b []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("more than one JSON value")
+	}
+	return nil
+}
+
+// ReadPolicy reads a whole policy from a file in the form of the gate's
+// built-in one (internal/config/policy/defaults.json), to decide with in
+// its place. The file must set every key and is held to no floor: it may
+// lower an age or leave a list entry out, which is the kind of change the
+// replay is there to measure.
+//
+// That is why this reader is here and not in internal/config: the gate's
+// jobs resolve their policy with config.Load alone, and nothing on their
+// path imports this package (a test in cmd/dep-review keeps it so).
+func ReadPolicy(b []byte) (allow.Policy, error) {
+	// The file is decoded over the built-in settings and over nothing. A
+	// key it leaves out keeps what was there, so the two differ exactly
+	// when one is missing.
+	whole, err := config.Load(nil)
+	if err != nil {
+		return allow.Policy{}, err
+	}
+	var bare config.Config
+	for _, c := range []*config.Config{&whole, &bare} {
+		if err := strict(b, c); err != nil {
+			return allow.Policy{}, fmt.Errorf("replay: policy: %w", err)
+		}
+	}
+	if !reflect.DeepEqual(whole, bare) {
+		return allow.Policy{}, errors.New("replay: policy: a key is missing; the file must set every key the built-in one sets")
+	}
+	p := whole.Policy()
+	// allow.Decide is the judge of what a usable policy is.
+	if d := allow.Decide(allow.PRFacts{}, p, time.Time{}); slices.Contains(d.Reasons, allow.ReasonPolicyInvalid) {
+		return allow.Policy{}, errors.New("replay: policy: " + allow.ReasonPolicyInvalid.Explain())
+	}
+	return p, nil
 }
 
 // Decide replays one record. Result.Name is left for the caller.

@@ -27,9 +27,10 @@ const refreshTimeout = 25 * time.Minute
 // The scheduled job. For every open Dependabot pull request the gate left
 // waiting it runs classify's proof again, gathers the facts again and
 // writes them with the verdicts the gate's comment remembers into
-// --out/<number>, for publish to decide. No model is asked: the job holds
-// no credential but its read-only token. It appends to $GITHUB_OUTPUT
-// publish=<true|false>, whether it wrote anything, and
+// --out/<number>, for publish to decide; publish runs the proof once more
+// itself and believes the facts only as far as it goes. No model is
+// asked: the job holds no credential but its read-only token. It appends
+// to $GITHUB_OUTPUT publish=<true|false>, whether it wrote anything, and
 // incomplete=<true|false>, whether a pull request could not be refreshed.
 func runRefresh(args []string) error {
 	fl := newFlagSet("refresh")
@@ -111,9 +112,7 @@ func (g *gathering) refresh(ctx context.Context, cfg land.Config, w land.Reevalu
 	if err != nil {
 		return false, err
 	}
-	switch class.Kind {
-	case model.KindDependabot, model.KindDependabotUnverified, model.KindPending:
-	default:
+	if !handled(class.Kind) {
 		// Closed, moved on (the new head has a run of its own) or
 		// ignored.
 		log.Printf("refresh: #%d: %s, nothing to do", w.Number, class.Kind)

@@ -14,7 +14,8 @@ import (
 	"github.com/sadbox/dep-review/internal/model"
 )
 
-// ignoreUsage is shared by classify and refresh, which must agree.
+// ignoreUsage is shared by classify, refresh and publish, which must
+// agree: each runs the identity proof.
 const ignoreUsage = "optional: comma-separated ecosystems, as in Dependabot's branch names (e.g. submodules), whose verified Dependabot PRs another process owns; the gate leaves them alone. An unknown name is an error"
 
 // runClassify: dep-review classify --event <file> --trigger-path <path> --out <file>

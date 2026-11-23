@@ -252,7 +252,7 @@ func TestMarkerRoundTrip(t *testing.T) {
 	m := marker{
 		Outcome: ActionWait, Head: headA,
 		NotBefore: t0.Add(time.Hour), Deadline: t0.Add(48 * time.Hour),
-		Notified:    []string{headB},
+		Notified: []string{headB}, NotifiedFailed: []string{headA}, NotifiedUnread: []string{headA, headB},
 		Fingerprint: reviewer,
 		Cache: []cached{
 			{Key: keyA, Read: allow.ReadFull},
@@ -302,13 +302,20 @@ func TestMarkerRejected(t *testing.T) {
 			fields[k] = v
 		}
 		var parts []string
-		for _, k := range []string{"outcome", "head", "not_before", "deadline", "notified", "fingerprint", "cache"} {
-			parts = append(parts, `"`+k+`":`+fields[k])
+		for _, k := range []string{"outcome", "head", "not_before", "deadline", "notified", "notified_failed", "notified_unread", "fingerprint", "cache"} {
+			// The two newer lists are left out unless a case sets one: a
+			// marker written before they existed still parses.
+			if v, ok := fields[k]; ok {
+				parts = append(parts, `"`+k+`":`+v)
+			}
 		}
 		return "{" + strings.Join(parts, ",") + "}"
 	}
 	if _, ok := parseMarker(encode(base(""))); !ok {
 		t.Fatal("the unchanged marker does not parse")
+	}
+	if m, ok := parseMarker(encode(base(`outcome="failed"`))); !ok || m.Outcome != ActionFailed {
+		t.Errorf("a failed run's marker: %+v (parsed: %t)", m, ok)
 	}
 	bad := map[string]string{
 		"no marker":                     "### dep-review: waiting",
@@ -324,6 +331,8 @@ func TestMarkerRejected(t *testing.T) {
 		"a head that is not a commit":   encode(base(`head="main"`)),
 		"a notified head that is not":   encode(base(`notified=["HEAD"]`)),
 		"too many notified heads":       encode(base(`notified=["` + strings.Repeat(headA+`","`, maxNotified) + headA + `"]`)),
+		"a failed head that is not":     encode(base(`notified_failed=["HEAD"]`)),
+		"too many unread heads":         encode(base(`notified_unread=["` + strings.Repeat(headA+`","`, maxNotified) + headA + `"]`)),
 		"a fingerprint that is not one": encode(base(`fingerprint="any"`)),
 		"a key that is not one":         encode(base(`cache=[{"key":"../x","read":"full","veto":null}]`)),
 		"a read state that is no state": encode(base(`cache=[{"key":"` + keyA + `","read":"approved","veto":null}]`)),

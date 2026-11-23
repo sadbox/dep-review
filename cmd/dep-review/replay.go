@@ -42,22 +42,23 @@ func runReplay(args []string) error {
 			return fmt.Errorf("replay: --name-created: %w", err)
 		}
 	}
-	// No repository file is applied on top: the file given here is the
-	// whole policy, so that a run can also measure a narrower list or a
-	// shorter age than the built-in one.
-	var cfg config.Config
-	if *policyPath == "" {
-		cfg, err = config.Load(nil)
-	} else {
-		var b []byte
-		if b, err = os.ReadFile(*policyPath); err == nil {
-			cfg, err = config.Complete(b)
-		}
-	}
+	cfg, err := config.Load(nil)
 	if err != nil {
-		return fmt.Errorf("replay: %w", err)
+		return err
 	}
 	opt.Policy = cfg.Policy()
+	if *policyPath != "" {
+		// The file given here is the whole policy, with no floor under
+		// it, so that a run can also measure a narrower list or a shorter
+		// age than the built-in one.
+		b, err := os.ReadFile(*policyPath)
+		if err != nil {
+			return fmt.Errorf("replay: --policy: %w", err)
+		}
+		if opt.Policy, err = replay.ReadPolicy(b); err != nil {
+			return err
+		}
+	}
 
 	results, err := replay.Run(context.Background(), *dir, opt)
 	if err != nil {

@@ -39,8 +39,19 @@ needed and Pushover is configured, notifies once per head commit.
 
 The gate does not judge CI. It asks GitHub to merge with `sha=<head>`, and
 GitHub's rules decide; a refusal because required checks are pending or
-failing is a wait. Any other refusal is reported (status `error`) and not
-retried.
+failing is a wait, and so is GitHub's "Base branch was modified" (another
+merge landed at the same moment; the next scheduled run asks again). Any
+other refusal is reported (status `error`) and not retried.
+
+A run that cannot decide is not silent. When the fetch job leaves no
+facts, or deciding fails, publish still runs: it sets the status to
+`error`, writes the comment ("the run failed", with the workflow run to
+re-run) and notifies once per head commit. When the review job fails or
+leaves a prepared read without a verdict, the pull request waits as
+before and the owner is told once, because the scheduled run asks no
+model and would not end that wait. A classify job that fails leaves only
+the failed workflow run: nothing is written on a pull request that was
+not classified.
 
 Waiting for an age has no deadline. Waiting for a retry (a model read, a
 source that did not answer, a superseded Docker digest, required checks)
@@ -181,7 +192,8 @@ version is taken to be as old as its pull request. Run it with the
 built-in policy and with the changed one, and compare who goes to a
 person. `--policy` takes a complete file in the form of `defaults.json`,
 and unlike a repository's file it may also be narrower than the built-in
-one. `--name-created` is the one stand-in with a choice: without it the
+one (only the replay reads a file that way: `replay.ReadPolicy`).
+`--name-created` is the one stand-in with a choice: without it the
 age of a new name is unknown, which is person. With it, the pull requests
 that do not go to a person are an upper bound on those that would not in
 the gate. npm records need a local npm; nothing else is run and no
@@ -203,8 +215,14 @@ schedule → gate.yml
             refresh   for every PR left waiting: the identity      (read-only token)
                       proof and the facts again, with the verdicts
                       the gate's comment remembers; no model
-            publish   decide, comment, status, merge               (gate app)
+            publish   the identity proof once more, then decide,   (gate app)
+                      comment, status, merge
 ```
+
+Publish jobs run one at a time in a repository and wait for each other
+in order (`queue: max`), so two merges never reach the base branch at the
+same moment. fetch and refresh run npm from a pinned Node major, not the
+runner image's.
 
 A verdict is remembered in the gate's comment by a hash of what was read
 and of the question (prompt, answer schema, model, effort), so a rebase or
@@ -286,9 +304,10 @@ and it then gets no status, comment or notification.
 - **What a job can assert.** The model can only veto: no answer of its
   makes a decision more permissive than "no veto". The facts file has no
   member that says an update was read; that comes only from the verdicts
-  file, matched by content hash. publish believes the facts of an event's
-  run only about the pull request and head that classify proved. The
-  policy file never comes from the pull request.
+  file, matched by content hash. publish believes the facts only about
+  the pull request and head that classify proved: the classify job on an
+  event, its own run of the proof on a schedule. The policy file never
+  comes from the pull request.
 - **Third-party text.** Everything a registry, a dependency or the model
   wrote reaches the comment only through one sanitiser, in code spans,
   with a length cap; it reaches logs only through a logger that escapes
@@ -296,7 +315,9 @@ and it then gets no status, comment or notification.
   statuses carry only the gate's own words.
 - **The scheduled path** has no model and no credential to ask one with.
   Its one unprivileged job runs both the identity proof and the fetch, so
-  there publish has no second job's word to check the facts against.
+  publish takes neither on its word: it runs the proof again itself for
+  every refreshed pull request and believes the facts only as far as that
+  goes.
 - **One app per owner.** The gate app's private key sits in the
   `dep-review` environment of every repository the app is installed on.
   Anyone who can get a workflow change onto one such repository's default

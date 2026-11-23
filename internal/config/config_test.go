@@ -469,10 +469,8 @@ func TestHintsNameTheRepoFile(t *testing.T) {
 	}
 }
 
-// Complete takes a whole file in place of the embedded one. It is for
-// measuring a policy, so unlike a repository's file it may go below the
-// built-in values and leave list entries out; like every file it must be
-// strict about what it says.
+// complete reads the embedded file, which sets every value itself: it
+// takes what the file says, and is strict about what the file may say.
 func TestComplete(t *testing.T) {
 	edit := func(change func(m map[string]any)) []byte {
 		var m map[string]any
@@ -487,12 +485,12 @@ func TestComplete(t *testing.T) {
 		return b
 	}
 
-	got, err := Complete(defaultsJSON)
+	got, err := complete(defaultsJSON)
 	if err != nil || !reflect.DeepEqual(got, specDefaults()) {
 		t.Errorf("the embedded file: %+v, %v; want the defaults", got, err)
 	}
 
-	got, err = Complete(edit(func(m map[string]any) {
+	got, err = complete(edit(func(m map[string]any) {
 		m["min_age_hours"] = 24
 		m["listed"].(map[string]any)["docker"] = []string{"gcr.io/distroless/"}
 	}))
@@ -515,10 +513,9 @@ func TestComplete(t *testing.T) {
 		{"an unknown key", edit(func(m map[string]any) { m["allow_everything"] = true }), "unknown field"},
 		{"an age of zero", edit(func(m map[string]any) { m["min_age_hours"] = 0 }), "min_age_hours"},
 		{"a bad list entry", edit(func(m map[string]any) { m["listed"].(map[string]any)["npm"] = []string{"/"} }), "listed.npm"},
-		{"too large", append(edit(func(map[string]any) {}), make([]byte, maxFileBytes)...), "bytes"},
 		{"empty", nil, "EOF"},
 	} {
-		if _, err := Complete(tc.file); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if _, err := complete(tc.file); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v, want an error that says %q", tc.name, err, tc.want)
 		}
 	}

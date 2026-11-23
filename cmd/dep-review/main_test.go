@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -77,13 +81,14 @@ func TestRequiredFlags(t *testing.T) {
 	}
 }
 
-// An unknown ecosystem name fails classify and refresh before they read
-// anything or call the API.
+// An unknown ecosystem name fails classify, refresh and publish before
+// they read anything or call the API.
 func TestIgnoreEcosystemsUnknownFails(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
 	for cmd, args := range map[string][]string{
 		"classify": {"--event", "/nonexistent", "--trigger-path", "t", "--out", "/nonexistent/c.json"},
 		"refresh":  {"--repo-dir", "/nonexistent", "--out", "/nonexistent", "--app-slug", "gate"},
+		"publish":  {"--in", "/nonexistent"},
 	} {
 		for _, bad := range []string{"gitsubmodule", "submodules,", "*"} {
 			err := commands[cmd](append(args, "--ignore-ecosystems", bad))
@@ -119,5 +124,58 @@ func TestReplayFlags(t *testing.T) {
 		if err := tools["replay"](tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v, want an error that says %q", tc.name, err, tc.want)
 		}
+	}
+}
+
+// The gate's jobs resolve their policy with config.Load, which holds a
+// repository's file to the built-in floors. The one reader that holds a
+// file to no floor is internal/replay's, for measuring a policy, and no
+// job's path may reach it. Imports are per file, so that is: replay.go is
+// the only file of the module that imports internal/replay, replay is no
+// job's subcommand, and Load is the only function internal/config
+// exports.
+func TestOnlyReplayReadsAPolicyWithoutFloors(t *testing.T) {
+	const root, replayPackage = "../..", "github.com/sadbox/dep-review/internal/replay"
+	if _, ok := commands["replay"]; ok {
+		t.Error("replay is a job's subcommand")
+	}
+	fset := token.NewFileSet()
+	var importers, exported []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		rel := filepath.ToSlash(strings.TrimPrefix(path, root+"/"))
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && (d.Name() == "testdata" || rel == "internal/replay"):
+			return filepath.SkipDir
+		case d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go"):
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, imp := range f.Imports {
+			if imp.Path.Value == `"`+replayPackage+`"` {
+				importers = append(importers, rel)
+			}
+		}
+		if strings.HasPrefix(rel, "internal/config/") {
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.IsExported() {
+					exported = append(exported, fn.Name.Name)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(importers, " "); got != "cmd/dep-review/replay.go" {
+		t.Errorf("internal/replay is imported by %q, want cmd/dep-review/replay.go alone", got)
+	}
+	if got := strings.Join(exported, " "); got != "Load" {
+		t.Errorf("internal/config exports the functions %q, want Load alone: any other way to a Config has no floors", got)
 	}
 }

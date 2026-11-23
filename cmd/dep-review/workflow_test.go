@@ -388,16 +388,128 @@ func TestArtifactsVerified(t *testing.T) {
 	}
 }
 
-// publish serves both paths, and it is the last job of each.
+// stepOf is the step of a job that starts with "- name: <name>", up to
+// the next step.
+func stepOf(t *testing.T, job, name string) string {
+	t.Helper()
+	i := strings.Index(job, "\n      - name: "+name+"\n")
+	if i < 0 {
+		t.Fatalf("no step %q", name)
+	}
+	step := job[i+1:]
+	if next := strings.Index(step, "\n      - "); next >= 0 {
+		step = step[:next+1]
+	}
+	return step
+}
+
+// publish serves both paths, and it is the last job of each. On an
+// event's run it runs whenever classify said the pull request is one the
+// gate handles, whatever became of fetch and review: a run that cannot
+// decide has to say so on the pull request, and only publish can. It is
+// told how those jobs ended.
 func TestPublishRunsOnBothPaths(t *testing.T) {
 	publish := gateJobs(t)["publish"]
 	if !strings.Contains(publish, "\n    needs: [build, classify, fetch, review, refresh]\n") {
 		t.Error("publish does not wait for every other job")
 	}
-	for _, want := range []string{"!cancelled()", "needs.build.result == 'success'", "needs.fetch.result == 'success'", "needs.refresh.outputs.publish == 'true'"} {
-		if !strings.Contains(publish, want) {
-			t.Errorf("publish's condition lacks %q", want)
+	const cond = `
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      ((needs.classify.result == 'success' &&
+        (needs.classify.outputs.kind == 'dependabot' ||
+         needs.classify.outputs.kind == 'dependabot-unverified' ||
+         needs.classify.outputs.kind == 'dependabot-pending')) ||
+       (needs.refresh.result == 'success' && needs.refresh.outputs.publish == 'true'))
+`
+	if !strings.Contains(publish, cond) {
+		t.Errorf("publish's condition is not%s", cond)
+	}
+	// The kinds are the ones fetch runs for.
+	for _, kind := range []string{"dependabot", "dependabot-unverified", "dependabot-pending"} {
+		if !strings.Contains(gateJobs(t)["fetch"], "needs.classify.outputs.kind == '"+kind+"'") {
+			t.Errorf("fetch does not run for %s", kind)
 		}
+	}
+	decide := stepOf(t, publish, "Decide, comment, merge")
+	for _, want := range []string{"FETCH_RESULT: ${{ needs.fetch.result }}", "REVIEW_RESULT: ${{ needs.review.result }}"} {
+		if !strings.Contains(decide, want) {
+			t.Errorf("the step that decides lacks %q", want)
+		}
+	}
+	// With no facts artifact publish still gets to the step that reports
+	// the failed run.
+	if !strings.Contains(stepOf(t, publish, "Verify the facts artifact"), `if [ ! -e "$RUNNER_TEMP/in/facts" ]; then echo "no facts artifact"; exit; fi`) {
+		t.Error("publish stops at a facts artifact that is not there")
+	}
+}
+
+// The scheduled run fails when a pull request could not be refreshed, and
+// the ones that could are decided first. refresh itself fails only when it
+// uploaded nothing; otherwise it succeeds, so publish never reads the
+// outputs of a failed job, and publish's last step fails the run.
+func TestIncompleteRefreshFailsTheRunLast(t *testing.T) {
+	jobs := gateJobs(t)
+	refresh, publish := jobs["refresh"], jobs["publish"]
+	if !strings.Contains(refresh, "      incomplete: ${{ steps.refresh.outputs.incomplete }}\n") {
+		t.Error("refresh does not output incomplete")
+	}
+	if n := strings.Count(refresh, "exit 1"); n != 1 {
+		t.Errorf("refresh has %d steps that fail it, want 1", n)
+	}
+	if !strings.Contains(stepOf(t, refresh, "Fail when no PR could be refreshed"),
+		"        if: steps.refresh.outputs.incomplete == 'true' && steps.refresh.outputs.publish != 'true'\n") {
+		t.Error("refresh fails although it uploaded something")
+	}
+	last := publish[strings.LastIndex(publish, "\n      - "):]
+	for _, want := range []string{"- name: Fail when a PR could not be refreshed\n", "        if: needs.refresh.outputs.incomplete == 'true'\n", "exit 1"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("publish's last step lacks %q:%s", want, last)
+		}
+	}
+	if strings.Contains(publish, "always()") || strings.Contains(publish, "failure()") {
+		t.Error("publish has a status function besides !cancelled()")
+	}
+}
+
+// One publish at a time in a repository, and none is dropped for it: the
+// group is fixed, nothing in progress is cancelled, and more than one may
+// wait (by default a group keeps one pending job and cancels it when the
+// next arrives, which would lose a pull request's only decision).
+func TestPublishIsSerialized(t *testing.T) {
+	for name, job := range gateJobs(t) {
+		has := strings.Contains(job, "concurrency:")
+		if has != (name == "publish") {
+			t.Errorf("%s: has a concurrency group: %v", name, has)
+		}
+	}
+	const want = "\n    concurrency:\n      group: dep-review-publish\n      cancel-in-progress: false\n      queue: max\n"
+	if !strings.Contains(gateJobs(t)["publish"], want) {
+		t.Errorf("publish's concurrency is not%s", want)
+	}
+}
+
+// The jobs that gather facts run npm, and the npm gatherer refuses a
+// major it was not tested with. They take Node, and so npm, from a pinned
+// major, not from whatever the runner image has, and restore no cache.
+func TestNodePinned(t *testing.T) {
+	pin := regexp.MustCompile(`\n      - name: Set up Node\n        uses: actions/setup-node@v[0-9]+\.[0-9]+\.[0-9]+\n        with:\n          node-version: "[0-9]+"\n          package-manager-cache: false\n`)
+	n := 0
+	for name, job := range gateJobs(t) {
+		gathers := strings.Contains(job, `/dep-review" fetch`) || strings.Contains(job, `/dep-review" refresh`)
+		loc := pin.FindStringIndex(job)
+		if gathers {
+			n++
+		}
+		switch {
+		case gathers && (loc == nil || loc[0] > strings.Index(job, `/dep-review" `)):
+			t.Errorf("%s gathers facts without a pinned Node before it", name)
+		case !gathers && strings.Contains(job, "setup-node"):
+			t.Errorf("%s sets up Node and runs no npm", name)
+		}
+	}
+	if n != 2 {
+		t.Errorf("%d jobs gather facts, want 2 (fetch, refresh)", n)
 	}
 }
 
@@ -433,7 +545,7 @@ func TestAppSlugPassed(t *testing.T) {
 	}
 
 	// publish itself takes the name from the app, never from the input.
-	if !strings.Contains(publish[run-600:run], "DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}") {
+	if !strings.Contains(stepOf(t, publish, "Decide, comment, merge"), "DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}") {
 		t.Error("publish does not take its own slug from the app token step")
 	}
 	example, err := os.ReadFile("../../examples/dep-review.yaml")
@@ -471,9 +583,10 @@ func TestInputs(t *testing.T) {
 	}
 }
 
-// The ignore_ecosystems input reaches classify (which ignores) and
-// refresh (which must skip what classify ignores), through env only, and
-// the example documents it commented out.
+// The ignore_ecosystems input reaches classify (which ignores), and
+// refresh and publish (which run the identity proof again on the
+// scheduled path and must skip what classify ignores), through env only,
+// and the example documents it commented out.
 func TestIgnoreEcosystemsPassed(t *testing.T) {
 	g := readGate(t)
 	call := g[strings.Index(g, "workflow_call:"):strings.Index(g, "\n    secrets:\n")]
@@ -483,8 +596,8 @@ func TestIgnoreEcosystemsPassed(t *testing.T) {
 	jobs := gateJobs(t)
 	for name, job := range jobs {
 		uses := strings.Contains(job, "ignore_ecosystems")
-		if uses != (name == "classify" || name == "refresh") {
-			t.Errorf("%s: uses ignore_ecosystems: %v; classify and refresh should, and no other job", name, uses)
+		if uses != (name == "classify" || name == "refresh" || name == "publish") {
+			t.Errorf("%s: uses ignore_ecosystems: %v; classify, refresh and publish should, and no other job", name, uses)
 		}
 		if !uses {
 			continue

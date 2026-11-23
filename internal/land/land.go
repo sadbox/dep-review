@@ -10,11 +10,12 @@
 // for a merge a call to GitHub's merge API with the exact head.
 //
 // Nothing in this package decides. An outcome is allow.Decide's, or
-// allow.ChecksRefused's after GitHub refused a merge for required checks;
-// what this package adds on its own is only ever "nothing was done" (the
-// pull request changed) or "GitHub refused" (reported, never retried as
-// if it were a wait). The gate does not judge CI: it asks GitHub to merge
-// and GitHub's rules answer.
+// allow.ChecksRefused's after GitHub refused a merge for required checks
+// or because the base branch moved under it; what this package adds on
+// its own is only ever "nothing was done" (the pull request changed),
+// "GitHub refused" (reported, never retried as if it were a wait) or "the
+// run failed" (Failed). The gate does not judge CI: it asks GitHub to
+// merge and GitHub's rules answer.
 //
 // There is no stored approval. The comment remembers what the last run
 // concluded and the model's verdicts by content key, so a later run can
@@ -71,8 +72,13 @@ type Config struct {
 	// https://github.com when empty.
 	ServerURL string
 	// RunURL is this workflow run, built by the caller from validated
-	// values, or "". It is the status's target and a link in the comment.
+	// values, or "". It is the status's target and a link in the comment
+	// and in a notification about the run itself.
 	RunURL string
+	// ModelAsked says this run had a review job: an event's run, never a
+	// scheduled one. Only then is a prepared read without a verdict the
+	// reviewer's failure, which Act tells the owner about.
+	ModelAsked bool
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }

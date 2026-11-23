@@ -51,16 +51,23 @@ const (
 // (findComment). A person who can write to the repository can edit that
 // comment all the same; such a person can also merge by hand.
 type marker struct {
-	// Outcome is what the run that wrote the comment did. Never
-	// ActionStale: a stale run writes nothing.
+	// Outcome is what the run that wrote the comment did, or ActionFailed
+	// for a run that ended without doing anything. Never ActionStale: a
+	// stale run writes nothing.
 	Outcome Action `json:"outcome"`
 	// Head is the commit it was done for.
 	Head string `json:"head"`
 	// NotBefore and Deadline are the decision's, for ActionWait.
 	NotBefore time.Time `json:"not_before"`
 	Deadline  time.Time `json:"deadline"`
-	// Notified lists the heads a notification was sent for.
-	Notified []string `json:"notified"`
+	// Notified lists the heads a notification about a decision was sent
+	// for. NotifiedFailed and NotifiedUnread do the same for the two about
+	// the gate's own run: one that failed (Failed), and a reviewer that
+	// did not answer (Act). They are lists of their own, so that having
+	// told the owner one thing never keeps the next from being told.
+	Notified       []string `json:"notified"`
+	NotifiedFailed []string `json:"notified_failed"`
+	NotifiedUnread []string `json:"notified_unread"`
 	// Fingerprint is the reviewer's fingerprint every Cache entry was
 	// written under.
 	Fingerprint string `json:"fingerprint"`
@@ -113,15 +120,15 @@ func parseMarker(body string) (marker, bool) {
 		return marker{}, false
 	}
 	switch m.Outcome {
-	case ActionMerged, ActionWait, ActionPerson, ActionRefused:
+	case ActionMerged, ActionWait, ActionPerson, ActionRefused, ActionFailed:
 	default:
 		return marker{}, false
 	}
-	if !gh.ValidSHA(m.Head) || len(m.Notified) > maxNotified || len(m.Cache) > maxCached {
+	if !gh.ValidSHA(m.Head) || len(m.Cache) > maxCached {
 		return marker{}, false
 	}
-	for _, head := range m.Notified {
-		if !gh.ValidSHA(head) {
+	for _, list := range [][]string{m.Notified, m.NotifiedFailed, m.NotifiedUnread} {
+		if len(list) > maxNotified || slices.ContainsFunc(list, func(head string) bool { return !gh.ValidSHA(head) }) {
 			return marker{}, false
 		}
 	}
@@ -341,6 +348,11 @@ func lead(v view) string {
 			fmt.Fprintf(&b, " (source: %s)", fact.source)
 		}
 		b.WriteString(".\n")
+	}
+	if v.res.Note != "" {
+		// The base branch moved while GitHub merged. The decision is the
+		// one for required checks (see Act); this is what GitHub said.
+		fmt.Fprintf(&b, "\nGitHub's answer to the merge call this time: %s.\n", code(v.res.Note))
 	}
 	fmt.Fprintf(&b, "\n**Way out:** %s\n", r.Hint())
 	return b.String()

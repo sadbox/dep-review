@@ -193,24 +193,9 @@ func (c Config) Fingerprint() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Complete returns the settings of a file that sets everything, in the
-// form of the embedded defaults (policy/defaults.json), in their place.
-// It is for measuring a change to the defaults before shipping it, which
-// is the replay command's job. The gate itself only ever calls Load: a
-// file read this way is held to no floor.
-func Complete(b []byte) (Config, error) {
-	if len(b) > maxFileBytes {
-		return Config{}, fmt.Errorf("config: the file is %d bytes, more than %d", len(b), maxFileBytes)
-	}
-	c, err := complete(b)
-	if err != nil {
-		return Config{}, fmt.Errorf("config: %w", err)
-	}
-	return c, nil
-}
-
-// complete parses a file that must set everything: the embedded one, or
-// one given to Complete.
+// complete parses a file that must set everything, and is held to no
+// floor: the embedded one, which is the floor. Load is the package's only
+// way in for any other file, and a test in cmd/dep-review keeps it so.
 func complete(b []byte) (Config, error) {
 	f, err := parse(b)
 	if err != nil {

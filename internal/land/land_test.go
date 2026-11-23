@@ -12,6 +12,7 @@ import (
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/config"
+	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
@@ -281,6 +282,21 @@ func TestPublish(t *testing.T) {
 			action: ActionRefused,
 			status: "error: GitHub refused the merge; see the comment", merges: 1, notified: 1, cached: 1,
 			comment: []string{"### dep-review: GitHub refused the merge", "GitHub answered: `HTTP 405: Pull Request is not mergeable`"},
+		},
+		{
+			// Two merges at the same moment: the second is told to try
+			// again, and the scheduled job does.
+			name:   "GitHub says the base branch was modified",
+			github: refusal(405, "Base branch was modified. Review and try the merge again.", "unknown"),
+			action: ActionWait, reason: allow.ReasonChecksPending,
+			status: "pending: waiting (checks_pending), at most until 2026-11-29 11:00 UTC", merges: 1, cached: 1,
+			comment: []string{"GitHub's answer to the merge call this time: `Base branch was modified. Review and try the merge again.`."},
+		},
+		{
+			name:   "GitHub says something like it",
+			github: refusal(405, "Base branch was modified.", "unknown"),
+			action: ActionRefused,
+			status: "error: GitHub refused the merge; see the comment", merges: 1, notified: 1, cached: 1,
 		},
 		{
 			name:   "GitHub refuses a review it wants and a check",
@@ -633,7 +649,7 @@ func TestOneCommentOneNotification(t *testing.T) {
 // a 405 from the merge call whose every line is about a required status
 // check. Anything else is not that.
 func TestChecksRefusalShape(t *testing.T) {
-	long := "Repository rule violations found\n\n" + strings.Repeat("Required status check \"a long name / with a matrix (ubuntu-26.04)\" is expected.\n\n", 4)
+	long := "Repository rule violations found\n\n" + strings.Repeat("Required status check \"a long name / with a matrix (ubuntu-26.04)\" is expected.\n\n", 30)
 	tests := []struct {
 		message string
 		want    bool
@@ -644,7 +660,7 @@ func TestChecksRefusalShape(t *testing.T) {
 		{`2 of 3 required status checks are expected.`, true},
 		{"Repository rule violations found\n\nRequired status check \"test\" is expected.\n\n", true},
 		{"Repository rule violations found\n\nRequired status check \"a\" is expected.\n\n1 of 2 required status checks are pending.", true},
-		{long[:200], true}, // as internal/gh cuts it, in the middle of a line
+		{long[:gh.MaxMessage], true}, // as internal/gh cuts it, in the middle of a line
 
 		{"", false},
 		{"Repository rule violations found", false},
