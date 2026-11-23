@@ -8,8 +8,8 @@ import (
 	"unicode/utf8"
 )
 
-// Errors can embed git's stderr or a registry's message (see
-// ecoutil.Git.run); none of it may start a workflow command or a new line.
+// Errors can embed git's stderr or a registry's message; none of it may
+// start a workflow command or a new line.
 func TestLogLine(t *testing.T) {
 	for in, want := range map[string]string{
 		"plain error": "plain error",
@@ -41,24 +41,53 @@ func TestLineWriter(t *testing.T) {
 	}
 }
 
-// A missing trigger path would let the trigger's no-op run count as CI,
-// so publish and sweep refuse to start without one.
-func TestTriggerPathRequired(t *testing.T) {
-	for name, run := range map[string]func() error{
-		"publish":       func() error { return runPublish([]string{"--in", t.TempDir()}) },
-		"publish empty": func() error { return runPublish([]string{"--in", t.TempDir(), "--trigger-path", ""}) },
-		"sweep":         func() error { return runSweep([]string{"--repo", "o/r"}) },
-		"sweep empty":   func() error { return runSweep([]string{"--repo", "o/r", "--trigger-path="}) },
-	} {
-		if err := run(); err == nil || !strings.Contains(err.Error(), "--trigger-path") {
-			t.Errorf("%s: err = %v", name, err)
+// Every subcommand refuses to start without its required flags, before it
+// reads anything or calls an API, and takes no stray argument.
+func TestRequiredFlags(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	complete := map[string][]string{
+		"classify": {"--event", "e", "--trigger-path", "t", "--out", "o"},
+		"fetch":    {"--classification", "c", "--repo-dir", "r", "--out", "o", "--app-slug", "gate"},
+		"review":   {"--facts", "f", "--out", "o"},
+		"publish":  {"--in", "i"},
+		"refresh":  {"--repo-dir", "r", "--out", "o", "--app-slug", "gate"},
+	}
+	for cmd, run := range commands {
+		args, ok := complete[cmd]
+		if !ok {
+			t.Errorf("%s: no arguments in this test", cmd)
+			continue
+		}
+		for i := 0; i < len(args); i += 2 {
+			without := append(append([]string{}, args[:i]...), args[i+2:]...)
+			if err := run(without); err == nil || !strings.Contains(err.Error(), "required") {
+				t.Errorf("%s without %s: %v", cmd, args[i], err)
+			}
+			empty := append([]string{}, args...)
+			empty[i+1] = ""
+			if err := run(empty); err == nil || !strings.Contains(err.Error(), "required") {
+				t.Errorf("%s with an empty %s: %v", cmd, args[i], err)
+			}
+		}
+		if err := run(append(append([]string{}, args...), "stray")); err == nil || !strings.Contains(err.Error(), "required") {
+			t.Errorf("%s with a stray argument: %v", cmd, err)
 		}
 	}
 }
 
-func TestFetchRejectsBadDockerPlatforms(t *testing.T) {
-	err := runFetch([]string{"--classification", "x", "--repo-dir", "y", "--out", "z", "--docker-platforms", "linux/amd64;id"})
-	if err == nil || !strings.Contains(err.Error(), "docker platform") {
-		t.Errorf("err = %v", err)
+// An unknown ecosystem name fails classify and refresh before they read
+// anything or call the API.
+func TestIgnoreEcosystemsUnknownFails(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	for cmd, args := range map[string][]string{
+		"classify": {"--event", "/nonexistent", "--trigger-path", "t", "--out", "/nonexistent/c.json"},
+		"refresh":  {"--repo-dir", "/nonexistent", "--out", "/nonexistent", "--app-slug", "gate"},
+	} {
+		for _, bad := range []string{"gitsubmodule", "submodules,", "*"} {
+			err := commands[cmd](append(args, "--ignore-ecosystems", bad))
+			if err == nil || !strings.Contains(err.Error(), "--ignore-ecosystems: unknown ecosystem") {
+				t.Errorf("%s --ignore-ecosystems %q: %v", cmd, bad, err)
+			}
+		}
 	}
 }

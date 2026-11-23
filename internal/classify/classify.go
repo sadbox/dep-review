@@ -115,10 +115,6 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	if logf == nil {
 		logf = log.Printf
 	}
-	sleep := opt.Sleep
-	if sleep == nil {
-		sleep = sleepCtx
-	}
 	var ev Event
 	if err := json.Unmarshal(eventJSON, &ev); err != nil {
 		return model.Classification{}, fmt.Errorf("parsing event: %w", err)
@@ -156,17 +152,41 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	if num == 0 {
 		return other("no single open same-repository pull request has this head")
 	}
+	cl, err := Pull(ctx, c, repoName, num, headSHA, opt)
+	if err != nil {
+		return model.Classification{}, err
+	}
+	cl.Private = ev.Repository.Private
+	cl.TriggerPath = opt.TriggerPath
+	return cl, nil
+}
+
+// Pull is the identity proof for one pull request: whether pull request
+// num of repoName is Dependabot's alone at headSHA. Classify calls it
+// once the event has named the pull request; the scheduled job calls it
+// for each pull request it evaluates again, where no event names one.
+// Both get the same proof, so a pull request is never taken to be
+// Dependabot's on anything less.
+//
+// An error means the gate could not decide (the API failed, or the
+// arguments are not a repository, a number and a commit ID).
+func Pull(ctx context.Context, c *gh.Client, repoName string, num int, headSHA string, opt Options) (model.Classification, error) {
+	if !gh.ValidRepo(repoName) || num < 1 || !gh.ValidSHA(headSHA) {
+		return model.Classification{}, fmt.Errorf("classify: %.100q #%d at %.80q is not a repository, a pull request and a commit ID", repoName, num, headSHA)
+	}
+	logf := opt.Logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	sleep := opt.Sleep
+	if sleep == nil {
+		sleep = sleepCtx
+	}
 	var pr pull
 	if err := c.Get(ctx, fmt.Sprintf("repos/%s/pulls/%d", repoName, num), &pr); err != nil {
 		return model.Classification{}, err
 	}
-	cl := model.Classification{
-		Repo:        repoName,
-		Private:     ev.Repository.Private,
-		PR:          num,
-		HeadSHA:     headSHA,
-		TriggerPath: opt.TriggerPath,
-	}
+	cl := model.Classification{Repo: repoName, PR: num, HeadSHA: headSHA}
 	if gh.ValidSHA(pr.Base.SHA) {
 		cl.BaseSHA = pr.Base.SHA
 	}
@@ -185,7 +205,9 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	byAuthor := pr.User != nil && pr.User.Login == dependabotLogin
 	byBranch := strings.HasPrefix(pr.Head.Ref, branchPrefix)
 	if !byAuthor && !byBranch {
-		return other("neither authored by dependabot[bot] nor on a dependabot/ branch")
+		const why = "neither authored by dependabot[bot] nor on a dependabot/ branch"
+		logf("kind=other: %s", why)
+		return model.Classification{Repo: repoName, Kind: model.KindOther, Reason: why}, nil
 	}
 	unverified := func(why string) (model.Classification, error) {
 		cl.Kind, cl.Reason = model.KindDependabotUnverified, why
@@ -260,7 +282,7 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	// The log shows who moved the branch; a ruleset makes sure nobody else
 	// could. Its bypass list (Dependabot only) is the owner's to maintain:
 	// a read-only token cannot see it.
-	if why := rulesetProblem(ctx, c, repoName); why != "" {
+	if why := rulesProblem(ctx, c, repoName, pr.Head.Ref); why != "" {
 		return unverified(why)
 	}
 
@@ -408,101 +430,54 @@ func timelineProblem(ctx context.Context, c *gh.Client, repo string, pr int) str
 	return ""
 }
 
-type ruleset struct {
-	ID          int64  `json:"id"`
-	Target      string `json:"target"`
-	Enforcement string `json:"enforcement"`
-	Conditions  *struct {
-		RefName *struct {
-			Include []string `json:"include"`
-			Exclude []string `json:"exclude"`
-		} `json:"ref_name"`
-	} `json:"conditions"`
-	Rules []struct {
+// headRefRe is the shape of a Dependabot branch name the gate puts in a
+// request path: letters, digits and ._/- only. Dependabot's own names fit
+// it; a name that does not is not asked about, which is not proof.
+var headRefRe = regexp.MustCompile(`^dependabot/[A-Za-z0-9._/-]{1,240}$`)
+
+// rulesProblem returns "" when GitHub's rules for the pull request's head
+// branch restrict creating, updating and deleting it, and otherwise why
+// not.
+//
+// GitHub is asked which rules apply to the branch (rules/branches), and
+// answers with every rule of every active ruleset whose conditions match
+// it, repository and organization rulesets alike; rulesets that are
+// disabled or only evaluated are left out. The gate matches no ref
+// pattern itself: a matcher of its own is a second reading of GitHub's
+// pattern rules, and v0.1.9's did not agree with them. An answer that
+// could not be read is not proof.
+
+func rulesProblem(ctx context.Context, c *gh.Client, repo, branch string) string {
+	if !headRefRe.MatchString(branch) {
+		return "the branch's name is not one the gate asks GitHub's rules about"
+	}
+	for _, el := range strings.Split(branch, "/") {
+		if el == "" || el == "." || strings.Contains(el, "..") {
+			return "the branch's name is not one the gate asks GitHub's rules about"
+		}
+	}
+	rules, err := gh.List[struct {
 		Type       string `json:"type"`
 		Parameters struct {
 			UpdateAllowsFetchAndMerge bool `json:"update_allows_fetch_and_merge"`
 		} `json:"parameters"`
-	} `json:"rules"`
-}
-
-// rulesetProblem returns "" when the repository (or its owner) has an
-// active branch ruleset that restricts creating, updating and deleting
-// every refs/heads/dependabot/** branch, and otherwise why not. Names are
-// ignored; an unreadable ruleset is not proof.
-func rulesetProblem(ctx context.Context, c *gh.Client, repo string) string {
-	const missing = "no active ruleset restricts creating, updating and deleting dependabot/ branches"
-	list, err := gh.List[ruleset](ctx, c, fmt.Sprintf("repos/%s/rulesets?includes_parents=true", repo))
+	}](ctx, c, fmt.Sprintf("repos/%s/rules/branches/%s", repo, branch))
 	if err != nil {
-		return fmt.Sprintf("the repository's rulesets could not be read (HTTP %d)", gh.StatusCode(err))
+		return fmt.Sprintf("the branch's rules could not be read (HTTP %d)", gh.StatusCode(err))
 	}
-	for _, s := range list {
-		if s.Target != "branch" || s.Enforcement != "active" || s.ID <= 0 {
-			continue
-		}
-		var full ruleset
-		if err := c.Get(ctx, fmt.Sprintf("repos/%s/rulesets/%d?includes_parents=true", repo, s.ID), &full); err != nil {
-			return fmt.Sprintf("a ruleset could not be read (HTTP %d)", gh.StatusCode(err))
-		}
-		if full.Target == "branch" && full.Enforcement == "active" && full.coversDependabot() && full.restrictsAll() {
-			return ""
-		}
-	}
-	return missing
-}
-
-func (s *ruleset) restrictsAll() bool {
 	have := map[string]bool{}
-	for _, r := range s.Rules {
+	for _, r := range rules {
+		// An update rule that lets anyone pull the base branch in does
+		// not keep the branch Dependabot's alone.
 		if r.Type == "update" && r.Parameters.UpdateAllowsFetchAndMerge {
 			continue
 		}
 		have[r.Type] = true
 	}
-	return have["creation"] && have["update"] && have["deletion"]
-}
-
-// coversDependabot: some include pattern matches every branch under
-// refs/heads/dependabot/, and no exclude pattern can match one.
-func (s *ruleset) coversDependabot() bool {
-	if s.Conditions == nil || s.Conditions.RefName == nil {
-		return false
+	if !have["creation"] || !have["update"] || !have["deletion"] {
+		return "no active rule restricts creating, updating and deleting this dependabot/ branch"
 	}
-	covered := false
-	for _, p := range s.Conditions.RefName.Include {
-		covered = covered || coversAllDependabot(p)
-	}
-	for _, p := range s.Conditions.RefName.Exclude {
-		if !excludesNoDependabot(p) {
-			return false
-		}
-	}
-	return covered
-}
-
-const dependabotRefs = "refs/heads/" + branchPrefix
-
-// coversAllDependabot reports whether an fnmatch include pattern matches
-// every ref under refs/heads/dependabot/: ~ALL, or a literal directory
-// prefix of it followed by "**" (refs/heads/dependabot/**, refs/heads/**,
-// **). "*" does not cross "/", so refs/heads/dependabot/* does not.
-func coversAllDependabot(p string) bool {
-	if p == "~ALL" {
-		return true
-	}
-	prefix, ok := strings.CutSuffix(p, "**")
-	return ok && (prefix == "" || strings.HasSuffix(prefix, "/")) &&
-		!strings.ContainsAny(prefix, "*?[]{}\\!~") && strings.HasPrefix(dependabotRefs, prefix)
-}
-
-// excludesNoDependabot reports whether an exclude pattern certainly
-// matches no dependabot/ branch: the default branch, or a literal ref
-// outside refs/heads/dependabot/.
-func excludesNoDependabot(p string) bool {
-	if p == "~DEFAULT_BRANCH" {
-		return true
-	}
-	return !strings.ContainsAny(p, "*?[]{}\\!~") && !strings.HasPrefix(p, dependabotRefs)
+	return ""
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

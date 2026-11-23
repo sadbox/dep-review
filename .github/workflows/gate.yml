@@ -1,20 +1,23 @@
-# The Dependabot review gate (reusable workflow). See README.md for the
-# design and examples/ for what a repository adds to use it.
+# The Dependabot merge gate (reusable workflow). See README.md for the
+# rule and examples/ for what a repository adds to use it.
 #
 # Trust layout, which every change here must keep:
-#   - classify, fetch: no secrets, read-only token. fetch downloads both
-#     versions of each dependency and diffs them; it never executes
-#     anything from the PR or from a dependency.
-#   - review: the ONLY job with a model. Read-only token, no secrets. The
-#     model runs in a gVisor sandbox with no credentials and no network
-#     except a proxy that holds the short-lived federated token (OIDC) and
-#     forwards only POST /v1/messages. Tools are Read/Grep/Glob on
-#     ./evidence and ./repo only. Its output is a schema-checked verdict,
-#     nothing else.
-#   - publish, sweep: no model and no untrusted text in any shell. They hold
-#     the gate app's token (environment `dep-review`, default branch only)
-#     and merge only a head SHA that classify verified and the verdict
-#     approved.
+#   - Every job runs the gate that this run's build job built from this
+#     workflow's own commit, and only after checking it against the build
+#     job's checksums. Every artifact one job hands another is checked the
+#     same way, against a job output, before anything uses it.
+#   - classify, fetch, refresh: no secrets, read-only token. fetch and
+#     refresh read what a pull request and its dependencies wrote, and
+#     never execute any of it.
+#   - review: the ONLY job with a model credential, and it holds nothing
+#     else: no access to the repository, only the OIDC token it exchanges
+#     for a short-lived Claude token. The model gets text in a request and
+#     no tools; its answer is a closed structure that can only veto. This
+#     job never runs on a schedule.
+#   - publish: the ONLY job with the gate app's token (environment
+#     `dep-review`, default branch only). No model, and no untrusted text
+#     in any shell. It decides from the facts (internal/allow) and merges
+#     only the head commit the facts name.
 name: dep-review gate
 
 on:
@@ -24,48 +27,23 @@ on:
         description: The caller's no-op pull_request workflow whose completion starts the gate.
         type: string
         default: .github/workflows/dep-review-trigger.yaml
-      notes_path:
-        description: Repository-specific review notes, read from the default branch.
-        type: string
-        default: .github/dep-review.md
-      docker_platforms:
+      app_slug:
         description: >-
-          Comma-separated platforms the repository builds its images for
-          (e.g. linux/amd64,linux/arm64). The docker fetcher proves a digest
-          refresh a no-op only for these. Empty: every platform in the image
-          index must be unchanged.
+          The gate app's slug: the name in https://github.com/apps/<slug>.
+          Not a secret. The jobs without the app's token recognise the
+          gate's own comment by it. publish fails when it is not the app
+          whose key it holds.
         type: string
-        default: ""
-      go_platforms:
-        description: >-
-          Comma-separated GOOS/GOARCH pairs the repository builds for
-          (e.g. linux/amd64,linux/arm64,darwin/arm64). When set, Go module
-          checks evaluate exactly these builds (cgo off and on, with no
-          tags and with each go_tags set) and skip Go and .syso files
-          they never compile. Empty: every platform, with build tags
-          over-approximated.
-        type: string
-        default: ""
-      go_tags:
-        description: >-
-          Extra tag sets the repository's Go builds use, separated by
-          spaces, the tags of one set by commas (e.g. "race" for go test
-          -race). Builds without tags are always checked. Only with
-          go_platforms.
-        type: string
-        default: ""
+        required: true
       ignore_ecosystems:
         description: >-
           Comma-separated ecosystems, as in Dependabot's branch names (e.g.
           submodules, not gitsubmodule), whose PRs another trusted process
-          owns. A verified Dependabot PR whose whole update set is in these
-          gets no status, comment or notification; anything else is gated
-          as usual. An unknown name fails the run. Empty: none.
+          owns. A verified Dependabot PR in one of these gets no status,
+          comment or notification; anything else is gated as usual. An
+          unknown name fails the run. Empty: none.
         type: string
         default: ""
-      model:
-        type: string
-        default: claude-opus-5-5
       anthropic_federation_rule_id:
         type: string
         required: true
@@ -79,19 +57,12 @@ on:
         description: Service account (svac_...) the federated token acts as; optional.
         type: string
         default: ""
-      max_model_requests:
-        description: >-
-          Messages API requests the credential proxy allows per reviewer
-          run. A review too large for one run is split into up to six
-          reading passes and a final pass, each a run with this limit.
-        type: number
-        default: 200
     # Declared so callers pass these and nothing else (no `secrets: inherit`).
-    # publish and sweep run in the caller's `dep-review` environment, and an
-    # environment secret of the same name takes precedence over a passed one,
-    # so the usual setup (all three as environment secrets) works with the
-    # pass-through in examples/dep-review.yaml; none is required at call time
-    # for that reason. publish and sweep fail without DEP_REVIEW_APP_KEY.
+    # publish runs in the caller's `dep-review` environment, and an
+    # environment secret of the same name takes precedence over a passed
+    # one, so the usual setup (all three as environment secrets) works with
+    # the pass-through in examples/dep-review.yaml; none is required at call
+    # time for that reason. publish fails without DEP_REVIEW_APP_KEY.
     secrets:
       DEP_REVIEW_APP_KEY:
         description: The gate app's private key (normally a `dep-review` environment secret).
@@ -142,13 +113,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           go build -C gate -trimpath -o "$RUNNER_TEMP/bin/dep-review" ./cmd/dep-review
-          # go.mod: the fetch job sets up the gate's Go version from it.
-          # sandbox/: the review job's Dockerfile, CLI lockfile and gVisor
-          # installer, and the rebuild job's Dockerfile.
-          cp gate/prompts/review.md gate/schema/verdict.json gate/go.mod "$RUNNER_TEMP/bin/"
-          mkdir -p "$RUNNER_TEMP/bin/sandbox/rebuild"
-          cp gate/sandbox/Dockerfile gate/sandbox/package.json gate/sandbox/package-lock.json gate/sandbox/install-gvisor.sh "$RUNNER_TEMP/bin/sandbox/"
-          cp gate/sandbox/rebuild/Dockerfile "$RUNNER_TEMP/bin/sandbox/rebuild/"
+          # go.mod: fetch and refresh set up the gate's Go version from it.
+          cp gate/go.mod "$RUNNER_TEMP/bin/"
       - name: Checksum the gate's files
         id: sums
         run: |
@@ -220,22 +186,26 @@ jobs:
           path: ${{ runner.temp }}/out/classification.json
           retention-days: 7
 
+  # The facts: the change set from the PR's git objects, what registries
+  # and GitHub say about every update, and the text the model is to read.
+  # It runs for a PR that is not Dependabot's alone too, and then writes
+  # only that, which is how publish comes to tell a person; for a PR whose
+  # proof is not finished yet it gathers everything and the PR waits.
   fetch:
     needs: [build, classify]
-    if: needs.classify.outputs.kind == 'dependabot'
+    if: >-
+      needs.classify.outputs.kind == 'dependabot' ||
+      needs.classify.outputs.kind == 'dependabot-unverified' ||
+      needs.classify.outputs.kind == 'dependabot-pending'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      route: ${{ steps.fetch.outputs.route }}
-      # true for the review route, and for triage of a person-routed PR
-      # (policy.Triage): publish never merges from triage.
+      # true when there is something for the model to read.
       review: ${{ steps.fetch.outputs.review }}
-      # true when an action's bundle can be rebuilt (job rebuild).
-      rebuild: ${{ steps.fetch.outputs.rebuild }}
-      evidence_sums: ${{ steps.sums.outputs.sums }}
+      facts_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@v8.0.2
         with:
@@ -264,10 +234,11 @@ jobs:
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           # ...and nothing else is there.
           diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
-      # The go_modules fetcher runs `go mod download` (downloads and sum
-      # checks only, in an empty module of its own). The version comes
-      # from the gate's go.mod, never the PR's; no cache, since a cache
-      # restored into a job that handles untrusted code can be poisoned.
+      # The Go facts come from the go command (`go mod download` in an
+      # empty module of its own: downloads and sum checks only). The
+      # version comes from the gate's go.mod, never the PR's; no cache,
+      # since a cache restored into a job that handles untrusted code can
+      # be poisoned.
       - name: Set up Go
         uses: actions/setup-go@v7.1.0
         with:
@@ -280,28 +251,24 @@ jobs:
           path: pr
           fetch-depth: 0
           persist-credentials: false
-      - name: Fetch and verify
+      - name: Gather the facts
         id: fetch
         env:
           GH_TOKEN: ${{ github.token }}
-          DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}
-          GO_PLATFORMS: ${{ inputs.go_platforms }}
-          GO_TAGS: ${{ inputs.go_tags }}
+          APP_SLUG: ${{ inputs.app_slug }}
         run: |
           "$RUNNER_TEMP/bin/dep-review" fetch \
             --classification "$RUNNER_TEMP/in/classification.json" \
             --repo-dir pr \
-            --out "$RUNNER_TEMP/evidence" \
-            --docker-platforms "$DOCKER_PLATFORMS" \
-            --go-platforms "$GO_PLATFORMS" \
-            --go-tags "$GO_TAGS"
+            --out "$RUNNER_TEMP/facts" \
+            --app-slug "$APP_SLUG"
       - name: Checksum the artifact
         id: sums
         run: |
           # One sum per file can pass the 128 KiB a single environment value
-          # may hold (Go modules' per-file diffs), so the sums go into the
-          # artifact as SHA256SUMS and the job outputs that file's own sum.
-          cd "$RUNNER_TEMP/evidence"
+          # may hold, so the sums go into the artifact as SHA256SUMS and
+          # the job outputs that file's own sum.
+          cd "$RUNNER_TEMP/facts"
           find . -type f -print0 | sort -z | xargs -0 sha256sum >"$RUNNER_TEMP/SHA256SUMS"
           mv "$RUNNER_TEMP/SHA256SUMS" ./SHA256SUMS
           {
@@ -311,25 +278,27 @@ jobs:
           } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: evidence
-          path: ${{ runner.temp }}/evidence
+          name: facts
+          path: ${{ runner.temp }}/facts
           retention-days: 7
 
+  # The veto calls: one tool-less Messages API request for each chunk of
+  # text fetch prepared. To this job a chunk is bytes; it checks them
+  # against the facts file's hashes and sends them.
   review:
-    needs: [build, classify, fetch]
-    if: needs.fetch.outputs.review == 'true'
+    needs: [build, fetch]
+    # Only for an event's run: the federation rule admits no other, and
+    # the scheduled path asks no model.
+    if: github.event_name == 'workflow_run' && needs.fetch.outputs.review == 'true'
     runs-on: ubuntu-26.04
-    # A review too large for one run is split into up to six reading
-    # passes and a final pass (internal/passes), each with --timeout.
-    timeout-minutes: 160
+    # `dep-review review` stops asking after 100 minutes and writes what
+    # it has.
+    timeout-minutes: 120
     outputs:
-      verdict_sums: ${{ steps.sums.outputs.sums }}
+      verdicts_sums: ${{ steps.sums.outputs.sums }}
     permissions:
-      contents: read
-      # The federated model credential. The OIDC request token (which is
-      # also the job's runtime token) stays in `dep-review review` on the
-      # host; the proxy container gets only Claude-audience JWTs from it
-      # over a unix socket, and the reviewer gets nothing.
+      # The federated model credential, and nothing else: no access to
+      # the repository. Artifacts of the same run need none.
       id-token: write
     steps:
       - uses: actions/download-artifact@v8.0.2
@@ -349,75 +318,38 @@ jobs:
           chmod +x dep-review
       - uses: actions/download-artifact@v8.0.2
         with:
-          name: evidence
-          path: evidence
-      - name: Verify the evidence artifact
+          name: facts
+          path: ${{ runner.temp }}/facts
+      - name: Verify the facts artifact
         env:
-          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+          SUMS: ${{ needs.fetch.outputs.facts_sums }}
         run: |
-          cd "evidence"
+          cd "$RUNNER_TEMP/facts"
           # The manifest is the one fetch summed, then every file is in it...
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           sha256sum --check --strict --quiet ./SHA256SUMS
           # ...and nothing else is there.
           diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
-      - name: Check out the default branch (for usage search and the review notes)
-        uses: actions/checkout@v7.0.1
-        with:
-          path: repo
-          persist-credentials: false
-      - name: Install gVisor
-        run: bash "$RUNNER_TEMP/bin/sandbox/install-gvisor.sh"
-      # Built here, only when a review runs, from the gate's own pinned
-      # Dockerfile: base images by digest, the CLI by package-lock
-      # integrity, installed with --ignore-scripts. No build cache.
-      - name: Build the sandbox images
-        run: |
-          docker build --no-cache -t dep-review-reviewer:local "$RUNNER_TEMP/bin/sandbox"
-          docker build --no-cache --target proxy -t dep-review-proxy:local "$RUNNER_TEMP/bin/sandbox"
-      - name: Prepare prompt and settings
+      # With no verdict for a read (the model did not answer, this step
+      # failed) the read counts as not done, and the PR waits.
+      - name: Review
         env:
-          NOTES_PATH: ${{ inputs.notes_path }}
-        run: |
-          "$RUNNER_TEMP/bin/dep-review" review-prep \
-            --prompt "$RUNNER_TEMP/bin/review.md" \
-            --schema "$RUNNER_TEMP/bin/verdict.json" \
-            --notes "repo/$NOTES_PATH" \
-            --out-dir "$RUNNER_TEMP/review"
-      # The reviewer runs under gVisor on an internal network whose only
-      # other member is the credential proxy (see README.md, "Sandbox").
-      # Its verdict comes back on stdout and is validated before
-      # verdict.json is written; with no valid verdict this step fails,
-      # the upload is skipped and publish sends the PR to a human.
-      - name: Review (sandboxed)
-        env:
-          MODEL: ${{ inputs.model }}
           RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
           ORG_ID: ${{ inputs.anthropic_organization_id }}
           WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
           SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
-          MAX_REQUESTS: ${{ inputs.max_model_requests }}
         run: |
           "$RUNNER_TEMP/bin/dep-review" review \
-            --prep-dir "$RUNNER_TEMP/review" \
-            --evidence evidence \
-            --repo repo \
-            --out "$RUNNER_TEMP/verdict/verdict.json" \
-            --reviewer-image dep-review-reviewer:local \
-            --proxy-image dep-review-proxy:local \
-            --model "$MODEL" \
+            --facts "$RUNNER_TEMP/facts" \
+            --out "$RUNNER_TEMP/verdicts" \
             --federation-rule-id "$RULE_ID" \
             --organization-id "$ORG_ID" \
             --workspace-id "$WORKSPACE_ID" \
-            --service-account-id "$SERVICE_ACCOUNT_ID" \
-            --max-requests "$MAX_REQUESTS" \
-            --max-turns 80 \
-            --timeout 20m \
-            --total-timeout 140m
+            --service-account-id "$SERVICE_ACCOUNT_ID"
       - name: Checksum the artifact
         id: sums
         run: |
-          cd "$RUNNER_TEMP/verdict"
+          cd "$RUNNER_TEMP/verdicts"
           {
             echo 'sums<<DEP_REVIEW_SUMS'
             find . -type f -print0 | sort -z | xargs -0 sha256sum
@@ -425,30 +357,34 @@ jobs:
           } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: verdict
-          path: ${{ runner.temp }}/verdict/verdict.json
+          name: verdicts
+          path: ${{ runner.temp }}/verdicts/verdicts.json
           retention-days: 7
 
-  # Rebuilds a bumped action's committed bundle from the new commit's
-  # source and compares it byte for byte (internal/rebuild). This runs
-  # the action's own build code, so: no permissions and no secrets here,
-  # every container under gVisor and with no network (the gate downloads
-  # the locked tarballs itself and checks their sha512; the install runs
-  # offline with --ignore-scripts). The result is information for the
-  # comment; no route depends on it.
-  rebuild:
-    needs: [build, classify, fetch]
-    if: needs.fetch.outputs.rebuild == 'true'
+  # The scheduled path: for every Dependabot PR the gate left waiting,
+  # the identity proof and the facts again, with the verdicts the gate's
+  # comment remembers. No model is asked and there is no credential to
+  # ask one with; publish then decides, as for an event.
+  refresh:
+    needs: build
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
-    permissions: {}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
-      rebuild_sums: ${{ steps.sums.outputs.sums }}
+      # true when there is a refreshed PR for publish to decide.
+      publish: ${{ steps.refresh.outputs.publish }}
+      refreshed_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@v8.0.2
         with:
           name: gate-bin
           path: ${{ runner.temp }}/bin
+      # gate-bin is an artifact of this run, and anything holding the
+      # run's runtime token can replace one. Use it only if every file
+      # matches the build job's checksums (a job output, not an artifact).
       - name: Verify the gate's files
         env:
           GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
@@ -457,63 +393,75 @@ jobs:
           printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
           diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
           chmod +x dep-review
-      - uses: actions/download-artifact@v8.0.2
+      # As in fetch: the gate's Go version, no cache.
+      - name: Set up Go
+        uses: actions/setup-go@v7.1.0
         with:
-          name: evidence
-          path: evidence
-      - name: Verify the evidence artifact
+          go-version-file: ${{ runner.temp }}/bin/go.mod
+          cache: false
+      # Every branch, so the PRs' heads are there; the working tree is the
+      # default branch's and is not looked at.
+      - name: Check out the repository (data only; nothing from it is executed)
+        uses: actions/checkout@v7.0.1
+        with:
+          path: repo
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refresh the waiting PRs
+        id: refresh
         env:
-          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+          GH_TOKEN: ${{ github.token }}
+          APP_SLUG: ${{ inputs.app_slug }}
+          IGNORE_ECOSYSTEMS: ${{ inputs.ignore_ecosystems }}
         run: |
-          cd "evidence"
-          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
-          sha256sum --check --strict --quiet ./SHA256SUMS
-          diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
-      - name: Install gVisor
-        run: bash "$RUNNER_TEMP/bin/sandbox/install-gvisor.sh"
-      # The official Node images, pinned by digest in the gate's own
-      # sandbox/rebuild/Dockerfile. No build cache.
-      - name: Build the build images
-        run: |
-          for n in 20 22 24; do
-            docker build --no-cache --target "node$n" -t "dep-review-node$n:local" "$RUNNER_TEMP/bin/sandbox/rebuild"
-          done
-      - name: Rebuild (sandboxed)
-        run: |
-          "$RUNNER_TEMP/bin/dep-review" rebuild \
-            --evidence evidence \
-            --out "$RUNNER_TEMP/rebuild" \
-            --images 20=dep-review-node20:local,22=dep-review-node22:local,24=dep-review-node24:local \
-            --runtime runsc
+          "$RUNNER_TEMP/bin/dep-review" refresh \
+            --repo-dir repo \
+            --out "$RUNNER_TEMP/refreshed" \
+            --app-slug "$APP_SLUG" \
+            --ignore-ecosystems "$IGNORE_ECOSYSTEMS"
       - name: Checksum the artifact
         id: sums
+        if: steps.refresh.outputs.publish == 'true'
         run: |
-          cd "$RUNNER_TEMP/rebuild"
+          # As for the facts artifact: the sums go into the artifact as
+          # SHA256SUMS and the job outputs that file's own sum.
+          cd "$RUNNER_TEMP/refreshed"
+          find . -type f -print0 | sort -z | xargs -0 sha256sum >"$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" ./SHA256SUMS
           {
             echo 'sums<<DEP_REVIEW_SUMS'
-            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            sha256sum ./SHA256SUMS
             echo 'DEP_REVIEW_SUMS'
           } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.2
+        if: steps.refresh.outputs.publish == 'true'
         with:
-          name: rebuild
-          path: ${{ runner.temp }}/rebuild/rebuild.json
-          retention-days: 7
+          name: refreshed
+          path: ${{ runner.temp }}/refreshed
+          retention-days: 1
+      # After the upload, so the PRs that were refreshed are still decided.
+      - name: Fail when a PR could not be refreshed
+        if: steps.refresh.outputs.incomplete == 'true'
+        run: |
+          echo "a waiting PR could not be refreshed; see the step above" >&2
+          exit 1
 
   publish:
-    needs: [build, classify, fetch, review, rebuild]
+    needs: [build, classify, fetch, review, refresh]
+    # review and refresh are each skipped on one of the two paths, and a
+    # review that failed still leaves facts to decide on (its reads wait).
     if: >-
-      always() && needs.build.result == 'success' &&
-      (needs.classify.outputs.kind == 'dependabot' || needs.classify.outputs.kind == 'dependabot-unverified')
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.fetch.result == 'success' || needs.refresh.outputs.publish == 'true')
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 15
     environment: dep-review
     permissions: {}
     steps:
       - uses: actions/download-artifact@v8.0.2
         with:
           path: ${{ runner.temp }}/in
-          pattern: "{gate-bin,classification,evidence,verdict,rebuild}"
+          pattern: "{gate-bin,classification,facts,verdicts,refreshed}"
       # gate-bin is an artifact of this run, and anything holding the
       # run's runtime token can replace one. Use it only if every file
       # matches the build job's checksums (a job output, not an artifact).
@@ -529,47 +477,46 @@ jobs:
         env:
           SUMS: ${{ needs.classify.outputs.classification_sums }}
         run: |
+          # None if the job that makes it did not run or succeed; then
+          # there must be no artifact either.
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/classification"; exit; fi
           cd "$RUNNER_TEMP/in/classification"
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           # ...and nothing else is there.
           diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
-      - name: Verify the evidence artifact
+      - name: Verify the facts artifact
         env:
-          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+          SUMS: ${{ needs.fetch.outputs.facts_sums }}
         run: |
-          # None if the job that makes it did not succeed; then there must
-          # be no artifact either.
-          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/evidence"; exit; fi
-          cd "$RUNNER_TEMP/in/evidence"
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/facts"; exit; fi
+          cd "$RUNNER_TEMP/in/facts"
           # The manifest is the one fetch summed, then every file is in it...
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           sha256sum --check --strict --quiet ./SHA256SUMS
           # ...and nothing else is there.
           diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
-      - name: Verify the verdict artifact
+      - name: Verify the verdicts artifact
         env:
-          SUMS: ${{ needs.review.outputs.verdict_sums }}
+          SUMS: ${{ needs.review.outputs.verdicts_sums }}
         run: |
-          # None if the job that makes it did not succeed; then there must
-          # be no artifact either.
-          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/verdict"; exit; fi
-          cd "$RUNNER_TEMP/in/verdict"
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/verdicts"; exit; fi
+          # Sums without an artifact (the upload failed after the sums
+          # step) are no verdicts: every read then counts as not done.
+          if [ ! -e "$RUNNER_TEMP/in/verdicts" ]; then echo "no verdicts artifact; the reads wait"; exit; fi
+          cd "$RUNNER_TEMP/in/verdicts"
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           # ...and nothing else is there.
           diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
-      - name: Verify the rebuild artifact
+      - name: Verify the refreshed artifact
         env:
-          SUMS: ${{ needs.rebuild.outputs.rebuild_sums }}
+          SUMS: ${{ needs.refresh.outputs.refreshed_sums }}
         run: |
-          # None if the job did not run or succeed; then there must be no
-          # artifact either. Sums without an artifact (the upload failed
-          # after the sums step) are "not run": the results inform, and
-          # their absence must not block the decision.
-          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/rebuild"; exit; fi
-          if [ ! -e "$RUNNER_TEMP/in/rebuild" ]; then echo "no rebuild artifact; shown as not run"; exit; fi
-          cd "$RUNNER_TEMP/in/rebuild"
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/refreshed"; exit; fi
+          cd "$RUNNER_TEMP/in/refreshed"
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
-          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+          sha256sum --check --strict --quiet ./SHA256SUMS
+          # ...and nothing else is there.
+          diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
       - name: Gate app token (this repository only)
         id: app
         uses: actions/create-github-app-token@v3.4.0
@@ -581,71 +528,24 @@ jobs:
           permission-pull-requests: write
           permission-statuses: write
           permission-workflows: write
-          permission-checks: read
-          permission-actions: read
+      # fetch and refresh looked for the gate's comment under the input's
+      # name. If that is not this app, they found none, and no verdict
+      # was reused and no waiting PR refreshed: say so loudly.
+      - name: The app_slug input names this app
+        env:
+          INPUT_SLUG: ${{ inputs.app_slug }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          if [ "$INPUT_SLUG" != "$APP_SLUG" ]; then
+            echo "the app_slug input is not the slug of the app whose key this job holds" >&2
+            exit 1
+          fi
       - name: Decide, comment, merge
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           # "<slug>[bot]" is how publish recognises its own comment.
           DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
-          FETCH_RESULT: ${{ needs.fetch.result }}
-          REVIEW_RESULT: ${{ needs.review.result }}
-          TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
         run: |
-          "$RUNNER_TEMP/in/gate-bin/dep-review" publish \
-            --in "$RUNNER_TEMP/in" \
-            --fetch-result "$FETCH_RESULT" \
-            --review-result "$REVIEW_RESULT" \
-            --trigger-path "$TRIGGER_PATH"
-
-  sweep:
-    needs: build
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    environment: dep-review
-    permissions: {}
-    steps:
-      - uses: actions/download-artifact@v8.0.2
-        with:
-          name: gate-bin
-          path: ${{ runner.temp }}/bin
-      # gate-bin is an artifact of this run, and anything holding the
-      # run's runtime token can replace one. Use it only if every file
-      # matches the build job's checksums (a job output, not an artifact).
-      - name: Verify the gate's files
-        env:
-          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
-        run: |
-          cd "$RUNNER_TEMP/bin"
-          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
-          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
-          chmod +x dep-review
-      - name: Gate app token (this repository only)
-        id: app
-        uses: actions/create-github-app-token@v3.4.0
-        with:
-          app-id: ${{ vars.DEP_REVIEW_APP_ID }}
-          private-key: ${{ secrets.DEP_REVIEW_APP_KEY }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-statuses: read
-          permission-workflows: write
-          permission-checks: read
-          permission-actions: read
-      - name: Merge approved PRs whose CI finished; report stuck ones
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          # Only a dep-review status created by "<slug>[bot]" counts as approval.
-          DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
-          # The caller's trigger workflow: its no-op check is not CI.
-          TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}
-          # Sweep skips PRs in these ecosystems, as classify ignores them.
-          IGNORE_ECOSYSTEMS: ${{ inputs.ignore_ecosystems }}
-          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
-          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
-        run: |
-          "$RUNNER_TEMP/bin/dep-review" sweep --repo "$GITHUB_REPOSITORY" --trigger-path "$TRIGGER_PATH" --ignore-ecosystems "$IGNORE_ECOSYSTEMS"
+          "$RUNNER_TEMP/in/gate-bin/dep-review" publish --in "$RUNNER_TEMP/in"

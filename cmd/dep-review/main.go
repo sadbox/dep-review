@@ -1,6 +1,8 @@
-// Command dep-review is the gate's deterministic half: classify, fetch,
-// review-prep, review (the sandboxed reviewer), proxy (its credential
-// proxy), publish and sweep. See README.md.
+// Command dep-review is the gate, one subcommand for each job of
+// .github/workflows/gate.yml that runs it: classify, fetch, review,
+// publish and refresh. A subcommand reads its flags, its files and the
+// job's environment and calls the package that does the work
+// (internal/classify, internal/gather, internal/land). See README.md.
 package main
 
 import (
@@ -10,65 +12,16 @@ import (
 	"os"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/sadbox/dep-review/internal/eco/ecoutil"
-	"github.com/sadbox/dep-review/internal/eco/gomod"
 )
 
 // commands are the gate's subcommands.
 var commands = map[string]func([]string) error{
-	"classify":    runClassify,
-	"fetch":       runFetch,
-	"review-prep": runReviewPrep,
-	"review":      runReview,
-	"rebuild":     runRebuild,
-	"proxy":       runProxy,
-	"publish":     runPublish,
-	"sweep":       runSweep,
+	"classify": runClassify,
+	"fetch":    runFetch,
+	"review":   runReview,
+	"publish":  runPublish,
+	"refresh":  runRefresh,
 }
-
-// extraCommands holds the sandboxtest build's test-only commands and the
-// hidden describe-binary and go-child, the child processes fetch starts to
-// parse binaries and run go list under a memory limit (ecoutil.Isolate).
-var extraCommands = map[string]func([]string) error{
-	describeBinaryCommand: func(args []string) error {
-		if len(args) > 0 {
-			return fmt.Errorf("%s takes no arguments", describeBinaryCommand)
-		}
-		return ecoutil.ChildMain(os.Stdin, os.Stdout)
-	},
-	goChildCommand: func(args []string) error {
-		if len(args) > 0 {
-			return fmt.Errorf("%s takes no arguments", goChildCommand)
-		}
-		return ecoutil.GoChildMain(os.Stdin, os.Stdout)
-	},
-	typesChildCommand: func(args []string) error {
-		if len(args) > 0 {
-			return fmt.Errorf("%s takes no arguments", typesChildCommand)
-		}
-		return gomod.TypesChildMain(os.Stdin, os.Stdout)
-	},
-	upstreamChildCommand: func(args []string) error {
-		if len(args) > 0 {
-			return fmt.Errorf("%s takes no arguments", upstreamChildCommand)
-		}
-		return gomod.UpstreamChildMain(os.Stdin, os.Stdout)
-	},
-}
-
-const (
-	describeBinaryCommand = "describe-binary"
-	// goChildCommand runs one go command (go list over a dependency's
-	// tree) under the same memory limit (ecoutil.RunGo).
-	goChildCommand = "go-child"
-	// upstreamChildCommand fetches a Go module's upstream history and
-	// rebuilds its zips with git, under the same limit (gomod/upstream.go).
-	upstreamChildCommand = "upstream-child"
-	// typesChildCommand type-checks a Go module's packages for the init
-	// walk, under the same limit (gomod/typed.go).
-	typesChildCommand = "types-child"
-)
 
 func main() {
 	// Errors and log lines can carry text from a dependency, a registry or
@@ -76,19 +29,15 @@ func main() {
 	// logLine: one line, no control characters, no workflow commands.
 	log.SetOutput(lineWriter{os.Stderr})
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review-prep|review|rebuild|proxy|publish|sweep [flags]")
+		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review|publish|refresh [flags]")
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
-	var err error
-	if f, ok := commands[cmd]; ok {
-		err = f(args)
-	} else if f, ok := extraCommands[cmd]; ok {
-		err = f(args)
-	} else {
-		err = fmt.Errorf("unknown command %q", cmd)
+	run, ok := commands[os.Args[1]]
+	if !ok {
+		fmt.Fprintln(os.Stderr, logLine(fmt.Sprintf("dep-review: unknown command %q", os.Args[1])))
+		os.Exit(2)
 	}
-	if err != nil {
+	if err := run(os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, logLine("dep-review: "+err.Error()))
 		os.Exit(1)
 	}

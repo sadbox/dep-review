@@ -3,18 +3,30 @@ package main
 import (
 	"os"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
 
-// gateJobs splits .github/workflows/gate.yml into its jobs' text.
-func gateJobs(t *testing.T) map[string]string {
+// The tests here read .github/workflows/gate.yml as text and pin its
+// trust layout (the comment at its top). They are deliberately literal: a
+// change to the workflow that moves a secret, drops a verification or
+// widens a permission has to change a test in the same commit.
+
+func readGate(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile("../../.github/workflows/gate.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(b)
+	return string(b)
+}
+
+// gateJobs splits .github/workflows/gate.yml into its jobs' text.
+func gateJobs(t *testing.T) map[string]string {
+	t.Helper()
+	s := readGate(t)
 	i := strings.Index(s, "\njobs:\n")
 	if i < 0 {
 		t.Fatal("no jobs")
@@ -33,6 +45,200 @@ func gateJobs(t *testing.T) map[string]string {
 	return jobs
 }
 
+// The jobs, and which of the two paths each runs on. A job added to the
+// workflow has to be placed here, and with that in every test below.
+func TestJobs(t *testing.T) {
+	var names []string
+	for name := range gateJobs(t) {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if got, want := strings.Join(names, " "), "build classify fetch publish refresh review"; got != want {
+		t.Fatalf("jobs %q, want %q", got, want)
+	}
+}
+
+// permissionsOf is a job's own permissions, "name: level" each, sorted;
+// "{}" for none.
+func permissionsOf(t *testing.T, name, job string) string {
+	t.Helper()
+	if strings.Contains(job, "\n    permissions: {}\n") {
+		return "{}"
+	}
+	i := strings.Index(job, "\n    permissions:\n")
+	if i < 0 {
+		t.Errorf("%s has no permissions of its own", name)
+		return ""
+	}
+	var out []string
+	for _, line := range strings.Split(job[i+len("\n    permissions:\n"):], "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, "      ") || strings.HasPrefix(line, "       ") {
+			break
+		}
+		out = append(out, trimmed)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
+}
+
+// Every job states its permissions, and they are exactly these. The
+// workflow's own default is none. review holds the OIDC token and has no
+// access to the repository; publish gets nothing from the job token (it
+// uses the app's).
+func TestPermissions(t *testing.T) {
+	if !strings.Contains(readGate(t), "\npermissions: {}\n") {
+		t.Error("the workflow's default permissions are not {}")
+	}
+	want := map[string]string{
+		"build":    "contents: read",
+		"classify": "contents: read, pull-requests: read",
+		"fetch":    "contents: read, pull-requests: read",
+		"refresh":  "contents: read, pull-requests: read",
+		"review":   "id-token: write",
+		"publish":  "{}",
+	}
+	for name, job := range gateJobs(t) {
+		if got := permissionsOf(t, name, job); got != want[name] {
+			t.Errorf("%s has permissions %q, want %q", name, got, want[name])
+		}
+	}
+}
+
+// Every job has a timeout and runs on the pinned runner image.
+func TestTimeoutsAndRunners(t *testing.T) {
+	for name, job := range gateJobs(t) {
+		if !regexp.MustCompile(`(?m)^    timeout-minutes: [0-9]+$`).MatchString(job) {
+			t.Errorf("%s has no timeout-minutes", name)
+		}
+		if !strings.Contains(job, "\n    runs-on: ubuntu-26.04\n") {
+			t.Errorf("%s does not run on ubuntu-26.04", name)
+		}
+	}
+}
+
+// publish is the only job with the gate app's token, a secret or an
+// environment. The jobs that read what a pull request, a dependency, a
+// registry or the model wrote (classify, fetch, refresh, review) hold no
+// secret at all, and review not even the job's token for the repository.
+func TestOnlyPublishHoldsSecrets(t *testing.T) {
+	jobs := gateJobs(t)
+	for name, job := range jobs {
+		for _, secret := range []string{"secrets.", "create-github-app-token", "environment:", "vars.", "DEP_REVIEW_APP_KEY", "PUSHOVER"} {
+			if has := strings.Contains(job, secret); has != (name == "publish") {
+				t.Errorf("%s: has %q: %v", name, secret, has)
+			}
+		}
+	}
+	for _, token := range []string{"github.token", "GH_TOKEN", "actions/checkout"} {
+		if strings.Contains(jobs["review"], token) {
+			t.Errorf("review uses %q: it needs nothing of the repository", token)
+		}
+	}
+	// publish's GH_TOKEN is the app's, and the job token is used nowhere
+	// in it.
+	if !strings.Contains(jobs["publish"], "GH_TOKEN: ${{ steps.app.outputs.token }}") || strings.Contains(jobs["publish"], "github.token") {
+		t.Error("publish does not run with the app's token alone")
+	}
+}
+
+// The model is asked on an event's run only. review is the one job with
+// the OIDC token, its condition names the event and cannot be forced with
+// always(), and none of the scheduled path's jobs has that permission.
+func TestScheduledPathHasNoModel(t *testing.T) {
+	jobs := gateJobs(t)
+	for name, job := range jobs {
+		if has := strings.Contains(job, "id-token"); has != (name == "review") {
+			t.Errorf("%s: mentions id-token: %v", name, has)
+		}
+	}
+	review := jobs["review"]
+	if !strings.Contains(review, "\n    if: github.event_name == 'workflow_run' && needs.fetch.outputs.review == 'true'\n") {
+		t.Error("review's condition does not restrict it to a workflow_run event")
+	}
+	if strings.Contains(review, "always()") || strings.Contains(review, "cancelled()") || strings.Contains(review, "failure()") {
+		t.Error("review's condition has a status function, which would run it when a job it needs was skipped")
+	}
+	if !strings.Contains(review, "\n    needs: [build, fetch]\n") {
+		t.Error("review does not need fetch")
+	}
+	// The scheduled path is build, refresh and publish. refresh runs for
+	// nothing else, and runs no model command.
+	refresh := jobs["refresh"]
+	if !strings.Contains(refresh, "\n    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'\n") {
+		t.Error("refresh's condition is not the schedule")
+	}
+	if strings.Contains(refresh, `dep-review" review`) || strings.Contains(refresh, "anthropic") {
+		t.Error("refresh asks the model")
+	}
+	// The event's jobs do not run on a schedule.
+	if !strings.Contains(jobs["classify"], "\n    if: github.event_name == 'workflow_run'\n") {
+		t.Error("classify's condition is not the workflow_run event")
+	}
+	if !strings.Contains(jobs["fetch"], "\n    needs: [build, classify]\n") {
+		t.Error("fetch does not need classify")
+	}
+}
+
+// Nothing in the gate runs a container or installs a sandbox runtime:
+// v0.2 executes nothing it downloads.
+func TestNoContainers(t *testing.T) {
+	gate := strings.ToLower(readGate(t))
+	for _, bad := range []string{"docker", "gvisor", "runsc", "podman", "container:", "services:", "sandbox"} {
+		if strings.Contains(gate, bad) {
+			t.Errorf("gate.yml mentions %q", bad)
+		}
+	}
+}
+
+// runScripts is every run: script of the workflow.
+func runScripts(t *testing.T, text string) []string {
+	t.Helper()
+	var out []string
+	lines := strings.Split(text, "\n")
+	for i := 0; i < len(lines); i++ {
+		indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))
+		rest, ok := strings.CutPrefix(strings.TrimLeft(lines[i], " -"), "run:")
+		if !ok {
+			continue
+		}
+		script := rest
+		for i+1 < len(lines) && (strings.TrimSpace(lines[i+1]) == "" || len(lines[i+1])-len(strings.TrimLeft(lines[i+1], " ")) > indent) {
+			i++
+			script += "\n" + lines[i]
+		}
+		out = append(out, script)
+	}
+	return out
+}
+
+// No expression is expanded inside a script: every value from an input,
+// an event or another job reaches a shell through env, as data.
+func TestNoExpressionInScripts(t *testing.T) {
+	scripts := runScripts(t, readGate(t))
+	if len(scripts) < 20 {
+		t.Fatalf("found %d run: scripts; the extraction is broken", len(scripts))
+	}
+	for _, s := range scripts {
+		if strings.Contains(s, "${{") {
+			t.Errorf("a script expands an expression:\n%s", s)
+		}
+	}
+	// Every expression that reads an input or the event is in a with: or
+	// env: value, or in a job's if:.
+	for _, line := range strings.Split(readGate(t), "\n") {
+		if !strings.Contains(line, "${{") {
+			continue
+		}
+		if !regexp.MustCompile(`^\s+[A-Za-z_-]+: \S*\$\{\{ [^{}]+ \}\}\S*$`).MatchString(line) {
+			t.Errorf("an expression outside a plain key: value line: %q", line)
+		}
+	}
+}
+
 // Every job that runs anything from the gate-bin artifact checks it
 // against the build job's checksums first: before setting up Go from its
 // go.mod, minting the app token, or running the binary.
@@ -42,61 +248,43 @@ func TestGateBinVerified(t *testing.T) {
 	if !strings.Contains(build, "gate_sums: ${{ steps.sums.outputs.sums }}") || !strings.Contains(build, "sha256sum") {
 		t.Fatal("the build job does not output the gate's checksums")
 	}
+	// The gate is built from the workflow's own commit, never the
+	// caller's or the pull request's.
+	if !strings.Contains(build, "repository: ${{ job.workflow_repository }}") || !strings.Contains(build, "ref: ${{ job.workflow_sha }}") {
+		t.Error("build does not check out the workflow's own commit")
+	}
 	n := 0
 	for name, job := range jobs {
-		if name == "build" || !strings.Contains(job, "gate-bin") {
+		if name == "build" {
 			continue
 		}
 		n++
 		v := strings.Index(job, "- name: Verify the gate's files")
 		if v < 0 {
-			t.Errorf("%s uses gate-bin without verifying it", name)
+			t.Errorf("%s does not verify gate-bin", name)
 			continue
 		}
 		if !strings.Contains(job[v:], "GATE_SUMS: ${{ needs.build.outputs.gate_sums }}") || !strings.Contains(job[v:], "sha256sum --check --strict") {
 			t.Errorf("%s: the verify step does not check the build job's sums", name)
 		}
-		for _, use := range []string{`/dep-review" `, "create-github-app-token", "bin/go.mod", "install-gvisor.sh", "docker build"} {
+		for _, use := range []string{`/dep-review" `, "create-github-app-token", "bin/go.mod", "actions/checkout"} {
 			if u := strings.Index(job, use); u >= 0 && u < v {
 				t.Errorf("%s: %q comes before the verify step", name, use)
 			}
 		}
-	}
-	if n != 6 {
-		t.Errorf("%d jobs use gate-bin, want 6 (classify, fetch, review, rebuild, publish, sweep)", n)
-	}
-}
-
-// The rebuild job runs an action's own build code: it holds no
-// permissions, no secrets and no OIDC token, runs every container under
-// gVisor, and cannot hold up publish's decision.
-func TestRebuildUnprivileged(t *testing.T) {
-	jobs := gateJobs(t)
-	job := jobs["rebuild"]
-	if !strings.Contains(job, "    permissions: {}\n") {
-		t.Error("the rebuild job does not set permissions: {}")
-	}
-	for _, bad := range []string{"secrets.", "id-token", "github.token", "GH_TOKEN", "environment:", "actions/checkout"} {
-		if strings.Contains(job, bad) {
-			t.Errorf("the rebuild job uses %q", bad)
+		if !strings.Contains(job, `/dep-review" `+name) {
+			t.Errorf("%s does not run `dep-review %s`", name, name)
 		}
 	}
-	if !strings.Contains(job, "--runtime runsc") || !strings.Contains(job, "install-gvisor.sh") {
-		t.Error("the rebuild job does not run its builds under gVisor")
-	}
-	pub := jobs["publish"]
-	if !strings.Contains(pub, "needs: [build, classify, fetch, review, rebuild]") || !strings.Contains(pub, "always()") {
-		t.Error("publish does not wait for rebuild, or does not run when it is skipped")
+	if n != 5 {
+		t.Errorf("%d jobs use gate-bin, want 5 (classify, fetch, review, refresh, publish)", n)
 	}
 }
 
 // The caller passes the gate exactly the secrets gate.yml declares, never
 // `secrets: inherit`, and gate.yml uses no secret it does not declare.
 func TestSecretsExplicit(t *testing.T) {
-	gate, err := os.ReadFile("../../.github/workflows/gate.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	g := readGate(t)
 	example, err := os.ReadFile("../../examples/dep-review.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +292,6 @@ func TestSecretsExplicit(t *testing.T) {
 	if regexp.MustCompile(`(?m)^\s*secrets:\s*inherit\b`).Match(example) {
 		t.Error("examples/dep-review.yaml uses secrets: inherit")
 	}
-	g := string(gate)
 	call := g[strings.Index(g, "workflow_call:"):strings.Index(g, "\npermissions:")]
 	declared := map[string]bool{}
 	if i := strings.Index(call, "\n    secrets:\n"); i >= 0 {
@@ -128,8 +315,9 @@ func TestSecretsExplicit(t *testing.T) {
 }
 
 // Every artifact passed between jobs is checked against its producer's
-// job output: a compromised job holding the run's runtime token could
-// otherwise replace, say, the verdict, and publish would merge on it.
+// job output before anything uses it: a job holding the run's runtime
+// token could otherwise replace, say, the verdicts, and publish would
+// merge on them.
 func TestArtifactsVerified(t *testing.T) {
 	jobs := gateJobs(t)
 	for _, a := range []struct {
@@ -137,9 +325,9 @@ func TestArtifactsVerified(t *testing.T) {
 		consumers      []string
 	}{
 		{"classification", "classify", []string{"fetch", "publish"}},
-		{"evidence", "fetch", []string{"review", "rebuild", "publish"}},
-		{"verdict", "review", []string{"publish"}},
-		{"rebuild", "rebuild", []string{"publish"}},
+		{"facts", "fetch", []string{"review", "publish"}},
+		{"verdicts", "review", []string{"publish"}},
+		{"refreshed", "refresh", []string{"publish"}},
 	} {
 		p := jobs[a.producer]
 		out := a.name + "_sums: ${{ steps.sums.outputs.sums }}"
@@ -148,128 +336,162 @@ func TestArtifactsVerified(t *testing.T) {
 		if !strings.Contains(p, out) || sums < 0 || up < 0 || sums > up {
 			t.Errorf("%s does not output the %s artifact's checksums before uploading it", a.producer, a.name)
 		}
+		for name, job := range jobs {
+			consumes := strings.Contains(job, "name: "+a.name+"\n") && name != a.producer
+			if name == "publish" {
+				consumes = true
+			}
+			if consumes != slices.Contains(a.consumers, name) {
+				t.Errorf("%s downloads %s: %v", name, a.name, consumes)
+			}
+		}
 		for _, c := range a.consumers {
 			job := jobs[c]
 			dl := strings.Index(job, "name: "+a.name+"\n")
 			if c == "publish" {
 				dl = strings.Index(job, "pattern: ")
-				if !strings.Contains(job[dl:], a.name) {
+				if dl < 0 || !strings.Contains(job[dl:strings.Index(job[dl:], "\n")+dl], a.name) {
 					t.Errorf("publish does not download %s", a.name)
+					continue
 				}
 			}
 			v := strings.Index(job, "- name: Verify the "+a.name+" artifact")
 			ref := "SUMS: ${{ needs." + a.producer + ".outputs." + a.name + "_sums }}"
-			if dl < 0 || v < dl || !strings.Contains(job[v:], ref) || !strings.Contains(job[v:], "sha256sum --check --strict") {
+			if dl < 0 || v < dl {
 				t.Errorf("%s does not verify the %s artifact after downloading it", c, a.name)
 				continue
 			}
-			for _, use := range []string{`/dep-review" `, "create-github-app-token", "install-gvisor.sh"} {
+			step := job[v:]
+			if next := strings.Index(step[1:], "\n      - "); next >= 0 {
+				step = step[:next+1]
+			}
+			if !strings.Contains(step, ref) || !strings.Contains(step, "sha256sum --check --strict") || !strings.Contains(step, "diff <(find . -type f") {
+				t.Errorf("%s: the step that verifies %s does not check the producer's sums and that nothing else is there", c, a.name)
+			}
+			for _, use := range []string{`/dep-review" `, "create-github-app-token"} {
 				if u := strings.Index(job, use); u >= 0 && u < v {
 					t.Errorf("%s: %q comes before verifying %s", c, use, a.name)
 				}
 			}
 		}
 	}
+	// publish downloads these artifacts and no other.
+	if !strings.Contains(jobs["publish"], `pattern: "{gate-bin,classification,facts,verdicts,refreshed}"`) {
+		t.Error("publish's download pattern changed; so must this test")
+	}
+	// An artifact with no sums from its producer must not be there at
+	// all: publish runs when jobs before it were skipped or failed.
+	for _, name := range []string{"classification", "facts", "verdicts", "refreshed"} {
+		if !strings.Contains(jobs["publish"], `if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/`+name+`"; exit; fi`) {
+			t.Errorf("publish accepts a %s artifact without sums", name)
+		}
+	}
 }
 
-// publish and sweep must know the caller's trigger workflow, or its no-op
-// check run could count as green CI.
-func TestTriggerPathPassed(t *testing.T) {
+// publish serves both paths, and it is the last job of each.
+func TestPublishRunsOnBothPaths(t *testing.T) {
+	publish := gateJobs(t)["publish"]
+	if !strings.Contains(publish, "\n    needs: [build, classify, fetch, review, refresh]\n") {
+		t.Error("publish does not wait for every other job")
+	}
+	for _, want := range []string{"!cancelled()", "needs.build.result == 'success'", "needs.fetch.result == 'success'", "needs.refresh.outputs.publish == 'true'"} {
+		if !strings.Contains(publish, want) {
+			t.Errorf("publish's condition lacks %q", want)
+		}
+	}
+}
+
+// The jobs without the app's token learn the app's name from the
+// app_slug input, through env only; publish checks the input against the
+// app whose key it holds before it decides anything; and the example
+// sets it.
+func TestAppSlugPassed(t *testing.T) {
+	g := readGate(t)
+	call := g[strings.Index(g, "workflow_call:"):strings.Index(g, "\n    secrets:\n")]
+	if i := strings.Index(call, "\n      app_slug:\n"); i < 0 || !strings.Contains(call[i:i+500], "required: true") {
+		t.Error("gate.yml does not declare a required app_slug input")
+	}
 	jobs := gateJobs(t)
-	for name, cmd := range map[string]string{"publish": `dep-review" publish`, "sweep": `dep-review" sweep`} {
+	for _, name := range []string{"fetch", "refresh"} {
 		job := jobs[name]
-		if !strings.Contains(job, "TRIGGER_PATH: ${{ inputs.trigger_workflow_path }}") {
-			t.Errorf("%s does not get the trigger path in its env", name)
-		}
-		i := strings.Index(job, cmd)
-		if i < 0 {
-			t.Fatalf("%s does not run %s", name, cmd)
-		}
-		// The command runs to the end of its run: block.
-		run := job[i:]
-		if j := strings.Index(run, "\n      - "); j >= 0 {
-			run = run[:j]
-		}
-		if !strings.Contains(run, `--trigger-path "$TRIGGER_PATH"`) {
-			t.Errorf("%s runs %s without --trigger-path", name, cmd)
+		if !strings.Contains(job, "APP_SLUG: ${{ inputs.app_slug }}") || !strings.Contains(job, `--app-slug "$APP_SLUG"`) {
+			t.Errorf("%s does not get the app's slug from the input", name)
 		}
 	}
-}
+	publish := jobs["publish"]
+	check := strings.Index(publish, "- name: The app_slug input names this app")
+	run := strings.Index(publish, `/dep-review" publish`)
+	if check < 0 || run < check {
+		t.Fatal("publish does not check the app_slug input before deciding")
+	}
+	step := publish[check:]
+	step = step[:strings.Index(step[1:], "\n      - ")+1]
+	for _, want := range []string{"INPUT_SLUG: ${{ inputs.app_slug }}", "        APP_SLUG: ${{ steps.app.outputs.app-slug }}", `if [ "$INPUT_SLUG" != "$APP_SLUG" ]; then`, "exit 1"} {
+		if !strings.Contains(step, want) {
+			t.Errorf("the step that checks the app_slug input lacks %q", want)
+		}
+	}
 
-// fetch gets the caller's docker_platforms (the platforms a digest
-// refresh must be proven a no-op for), and the example sets it.
-func TestDockerPlatformsPassed(t *testing.T) {
-	jobs := gateJobs(t)
-	fetch := jobs["fetch"]
-	if !strings.Contains(fetch, "DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}") || !strings.Contains(fetch, `--docker-platforms "$DOCKER_PLATFORMS"`) {
-		t.Error("fetch does not pass --docker-platforms from inputs.docker_platforms")
+	// publish itself takes the name from the app, never from the input.
+	if !strings.Contains(publish[run-600:run], "DEP_REVIEW_APP_SLUG: ${{ steps.app.outputs.app-slug }}") {
+		t.Error("publish does not take its own slug from the app token step")
 	}
 	example, err := os.ReadFile("../../examples/dep-review.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(example), "docker_platforms: linux/amd64,linux/arm64") {
-		t.Error("the example does not set docker_platforms")
+	if !strings.Contains(string(example), "\n      app_slug: ") {
+		t.Error("the example does not set app_slug")
 	}
 }
 
-// fetch gets the caller's go_platforms and go_tags (the Go builds module
-// checks evaluate), and the example sets go_platforms.
-func TestGoBuildsPassed(t *testing.T) {
-	fetch := gateJobs(t)["fetch"]
-	for _, want := range []string{"GO_PLATFORMS: ${{ inputs.go_platforms }}", "GO_TAGS: ${{ inputs.go_tags }}",
-		`--go-platforms "$GO_PLATFORMS"`, `--go-tags "$GO_TAGS"`} {
-		if !strings.Contains(fetch, want) {
-			t.Errorf("fetch lacks %s", want)
-		}
+// The inputs are these and no others: the ones v0.1.9 had for its build
+// analysis, its Docker comparison, its model session and its notes file
+// mean nothing now, and a caller that still passes one should fail at the
+// call, not be ignored.
+func TestInputs(t *testing.T) {
+	g := readGate(t)
+	call := g[strings.Index(g, "    inputs:\n"):strings.Index(g, "\n    secrets:\n")]
+	var got []string
+	for _, m := range regexp.MustCompile(`(?m)^      ([a-z_]+):$`).FindAllStringSubmatch(call, -1) {
+		got = append(got, m[1])
+	}
+	want := "trigger_workflow_path app_slug ignore_ecosystems anthropic_federation_rule_id anthropic_organization_id anthropic_workspace_id anthropic_service_account_id"
+	if strings.Join(got, " ") != want {
+		t.Errorf("inputs %q, want %q", strings.Join(got, " "), want)
 	}
 	example, err := os.ReadFile("../../examples/dep-review.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(example), "go_platforms: ") {
-		t.Error("the example does not set go_platforms")
+	for _, m := range regexp.MustCompile(`(?m)^      (?:# )?([a-z_]+): `).FindAllStringSubmatch(string(example[strings.Index(string(example), "    with:\n"):]), -1) {
+		if !slices.Contains(got, m[1]) {
+			t.Errorf("the example sets %s, which is not an input", m[1])
+		}
 	}
 }
 
-// The ignore_ecosystems input reaches classify (which ignores) and sweep
-// (which must skip what classify ignores), through env only, and the
-// example documents it commented out.
+// The ignore_ecosystems input reaches classify (which ignores) and
+// refresh (which must skip what classify ignores), through env only, and
+// the example documents it commented out.
 func TestIgnoreEcosystemsPassed(t *testing.T) {
-	gate, err := os.ReadFile("../../.github/workflows/gate.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := string(gate)
+	g := readGate(t)
 	call := g[strings.Index(g, "workflow_call:"):strings.Index(g, "\n    secrets:\n")]
 	if i := strings.Index(call, "\n      ignore_ecosystems:\n"); i < 0 || !strings.Contains(call[i:], `default: ""`) {
 		t.Error("gate.yml does not declare an optional ignore_ecosystems input defaulting to empty")
 	}
 	jobs := gateJobs(t)
-	for name, cmd := range map[string]string{"classify": `dep-review" classify`, "sweep": `dep-review" sweep`} {
-		job := jobs[name]
-		if !strings.Contains(job, "IGNORE_ECOSYSTEMS: ${{ inputs.ignore_ecosystems }}") {
-			t.Errorf("%s does not get ignore_ecosystems in its env", name)
-		}
-		i := strings.Index(job, cmd)
-		if i < 0 {
-			t.Fatalf("%s does not run %s", name, cmd)
-		}
-		run := job[i:]
-		if j := strings.Index(run, "\n      - "); j >= 0 {
-			run = run[:j]
-		}
-		if !strings.Contains(run, `--ignore-ecosystems "$IGNORE_ECOSYSTEMS"`) {
-			t.Errorf("%s runs %s without --ignore-ecosystems", name, cmd)
-		}
-	}
 	for name, job := range jobs {
-		if name != "classify" && name != "sweep" && strings.Contains(job, "ignore_ecosystems") {
-			t.Errorf("%s uses ignore_ecosystems; only classify and sweep should", name)
+		uses := strings.Contains(job, "ignore_ecosystems")
+		if uses != (name == "classify" || name == "refresh") {
+			t.Errorf("%s: uses ignore_ecosystems: %v; classify and refresh should, and no other job", name, uses)
 		}
-	}
-	if strings.Contains(g, "${{ inputs.ignore_ecosystems }}\"") || regexp.MustCompile(`run:[^\n]*inputs\.ignore_ecosystems`).MatchString(g) {
-		t.Error("ignore_ecosystems is expanded inside a run: script")
+		if !uses {
+			continue
+		}
+		if !strings.Contains(job, "IGNORE_ECOSYSTEMS: ${{ inputs.ignore_ecosystems }}") || !strings.Contains(job, `--ignore-ecosystems "$IGNORE_ECOSYSTEMS"`) {
+			t.Errorf("%s does not pass --ignore-ecosystems from the input", name)
+		}
 	}
 	example, err := os.ReadFile("../../examples/dep-review.yaml")
 	if err != nil {
@@ -277,23 +499,6 @@ func TestIgnoreEcosystemsPassed(t *testing.T) {
 	}
 	if !strings.Contains(string(example), "      # ignore_ecosystems: submodules\n") {
 		t.Error("the example does not show ignore_ecosystems commented out")
-	}
-}
-
-// An unknown ecosystem name fails classify and sweep before they read
-// anything or call the API.
-func TestIgnoreEcosystemsUnknownFails(t *testing.T) {
-	t.Setenv("GH_TOKEN", "")
-	for cmd, args := range map[string][]string{
-		"classify": {"--event", "/nonexistent", "--trigger-path", "t", "--out", "/nonexistent/c.json"},
-		"sweep":    {"--repo", "o/r", "--trigger-path", "t"},
-	} {
-		for _, bad := range []string{"gitsubmodule", "submodules,", "*"} {
-			err := commands[cmd](append(args, "--ignore-ecosystems", bad))
-			if err == nil || !strings.Contains(err.Error(), "--ignore-ecosystems: unknown ecosystem") {
-				t.Errorf("%s --ignore-ecosystems %q: %v", cmd, bad, err)
-			}
-		}
 	}
 }
 
@@ -308,6 +513,34 @@ func TestSkippedTriggerRunsNothing(t *testing.T) {
 	for name, job := range jobs {
 		if name != "build" && !regexp.MustCompile(`(?m)^    needs: (build|\[build[],])`).MatchString(job) {
 			t.Errorf("%s does not need build, so a skipped trigger would still run it", name)
+		}
+	}
+}
+
+// What fetch and refresh check out is data: no credential stays in the
+// clone, and neither job runs anything but the gate.
+func TestCheckoutsAreData(t *testing.T) {
+	jobs := gateJobs(t)
+	for name, job := range jobs {
+		n := strings.Count(job, "uses: actions/checkout@")
+		if n != strings.Count(job, "persist-credentials: false") {
+			t.Errorf("%s: a checkout keeps its credentials", name)
+		}
+		if want := map[string]int{"build": 1, "fetch": 1, "refresh": 1}[name]; n != want {
+			t.Errorf("%s has %d checkouts, want %d", name, n, want)
+		}
+	}
+	for _, name := range []string{"fetch", "refresh"} {
+		if !strings.Contains(jobs[name], "fetch-depth: 0") {
+			t.Errorf("%s does not fetch the history the change set is read from", name)
+		}
+		for _, s := range runScripts(t, jobs[name]) {
+			for _, line := range strings.Split(s, "\n") {
+				word := strings.Fields(strings.TrimSpace(line) + " x")[0]
+				if word == "npm" || word == "go" || word == "make" || word == "bash" || word == "sh" || word == "node" || strings.HasPrefix(word, "./") || strings.HasPrefix(word, "pr/") || strings.HasPrefix(word, "repo/") {
+					t.Errorf("%s runs %q", name, strings.TrimSpace(line))
+				}
+			}
 		}
 	}
 }
