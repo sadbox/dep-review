@@ -1,0 +1,22 @@
+{
+  "attestations": [
+    {
+      "predicateType": "https://github.com/npm/attestation/tree/main/specs/publish/v0.1",
+      "bundle": {
+        "dsseEnvelope": {
+          "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjAuMSIsInN1YmplY3QiOlt7Im5hbWUiOiJwa2c6bnBtL3RhaWx3aW5kY3NzQDQuMy40IiwiZGlnZXN0Ijp7InNoYTUxMiI6IjNjMjI1OTRjNTE1ZDFiZWIwYmRlMGJlNzNmNTBlOGY2OGU4NjZlNGJjN2RhYWQyOWQzOGM1MmIzNzdmYjcxMmJlNjAxZTJiZWIyZGI0NmZiZmVlNzcwYWQ1Zjc1MWMwYTE1ZjBiYjlmZWMwMzBjOTY4ZTMwMTQ5ZTdlNDIzZGEzIn19XSwicHJlZGljYXRlVHlwZSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9ucG0vYXR0ZXN0YXRpb24vdHJlZS9tYWluL3NwZWNzL3B1Ymxpc2gvdjAuMSIsInByZWRpY2F0ZSI6eyJuYW1lIjoidGFpbHdpbmRjc3MiLCJ2ZXJzaW9uIjoiNC4zLjQiLCJyZWdpc3RyeSI6Imh0dHBzOi8vcmVnaXN0cnkubnBtanMub3JnIn19",
+          "payloadType": "application/vnd.in-toto+json"
+        }
+      }
+    },
+    {
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "bundle": {
+        "dsseEnvelope": {
+          "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJzdWJqZWN0IjpbeyJuYW1lIjoicGtnOm5wbS90YWlsd2luZGNzc0A0LjMuNCIsImRpZ2VzdCI6eyJzaGE1MTIiOiIzYzIyNTk0YzUxNWQxYmViMGJkZTBiZTczZjUwZThmNjhlODY2ZTRiYzdkYWFkMjlkMzhjNTJiMzc3ZmI3MTJiZTYwMWUyYmViMmRiNDZmYmZlZTc3MGFkNWY3NTFjMGExNWYwYmI5ZmVjMDMwYzk2OGUzMDE0OWU3ZTQyM2RhMyJ9fV0sInByZWRpY2F0ZVR5cGUiOiJodHRwczovL3Nsc2EuZGV2L3Byb3ZlbmFuY2UvdjEiLCJwcmVkaWNhdGUiOnsiYnVpbGREZWZpbml0aW9uIjp7ImJ1aWxkVHlwZSI6Imh0dHBzOi8vc2xzYS1mcmFtZXdvcmsuZ2l0aHViLmlvL2dpdGh1Yi1hY3Rpb25zLWJ1aWxkdHlwZXMvd29ya2Zsb3cvdjEiLCJleHRlcm5hbFBhcmFtZXRlcnMiOnsid29ya2Zsb3ciOnsicmVmIjoicmVmcy90YWdzL3Y0LjMuNCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vdGFpbHdpbmRsYWJzL3RhaWx3aW5kY3NzIiwicGF0aCI6Ii5naXRodWIvd29ya2Zsb3dzL3JlbGVhc2UueW1sIn19LCJpbnRlcm5hbFBhcmFtZXRlcnMiOnsiZ2l0aHViIjp7ImV2ZW50X25hbWUiOiJyZWxlYXNlIiwicmVwb3NpdG9yeV9pZCI6IjEwNjAxNzM0MyIsInJlcG9zaXRvcnlfb3duZXJfaWQiOiI2NzEwOTgxNSJ9fSwicmVzb2x2ZWREZXBlbmRlbmNpZXMiOlt7InVyaSI6ImdpdCtodHRwczovL2dpdGh1Yi5jb20vdGFpbHdpbmRsYWJzL3RhaWx3aW5kY3NzQHJlZnMvdGFncy92NC4zLjQiLCJkaWdlc3QiOnsiZ2l0Q29tbWl0IjoiMjYyNmFlNmNlZGRmMzYwNjlhYjZkNTVjNTNhNTg1N2MxZTJlMzYwYSJ9fV19LCJydW5EZXRhaWxzIjp7ImJ1aWxkZXIiOnsiaWQiOiJodHRwczovL2dpdGh1Yi5jb20vYWN0aW9ucy9ydW5uZXIvZ2l0aHViLWhvc3RlZCJ9LCJtZXRhZGF0YSI6eyJpbnZvY2F0aW9uSWQiOiJodHRwczovL2dpdGh1Yi5jb20vdGFpbHdpbmRsYWJzL3RhaWx3aW5kY3NzL2FjdGlvbnMvcnVucy80MTUyNjg5Nzc1Mi9hdHRlbXB0cy8xIn19fX0=",
+          "payloadType": "application/vnd.in-toto+json"
+        }
+      }
+    }
+  ]
+}

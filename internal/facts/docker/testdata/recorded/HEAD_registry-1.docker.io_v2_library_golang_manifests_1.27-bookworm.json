@@ -1,0 +1,9 @@
+{
+  "method": "HEAD",
+  "url": "https://registry-1.docker.io/v2/library/golang/manifests/1.27-bookworm",
+  "status": 200,
+  "header": {
+    "Content-Type": "application/vnd.oci.image.index.v1+json",
+    "Docker-Content-Digest": "sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea"
+  }
+}

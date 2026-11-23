@@ -1,0 +1,54 @@
+{
+  "method": "GET",
+  "url": "https://gcr.io/v2/distroless/static-debian12/tags/list",
+  "note": "trimmed: 2 of the list's 12061 manifests are kept, and its \"tags\" and \"child\" arrays are dropped",
+  "status": 200,
+  "header": {
+    "Content-Type": "application/json; charset=utf-8"
+  },
+  "body": {
+    "name": "distroless/static-debian12",
+    "manifest": {
+      "sha256:1b7b9f0f0e0a1d2155f531db587cc48ec26aaf97ab64364225f5bf18a054e66a": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "tag": [
+          "nonroot-38b199940da833e75f38b4145291bf0ac95f9e20",
+          "nonroot-39657ea5500829c126b7159fedf41aaf32d5dfab",
+          "nonroot-e34e3fb5a79800f415e52c81a55517a9e9751cff",
+          "nonroot-f852f6a454277a5a06465b355ec20bb1bb424490",
+          "nonroot-fdd509e1ab6f9e1c7c8e4a400c8f60a1e48b4a95",
+          "update-available-1b7b9f0f0e0a1d2155f531db587cc48ec26aaf97ab64364225f5bf18a054e66a"
+        ],
+        "timeUploadedMs": "1786400118666",
+        "timeCreatedMs": "0",
+        "imageSizeBytes": "0"
+      },
+      "sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "tag": [
+          "deprecated-public-image-afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab",
+          "nonroot",
+          "nonroot-0170310d2620046d308a2b1cc1d2a4303fa71946",
+          "nonroot-03c6d388c70617a0098d565198e3721007b0fb7e",
+          "nonroot-0ab07d3480d5be9240211d4eaea06e3e3e929152",
+          "nonroot-21c3bed4705a1eb0fed7d69493ebdcf9d4c1cdbc",
+          "nonroot-23301cf45eefeb37e4f30a49ee0a8a4a6708561e",
+          "nonroot-2958d510e6e7dcaa1f546042cfca98930a60a2ce",
+          "nonroot-2f569dec658c54549c6fe5d6b3d1a90ad261a5cc",
+          "nonroot-7518508d3bde836a10ac7476f61ef27bac4bac13",
+          "nonroot-9fe50e2ba484b4a43010d6e4f3d2efc8395a415a",
+          "nonroot-a82372c75ba8fe7dae3028f8d4e1dbd3ca73fa64",
+          "nonroot-b105d3858691c056fca3cc29ca6e33060ca3f2ef",
+          "nonroot-c6c09d570aa2896682393fd41260bcf19a2425e8",
+          "nonroot-cd080764af3103b2f49fb5eb23297c72c945e77a",
+          "nonroot-da7e67667b7f18118fc6d07c5c3cfbd0878ac564",
+          "nonroot-e5c27fb6750476a76e04b804c737f073ad1f21c6",
+          "nonroot-ea07950adcf661159d9a9a901a6b6879757157c1"
+        ],
+        "timeUploadedMs": "1787335936959",
+        "timeCreatedMs": "0",
+        "imageSizeBytes": "0"
+      }
+    }
+  }
+}

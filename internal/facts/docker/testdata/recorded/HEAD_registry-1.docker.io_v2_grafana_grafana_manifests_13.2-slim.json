@@ -1,0 +1,9 @@
+{
+  "method": "HEAD",
+  "url": "https://registry-1.docker.io/v2/grafana/grafana/manifests/13.2-slim",
+  "status": 200,
+  "header": {
+    "Content-Type": "application/vnd.docker.distribution.manifest.list.v2+json",
+    "Docker-Content-Digest": "sha256:c0bd9bb5ea9b9c33926eaa3ed3edfad31075865e359d0df5363458a9af8466b9"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "event-stream",
+  "time": {
+    "3.3.5": "2018-09-05T05:27:47.219Z",
+    "3.3.6": "2018-09-09T08:28:59.503Z",
+    "created": "2011-08-22T05:26:46.363Z",
+    "modified": "2022-11-08T10:38:35.230Z"
+  },
+  "versions": {
+    "3.3.5": {
+      "dist": {
+        "integrity": "sha512-vyibDcu5JL20Me1fP734QBH/kenBGLZap2n0+XXM7mvuUPzJ20Ydqj1aKcIeMdri1p+PU+4yAKugjN8KCVst+g==",
+        "tarball": "https://registry.npmjs.org/event-stream/-/event-stream-3.3.5.tgz"
+      },
+      "license": "MIT",
+      "name": "event-stream",
+      "scripts": {
+        "prepublish": "npm ls && npm test",
+        "test": "asynct test/",
+        "test_tap": "set -e; for t in test/*.js; do node $t; done"
+      },
+      "version": "3.3.5"
+    }
+  }
+}

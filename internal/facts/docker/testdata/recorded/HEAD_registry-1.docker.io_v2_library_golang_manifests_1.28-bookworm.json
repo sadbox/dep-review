@@ -1,0 +1,8 @@
+{
+  "method": "HEAD",
+  "url": "https://registry-1.docker.io/v2/library/golang/manifests/1.28-bookworm",
+  "status": 404,
+  "header": {
+    "Content-Type": "application/json"
+  }
+}

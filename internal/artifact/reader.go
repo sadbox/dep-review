@@ -1,0 +1,267 @@
+package artifact
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"golang.org/x/mod/module"
+
+	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/gh"
+)
+
+// ErrBadRef means a Pair, a Ref or the Limits are not something the gate
+// can prepare a read for: an unknown kind, a name or version that is not
+// in the kind's exact shape, a hash of the wrong form, two sides that do
+// not belong together. Nothing is downloaded. Test with errors.Is.
+var ErrBadRef = errors.New("artifact: bad reference")
+
+func badRef(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrBadRef, fmt.Sprintf(format, args...))
+}
+
+// Options configures the Preparer that New returns.
+type Options struct {
+	// Scratch is a directory to work in. Every Prepare makes its own
+	// directory under it and removes it again. Empty means the system's
+	// temporary directory.
+	Scratch string
+	// HTTP is used for the npm registry and for GitHub's tarballs. Only
+	// its Transport and Timeout are used: the redirect policy is this
+	// package's own. Nil means http.DefaultTransport and no timeout
+	// beyond the one each download has.
+	HTTP *http.Client
+	// GitHub supplies the API root and the job's read-only token for
+	// action tarballs; none of its methods is called. Nil means
+	// api.github.com without a token, which is enough for public
+	// actions at the unauthenticated rate limit.
+	GitHub *gh.Client
+}
+
+// New returns the Preparer that downloads from the module proxy, the npm
+// registry and GitHub. It needs git on PATH, and the go command for Go
+// modules; a missing git is an error here, a missing go command is an
+// error when the first module is prepared. The Preparer keeps no state
+// between calls and may be used from several goroutines.
+func New(o Options) (Preparer, error) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return nil, fmt.Errorf("artifact: git is not installed: %w", err)
+	}
+	goBin, _ := exec.LookPath("go")
+
+	f := &netFetcher{
+		githubAPI: gh.DefaultBaseURL,
+		goBin:     goBin,
+		goProxy:   goProxy,
+		goSumDB:   goSumDB,
+	}
+	f.retryDelay = time.Second
+	apiHost := "api.github.com"
+	if o.GitHub != nil {
+		if !strings.HasPrefix(o.GitHub.BaseURL, "https://") || !strings.HasSuffix(o.GitHub.BaseURL, "/") {
+			return nil, fmt.Errorf("artifact: GitHub API root %q is not an https URL ending in /", o.GitHub.BaseURL)
+		}
+		f.githubAPI = o.GitHub.BaseURL
+		f.githubToken = o.GitHub.Token
+		apiHost = strings.SplitN(strings.TrimPrefix(o.GitHub.BaseURL, "https://"), "/", 2)[0]
+	}
+	var base http.Client
+	if o.HTTP != nil {
+		base.Transport, base.Timeout = o.HTTP.Transport, o.HTTP.Timeout
+	}
+	registry, github := base, base
+	registry.CheckRedirect = redirects()
+	// GitHub redirects a tarball request to its download host; a GitHub
+	// Enterprise server serves it from the API host itself.
+	github.CheckRedirect = redirects(codeloadHost, apiHost)
+	f.registry, f.github = &registry, &github
+
+	return &reader{scratch: o.Scratch, git: git, fetch: f, limits: defaultExtractLimits, read: defaultReadLimits}, nil
+}
+
+// reader is the Preparer.
+type reader struct {
+	scratch string
+	git     string
+	fetch   fetcher
+	limits  extractLimits
+	read    readLimits
+}
+
+// Shapes of npm names and versions. The registry URL is built from them,
+// so they are matched exactly; a name the pattern does not cover is not
+// fetched.
+var (
+	npmNameRE    = regexp.MustCompile(`^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	npmVersionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+)
+
+// actionTagRE is the shape of an action's tag: what version tags and
+// release branches look like ("v4", "v4.1.0", "v3.1.0-node20",
+// "releases/v1"), in plain characters and of a bounded length.
+var actionTagRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]{0,127}$`)
+
+// kinds maps each ecosystem that has something to read to its artifact.
+var kinds = map[string]Kind{
+	allow.GoModules:     GoModuleZip,
+	allow.NPM:           NPMTarball,
+	allow.GitHubActions: ActionTarball,
+}
+
+// checkRef refuses a Ref whose fields are not in their kind's shape.
+func checkRef(ref Ref) error {
+	switch ref.Kind {
+	case GoModuleZip:
+		if err := module.Check(ref.Name, ref.Version); err != nil {
+			return badRef("%v", err)
+		}
+		// module.Check takes "v1.2"; go.mod and go.sum never hold it.
+		if module.CanonicalVersion(ref.Version) != ref.Version {
+			return badRef("%s: version %q is not canonical", ref.Name, ref.Version)
+		}
+		if !moduleHashRE.MatchString(ref.Hash) {
+			return badRef("%s@%s: %q is not an h1: hash", ref.Name, ref.Version, ref.Hash)
+		}
+	case NPMTarball:
+		if len(ref.Name) > 214 || !npmNameRE.MatchString(ref.Name) {
+			return badRef("%q is not an npm package name the gate fetches", ref.Name)
+		}
+		if !npmVersionRE.MatchString(ref.Version) {
+			return badRef("%s: %q is not a version", ref.Name, ref.Version)
+		}
+		if !integrityRE.MatchString(ref.Hash) {
+			return badRef("%s@%s: %q is not exactly one sha512 integrity", ref.Name, ref.Version, ref.Hash)
+		}
+	case ActionTarball:
+		if !gh.ValidRepo(ref.Name) {
+			return badRef("%q is not owner/repo", ref.Name)
+		}
+		// The tag is not part of the download, but the model is told
+		// it and it is in the content key.
+		if !actionTagRE.MatchString(ref.Version) {
+			return badRef("%s: %q is not a tag the gate takes", ref.Name, ref.Version)
+		}
+		if !commitRE.MatchString(ref.Hash) {
+			return badRef("%s@%s: %q is not a full commit ID", ref.Name, ref.Version, ref.Hash)
+		}
+	default:
+		return badRef("kind %q", ref.Kind)
+	}
+	return nil
+}
+
+// checkPair refuses a Pair whose parts do not describe one update. The
+// model is told the pair's name and versions, so they have to be the ones
+// of the artifacts it is shown.
+func checkPair(p Pair) error {
+	if err := checkRef(p.New); err != nil {
+		return err
+	}
+	if kind, ok := kinds[p.Ecosystem]; !ok || kind != p.New.Kind {
+		return badRef("ecosystem %q does not go with a %s", p.Ecosystem, p.New.Kind)
+	}
+	if p.New.Name != p.Name || p.New.Version != p.To {
+		return badRef("the new artifact is %s@%s, the update is %q to %q", p.New.Name, p.New.Version, p.Name, p.To)
+	}
+	if p.Old == (Ref{}) {
+		if p.From != "" {
+			return badRef("%s: an update from %q with no old artifact", p.Name, p.From)
+		}
+		return nil
+	}
+	if err := checkRef(p.Old); err != nil {
+		return err
+	}
+	if p.Old.Kind != p.New.Kind {
+		return badRef("%s: old artifact is a %s, new is a %s", p.Name, p.Old.Kind, p.New.Kind)
+	}
+	if p.Old.Name != p.Name || p.Old.Version != p.From {
+		return badRef("the old artifact is %s@%s, the update is %s from %q", p.Old.Name, p.Old.Version, p.Name, p.From)
+	}
+	return nil
+}
+
+// Prepare implements Preparer.
+func (r *reader) Prepare(ctx context.Context, p Pair, lim Limits) (Prepared, error) {
+	if lim.ChunkBytes < minChunkBytes || lim.MaxChunks < 1 ||
+		lim.ChunkBytes > maxBudgetBytes || lim.MaxChunks > maxBudgetBytes/lim.ChunkBytes {
+		return Prepared{}, badRef("limits %+v: want at least %d bytes per chunk, at least 1 chunk, and at most %d bytes in all",
+			lim, minChunkBytes, maxBudgetBytes)
+	}
+	if err := checkPair(p); err != nil {
+		return Prepared{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Prepared{}, err
+	}
+
+	work, err := os.MkdirTemp(r.scratch, "dep-review-read-")
+	if err != nil {
+		return Prepared{}, err
+	}
+	defer os.RemoveAll(work)
+	// git compares GIT_CEILING_DIRECTORIES with real paths, and the
+	// system's temporary directory can be a symbolic link.
+	if work, err = filepath.EvalSymlinks(work); err != nil {
+		return Prepared{}, err
+	}
+
+	oldTree, err := r.extract(ctx, p.Old, work, "old")
+	if err != nil {
+		return Prepared{}, err
+	}
+	defer oldTree.close()
+	newTree, err := r.extract(ctx, p.New, work, "new")
+	if err != nil {
+		return Prepared{}, err
+	}
+	defer newTree.close()
+
+	d, err := newDiffer(r.git, work)
+	if err != nil {
+		return Prepared{}, err
+	}
+	changed, removed := compare(oldTree, newTree)
+	sections, unread, err := readChanged(ctx, p.New.Kind, oldTree, newTree, changed, d, r.read)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return assemble(p, sections, unread, removed, lim), nil
+}
+
+// extract downloads one side's artifact, verifies it and extracts it
+// into work/side. The zero Ref is "no artifact" and gives an empty tree.
+// Verification comes first: an archive that is not the one the pull
+// request is bound to is never opened by an extractor.
+func (r *reader) extract(ctx context.Context, ref Ref, work, side string) (*tree, error) {
+	if ref == (Ref{}) {
+		return &tree{}, nil
+	}
+	archive, err := r.fetch.fetch(ctx, ref, work)
+	if err != nil {
+		return nil, fmt.Errorf("artifact: fetching %s %s@%s: %w", ref.Kind, ref.Name, ref.Version, err)
+	}
+	if err := verify(archive, ref); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(work, side)
+	var t *tree
+	if ref.Kind == GoModuleZip {
+		t, err = unzipModule(archive, dir, module.Version{Path: ref.Name, Version: ref.Version}, r.limits)
+	} else {
+		t, err = extractTarGz(archive, dir, r.limits)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s %s@%s: %w", ref.Kind, ref.Name, ref.Version, err)
+	}
+	return t, nil
+}

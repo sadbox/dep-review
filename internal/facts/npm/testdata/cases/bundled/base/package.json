@@ -1,0 +1,8 @@
+{
+  "name": "fixture-bundled",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "@tailwindcss/oxide-wasm32-wasi": "4.3.4"
+  }
+}

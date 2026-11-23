@@ -1,0 +1,47 @@
+{
+  "method": "GET",
+  "url": "https://gcr.io/v2/distroless/static-debian13/tags/list",
+  "note": "trimmed: 2 of the list's 2725 manifests are kept, and its \"tags\" and \"child\" arrays are dropped",
+  "status": 200,
+  "header": {
+    "Content-Type": "application/json; charset=utf-8"
+  },
+  "body": {
+    "name": "distroless/static-debian13",
+    "manifest": {
+      "sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "tag": [
+          "nonroot",
+          "nonroot-130048d94000cec18d16cc44cc561e1e81052304"
+        ],
+        "timeUploadedMs": "1795381810799",
+        "timeCreatedMs": "0",
+        "imageSizeBytes": "0"
+      },
+      "sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "tag": [
+          "nonroot-0490c59739406e128ef0221780362acb938e874a",
+          "nonroot-0af09fb8f491449b27f27f87c4dd10a56b401be1",
+          "nonroot-165589fb68b1f662a3cff38b7d7b5f657c7b9a3a",
+          "nonroot-2adb3ee2e9717d0c723aa26a9d8e7320c76310a5",
+          "nonroot-3c65fe11406366251f0953e3ca3de50080229c1b",
+          "nonroot-4119ea75cb1b25f1bae3ebf4b6488c22deaf1b9e",
+          "nonroot-5f432f038cea47105b8135e968b55fff0cd80cd2",
+          "nonroot-b9ab60fec0189d0bb70aa4a60fe1fa91fbb4a115",
+          "nonroot-b9c6d3e25ff720bdc3290615fc8eb5bba06687b0",
+          "nonroot-bb54339738271d6a6f5ebb3f662bb08721813769",
+          "nonroot-c91316a0dc3c060fb8b1494ed6b783688e01ebd1",
+          "nonroot-db261bc0a05d0c6d85c08e21fd683f54c53926f1",
+          "nonroot-e7586b7fdab67019a80636976986b37d410a0af6",
+          "nonroot-e8b70bcccfd47a76f80d737f68aed98d9c731c39",
+          "nonroot-ef1e02594f6f8dd1d781644fdfb8dc87ff2c0910"
+        ],
+        "timeUploadedMs": "1794518195292",
+        "timeCreatedMs": "0",
+        "imageSizeBytes": "0"
+      }
+    }
+  }
+}

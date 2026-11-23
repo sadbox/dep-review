@@ -1,0 +1,12 @@
+{
+  "status": "identical",
+  "ahead_by": 0,
+  "behind_by": 0,
+  "total_commits": 0,
+  "base_commit": {
+    "sha": "d23441a48e516b6c34aea4fa41551a30e30af803"
+  },
+  "merge_base_commit": {
+    "sha": "d23441a48e516b6c34aea4fa41551a30e30af803"
+  }
+}

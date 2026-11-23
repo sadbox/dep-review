@@ -1,0 +1,10 @@
+{
+  "id": 287743349,
+  "full_name": "docker/login-action",
+  "default_branch": "master",
+  "archived": false,
+  "owner": {
+    "id": 5429470,
+    "login": "docker"
+  }
+}

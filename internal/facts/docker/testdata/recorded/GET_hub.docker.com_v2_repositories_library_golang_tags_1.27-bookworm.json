@@ -1,0 +1,14 @@
+{
+  "method": "GET",
+  "url": "https://hub.docker.com/v2/repositories/library/golang/tags/1.27-bookworm",
+  "note": "reduced to the three fields that are read",
+  "status": 200,
+  "header": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "digest": "sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea",
+    "name": "1.27-bookworm",
+    "tag_last_pushed": "2026-11-10T18:33:44.343824Z"
+  }
+}

@@ -1,0 +1,6 @@
+{
+	"Path": "github.com/fsnotify/fsnotify",
+	"Error": {
+		"Err": "loading module retractions for github.com/fsnotify/fsnotify@v0.8.10: reading http://127.0.0.1:18482/github.com/fsnotify/fsnotify/@v/v1.10.1.mod: 404 Not Found\n\tserver response: not found"
+	}
+}

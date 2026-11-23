@@ -1,0 +1,89 @@
+{"npm":"11.20.0","exit":0,"stdout":{
+  "version": "1.0.0",
+  "name": "fixture-plain",
+  "private": true,
+  "devDependencies": {
+    "tailwindcss": "4.3.5"
+  },
+  "_id": "fixture-plain@1.0.0",
+  "extraneous": false,
+  "path": "/scratch/project",
+  "_dependencies": {
+    "chart.js": "4.4.7",
+    "core-js": "3.38.1",
+    "date-fns": "4.1.0"
+  },
+  "peerDependencies": {},
+  "dependencies": {
+    "chart.js": {
+      "version": "4.4.7",
+      "resolved": "https://registry.npmjs.org/chart.js/-/chart.js-4.4.7.tgz",
+      "overridden": false,
+      "name": "chart.js",
+      "integrity": "sha512-pwkcKfdzTMAU/+jNosKhNL2bHtJc/sSmYgVbuGTEDhzkrhmyihmP7vUc/5ZK9WopidMDHNe3Wm7jOd/WhuHWuw==",
+      "_id": "chart.js@4.4.7",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/chart.js",
+      "_dependencies": {
+        "@kurkle/color": "^0.3.0"
+      },
+      "devDependencies": {},
+      "peerDependencies": {},
+      "dependencies": {
+        "@kurkle/color": {
+          "version": "0.3.4",
+          "resolved": "https://registry.npmjs.org/@kurkle/color/-/color-0.3.4.tgz",
+          "overridden": false,
+          "name": "@kurkle/color",
+          "integrity": "sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==",
+          "_id": "@kurkle/color@0.3.4",
+          "extraneous": false,
+          "path": "/scratch/project/node_modules/@kurkle/color",
+          "_dependencies": {},
+          "devDependencies": {},
+          "peerDependencies": {}
+        }
+      }
+    },
+    "core-js": {
+      "version": "3.38.1",
+      "resolved": "https://registry.npmjs.org/core-js/-/core-js-3.38.1.tgz",
+      "overridden": false,
+      "name": "core-js",
+      "integrity": "sha512-OP35aUorbU3Zvlx7pjsFdu1rGNnD4pgw/CWoYzRY3t2EzoVT7shKHY1dlAy3f41cGIO7ZDPQimhGFTlEYkG/Hw==",
+      "_id": "core-js@3.38.1",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/core-js",
+      "_dependencies": {},
+      "devDependencies": {},
+      "peerDependencies": {}
+    },
+    "date-fns": {
+      "version": "4.1.0",
+      "resolved": "https://registry.npmjs.org/date-fns/-/date-fns-4.1.0.tgz",
+      "overridden": false,
+      "name": "date-fns",
+      "integrity": "sha512-Ukq0owbQXxa/U3EGtsdVBkR1w7KOQ5gIBqdH2hkvknzZPYvBxb/aa6E8L7tmjFtkwZBu3UXBbjIgPo/Ez4xaNg==",
+      "_id": "date-fns@4.1.0",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/date-fns",
+      "_dependencies": {},
+      "devDependencies": {},
+      "peerDependencies": {}
+    },
+    "tailwindcss": {
+      "version": "4.3.5",
+      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
+      "overridden": false,
+      "name": "tailwindcss",
+      "dev": true,
+      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
+      "_id": "tailwindcss@4.3.5",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/tailwindcss",
+      "_dependencies": {},
+      "devDependencies": {},
+      "peerDependencies": {}
+    }
+  }
+}}

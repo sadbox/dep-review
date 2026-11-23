@@ -1,0 +1,9 @@
+{
+  "tag_name": "v6.1.0",
+  "draft": false,
+  "prerelease": false,
+  "immutable": false,
+  "published_at": "2026-07-20T15:23:28Z",
+  "created_at": "2026-07-16T19:43:33Z",
+  "target_commitish": "releases/v6"
+}

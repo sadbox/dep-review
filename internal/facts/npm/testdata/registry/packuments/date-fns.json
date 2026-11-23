@@ -1,0 +1,26 @@
+{
+  "name": "date-fns",
+  "time": {
+    "4.1.0": "2024-09-17T04:37:03.810Z",
+    "created": "2014-10-06T12:10:33.939Z",
+    "modified": "2026-05-29T23:45:56.761Z"
+  },
+  "versions": {
+    "4.1.0": {
+      "dist": {
+        "integrity": "sha512-Ukq0owbQXxa/U3EGtsdVBkR1w7KOQ5gIBqdH2hkvknzZPYvBxb/aa6E8L7tmjFtkwZBu3UXBbjIgPo/Ez4xaNg==",
+        "tarball": "https://registry.npmjs.org/date-fns/-/date-fns-4.1.0.tgz"
+      },
+      "license": "MIT",
+      "name": "date-fns",
+      "scripts": {
+        "lint": "eslint .",
+        "test": "vitest run",
+        "stats": "cloc . --exclude-dir=node_modules,lib,examples,tmp,.git --exclude-ext=yaml,yml,json,svg,xml",
+        "types": "tsc --noEmit",
+        "locale-snapshots": "env TZ=utc tsx ./scripts/build/localeSnapshots/index.ts"
+      },
+      "version": "4.1.0"
+    }
+  }
+}

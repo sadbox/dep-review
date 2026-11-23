@@ -1,0 +1,275 @@
+// Package npm gathers the facts for a Dependabot npm pull request
+// (docs/v0.2-spec.md, sections 3, 4 and 6).
+//
+// The change set is npm's own reading of package-lock.json at the base and
+// at the head commit: the gatherer runs
+//
+//	npm ls --all --json --long --package-lock-only --ignore-scripts --offline
+//
+// twice, each time in a scratch directory that holds nothing but that
+// commit's package.json and package-lock.json, and compares the two trees
+// npm prints. npm install, npm ci and lifecycle scripts are never run, and
+// npm gets a minimal environment with no user or project npmrc.
+//
+// npm ls prints only the lock entries it can reach from the root, so the
+// gatherer also requires the lock's "packages" keys to be exactly the
+// paths npm printed. Without that an entry nothing depends on would be
+// installed by npm ci and never seen here.
+//
+// Everything else comes from registry.npmjs.org: the hash the lock pins
+// (Bound), when the version and the name appeared (FirstSeen,
+// NameCreated), whether the version is still published and not deprecated
+// (Clean), and its install scripts and provenance (NoRegress).
+//
+// Which fact says no for what:
+//
+//   - Shape: any file other than one directory's package.json and
+//     package-lock.json, a lock that is not lockfileVersion 2 or 3, npm
+//     reporting a problem, a lock entry npm did not print, a lock entry
+//     that carries scripts, a package that keeps its version while its
+//     hash, source or flags change, or a package.json change other than
+//     the version range of a package that moved.
+//   - Bound: a source that is not the registry's own tarball for that name
+//     and version (git, file, link, another host, an alias), a hash that
+//     is not one sha512, or a hash the registry does not report.
+//   - NoRegress: a new or changed install script, a provenance identity
+//     that changed or was lost, or a package that bundles dependencies.
+//
+// Every JSON document is read with encoding/json/v2: names match case
+// sensitively and a duplicate name is an error. npm copies unknown lock
+// fields into its output, so a reader that folded case could be shown one
+// "integrity" while npm installs another.
+package npm
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/sadbox/dep-review/internal/advisory"
+	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/artifact"
+	"github.com/sadbox/dep-review/internal/facts"
+)
+
+// Gatherer is the npm fact gatherer. The zero value runs the npm found on
+// PATH.
+type Gatherer struct {
+	// NPM is the npm executable to run. Empty means the one on PATH.
+	NPM string
+
+	// tool stands in for the real npm in tests that replay recorded
+	// output. Nil means run NPM.
+	tool tool
+}
+
+var _ facts.Gatherer = Gatherer{}
+
+// Gather reads the change set with npm and gathers the facts.
+//
+// It returns an error only when the run itself failed: the context ended,
+// npm or node is not installed, npm is a version this package was not
+// tested with, or the scratch directory could not be written. A registry
+// or an advisory database that does not answer is not an error: the facts
+// it feeds are left ungathered, with what failed in their Value.
+func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
+	if in.HTTP == nil {
+		return facts.Result{}, errors.New("npm: no HTTP client for the registry")
+	}
+	t := g.tool
+	if t == nil {
+		real, err := findNPM(g.NPM)
+		if err != nil {
+			return facts.Result{}, err
+		}
+		t = real
+	}
+	version, err := t.Version(ctx)
+	if err != nil {
+		return facts.Result{}, fmt.Errorf("npm --version: %w", err)
+	}
+	if err := supportedNPM(version); err != nil {
+		return facts.Result{}, err
+	}
+	// The npm version is part of the source: it is npm's reading the
+	// facts rest on, and the reading is only as good as that npm.
+	lockSource := "npm " + version + ": " + lsCommand + " at base and head"
+
+	cs, err := readChangeSet(ctx, t, in.Files)
+	if err != nil {
+		return facts.Result{}, err
+	}
+	if len(cs.problems) > 0 {
+		// The change set cannot be trusted, so no update is reported and
+		// the registry is not asked about names from a lock nobody
+		// understood.
+		return facts.Result{Shape: allow.No(summarise(cs.problems), lockSource)}, nil
+	}
+
+	res := facts.Result{Shape: allow.Yes(cs.summary, lockSource)}
+	reg := &registry{client: in.HTTP, packuments: map[string]packumentAnswer{}}
+	for _, u := range cs.updates {
+		uf, pair, err := gatherUpdate(ctx, in, reg, u, lockSource)
+		if err != nil {
+			return facts.Result{}, err
+		}
+		res.Updates = append(res.Updates, uf)
+		if pair != nil {
+			res.Artifacts = append(res.Artifacts, *pair)
+		}
+	}
+	return res, nil
+}
+
+// gatherUpdate fills in every fact of one update except Read and Veto. The
+// pair is nil when Bound does not hold: there is then no verified hash to
+// read an artifact against.
+func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, lockSource string) (allow.UpdateFacts, *artifact.Pair, error) {
+	uf := allow.UpdateFacts{Name: u.Name, From: u.From, To: u.To}
+
+	const listSource = "policy list (npm)"
+	listed := allow.Listed(in.Policy, allow.NPM, u.Name)
+	if listed {
+		uf.Listed = allow.Yes("on the list", listSource)
+	} else {
+		uf.Listed = allow.No("not on the list", listSource)
+	}
+	switch {
+	case u.NewName:
+		uf.NewName = allow.Yes("no package of this name in the lock at base", lockSource)
+	default:
+		uf.NewName = allow.No("in the lock at base", lockSource)
+	}
+	switch {
+	case listed:
+		uf.Known = allow.Yes("on the list", listSource)
+	case !u.NewName:
+		uf.Known = allow.Yes("in the lock at base", lockSource)
+	default:
+		uf.Known = allow.No("not in the lock at base and not on the list", lockSource)
+	}
+	uf.Increase = increaseFact(u.From, u.To, lockSource)
+	uf.Major = majorFact(u.From, u.To, lockSource)
+
+	// One packument answers Bound, FirstSeen, NameCreated, half of Clean
+	// and most of NoRegress. A name the gate will not put in a URL gets no
+	// request at all.
+	var doc packumentAnswer
+	if !validName(u.Name) || !validVersion(u.To) || (u.From != "" && !validVersion(u.From)) {
+		doc = packumentAnswer{failed: "the name or a version is not a shape the gate asks the registry about"}
+	} else {
+		var err error
+		doc, err = reg.packument(ctx, u.Name)
+		if err != nil {
+			return uf, nil, err
+		}
+	}
+	source := packumentURL(u.Name)
+
+	uf.Bound = boundFact(u, doc, source)
+	uf.FirstSeen, uf.NameCreated = timeFacts(u, doc, source)
+
+	nr, err := noRegressFact(ctx, reg, u, doc, source)
+	if err != nil {
+		return uf, nil, err
+	}
+	uf.NoRegress = nr
+
+	// The advisory database is the other half of Clean and all of
+	// SecurityFix.
+	var adv advisory.Result
+	advFailed := "no advisory checker was configured"
+	if in.Advisories != nil {
+		var err error
+		adv, err = in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To})
+		switch {
+		case ctx.Err() != nil:
+			return uf, nil, ctx.Err()
+		case err != nil:
+			adv = advisory.Result{}
+			advFailed = "the advisory database could not be asked: " + quote(err.Error())
+		default:
+			advFailed = ""
+		}
+	}
+	if advFailed == "" {
+		uf.SecurityFix = adv.SecurityFix
+	} else {
+		uf.SecurityFix = allow.Fact{Value: advFailed}
+	}
+	uf.Clean = cleanFact(u, doc, source, adv, advFailed)
+
+	var pair *artifact.Pair
+	if uf.Bound.Holds() {
+		p, ok := artifactPair(u)
+		if ok {
+			pair = &p
+		}
+	}
+	return uf, pair, nil
+}
+
+// artifactPair names the two tarballs of an update whose Bound holds, each
+// with the lock's own hash for it. It reports false when the old version's
+// hash in the base lock is not one sha512: the reader could not check that
+// tarball, and an update that cannot be read stays unread.
+func artifactPair(u update) (artifact.Pair, bool) {
+	p := artifact.Pair{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To}
+	p.New = artifact.Ref{Kind: artifact.NPMTarball, Name: u.Name, Version: u.To, Hash: u.New[0].Integrity}
+	if u.From == "" {
+		return p, true
+	}
+	old, ok := oneIntegrity(u.Old)
+	if !ok {
+		return artifact.Pair{}, false
+	}
+	p.Old = artifact.Ref{Kind: artifact.NPMTarball, Name: u.Name, Version: u.From, Hash: old}
+	return p, true
+}
+
+// oneIntegrity returns the sha512 integrity every copy agrees on.
+func oneIntegrity(copies []node) (string, bool) {
+	if len(copies) == 0 {
+		return "", false
+	}
+	first := copies[0].Integrity
+	if _, ok := sha512Of(first); !ok {
+		return "", false
+	}
+	for _, c := range copies[1:] {
+		if c.Integrity != first {
+			return "", false
+		}
+	}
+	return first, true
+}
+
+// summarise turns the list of Shape problems into one Value: the first
+// problem, and how many more there are.
+func summarise(problems []string) string {
+	if len(problems) == 1 {
+		return problems[0]
+	}
+	return fmt.Sprintf("%s (and %d more)", problems[0], len(problems)-1)
+}
+
+// sortedKeys returns m's keys in order, so everything the gatherer reports
+// is the same from run to run.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// list renders up to max items for a Value.
+func list(items []string, max int) string {
+	if len(items) <= max {
+		return strings.Join(items, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(items[:max], ", "), len(items)-max)
+}

@@ -1,0 +1,90 @@
+{
+  "name": "chart.js",
+  "time": {
+    "3.9.1": "2022-08-03T12:51:30.873Z",
+    "4.4.6": "2024-10-28T13:43:42.509Z",
+    "4.4.7": "2024-12-01T16:47:46.119Z",
+    "created": "2014-07-08T22:30:18.422Z",
+    "modified": "2026-10-22T17:23:25.099Z"
+  },
+  "versions": {
+    "3.9.1": {
+      "dist": {
+        "integrity": "sha512-Ro2JbLmvg83gXF5F4sniaQ+lTbSv18E+TIf2cOeiH1Iqd2PGFOtem+DUufMZsCJwFE7ywPOpfXFBwRTGq7dh6w==",
+        "tarball": "https://registry.npmjs.org/chart.js/-/chart.js-3.9.1.tgz"
+      },
+      "license": "MIT",
+      "name": "chart.js",
+      "scripts": {
+        "dev": "karma start --auto-watch --no-single-run --browsers chrome --grep",
+        "docs": "npm run build && vuepress build docs --no-cache",
+        "lint": "concurrently \"npm:lint-*\"",
+        "test": "npm run lint && npm run test-ci",
+        "build": "rollup -c",
+        "dev:ff": "karma start --auto-watch --no-single-run --browsers firefox --grep",
+        "lint-js": "eslint \"src/**/*.js\" \"test/**/*.js\" \"docs/**/*.js\"",
+        "lint-md": "eslint \"**/*.md\"",
+        "test-ci": "cross-env NODE_ENV=test karma start --auto-watch --single-run --coverage --grep",
+        "docs:dev": "npm run build && vuepress dev docs --no-cache",
+        "lint-tsc": "tsc",
+        "autobuild": "rollup -c -w",
+        "lint-types": "eslint \"types/**/*.ts\" && node -r esm types/tests/autogen.js && tsc -p types/tests/"
+      },
+      "version": "3.9.1"
+    },
+    "4.4.6": {
+      "dist": {
+        "integrity": "sha512-8Y406zevUPbbIBA/HRk33khEmQPk5+cxeflWE/2rx1NJsjVWMPw/9mSP9rxHP5eqi6LNoPBVMfZHxbwLSgldYA==",
+        "tarball": "https://registry.npmjs.org/chart.js/-/chart.js-4.4.6.tgz"
+      },
+      "license": "MIT",
+      "name": "chart.js",
+      "scripts": {
+        "dev": "karma start ./karma.conf.cjs --auto-watch --no-single-run --browsers chrome --grep",
+        "docs": "pnpm run build && pnpm --filter \"./docs/**\" build",
+        "lint": "concurrently \"pnpm:lint-*\"",
+        "test": "pnpm lint && pnpm test-ci",
+        "build": "rollup -c && pnpm emitDeclarations",
+        "dev:ff": "karma start ./karma.conf.cjs --auto-watch --no-single-run --browsers firefox --grep",
+        "lint-js": "eslint \"src/**/*.{js,ts}\" \"test/**/*.js\" \"docs/**/*.js\" --cache",
+        "lint-md": "eslint \"**/*.md\" --cache",
+        "test-ci": "concurrently \"pnpm:test-ci-*\"",
+        "docs:dev": "pnpm run build && pnpm --filter \"./docs/**\" dev",
+        "autobuild": "rollup -c -w",
+        "lint-types": "pnpm build && node test/types/autogen.js && tsc -p test/types",
+        "test-ci-karma": "cross-env NODE_ENV=test karma start ./karma.conf.cjs --auto-watch --single-run --coverage --grep",
+        "copyDeclarations": "node -e \"fs.cpSync('./src/types/', './dist/types/', {recursive:true})\"",
+        "emitDeclarations": "tsc --emitDeclarationOnly && pnpm copyDeclarations",
+        "test-ci-integration": "pnpm --filter \"./test/integration/**\" test"
+      },
+      "version": "4.4.6"
+    },
+    "4.4.7": {
+      "dist": {
+        "integrity": "sha512-pwkcKfdzTMAU/+jNosKhNL2bHtJc/sSmYgVbuGTEDhzkrhmyihmP7vUc/5ZK9WopidMDHNe3Wm7jOd/WhuHWuw==",
+        "tarball": "https://registry.npmjs.org/chart.js/-/chart.js-4.4.7.tgz"
+      },
+      "license": "MIT",
+      "name": "chart.js",
+      "scripts": {
+        "dev": "karma start ./karma.conf.cjs --auto-watch --no-single-run --browsers chrome --grep",
+        "docs": "pnpm run build && pnpm --filter \"./docs/**\" build",
+        "lint": "concurrently \"pnpm:lint-*\"",
+        "test": "pnpm lint && pnpm test-ci",
+        "build": "rollup -c && pnpm emitDeclarations",
+        "dev:ff": "karma start ./karma.conf.cjs --auto-watch --no-single-run --browsers firefox --grep",
+        "lint-js": "eslint \"src/**/*.{js,ts}\" \"test/**/*.js\" \"docs/**/*.js\" --cache",
+        "lint-md": "eslint \"**/*.md\" --cache",
+        "test-ci": "concurrently \"pnpm:test-ci-*\"",
+        "docs:dev": "pnpm run build && pnpm --filter \"./docs/**\" dev",
+        "autobuild": "rollup -c -w",
+        "lint-types": "pnpm build && node test/types/autogen.js && tsc -p test/types",
+        "test-ci-karma": "cross-env NODE_ENV=test karma start ./karma.conf.cjs --auto-watch --single-run --coverage --grep",
+        "copyDeclarations": "node -e \"fs.cpSync('./src/types/', './dist/types/', {recursive:true})\"",
+        "emitDeclarations": "tsc --emitDeclarationOnly && pnpm copyDeclarations",
+        "test-ci-integration": "pnpm --filter \"./test/integration/**\" test"
+      },
+      "version": "4.4.7"
+    }
+  }
+}
