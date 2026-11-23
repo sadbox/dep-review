@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -167,8 +168,11 @@ func TestGatherSetupGo(t *testing.T) {
 		Ecosystem: allow.GitHubActions, Name: "actions/setup-go", From: "v7.0.0", To: "v7.1.0",
 		Old: artifact.Ref{Kind: artifact.ActionTarball, Name: "actions/setup-go", Version: "v7.0.0", Hash: setupGoV700},
 		New: artifact.Ref{Kind: artifact.ActionTarball, Name: "actions/setup-go", Version: "v7.1.0", Hash: setupGoV710},
+		// The workflow line names the repository: the reader looks at the
+		// action in its root.
+		Dirs: []string{"."},
 	}
-	if len(res.Artifacts) != 1 || res.Artifacts[0] != wantPair {
+	if len(res.Artifacts) != 1 || !reflect.DeepEqual(res.Artifacts[0], wantPair) {
 		t.Errorf("Artifacts = %+v, want %+v", res.Artifacts, wantPair)
 	}
 	wantQuery := advisory.Query{Ecosystem: allow.GitHubActions, Name: "actions/setup-go", From: "v7.0.0", To: "v7.1.0"}
@@ -745,8 +749,11 @@ func TestGatherAsksAboutAnActionInADirectory(t *testing.T) {
 			mustHold(t, "Bound", u.Bound)
 			mustHold(t, "NoRegress", u.NoRegress)
 			mustBeNo(t, "SecurityFix", u.SecurityFix, "no advisory names this update as the fix")
-			if len(res.Artifacts) != 1 || res.Artifacts[0].Name != repo {
-				t.Errorf("Artifacts = %+v, want the repository's tarball", res.Artifacts)
+			// The reader is told the directory: what the action there runs
+			// is the one other thing that is about it alone (spec section
+			// 11, amendment 55).
+			if len(res.Artifacts) != 1 || res.Artifacts[0].Name != repo || !slices.Equal(res.Artifacts[0].Dirs, []string{"sub"}) {
+				t.Errorf("Artifacts = %+v, want the repository's tarball, used from the directory", res.Artifacts)
 			}
 			want := []advisory.Query{
 				{Ecosystem: allow.GitHubActions, Name: repo, From: "v7.0.0", To: "v7.1.0"},

@@ -152,7 +152,9 @@ func setupGoBump(t *testing.T) []facts.File {
 }
 
 func TestReadChangeSetAccepts(t *testing.T) {
-	setupGoLocked := pin{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, ownerID: actionsOwnerID, repoID: setupGoRepoID}
+	// A workflow line uses the action by the repository's own name: from
+	// its root.
+	setupGoLocked := pin{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, ownerID: actionsOwnerID, repoID: setupGoRepoID, root: true}
 	// nested is lockText with an action that setup-go uses, recorded under
 	// its commit as the lockfile does for such an action.
 	nested := lockText + commitEntry("actions/checkout", "v6.0.2", checkoutV602, checkoutRepoID)
@@ -178,7 +180,7 @@ func TestReadChangeSetAccepts(t *testing.T) {
 				}
 			},
 			want: []pin{
-				{name: "actions/checkout", from: "v7.0.0", to: "v7.0.1", oldCommit: checkoutV700, newCommit: checkoutV701, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: ciPath + ":7"},
+				{name: "actions/checkout", from: "v7.0.0", to: "v7.0.1", oldCommit: checkoutV700, newCommit: checkoutV701, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: ciPath + ":7", root: true},
 				with(setupGoLocked, ciPath+":9"),
 			},
 		},
@@ -241,7 +243,7 @@ func TestReadChangeSetAccepts(t *testing.T) {
 				fs[1].Head = []byte(edit(t, string(fs[1].Head), "actions/setup-go", "Actions/Setup-Go"))
 				return fs
 			},
-			want: []pin{{name: "Actions/Setup-Go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, ownerID: actionsOwnerID, repoID: setupGoRepoID, where: ciPath + ":9"}},
+			want: []pin{{name: "Actions/Setup-Go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, ownerID: actionsOwnerID, repoID: setupGoRepoID, where: ciPath + ":9", root: true}},
 		},
 		{
 			name: "tag line that ends in a comment",
@@ -263,8 +265,10 @@ func TestReadChangeSetAccepts(t *testing.T) {
 					file(ciPath, ciTags, edit(t, ciTags, "setup-go@v7.0.0", "setup-go@v7.1.0")),
 				}
 			},
+			// The lockfile names no directory for it: nested, and not known
+			// to be used from the root.
 			want: []pin{
-				{name: "actions/checkout", from: "v6.0.2", to: "v6.1.0", oldCommit: checkoutV602, newCommit: checkoutV610, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: lockPath + ":22"},
+				{name: "actions/checkout", from: "v6.0.2", to: "v6.1.0", oldCommit: checkoutV602, newCommit: checkoutV610, ownerID: actionsOwnerID, repoID: checkoutRepoID, where: lockPath + ":22", nested: true},
 				with(setupGoLocked, ciPath+":9"),
 			},
 		},
@@ -279,11 +283,14 @@ func TestReadChangeSetAccepts(t *testing.T) {
 					file(ciPath, ciTags, edit(t, ciTags, "setup-go@v7.0.0", "setup-go@v7.1.0")),
 				}
 			},
-			want: []pin{with(setupGoLocked, ciPath+":9")},
+			// The workflow uses it from the root, and where the other
+			// action uses it from is not known.
+			want: []pin{nestedToo(with(setupGoLocked, ciPath+":9"))},
 		},
 		{
 			// The pin is the repository's; the directory is kept for the
-			// one question that can be about it alone, the advisory lookup.
+			// questions that can be about it alone: the advisory lookup,
+			// and what the action there runs.
 			name: "an action used from a directory of its repository",
 			files: func(t *testing.T) []facts.File {
 				fs := setupGoBump(t)
@@ -291,7 +298,7 @@ func TestReadChangeSetAccepts(t *testing.T) {
 				fs[1].Head = []byte(edit(t, string(fs[1].Head), "actions/setup-go@", "actions/setup-go/sub/dir@"))
 				return fs
 			},
-			want: []pin{withSubPaths(with(setupGoLocked, ciPath+":9"), "/sub/dir")},
+			want: []pin{notFromRoot(withSubPaths(with(setupGoLocked, ciPath+":9"), "/sub/dir"))},
 		},
 		{
 			// One move, whichever directories it is used from: one pin
@@ -323,7 +330,7 @@ func TestReadChangeSetAccepts(t *testing.T) {
 				}
 				return fs
 			},
-			want: []pin{{name: "actions/setup-go", from: "v7.1.0", to: "v7.0.0", oldCommit: setupGoV710, newCommit: setupGoV700, ownerID: actionsOwnerID, repoID: setupGoRepoID, where: ciPath + ":9"}},
+			want: []pin{{name: "actions/setup-go", from: "v7.1.0", to: "v7.0.0", oldCommit: setupGoV710, newCommit: setupGoV700, ownerID: actionsOwnerID, repoID: setupGoRepoID, where: ciPath + ":9", root: true}},
 		},
 	}
 	for _, tt := range tests {
@@ -343,6 +350,42 @@ func TestReadChangeSetAccepts(t *testing.T) {
 func withSubPaths(p pin, subPaths ...string) pin {
 	p.subPaths = subPaths
 	return p
+}
+
+// notFromRoot returns p with no workflow line that uses the repository
+// itself.
+func notFromRoot(p pin) pin {
+	p.root = false
+	return p
+}
+
+// nestedToo returns p as also recorded by a lockfile entry that no
+// workflow line names.
+func nestedToo(p pin) pin {
+	p.nested = true
+	return p
+}
+
+// The directories the artifact reader is given: the root for a line that
+// names the repository, each directory a line names, and none at all
+// when the lockfile alone records the pin, which makes the reader hold
+// every action of the repository to its rule.
+func TestUsedDirs(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		pin  pin
+		want []string
+	}{
+		{"the repository itself", pin{root: true}, []string{"."}},
+		{"a directory", pin{subPaths: []string{"/upload-sarif"}}, []string{"upload-sarif"}},
+		{"the repository and two directories", pin{root: true, subPaths: []string{"/a", "/b/c"}}, []string{".", "a", "b/c"}},
+		{"only the lockfile names it", pin{nested: true}, nil},
+		{"a workflow line and the lockfile", pin{root: true, nested: true, subPaths: []string{"/a"}}, nil},
+	} {
+		if got := tt.pin.usedDirs(); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: %q, want %q", tt.name, got, tt.want)
+		}
+	}
 }
 
 // with returns p named at where.

@@ -326,6 +326,10 @@ func (f Fetch) read(ctx context.Context, chunks string, i int, pair artifact.Pai
 		read.Detail = "the artifact's archive is not one the gate unpacks"
 	case errors.Is(err, artifact.ErrBadRef):
 		read.Detail = "the artifact's name, version or hash is not one the gate fetches"
+	case errors.Is(err, artifact.ErrActionKind):
+		read.Detail = "the action is not shown to run only files of its own repository: where the workflows use it from, its action.yml is missing, " +
+			"names a docker:// image, or does not say `using: nodeNN` or `using: composite` in the usual form. " +
+			"A container action runs an image, and nothing of an image is read"
 	case errors.Is(err, artifact.ErrPathName):
 		read.Detail = "a file that changed, was added or was removed has a path with characters other than letters, digits and ._/@+- ; " +
 			"the gate writes no such path into the text it shows the model, so nothing was read"

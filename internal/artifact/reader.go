@@ -3,6 +3,7 @@ package artifact
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -171,6 +172,12 @@ func checkPair(p Pair) error {
 	if p.New.Name != p.Name || p.New.Version != p.To {
 		return badRef("the new artifact is %s@%s, the update is %q to %q", p.New.Name, p.New.Version, p.Name, p.To)
 	}
+	for _, dir := range p.Dirs {
+		// A workflow line's own shape allows no more than this.
+		if p.New.Kind != ActionTarball || !fs.ValidPath(dir) || !shownPath(dir) {
+			return badRef("%s: %q is not a directory of an action's repository", p.Name, dir)
+		}
+	}
 	if p.Old == (Ref{}) {
 		if p.From != "" {
 			return badRef("%s: an update from %q with no old artifact", p.Name, p.From)
@@ -224,6 +231,14 @@ func (r *reader) Prepare(ctx context.Context, p Pair, lim Limits) (Prepared, err
 		return Prepared{}, err
 	}
 	defer newTree.close()
+	if p.New.Kind == ActionTarball {
+		// Before anything is laid out for a model: a read of the
+		// repository is a read of what runs only for an action that runs
+		// its repository's files.
+		if why := actionProblem(newTree, p.Dirs); why != "" {
+			return Prepared{}, fmt.Errorf("%w: %s", ErrActionKind, why)
+		}
+	}
 
 	d, err := newDiffer(r.git, work)
 	if err != nil {

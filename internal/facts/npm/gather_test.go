@@ -205,7 +205,7 @@ func TestGatherPlain(t *testing.T) {
 				Old: artifact.Ref{Kind: artifact.NPMTarball, Name: "chart.js", Version: "4.4.6", Hash: "sha512-8Y406zevUPbbIBA/HRk33khEmQPk5+cxeflWE/2rx1NJsjVWMPw/9mSP9rxHP5eqi6LNoPBVMfZHxbwLSgldYA=="},
 				New: artifact.Ref{Kind: artifact.NPMTarball, Name: "chart.js", Version: "4.4.7", Hash: chartHash},
 			}
-			if res.Artifacts[0] != wantPair {
+			if !reflect.DeepEqual(res.Artifacts[0], wantPair) {
 				t.Errorf("artifact pair:\n got %+v\nwant %+v", res.Artifacts[0], wantPair)
 			}
 
@@ -257,7 +257,7 @@ func TestGatherBundled(t *testing.T) {
 		Old: artifact.Ref{Kind: artifact.NPMTarball, Name: name, Version: "4.3.4", Hash: oldHash},
 		New: artifact.Ref{Kind: artifact.NPMTarball, Name: name, Version: "4.3.5", Hash: newHash},
 	}
-	if len(res.Artifacts) != 1 || res.Artifacts[0] != want {
+	if len(res.Artifacts) != 1 || !reflect.DeepEqual(res.Artifacts[0], want) {
 		t.Errorf("artifacts:\n got %+v\nwant %+v", res.Artifacts, want)
 	}
 	if d := decide(res); d.Outcome != allow.Merge {

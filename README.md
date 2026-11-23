@@ -161,7 +161,7 @@ needs no age and is not held up.
 |---|---|---|---|---|
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
 | npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install steps: npm's NoRegress holds only once they were |
-| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
+| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included, for an action that runs its repository's own files (`using: nodeNN` or `composite` where the workflows use it from) |
 | Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`; for a gcr.io image the gate's first evaluation of the pin | nothing |
 
 Limits that send real pull requests to a person:
@@ -178,6 +178,13 @@ Limits that send real pull requests to a person:
   another) goes to a person.
 - A changed `uses:` line that points at a reusable workflow never merges.
   That includes a caller's pin of this gate.
+- A container action: `runs.using: docker` in its `action.yml`, with an
+  image by reference or built from a Dockerfile, or a composite action
+  with a `docker://` step. It runs an image, and nothing of an image is
+  read. The gate looks at the `action.yml` (or `action.yaml`) in the
+  directory the workflows use the action from, and takes one line there,
+  `using: nodeNN` or `using: composite`; a file that says it any other
+  way, or no file, goes to a person too.
 - Docker images merge only from the list, and only when written as an
   official Docker Hub image by its bare name or as a gcr.io image. Any
   other spelling (`library/golang`, `grafana/grafana`, another registry)
@@ -370,6 +377,8 @@ and it then gets no status, comment or notification.
   required age, merges.
 - Anything in a Docker image: images are never read. A listed image whose
   tag still resolves to the pinned digest after 72 hours merges unseen.
+- What an action or an install script downloads when it runs: a tool, an
+  installer, a prebuilt binary. The model sees the lines that fetch it.
 - Code the model was not shown. Files that are not text, and text beyond
   the chunk budget, are listed as unread; such an update is only partly
   read and still merges, after `unread_age_days`, as long as the model

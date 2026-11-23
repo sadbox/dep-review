@@ -136,9 +136,35 @@ type pin struct {
 	// workflow line names: actions.lock records a repository and a
 	// commit, never a directory. The tag, the commit and the code the
 	// model reads are the repository's whatever the directory; the one
-	// thing that can be about the directory alone is an advisory filed
-	// under its own name, which is why it is kept.
+	// things that can be about the directory alone are an advisory filed
+	// under its own name and what the action there runs (usedDirs), which
+	// is why it is kept.
 	subPaths []string
+	// root: a changed workflow line uses the action from the repository
+	// itself, with no directory. Lines may use it both ways.
+	root bool
+	// nested: an actions.lock entry that no workflow line names records
+	// the move, which is an action that another action uses. From which
+	// directory is then not known.
+	nested bool
+}
+
+// usedDirs is every directory of the repository that the pull request's
+// workflows use the action from, as the artifact reader takes them: paths
+// in the repository, "." for its root. It is nil for a nested pin: every
+// action of the repository then counts (artifact.Pair.Dirs).
+func (p pin) usedDirs() []string {
+	if p.nested {
+		return nil
+	}
+	var dirs []string
+	if p.root {
+		dirs = append(dirs, ".")
+	}
+	for _, sub := range p.subPaths {
+		dirs = append(dirs, strings.TrimPrefix(sub, "/"))
+	}
+	return dirs
 }
 
 // usesLine is one parsed pin line of a workflow.
@@ -478,11 +504,18 @@ func (ch *changes) pins() ([]pin, string) {
 	// add records a pin once. A tag-keyed and a commit-keyed entry may
 	// record the same move; they must then agree. Lines that use one
 	// action from different directories are one pin too, and the pin
-	// keeps every directory (subPath, "" for none).
+	// keeps every directory (subPath, "" for the repository itself). line
+	// says a workflow line names the pin; without one the lockfile alone
+	// does, and it names no directory.
 	var pins []pin
-	add := func(e *lockEntry, name, subPath, where string) string {
+	add := func(e *lockEntry, name, subPath, where string, line bool) string {
 		p := pin{name: name, from: e.from, to: e.to, oldCommit: e.oldCommit, newCommit: e.newCommit, ownerID: e.ownerID, repoID: e.repoID, where: where}
-		if subPath != "" {
+		switch {
+		case !line:
+			p.nested = true
+		case subPath == "":
+			p.root = true
+		default:
 			p.subPaths = []string{subPath}
 		}
 		for i := range pins {
@@ -500,6 +533,8 @@ func (ch *changes) pins() ([]pin, string) {
 				q.subPaths = append(q.subPaths, subPath)
 				slices.Sort(q.subPaths)
 			}
+			q.root = q.root || p.root
+			q.nested = q.nested || p.nested
 			return ""
 		}
 		pins = append(pins, p)
@@ -540,7 +575,7 @@ func (ch *changes) pins() ([]pin, string) {
 			return nil, t.where + ": this workflow's own list in actions.lock does not move to the tag the line names"
 		}
 		found.used = true
-		if problem := add(found, t.name, t.subPath, t.where); problem != "" {
+		if problem := add(found, t.name, t.subPath, t.where, true); problem != "" {
 			return nil, problem
 		}
 	}
@@ -556,7 +591,7 @@ func (ch *changes) pins() ([]pin, string) {
 		}
 		// A commit-keyed entry is an action that a bumped action uses,
 		// moved in place. It is an update like any other.
-		if problem := add(e, e.old.name, "", e.where); problem != "" {
+		if problem := add(e, e.old.name, "", e.where, false); problem != "" {
 			return nil, problem
 		}
 	}

@@ -61,6 +61,10 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 				To:        p.to,
 				Old:       artifact.Ref{Kind: artifact.ActionTarball, Name: p.name, Version: p.from, Hash: p.oldCommit},
 				New:       artifact.Ref{Kind: artifact.ActionTarball, Name: p.name, Version: p.to, Hash: p.newCommit},
+				// The reader refuses an action that runs a container image
+				// where the workflows use it (spec section 11, amendment
+				// 55).
+				Dirs: p.usedDirs(),
 			})
 		}
 	}

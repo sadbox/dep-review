@@ -421,6 +421,8 @@ func TestFetchPrepareFailures(t *testing.T) {
 			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused},
 		{name: "example.com/badref", answer: fail(fmt.Errorf("%w: %s", artifact.ErrBadRef, theirs)),
 			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused},
+		{name: "example.com/container", answer: fail(fmt.Errorf("%w: %s", artifact.ErrActionKind, theirs)),
+			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused, detail: "A container action runs an image, and nothing of an image is read"},
 		{name: "example.com/pathname", answer: fail(fmt.Errorf("%w: %s", artifact.ErrPathName, theirs)),
 			status: wire.Refused, outcome: allow.Person, reason: allow.ReasonReadRefused, detail: "a path with characters other than letters, digits and ._/@+-"},
 		// An error without a name is a person, never a wait.

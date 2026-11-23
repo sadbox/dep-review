@@ -399,7 +399,7 @@ func TestGatherPseudoVersion(t *testing.T) {
 		want := artifact.Pair{Ecosystem: allow.GoModules, Name: genprotoRPC, From: rpcOld, To: rpcNew,
 			Old: artifact.Ref{Kind: artifact.GoModuleZip, Name: genprotoRPC, Version: rpcOld, Hash: rpcOldSum},
 			New: artifact.Ref{Kind: artifact.GoModuleZip, Name: genprotoRPC, Version: rpcNew, Hash: rpcNewSum}}
-		if len(res.Artifacts) != 1 || res.Artifacts[0] != want {
+		if len(res.Artifacts) != 1 || !reflect.DeepEqual(res.Artifacts[0], want) {
 			t.Errorf("artifacts %+v, want %+v", res.Artifacts, want)
 		}
 	})

@@ -187,7 +187,7 @@ func TestReview(t *testing.T) {
 		if !reflect.DeepEqual(req.Chunks, want.Chunks) || !reflect.DeepEqual(req.Unread, want.Unread) || req.State != want.State || req.Key != want.Key {
 			t.Errorf("%s: the reviewer was given %+v, want %+v", name, req, want)
 		}
-		if want := (artifact.Pair{Ecosystem: allow.GoModules, Name: name, From: "1.2.3", To: "1.3.0"}); req.Pair != want {
+		if want := (artifact.Pair{Ecosystem: allow.GoModules, Name: name, From: "1.2.3", To: "1.3.0"}); !reflect.DeepEqual(req.Pair, want) {
 			t.Errorf("%s: pair %+v, want %+v", name, req.Pair, want)
 		}
 	}

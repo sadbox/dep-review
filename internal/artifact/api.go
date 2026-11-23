@@ -61,6 +61,18 @@ type Pair struct {
 	Old Ref `json:"old"`
 	// New is the artifact at the head commit.
 	New Ref `json:"new"`
+	// Dirs is, for an action, every directory of its repository that the
+	// pull request's workflows use it from, as paths in the repository
+	// ("." for its root). Prepare reads what the action runs from the
+	// metadata file in each (ErrActionKind). Empty means the gatherer
+	// cannot tell: actions.lock records an action that another action
+	// uses by repository and commit alone, and every directory with a
+	// metadata file then counts. Any other kind of artifact has none.
+	//
+	// It is not part of the read's Key. It decides whether the action is
+	// read at all, never what the model is shown: the text is the
+	// repository's, whatever the directory.
+	Dirs []string `json:"-"`
 }
 
 // MinChunkBytes is the smallest Limits.ChunkBytes Prepare accepts. Below
@@ -139,10 +151,10 @@ type Prepared struct {
 	State allow.ReadState `json:"state"`
 	// Key is the content key (lower-case hex SHA-256) a verdict is stored
 	// under, together with the reviewer's fingerprint. It covers the
-	// chunks, the Pair with both hashes, State and Unread, and nothing of
-	// the pull request, the repository or the machine: the same update
-	// prepared again, after a rebase or in another repository, has the
-	// same Key.
+	// chunks, the Pair with both hashes (not its Dirs), State and Unread,
+	// and nothing of the pull request, the repository or the machine: the
+	// same update prepared again, after a rebase or in another
+	// repository, has the same Key.
 	Key string `json:"key"`
 	// Inspected is the answer of the Inspect function configured for the
 	// pair's Kind, and the zero Fact when there is none. It is not part
@@ -169,6 +181,13 @@ var (
 	// clean path inside the archive, a repeated name, data after the end,
 	// too many entries or bytes). Nothing of it is read. Person.
 	ErrUnsafeArchive = errors.New("artifact: unsafe archive")
+	// ErrActionKind means an action is not shown to run only files of its
+	// own repository: in a directory the workflows use it from, the
+	// metadata file is missing or does not say `using: nodeNN` or `using:
+	// composite` in the one form the gate reads, or it names a docker://
+	// image. A container action runs an image, and nothing of an image is
+	// read. Nothing is prepared. Person.
+	ErrActionKind = errors.New("artifact: the action is not one whose code the gate reads")
 	// ErrPathName means a file that changed, was added or was removed has
 	// a path with a character outside ASCII letters, digits and "._/@+-".
 	// A path stands on lines the model is told the gate wrote, and a

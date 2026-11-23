@@ -481,8 +481,8 @@ func TestBundleView(t *testing.T) {
 			Old: Ref{Kind: ActionTarball, Name: "owner/repo", Version: "v1.0.0", Hash: oldCommit},
 			New: Ref{Kind: ActionTarball, Name: "owner/repo", Version: "v1.0.1", Hash: newCommit}}
 		f := fakeFetcher{
-			p.Old: actionTarball(t, oldCommit, map[string]string{"dist/index.js": before}),
-			p.New: actionTarball(t, newCommit, map[string]string{"dist/index.js": after}),
+			p.Old: actionTarball(t, oldCommit, map[string]string{"action.yml": nodeAction, "dist/index.js": before}),
+			p.New: actionTarball(t, newCommit, map[string]string{"action.yml": nodeAction, "dist/index.js": after}),
 		}
 		got, err := newReader(t, f).Prepare(context.Background(), p, roomy)
 		if err != nil {
