@@ -30,6 +30,9 @@ type Inputs struct {
 	Verdict      []byte
 	FetchResult  string // needs.fetch.result
 	ReviewResult string // needs.review.result
+	// Rebuild is the rebuild job's results (rebuild/rebuild.json), shown
+	// in the comment against Evidence.Rebuilds. Decide never reads it.
+	Rebuild []model.RebuildResult
 }
 
 // Outcome is the decision and everything rendered from it.

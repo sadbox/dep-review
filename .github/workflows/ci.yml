@@ -130,6 +130,37 @@ jobs:
           # nothing the CLI sent (no other model, path or feature).
           grep -q '#5 POST /v1/messages 200' run.log
           if grep -E 'proxy: .*(refused|dropped)|REJECT' run.log; then exit 1; fi
+      # The rebuild job's containers under gVisor: a fixture action whose
+      # build writes whether it could reach the network, so the bundle
+      # matches only if the build had none.
+      - name: Rebuild a fixture action (gVisor)
+        run: |
+          set -euo pipefail
+          docker build --no-cache --target node24 -t dep-review-node24:ci sandbox/rebuild
+          f="$RUNNER_TEMP/rebuild"
+          up="$f/up/o/r"
+          mkdir -p "$up/src" "$up/dist/a" "$f/evidence"
+          cat >"$up/src/build.js" <<'JS'
+          const fs = require('fs')
+          const done = net => { fs.mkdirSync('dist/a', {recursive: true}); fs.writeFileSync('dist/a/index.js', 'built ' + net + '\n') }
+          require('https').get('https://github.com/', () => done('net')).on('error', () => done('nonet'))
+          JS
+          echo '{"name":"f","version":"1.0.0","scripts":{"build":"node src/build.js"}}' >"$up/package.json"
+          echo '{"name":"f","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"f","version":"1.0.0"}}}' >"$up/package-lock.json"
+          printf 'built nonet\n' >"$up/dist/a/index.js"
+          git -C "$up" init -q
+          git -C "$up" add -A
+          git -C "$up" -c user.name=ci -c user.email=ci@example.com -c commit.gpgsign=false commit -q -m fixture
+          commit=$(git -C "$up" rev-parse HEAD)
+          sum=$(sha256sum "$up/dist/a/index.js" | cut -c1-64)
+          size=$(wc -c <"$up/dist/a/index.js")
+          jq -n --arg c "$commit" --arg s "$sum" --argjson n "$size" \
+            '{rebuilds: [{update: "o/r", repo: "o/r", commit: $c, node: 24, scripts: ["build"], dirs: ["dist/a"], files: [{path: "dist/a/index.js", sha256: $s, size: $n}]}]}' \
+            >"$f/evidence/evidence.json"
+          "$RUNNER_TEMP/dep-review" rebuild --evidence "$f/evidence" --out "$f/out" \
+            --images 24=dep-review-node24:ci --runtime runsc --clone-base "file://$f/up/"
+          jq . "$f/out/rebuild.json"
+          test "$(jq -r '.results[0].outcome' "$f/out/rebuild.json")" = verified
 
   # sadbox/ci's linters (actionlint, zizmor, shellcheck, hadolint, npm,
   # whichever apply) and gh actions-lock --verify. testdata/ is left out:

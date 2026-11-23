@@ -112,7 +112,16 @@ func runFetch(args []string) error {
 	if out.Route == model.RouteReview || out.Triage {
 		review = "true"
 	}
-	return stepOutput("review", review)
+	if err := stepOutput("review", review); err != nil {
+		return err
+	}
+	// The rebuild job runs when there is a bundle to rebuild and a
+	// person or the reviewer will read its result.
+	rebuild := "false"
+	if len(out.Rebuilds) > 0 && out.Route != model.RouteRefuse {
+		rebuild = "true"
+	}
+	return stepOutput("rebuild", rebuild)
 }
 
 // removeScratch deletes the scratch tree, first making any read-only

@@ -105,6 +105,7 @@ type commentData struct {
 	MergeNote string // the gate's own words
 	RunURL    string // built from validated workflow env, or ""
 	Marker    marker
+	Rebuild   []model.RebuildResult
 }
 
 var headline = map[model.Decision]string{
@@ -180,6 +181,9 @@ func renderComment(d commentData) string {
 	}
 	if d.Evidence != nil && d.Evidence.Truncated {
 		b.WriteString("\nThe evidence was truncated by a size cap.\n")
+	}
+	if d.Evidence != nil && len(d.Evidence.Rebuilds) > 0 {
+		renderRebuilds(&b, d.Evidence.Rebuilds, d.Rebuild)
 	}
 
 	if v := o.Verdict; v != nil {
@@ -308,5 +312,37 @@ func renderUpstream(b *strings.Builder, upstream []model.Upstream) {
 	b.WriteString("\n#### Upstream history\n\n| Update | Status | Detail |\n|---|---|---|\n")
 	for _, u := range upstream {
 		fmt.Fprintf(b, "| %s | %s | %s |\n", code(u.Update), code(string(u.Status)), code(u.Detail))
+	}
+}
+
+// rebuildOutcome is the result shown for a plan: the first result bound
+// to it (same update, repository, commit and directories) with a known
+// outcome, or
+// "not run".
+func rebuildOutcome(p model.RebuildPlan, results []model.RebuildResult) (outcome, script, detail string) {
+	for _, r := range results {
+		if r.Update != p.Update || r.Repo != p.Repo || r.Commit != p.Commit || !slices.Equal(r.Dirs, p.Dirs) {
+			continue
+		}
+		switch r.Outcome {
+		case model.RebuildVerified, model.RebuildDiffers, model.RebuildFailed:
+			return r.Outcome, r.Script, r.Detail
+		}
+	}
+	return "not run", "", "the rebuild job produced no result for it"
+}
+
+// renderRebuilds shows the rebuild job's results. They are information:
+// no route depends on them (see package rebuild for what a match shows).
+func renderRebuilds(b *strings.Builder, plans []model.RebuildPlan, results []model.RebuildResult) {
+	fmt.Fprintf(b, "\n#### Bundle rebuilds (%d; information only, no route depends on them)\n\n", len(plans))
+	b.WriteString("| Update | Commit | Result | Detail |\n|---|---|---|---|\n")
+	for i, p := range plans {
+		if i == maxRows {
+			fmt.Fprintf(b, "| … %d more | | | |\n", len(plans)-maxRows)
+			break
+		}
+		outcome, _, detail := rebuildOutcome(p, results)
+		fmt.Fprintf(b, "| %s | %s | %s | %s |\n", code(p.Update), code(p.Commit), code(outcome), code(detail))
 	}
 }

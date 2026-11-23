@@ -62,8 +62,31 @@ func TestGateBinVerified(t *testing.T) {
 			}
 		}
 	}
-	if n != 5 {
-		t.Errorf("%d jobs use gate-bin, want 5 (classify, fetch, review, publish, sweep)", n)
+	if n != 6 {
+		t.Errorf("%d jobs use gate-bin, want 6 (classify, fetch, review, rebuild, publish, sweep)", n)
+	}
+}
+
+// The rebuild job runs an action's own build code: it holds no
+// permissions, no secrets and no OIDC token, runs every container under
+// gVisor, and cannot hold up publish's decision.
+func TestRebuildUnprivileged(t *testing.T) {
+	jobs := gateJobs(t)
+	job := jobs["rebuild"]
+	if !strings.Contains(job, "    permissions: {}\n") {
+		t.Error("the rebuild job does not set permissions: {}")
+	}
+	for _, bad := range []string{"secrets.", "id-token", "github.token", "GH_TOKEN", "environment:", "actions/checkout"} {
+		if strings.Contains(job, bad) {
+			t.Errorf("the rebuild job uses %q", bad)
+		}
+	}
+	if !strings.Contains(job, "--runtime runsc") || !strings.Contains(job, "install-gvisor.sh") {
+		t.Error("the rebuild job does not run its builds under gVisor")
+	}
+	pub := jobs["publish"]
+	if !strings.Contains(pub, "needs: [build, classify, fetch, review, rebuild]") || !strings.Contains(pub, "always()") {
+		t.Error("publish does not wait for rebuild, or does not run when it is skipped")
 	}
 }
 
@@ -114,8 +137,9 @@ func TestArtifactsVerified(t *testing.T) {
 		consumers      []string
 	}{
 		{"classification", "classify", []string{"fetch", "publish"}},
-		{"evidence", "fetch", []string{"review", "publish"}},
+		{"evidence", "fetch", []string{"review", "rebuild", "publish"}},
 		{"verdict", "review", []string{"publish"}},
+		{"rebuild", "rebuild", []string{"publish"}},
 	} {
 		p := jobs[a.producer]
 		out := a.name + "_sums: ${{ steps.sums.outputs.sums }}"

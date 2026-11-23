@@ -181,11 +181,59 @@ type Evidence struct {
 	// Diffs is the navigable evidence's per-file diffs (Go modules): the
 	// reference list the verdict's Examined is checked against.
 	Diffs []DiffFile `json:"diffs,omitempty"`
+	// Rebuilds are the action updates whose bundles the rebuild job
+	// rebuilds from source (gate.yml, job rebuild): the reference its
+	// results are checked against.
+	Rebuilds []RebuildPlan `json:"rebuilds,omitempty"`
 	// Triage: the route is human only because of findings marked Triage,
 	// so the review still runs, and its answer is shown to the person
 	// deciding. It never merges.
 	Triage bool `json:"triage"`
 }
+
+// RebuildPlan is one GitHub Actions update whose committed bundle the
+// rebuild job rebuilds from the new commit's source, offline and
+// sandboxed, and compares byte for byte.
+type RebuildPlan struct {
+	Update string `json:"update"`
+	Repo   string `json:"repo"`   // owner/repo
+	Commit string `json:"commit"` // the new pin (40 hex)
+	// Node is the major version of the action's runtime (runs.using).
+	Node int `json:"node"`
+	// Scripts are the package.json scripts to try, in order; the first
+	// that reproduces every file wins.
+	Scripts []string `json:"scripts"`
+	// Dirs are the bundle directories (those of runs.main/pre/post):
+	// left out of the build's input, rebuilt, and compared.
+	Dirs []string `json:"dirs"`
+	// Files is every file committed under Dirs at Commit.
+	Files []RebuildFile `json:"files"`
+}
+
+// RebuildFile is one committed file of a bundle directory.
+type RebuildFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+// RebuildResult is the rebuild job's answer for one RebuildPlan.
+type RebuildResult struct {
+	Update  string   `json:"update"`
+	Repo    string   `json:"repo"`
+	Commit  string   `json:"commit"`
+	Dirs    []string `json:"dirs"`
+	Outcome string   `json:"outcome"` // RebuildVerified, RebuildDiffers or RebuildFailed
+	Script  string   `json:"script,omitempty"`
+	Detail  string   `json:"detail,omitempty"`
+}
+
+// Rebuild outcomes.
+const (
+	RebuildVerified = "verified" // every committed file, and nothing else, was rebuilt byte for byte
+	RebuildDiffers  = "differs"  // the build ran, its output is not the committed bundle
+	RebuildFailed   = "failed"   // no comparison: the build or its setup failed
+)
 
 // MaxFlagged bounds Flagged: past it a reviewer cannot be expected to
 // assess every item, so fetch sends the PR to a human (and publish

@@ -21,6 +21,7 @@ var commands = map[string]func([]string) error{
 	"fetch":       runFetch,
 	"review-prep": runReviewPrep,
 	"review":      runReview,
+	"rebuild":     runRebuild,
 	"proxy":       runProxy,
 	"publish":     runPublish,
 	"sweep":       runSweep,
@@ -75,7 +76,7 @@ func main() {
 	// logLine: one line, no control characters, no workflow commands.
 	log.SetOutput(lineWriter{os.Stderr})
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review-prep|review|proxy|publish|sweep [flags]")
+		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review-prep|review|rebuild|proxy|publish|sweep [flags]")
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]

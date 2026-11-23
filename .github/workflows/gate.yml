@@ -144,10 +144,11 @@ jobs:
           go build -C gate -trimpath -o "$RUNNER_TEMP/bin/dep-review" ./cmd/dep-review
           # go.mod: the fetch job sets up the gate's Go version from it.
           # sandbox/: the review job's Dockerfile, CLI lockfile and gVisor
-          # installer.
+          # installer, and the rebuild job's Dockerfile.
           cp gate/prompts/review.md gate/schema/verdict.json gate/go.mod "$RUNNER_TEMP/bin/"
-          mkdir "$RUNNER_TEMP/bin/sandbox"
+          mkdir -p "$RUNNER_TEMP/bin/sandbox/rebuild"
           cp gate/sandbox/Dockerfile gate/sandbox/package.json gate/sandbox/package-lock.json gate/sandbox/install-gvisor.sh "$RUNNER_TEMP/bin/sandbox/"
+          cp gate/sandbox/rebuild/Dockerfile "$RUNNER_TEMP/bin/sandbox/rebuild/"
       - name: Checksum the gate's files
         id: sums
         run: |
@@ -232,6 +233,8 @@ jobs:
       # true for the review route, and for triage of a person-routed PR
       # (policy.Triage): publish never merges from triage.
       review: ${{ steps.fetch.outputs.review }}
+      # true when an action's bundle can be rebuilt (job rebuild).
+      rebuild: ${{ steps.fetch.outputs.rebuild }}
       evidence_sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/download-artifact@v8.0.2
@@ -426,8 +429,79 @@ jobs:
           path: ${{ runner.temp }}/verdict/verdict.json
           retention-days: 7
 
+  # Rebuilds a bumped action's committed bundle from the new commit's
+  # source and compares it byte for byte (internal/rebuild). This runs
+  # the action's own build code, so: no permissions and no secrets here,
+  # every container under gVisor and with no network (the gate downloads
+  # the locked tarballs itself and checks their sha512; the install runs
+  # offline with --ignore-scripts). The result is information for the
+  # comment; no route depends on it.
+  rebuild:
+    needs: [build, classify, fetch]
+    if: needs.fetch.outputs.rebuild == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions: {}
+    outputs:
+      rebuild_sums: ${{ steps.sums.outputs.sums }}
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: gate-bin
+          path: ${{ runner.temp }}/bin
+      - name: Verify the gate's files
+        env:
+          GATE_SUMS: ${{ needs.build.outputs.gate_sums }}
+        run: |
+          cd "$RUNNER_TEMP/bin"
+          printf '%s\n' "$GATE_SUMS" | sha256sum --check --strict --quiet -
+          diff <(find . -type f | sort) <(printf '%s\n' "$GATE_SUMS" | cut -c67- | sort)
+          chmod +x dep-review
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: evidence
+          path: evidence
+      - name: Verify the evidence artifact
+        env:
+          SUMS: ${{ needs.fetch.outputs.evidence_sums }}
+        run: |
+          cd "evidence"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
+          sha256sum --check --strict --quiet ./SHA256SUMS
+          diff <(find . -type f ! -path ./SHA256SUMS | sort) <(cut -c67- ./SHA256SUMS | sort)
+      - name: Install gVisor
+        run: bash "$RUNNER_TEMP/bin/sandbox/install-gvisor.sh"
+      # The official Node images, pinned by digest in the gate's own
+      # sandbox/rebuild/Dockerfile. No build cache.
+      - name: Build the build images
+        run: |
+          for n in 20 22 24; do
+            docker build --no-cache --target "node$n" -t "dep-review-node$n:local" "$RUNNER_TEMP/bin/sandbox/rebuild"
+          done
+      - name: Rebuild (sandboxed)
+        run: |
+          "$RUNNER_TEMP/bin/dep-review" rebuild \
+            --evidence evidence \
+            --out "$RUNNER_TEMP/rebuild" \
+            --images 20=dep-review-node20:local,22=dep-review-node22:local,24=dep-review-node24:local \
+            --runtime runsc
+      - name: Checksum the artifact
+        id: sums
+        run: |
+          cd "$RUNNER_TEMP/rebuild"
+          {
+            echo 'sums<<DEP_REVIEW_SUMS'
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            echo 'DEP_REVIEW_SUMS'
+          } >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: rebuild
+          path: ${{ runner.temp }}/rebuild/rebuild.json
+          retention-days: 7
+
   publish:
-    needs: [build, classify, fetch, review]
+    needs: [build, classify, fetch, review, rebuild]
     if: >-
       always() && needs.build.result == 'success' &&
       (needs.classify.outputs.kind == 'dependabot' || needs.classify.outputs.kind == 'dependabot-unverified')
@@ -439,7 +513,7 @@ jobs:
       - uses: actions/download-artifact@v8.0.2
         with:
           path: ${{ runner.temp }}/in
-          pattern: "{gate-bin,classification,evidence,verdict}"
+          pattern: "{gate-bin,classification,evidence,verdict,rebuild}"
       # gate-bin is an artifact of this run, and anything holding the
       # run's runtime token can replace one. Use it only if every file
       # matches the build job's checksums (a job output, not an artifact).
@@ -482,6 +556,19 @@ jobs:
           cd "$RUNNER_TEMP/in/verdict"
           printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           # ...and nothing else is there.
+          diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
+      - name: Verify the rebuild artifact
+        env:
+          SUMS: ${{ needs.rebuild.outputs.rebuild_sums }}
+        run: |
+          # None if the job did not run or succeed; then there must be no
+          # artifact either. Sums without an artifact (the upload failed
+          # after the sums step) are "not run": the results inform, and
+          # their absence must not block the decision.
+          if [ -z "$SUMS" ]; then test ! -e "$RUNNER_TEMP/in/rebuild"; exit; fi
+          if [ ! -e "$RUNNER_TEMP/in/rebuild" ]; then echo "no rebuild artifact; shown as not run"; exit; fi
+          cd "$RUNNER_TEMP/in/rebuild"
+          printf '%s\n' "$SUMS" | sha256sum --check --strict --quiet -
           diff <(find . -type f | sort) <(printf '%s\n' "$SUMS" | cut -c67- | sort)
       - name: Gate app token (this repository only)
         id: app
