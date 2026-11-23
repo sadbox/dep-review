@@ -60,7 +60,7 @@ func TestCommentWithHostileText(t *testing.T) {
 		return allow.UpdateFacts{
 			Name: h.text(p + "name"), From: h.text(p + "from"), To: h.text(p + "to"),
 			Known: h.fact(p+"known", true), Listed: h.fact(p+"listed", false), NewName: h.fact(p+"new_name", true),
-			Increase: h.fact(p+"increase", true), Major: h.fact(p+"major", false), Bound: h.fact(p+"bound", false),
+			Increase: h.fact(p+"increase", true), Major: h.fact(p+"major", false), Indirect: h.fact(p+"indirect", false), Bound: h.fact(p+"bound", false),
 			FirstSeen: h.time(p + "first_seen"), NameCreated: h.time(p + "name_created"),
 			Clean: h.fact(p+"clean", true), NoRegress: h.fact(p+"no_regress", true),
 			SecurityFix: h.fact(p+"security_fix", false), Superseded: h.fact(p+"superseded", false),

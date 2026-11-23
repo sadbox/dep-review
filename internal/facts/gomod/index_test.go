@@ -198,6 +198,46 @@ func TestFirstSeenTransportError(t *testing.T) {
 
 // An index that was asked and did not answer is told apart from every
 // answer it gave: only the first is worth asking again.
+// A pseudo-version carries its commit's time, and the proxy's .info for
+// it repeats that time: both are the publisher's to set. FirstSeen is
+// the index's own timestamp or nothing (spec section 11, amendment 24).
+// With nothing, the fetch command falls back to when the pull request was
+// opened (amendment 4).
+func TestFirstSeenOfAPseudoVersion(t *testing.T) {
+	const (
+		name    = "google.golang.org/genproto/googleapis/rpc"
+		version = "v0.0.0-20240101000000-aaaaaaaaaaaa"
+	)
+	commit := ts("2024-01-01T00:00:00Z")
+	for _, tc := range []struct {
+		name string
+		page string
+		// want is the index's time; empty when the version is not found.
+		want string
+	}{
+		{"cached by the proxy nine hours after the commit", line("example.com/other", "v1.0.0", "2024-01-01T00:00:03Z") + line(name, version, "2024-01-01T09:30:00Z"), "2024-01-01T09:30:00Z"},
+		{"not in the index pages read", line("example.com/other", "v1.0.0", "2024-01-01T00:00:03Z"), ""},
+		{"only another commit of the same module is there", line(name, "v0.0.0-20240101000000-bbbbbbbbbbbb", "2024-01-01T09:30:00Z"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
+				return respond(req, http.StatusOK, tc.page), nil
+			})}
+			ix := &index{client: client, url: defaultIndexURL, limit: 3, perVersion: 2, left: 10}
+			f := seenFact(context.Background(), ix, name, version, commit, testNow)
+			if f.Time.Equal(commit) {
+				t.Fatalf("FirstSeen is the commit's time: %+v", f)
+			}
+			switch {
+			case tc.want == "" && (f.Known() || f.Unavailable):
+				t.Errorf("FirstSeen = %+v, want a time that was not established", f)
+			case tc.want != "" && (!f.Known() || !f.Time.Equal(ts(tc.want)) || f.Source != sourceIndex):
+				t.Errorf("FirstSeen = %+v, want the index's %s", f, tc.want)
+			}
+		})
+	}
+}
+
 func TestFirstSeenDown(t *testing.T) {
 	other := line("example.com/other", "v1.0.0", "2024-01-01T00:00:03Z")
 	for _, tc := range []struct {

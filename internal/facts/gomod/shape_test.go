@@ -73,7 +73,7 @@ func TestReadChangeSet(t *testing.T) {
 		t.Fatalf("problem: %s", problem)
 	}
 	wantUpdates := []update{
-		{name: "golang.org/x/mod", from: "", to: "v0.5.1"},
+		{name: "golang.org/x/mod", from: "", to: "v0.5.1", indirect: true},
 		{name: "golang.org/x/text", from: "v0.3.2", to: "v0.3.3"},
 	}
 	if !reflect.DeepEqual(cs.updates, wantUpdates) {

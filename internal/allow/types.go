@@ -254,11 +254,25 @@ type UpdateFacts struct {
 	Listed Fact `json:"listed"`
 	// NewName: the name is absent at the base commit.
 	NewName Fact `json:"new_name"`
-	// Increase: both versions are plain releases and To is greater than
-	// From. For a new name there is no From: To is a plain release.
+	// Increase: To is a plain release greater than From. For a new name
+	// there is no From: To is a plain release. A listed Go module may
+	// also move to a higher pseudo-version (spec section 11, amendment
+	// 24).
 	Increase Fact `json:"increase"`
 	// Major: the leading version component changed.
 	Major Fact `json:"major"`
+	// Indirect: the repository's own manifest shows that it does not
+	// declare this dependency, so the update is there because another
+	// dependency asks for it. Go: the require line in go.mod is marked
+	// "// indirect". npm: the name is in none of the root package's
+	// dependency maps. It does one thing: a major update of an unlisted
+	// name that is indirect is decided like a listed one's, because the
+	// version was the parent's choice and the owner has none to make.
+	// Only a fact that holds counts. Unset, "no" and unavailable all mean
+	// the repository declares the dependency itself, and Decide never
+	// waits for it. Decide looks at it for Go modules and npm only: an
+	// action or an image is always the repository's own choice.
+	Indirect Fact `json:"indirect"`
 	// Bound: the pinned hash, commit or digest equals what the registry
 	// reports now.
 	Bound Fact `json:"bound"`
@@ -353,9 +367,9 @@ type Policy struct {
 	// UnreadAge is how long an update that was only partly read must
 	// have been public. Decide never lets it be shorter than MinAge.
 	UnreadAge time.Duration
-	// MajorAge is how long a major update of a listed name must have
-	// been public. Decide never lets a major need less than the same
-	// update would need as a minor.
+	// MajorAge is how long a major update of a listed name, or of an
+	// indirect dependency, must have been public. Decide never lets a
+	// major need less than the same update would need as a minor.
 	MajorAge time.Duration
 	// NewNameAge is how old a package name must be before a new, unlisted
 	// dependency under that name can merge without a person.

@@ -37,6 +37,11 @@ type update struct {
 	// require the module.
 	from string
 	to   string
+	// indirect: the require line is marked "// indirect" at head, which
+	// is how go.mod says the repository's own code does not import the
+	// module. Where base has the line too it carries the same marker:
+	// diffRequires refuses a marker that changes.
+	indirect bool
 }
 
 // changeSet is what base and head go.mod and go.sum say the pull request
@@ -266,11 +271,11 @@ func diffRequires(base, head modFile) (updates []update, removed []string, probl
 		b, atBase := base.requires[name]
 		switch {
 		case !atBase:
-			updates = append(updates, update{name: name, to: h.version})
+			updates = append(updates, update{name: name, to: h.version, indirect: h.indirect})
 		case b.indirect != h.indirect:
 			return nil, nil, fmt.Sprintf("go.mod changes the // indirect marker of %s", show(name))
 		case b.version != h.version:
-			updates = append(updates, update{name: name, from: b.version, to: h.version})
+			updates = append(updates, update{name: name, from: b.version, to: h.version, indirect: h.indirect})
 		}
 	}
 	for _, name := range sortedKeys(base.requires) {

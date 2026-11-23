@@ -114,6 +114,37 @@ func TestRealNPMReadsOnlyTheScratchProject(t *testing.T) {
 	}
 }
 
+// A lock with a workspace member does not have the shape: npm cannot
+// read it without the member's own package.json, which is not among the
+// files the gatherer is given. Indirect rests on that. The lock's root
+// entry is the only place it looks for what the repository declares, and
+// a member would declare dependencies of its own.
+func TestRealNPMWorkspaceHasNoShape(t *testing.T) {
+	realTool(t)
+	const base = `{
+  "name": "app", "version": "1.0.0", "lockfileVersion": 3, "requires": true,
+  "packages": {
+    "": {"name": "app", "version": "1.0.0", "workspaces": ["packages/a"]},
+    "node_modules/a": {"resolved": "packages/a", "link": true},
+    "node_modules/left-pad": {"version": "1.2.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.2.0.tgz", "integrity": "sha512-OLD"},
+    "packages/a": {"version": "1.0.0", "dependencies": {"left-pad": "^1.2.0"}}
+  }
+}
+`
+	head := strings.NewReplacer("1.2.0\"", "1.3.0\"", "left-pad-1.2.0.tgz", "left-pad-1.3.0.tgz", "sha512-OLD", "sha512-NEW").Replace(base)
+	res, err := Gatherer{}.Changes(context.Background(), []facts.File{
+		{Path: "package-lock.json", BaseMode: "100644", HeadMode: "100644", Base: []byte(base), Head: []byte(head)},
+	}, testPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// npm's own word for it: without the member's package.json the link
+	// to it is something nothing asks for.
+	if !res.Shape.Gathered() || res.Shape.OK || !strings.Contains(res.Shape.Value, "extraneous: a@1.0.0") || len(res.Updates) != 0 {
+		t.Errorf("Shape = %+v with %d updates, want a gathered no that calls the member extraneous, and no update", res.Shape, len(res.Updates))
+	}
+}
+
 // TestRealNPMGather is the whole gatherer with the real npm and the
 // recorded registry: no network.
 func TestRealNPMGather(t *testing.T) {

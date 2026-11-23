@@ -190,7 +190,8 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 
 // Changes is the half of Gather that reads nothing but the pull request's
 // files: the Shape fact, and every update with the facts no registry is
-// ever asked for (Known, Listed, NewName, Increase, Major and NoRegress).
+// ever asked for (Known, Listed, NewName, Increase, Major, Indirect and
+// NoRegress).
 // Every other fact is left unset. Gather starts from the same reading;
 // the replay command runs this half alone.
 func Changes(files []facts.File, policy allow.Policy) facts.Result {
@@ -229,7 +230,7 @@ func shapeValue(cs changeSet) string {
 }
 
 // setManifestFacts fills in the facts that come from go.mod alone:
-// NewName, Listed, Known, Increase, Major and NoRegress.
+// NewName, Listed, Known, Increase, Major, Indirect and NoRegress.
 func setManifestFacts(u *allow.UpdateFacts, up update, cs changeSet, policy allow.Policy) {
 	isNew := up.from == ""
 	if isNew {
@@ -254,7 +255,7 @@ func setManifestFacts(u *allow.UpdateFacts, up update, cs changeSet, policy allo
 		u.Known = allow.No("not required by go.mod at base and not on the go_modules list", sourceManifests)
 	}
 
-	u.Increase = increaseFact(up)
+	u.Increase = increaseFact(up, listed)
 
 	// A module's path carries its major version from v2 on, so a major
 	// update of something go.mod already required shows up as one path
@@ -275,6 +276,17 @@ func setManifestFacts(u *allow.UpdateFacts, up update, cs changeSet, policy allo
 		u.Major = allow.No("stays on "+semver.Major(up.to), sourceManifests)
 	}
 
+	// A path that takes another's place is not followed back to what the
+	// old path was: such an update goes to a person anyway (NoRegress).
+	switch {
+	case replaced != "":
+		u.Indirect = allow.No(fmt.Sprintf("takes the place of %s, and the marker of a requirement is not followed across a change of module path", replaced), sourceManifests)
+	case up.indirect:
+		u.Indirect = allow.Yes("its require line in go.mod is marked // indirect: the repository's own code does not import it", sourceManifests)
+	default:
+		u.Indirect = allow.No("go.mod requires it directly", sourceManifests)
+	}
+
 	// Go modules run nothing at install time and carry no provenance
 	// attestation, so there is nothing of that kind to lose. What can
 	// change under an existing requirement is which module it is.
@@ -285,17 +297,27 @@ func setManifestFacts(u *allow.UpdateFacts, up update, cs changeSet, policy allo
 	}
 }
 
-// increaseFact is the Increase fact: plain releases, and to above from.
-func increaseFact(up update) allow.Fact {
-	for _, v := range []string{up.from, up.to} {
-		switch {
-		case v == "":
-			// A new requirement has no from.
-		case module.IsPseudoVersion(v):
-			return allow.No(v+" is a pseudo-version (a commit, not a release)", sourceManifests)
-		case !plainRelease(v):
-			return allow.No(v+" is not a plain release", sourceManifests)
-		}
+// increaseFact is the Increase fact (spec section 11, amendment 24): what
+// the update moves to decides, and x/mod orders the versions.
+//
+//   - To a plain release: it is above the old version, whatever form that
+//     has. A pseudo-version or a pre-release that moves to a higher tagged
+//     release is an increase.
+//   - To a pseudo-version, which is a commit and not a release: only for
+//     a module on the list, whose publisher is trusted to publish that
+//     way (google.golang.org/genproto publishes nothing else), and only
+//     when it is above the old version. A new requirement has no old
+//     version to be above, so it is never an increase at a pseudo-version.
+//   - To anything else (a pre-release): never.
+func increaseFact(up update, listed bool) allow.Fact {
+	switch {
+	case plainRelease(up.to):
+	case !module.IsPseudoVersion(up.to):
+		return allow.No(up.to+" is not a plain release", sourceManifests)
+	case !listed:
+		return allow.No(up.to+" is a pseudo-version (a commit, not a release) of a module that is not on the list", sourceManifests)
+	case up.from == "":
+		return allow.No("new at "+up.to+", a pseudo-version (a commit, not a release) with no old version to be above", sourceManifests)
 	}
 	switch {
 	case up.from == "":

@@ -78,8 +78,9 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | Known | the name is a dependency at the base commit, or is on the list (Docker: on the list only) |
 | Listed | the name is on the owner's list |
 | NewName | the name is absent at base |
-| Increase | plain release versions, and `to > from` |
+| Increase | `to` is a plain release above `from` (Go: a listed module may also move to a higher pseudo-version) |
 | Major | the leading version component changed |
+| Indirect | the repository's own manifest shows it does not declare the dependency: `// indirect` in `go.mod`, or in none of the root package's dependency maps in `package-lock.json` (Go and npm only) |
 | Bound | the pinned hash, commit or digest is what the registry reports now |
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the pull request was opened |
 | NameCreated | when the package name first appeared (new names only) |
@@ -103,8 +104,8 @@ With every fact holding, an update needs an age, measured from FirstSeen:
 | read in part, security fix | `min_age_hours` (72 h) |
 | read in part | `unread_age_days` (14 d) |
 | Docker (nothing is read) | `min_age_hours` (72 h) |
-| major update of a listed name | at least `major_age_days` (14 d) |
-| major update of an unlisted name | person |
+| major update of a listed name, or of an indirect dependency | at least `major_age_days` (14 d) |
+| major update of an unlisted name the repository declares itself | person |
 | new name, unlisted | person unless read in full and the name is `new_name_age_days` (365 d) old |
 
 In a pull request that carries a fully read security fix, the other
@@ -129,7 +130,10 @@ Limits that send real pull requests to a person:
   That includes a caller's pin of this gate.
 - Docker images merge only from the list, and only from docker.io and
   gcr.io.
-- Pre-releases and pseudo-versions are never an increase.
+- A pre-release is never an increase. A pseudo-version is one only for
+  a listed Go module, and such an update still goes to a person: the
+  retraction check and the advisory lookup have no rule for a version
+  that is not a tagged release.
 
 ## Configuration
 
@@ -155,7 +159,9 @@ falling back to the defaults.
 | `model`, `effort`, `context_tokens`, `max_output_tokens`, `request_timeout_seconds`, `attempts` | `claude-opus-5-5`, `high`, ... | not set them |
 
 The list names the publishers whose major updates and new packages may
-merge, and the only Docker images that may. An entry ending in `/` is a
+merge, and the only Docker images that may. A major update of a
+dependency the repository does not declare itself (one that a parent
+pulls in) needs no entry. An entry ending in `/` is a
 namespace; any other entry is a name and everything below it. Matching is
 exact and case-sensitive, with no wildcards. Entries can be added, never
 removed.

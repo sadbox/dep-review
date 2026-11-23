@@ -112,7 +112,8 @@ func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, err
 
 // Changes is the half of Gather that asks no registry: the Shape fact,
 // and every update with the facts npm's reading of the two locks and the
-// policy list establish (Known, Listed, NewName, Increase and Major).
+// policy list establish (Known, Listed, NewName, Increase, Major and
+// Indirect).
 // Every other fact is left unset. It runs npm, which reads the lock
 // offline, and returns an error when Gather would for the same reason.
 // Gather starts from the same reading; the replay command runs this half
@@ -191,6 +192,7 @@ func lockFacts(u update, policy allow.Policy, lockSource string) allow.UpdateFac
 	}
 	uf.Increase = increaseFact(u.From, u.To, lockSource)
 	uf.Major = majorFact(u.From, u.To, lockSource)
+	uf.Indirect = u.Indirect
 	return uf
 }
 

@@ -147,6 +147,7 @@ type Update struct {
 	NewName     allow.Fact     `json:"new_name"`
 	Increase    allow.Fact     `json:"increase"`
 	Major       allow.Fact     `json:"major"`
+	Indirect    allow.Fact     `json:"indirect"`
 	Bound       allow.Fact     `json:"bound"`
 	FirstSeen   allow.TimeFact `json:"first_seen"`
 	NameCreated allow.TimeFact `json:"name_created"`
@@ -241,7 +242,7 @@ func NewUpdate(u allow.UpdateFacts, prepared Read) Update {
 	return Update{
 		Name: u.Name, From: u.From, To: u.To,
 		Known: u.Known, Listed: u.Listed, NewName: u.NewName,
-		Increase: u.Increase, Major: u.Major, Bound: u.Bound,
+		Increase: u.Increase, Major: u.Major, Indirect: u.Indirect, Bound: u.Bound,
 		FirstSeen: u.FirstSeen, NameCreated: u.NameCreated,
 		Clean: u.Clean, NoRegress: u.NoRegress, SecurityFix: u.SecurityFix,
 		Superseded: u.Superseded,
@@ -323,7 +324,7 @@ func Join(f Facts, v Verdicts, fingerprint string) allow.PRFacts {
 		joined := allow.UpdateFacts{
 			Name: u.Name, From: u.From, To: u.To,
 			Known: u.Known, Listed: u.Listed, NewName: u.NewName,
-			Increase: u.Increase, Major: u.Major, Bound: u.Bound,
+			Increase: u.Increase, Major: u.Major, Indirect: u.Indirect, Bound: u.Bound,
 			FirstSeen: u.FirstSeen, NameCreated: u.NameCreated,
 			Clean: u.Clean, NoRegress: u.NoRegress, SecurityFix: u.SecurityFix,
 			Superseded: u.Superseded,

@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,6 +84,11 @@ func listed(u *UpdateFacts) {
 func major(u *UpdateFacts) {
 	u.From, u.To = "v1.9.0", "v2.0.0"
 	u.Major = Yes("v1 to v2", "x/mod/semver")
+}
+
+// indirect makes the update one the repository does not declare itself.
+func indirect(u *UpdateFacts) {
+	u.Indirect = Yes("the require line is marked // indirect", "go.mod at base and head")
 }
 
 func securityFix(u *UpdateFacts) {
@@ -373,6 +379,7 @@ func mergingBaselines() map[string]PRFacts {
 		"listed":            pr(GoModules, update(100*hour, listed)),
 		"listed new name":   pr(GoModules, update(100*hour, newListed)),
 		"listed major":      pr(GoModules, update(15*day, listed, major)),
+		"indirect major":    pr(GoModules, update(15*day, major, indirect)),
 		"security fix":      pr(GoModules, update(0, securityFix)),
 		"partial read":      pr(NPM, update(15*day, read(ReadPartial))),
 		"docker":            pr(Docker, update(100*hour, read(ReadNotApplicable))),
@@ -391,6 +398,7 @@ var (
 		"Veto":        "nil is the absence of an objection; a model that never answered is Read none",
 		"NameCreated": "needed for an unlisted new name only, and tried on that baseline",
 		"Superseded":  "unset is not superseded; set, it can only turn a merge into a wait (TestSuperseded)",
+		"Indirect":    "unset is a dependency the repository declares itself; only holding does it change anything (TestIndirect)",
 	}
 )
 
@@ -447,6 +455,9 @@ func TestUnavailableFact(t *testing.T) {
 		updateType := reflect.TypeOf(UpdateFacts{})
 		for i := 0; i < updateType.NumField(); i++ {
 			field := updateType.Field(i).Name
+			if field == "Indirect" {
+				continue // never waited for: unavailable is direct (TestIndirect)
+			}
 			switch updateType.Field(i).Type {
 			case reflect.TypeOf(Fact{}):
 				for _, fact := range facts {
@@ -543,8 +554,8 @@ func TestMergeNeedsEveryFact(t *testing.T) {
 				t.Fatalf("merged unread: %+v", u)
 			case f.Ecosystem == Docker && u.Superseded.Holds():
 				t.Fatalf("merged a superseded pin: %+v", u)
-			case u.Major.Holds() && !u.Listed.Holds():
-				t.Fatalf("merged an unlisted major: %+v", u)
+			case u.Major.Holds() && !u.Listed.Holds() && !(u.Indirect.Holds() && (f.Ecosystem == GoModules || f.Ecosystem == NPM)):
+				t.Fatalf("merged an unlisted major of a dependency the repository declares: %+v", u)
 			case u.NewName.Holds() && !u.Listed.Holds() && (!u.NameCreated.Known() || u.Read != ReadFull):
 				t.Fatalf("merged an unlisted new name without its conditions: %+v", u)
 			case !u.Known.Holds() && !(u.NewName.Holds() && !u.Listed.Holds()):
@@ -1106,6 +1117,108 @@ func TestMajors(t *testing.T) {
 			f.Opened = t0.Add(-hour)
 			wantOutcome(t, Decide(f, p, t0), tc.want, tc.reasons...)
 		})
+	}
+}
+
+// Indirect (spec section 11, amendment 23): a major update of an unlisted
+// name that the repository does not declare itself is decided like a
+// listed major. Only a fact that holds does that, only for Go modules and
+// npm, and it changes nothing else.
+func TestIndirect(t *testing.T) {
+	p := testPolicy()
+	is := func(f Fact) func(*UpdateFacts) { return func(u *UpdateFacts) { u.Indirect = f } }
+	tests := []struct {
+		name    string
+		eco     string
+		u       UpdateFacts
+		want    Outcome
+		reasons []Reason
+	}{
+		{"major, indirect, 14 days", GoModules, update(14*day, major, indirect), Merge, nil},
+		{"major, indirect, 13 days", GoModules, update(13*day, major, indirect), Wait, []Reason{ReasonAge}},
+		{"major, indirect, npm", NPM, update(14*day, major, indirect), Merge, nil},
+		{"major, indirect, partial read, 14 days", GoModules, update(14*day, major, indirect, read(ReadPartial)), Merge, nil},
+		{"major, indirect, read missing", GoModules, update(400*day, major, indirect, read(ReadNone)), Wait, []Reason{ReasonReadPending}},
+		{"major, indirect, security fix, 13 days", GoModules, update(13*day, major, indirect, securityFix), Wait, []Reason{ReasonAge}},
+
+		// Everything that is not a holding fact is a dependency the
+		// repository declares, at once: it is never waited for.
+		{"major, declared", GoModules, update(400*day, major, is(No("required directly", "go.mod"))), Person, []Reason{ReasonMajorUnlisted}},
+		{"major, never gathered", GoModules, update(400*day, major), Person, []Reason{ReasonMajorUnlisted}},
+		{"major, unavailable", GoModules, update(400*day, major, is(Unavailable("no answer", "go.mod"))), Person, []Reason{ReasonMajorUnlisted}},
+		{"major, yes from nowhere", GoModules, update(400*day, major, is(Fact{OK: true, Value: "yes"})), Person, []Reason{ReasonMajorUnlisted}},
+		{"major, yes and unavailable", GoModules, update(400*day, major, is(Fact{OK: true, Unavailable: true, Value: "yes", Source: "go.mod"})), Person, []Reason{ReasonMajorUnlisted}},
+		// An action is always the repository's own choice.
+		{"major, indirect, an action", GitHubActions, update(400*day, major, indirect), Person, []Reason{ReasonMajorUnlisted}},
+
+		// Nothing else moves.
+		{"minor, indirect, 72 hours", GoModules, update(72*hour, indirect), Merge, nil},
+		{"minor, indirect, 71 hours", GoModules, update(71*hour, indirect), Wait, []Reason{ReasonAge}},
+		{"listed major, indirect, 13 days", GoModules, update(13*day, listed, major, indirect), Wait, []Reason{ReasonAge}},
+		{"new name, indirect, young name", NPM, update(400*day, newUnlisted(300*day), indirect), Person, []Reason{ReasonNewNameYoung}},
+		{"new name, indirect, name age unknown", NPM, update(400*day, newUnlisted(400*day), indirect, func(u *UpdateFacts) { u.NameCreated = TimeFact{} }), Person, []Reason{ReasonNameCreatedUnknown}},
+		{"new name, indirect, partial read", NPM, update(400*day, newUnlisted(400*day), indirect, read(ReadPartial)), Person, []Reason{ReasonNewNameUnread}},
+		{"major, indirect, not bound", GoModules, update(400*day, major, indirect, func(u *UpdateFacts) { u.Bound = No("hash differs", "go mod download") }), Person, []Reason{ReasonNotBound}},
+		{"major, indirect, veto", GoModules, update(400*day, major, indirect, func(u *UpdateFacts) { u.Veto = &Veto{Category: "obfuscation"} }), Person, []Reason{ReasonVeto}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wantOutcome(t, Decide(pr(tc.eco, tc.u), p, t0), tc.want, tc.reasons...)
+		})
+	}
+	// It does not make a companion: the fast path's ride is for an update
+	// that is not a major.
+	d := Decide(pr(GoModules, update(0, securityFix), update(hour, major, indirect)), p, t0)
+	wantOutcome(t, d, Wait, ReasonAge)
+	if d.PerUpdate[1].RequiredAge != 14*day {
+		t.Fatalf("an indirect major beside a security fix needs %v", d.PerUpdate[1].RequiredAge)
+	}
+}
+
+// Indirect holding never gives a worse outcome than not holding, it
+// changes nothing but the decision about an unlisted major, and every
+// way of not holding is the same as a dependency the repository declares.
+func TestIndirectMonotone(t *testing.T) {
+	r := rand.New(rand.NewPCG(23, 5))
+	set := func(f PRFacts, fact Fact) PRFacts {
+		out := clonePR(f)
+		for k := range out.Updates {
+			out.Updates[k].Indirect = fact
+		}
+		return out
+	}
+	spared := 0
+	for i := 0; i < 30000; i++ {
+		f, p := randomPR(r), randomPolicy(r)
+		now := t0.Add(time.Duration(r.Int64N(int64(30*day))) - 10*day)
+
+		declared := Decide(set(f, No("declared", "manifest")), p, now)
+		holding := Decide(set(f, Yes("indirect", "manifest")), p, now)
+		switch {
+		case rank(holding.Outcome) < rank(declared.Outcome):
+			t.Fatalf("case %d: Indirect made the decision worse: %q, %q without\n%+v", i, holding.Outcome, declared.Outcome, f)
+		case reflect.DeepEqual(holding, declared):
+		case !slices.Contains(declared.Reasons, ReasonMajorUnlisted):
+			t.Fatalf("case %d: Indirect changed a decision that was not about an unlisted major: %v, %v without\n%+v", i, holding.Reasons, declared.Reasons, f)
+		}
+		if rank(holding.Outcome) > rank(declared.Outcome) {
+			spared++
+		}
+		for what, fact := range map[string]Fact{
+			"unset":                        {},
+			"unavailable":                  Unavailable("no answer", "manifest"),
+			"true without a source":        {OK: true, Value: "yes"},
+			"true and unavailable":         {OK: true, Unavailable: true, Value: "yes", Source: "manifest"},
+			"unavailable without a source": {Unavailable: true, Value: "no answer"},
+		} {
+			if d := Decide(set(f, fact), p, now); !reflect.DeepEqual(d, declared) {
+				t.Fatalf("case %d: Indirect %s is not decided as declared: %q %v, want %q %v", i, what, d.Outcome, d.Reasons, declared.Outcome, declared.Reasons)
+			}
+		}
+	}
+	// The property is empty unless Indirect sometimes decides.
+	if spared < 100 {
+		t.Fatalf("Indirect changed the outcome of only %d random records", spared)
 	}
 }
 
@@ -1730,6 +1843,7 @@ func randomPR(r *rand.Rand) PRFacts {
 			NoRegress:   randomFact(r, 0.985),
 			NewName:     randomAnswer(r, 0.15),
 			Major:       randomAnswer(r, 0.15),
+			Indirect:    randomFact(r, 0.4),
 			SecurityFix: randomAnswer(r, 0.3),
 			FirstSeen:   randomTime(r, 0.985, 30*day),
 			NameCreated: randomTime(r, 0.9, 800*day),

@@ -181,10 +181,26 @@ func TestPublish(t *testing.T) {
 			status: "failure: needs a person: regress", notified: 1, cached: 1,
 		},
 		{
-			name:   "person: a major of an unlisted name",
-			facts:  func(f *wire.Facts) { f.Facts.Updates[0].Major = allow.Yes("v1 to v2", "x/mod/semver") },
+			name: "person: a major of an unlisted name the repository declares",
+			facts: func(f *wire.Facts) {
+				f.Facts.Updates[0].Major = allow.Yes("v1 to v2", "x/mod/semver")
+				f.Facts.Updates[0].Indirect = allow.No("go.mod requires it directly", "go.mod")
+			},
 			action: ActionPerson, reason: allow.ReasonMajorUnlisted, fact: "Major",
 			status: "failure: needs a person: major_unlisted", notified: 1, cached: 1,
+			comment: []string{"| Major | `yes` | `v1 to v2` | `x/mod/semver` |\n| Indirect | `no` | `go.mod requires it directly` | `go.mod` |\n| Bound |"},
+		},
+		{
+			// The parent chose the major: it needs the major's age and no
+			// person (the update is 100 hours old).
+			name: "a major of an unlisted name the repository does not declare",
+			facts: func(f *wire.Facts) {
+				f.Facts.Updates[0].Major = allow.Yes("v1 to v2", "x/mod/semver")
+				f.Facts.Updates[0].Indirect = allow.Yes("marked // indirect", "go.mod")
+			},
+			action: ActionWait, reason: allow.ReasonAge, fact: "FirstSeen",
+			status: "pending: waiting until 2026-12-02 08:00 UTC", cached: 1,
+			comment: []string{"| Indirect | `yes` | `marked // indirect` | `go.mod` |"},
 		},
 		{
 			name: "person: a fact nobody gathered",

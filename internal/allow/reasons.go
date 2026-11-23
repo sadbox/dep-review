@@ -68,7 +68,9 @@ const (
 	ReasonReadUnknown Reason = "read_unknown"
 	// ReasonReadRefused: Read is ReadRefused.
 	ReasonReadRefused Reason = "read_refused"
-	// ReasonMajorUnlisted: a major update of a name that is not listed.
+	// ReasonMajorUnlisted: a major update of a name that is not listed
+	// and that the repository's own manifest does not show to be an
+	// indirect dependency.
 	ReasonMajorUnlisted Reason = "major_unlisted"
 	// ReasonFirstSeenUnknown: the FirstSeen fact was not established.
 	ReasonFirstSeenUnknown Reason = "first_seen_unknown"
@@ -182,7 +184,7 @@ var reasonTable = []reasonText{
 		"The update adds a dependency that is not on the list, and the age of its package name could not be established.",
 		listIt},
 	{ReasonNotIncrease, Person,
-		"The update is not a plain release moving to a higher plain release (a downgrade, a pre-release, a pseudo-version or an unreadable version).",
+		"The update does not move to a higher plain release: it is a downgrade, moves to a pre-release or to a version that cannot be read, or moves to a pseudo-version (which only a listed Go module may, and only upwards).",
 		byHand},
 	{ReasonNotBound, Person,
 		"The registry answered, and the hash, commit or digest the pull request pins is not what it reports for that version now.",
@@ -206,7 +208,7 @@ var reasonTable = []reasonText{
 		"The gate would not read this update's code: what it downloaded did not match the hash the pull request pins, the archive was unsafe to unpack, or the prepared text was not usable.",
 		"Do not merge without knowing why. Re-running gives the same answer while the registry serves the same bytes; look at the update by hand."},
 	{ReasonMajorUnlisted, Person,
-		"A major update of a name that is not on the list.",
+		"A major update of a name that is not on the list, and that the repository's own manifest does not show to be a dependency of a dependency.",
 		listIt},
 	{ReasonFirstSeenUnknown, Person,
 		"When the new version became public could not be established by a clock its publisher cannot set.",

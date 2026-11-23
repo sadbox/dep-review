@@ -275,6 +275,10 @@ func TestGatherNewName(t *testing.T) {
 	if got, want := names(res), "@kurkle/color ->0.3.4, chart.js 3.9.1->4.4.7"; got != want {
 		t.Fatalf("updates: got %s, want %s", got, want)
 	}
+	// The root package asks for chart.js, and chart.js for @kurkle/color.
+	if chart, color := findUpdate(t, res, "chart.js").Indirect, findUpdate(t, res, "@kurkle/color").Indirect; !chart.Gathered() || chart.OK || !color.Holds() {
+		t.Errorf("Indirect: chart.js %+v, @kurkle/color %+v; want a gathered no and a yes", chart, color)
+	}
 	color := findUpdate(t, res, "@kurkle/color")
 	if !color.NewName.Holds() || color.Known.OK || !color.Known.Gathered() {
 		t.Errorf("@kurkle/color NewName = %+v, Known = %+v", color.NewName, color.Known)

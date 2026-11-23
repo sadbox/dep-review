@@ -481,11 +481,16 @@ func updateRows(v view, i int) []row {
 	u := v.ev.Facts.Updates[i]
 	rows := []row{
 		factRow("Known", u.Known), factRow("Listed", u.Listed), factRow("NewName", u.NewName),
-		factRow("Increase", u.Increase), factRow("Major", u.Major), factRow("Bound", u.Bound),
-		timeRow("FirstSeen", u.FirstSeen),
+		factRow("Increase", u.Increase), factRow("Major", u.Major),
 	}
-	// The two facts only some updates have are shown where they are in
-	// play: a name's age for a new name, a superseded pin for an image.
+	// The three facts only some updates have are shown where they are in
+	// play: whether the repository declares the dependency itself for a Go
+	// module or an npm package, a name's age for a new name, a superseded
+	// pin for an image.
+	if u.Indirect != (allow.Fact{}) {
+		rows = append(rows, factRow("Indirect", u.Indirect))
+	}
+	rows = append(rows, factRow("Bound", u.Bound), timeRow("FirstSeen", u.FirstSeen))
 	if u.NewName.Holds() || u.NameCreated != (allow.TimeFact{}) {
 		rows = append(rows, timeRow("NameCreated", u.NameCreated))
 	}

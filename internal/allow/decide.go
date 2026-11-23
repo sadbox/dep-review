@@ -315,7 +315,12 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 	case !readValid(u.Read, ecosystem):
 		person = append(person, ReasonReadUnknown)
 	}
-	if major == factYes && listed == factNo {
+	// A major is the owner's to decide unless they already did (the list)
+	// or there is nothing for them to decide: a dependency the repository
+	// does not declare moves because its parent asked for the new major.
+	// Such an update still needs the major's age, like a listed one.
+	indirect := (ecosystem == GoModules || ecosystem == NPM) && u.Indirect.Holds()
+	if major == factYes && listed == factNo && !indirect {
 		person = append(person, ReasonMajorUnlisted)
 	}
 	if !superseded && !u.FirstSeen.Known() {

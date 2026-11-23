@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	json "encoding/json/v2"
+
+	"github.com/sadbox/dep-review/internal/allow"
 )
 
 // reg builds a registry entry at a lock path, with a hash that stands for
@@ -301,6 +303,71 @@ func TestSameButRanges(t *testing.T) {
 			t.Errorf("sameButRanges = %q", got)
 		}
 	})
+}
+
+// Indirect is read from the lock's root entry (spec section 11, amendment
+// 23): a package the root names in none of its dependency maps, at head
+// or at base, under its own name or the name it is installed as.
+func TestDeclared(t *testing.T) {
+	root := func(s string) map[string]any {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(s), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	plain := root(`{"name":"app","dependencies":{"a":"^1.0.0"},"devDependencies":{"b":"^2.0.0"}}`)
+	moved := func(name string, paths ...string) update {
+		u := update{Name: name, From: "1.0.0", To: "2.0.0"}
+		for _, p := range paths {
+			u.Old = append(u.Old, reg(p, name, "1.0.0"))
+			u.New = append(u.New, reg(p, name, "2.0.0"))
+		}
+		return u
+	}
+	tests := []struct {
+		name       string
+		u          update
+		base, head map[string]any
+		want       string // "" for a package the root does not declare
+	}{
+		{"a dependency of a dependency", moved("deep", "node_modules/deep"), plain, plain, ""},
+		{"nested under its parent", moved("deep", "node_modules/a/node_modules/deep"), plain, plain, ""},
+		{"a new name the root does not declare", update{Name: "deep", To: "1.0.0", NewName: true, New: []node{reg("node_modules/deep", "deep", "1.0.0")}}, plain, plain, ""},
+		{"in dependencies", moved("a", "node_modules/a"), plain, plain, "in dependencies at head"},
+		{"in devDependencies", moved("b", "node_modules/b"), plain, plain, "in devDependencies at head"},
+		{"in optionalDependencies", moved("c", "node_modules/c"), plain, root(`{"optionalDependencies":{"c":"^1.0.0"}}`), "in optionalDependencies at head"},
+		{"in peerDependencies", moved("c", "node_modules/c"), plain, root(`{"peerDependencies":{"c":"*"}}`), "in peerDependencies at head"},
+		{"declared at base only", moved("c", "node_modules/c"), root(`{"dependencies":{"c":"^1.0.0"}}`), plain, "in dependencies at base"},
+		{"a root with no dependencies at all", moved("deep", "node_modules/deep"), root(`{"name":"app"}`), root(`{"name":"app"}`), ""},
+		// The same name as a declared package, at another place in the
+		// tree, is still the declared name: the gate does not say which
+		// copy the root's range picks.
+		{"a second copy of a declared name, nested", moved("a", "node_modules/x/node_modules/a"), plain, plain, "in dependencies at head"},
+		// An alias is declared under the name it is installed as.
+		{"declared under an alias", moved("real", "node_modules/alias"), plain, root(`{"dependencies":{"alias":"npm:real@^1.0.0"}}`), "in dependencies at head"},
+		// Names are compared exactly.
+		{"a name that only resembles a declared one", moved("a-b", "node_modules/a-b"), plain, plain, ""},
+		{"a scope is part of the name", moved("@a/a", "node_modules/@a/a"), plain, plain, ""},
+		// A map that cannot be read declares everything.
+		{"dependencies is a list", moved("deep", "node_modules/deep"), plain, root(`{"dependencies":["deep"]}`), "dependencies at head is not an object"},
+		{"devDependencies is null at base", moved("deep", "node_modules/deep"), root(`{"devDependencies":null}`), plain, "devDependencies at base is not an object"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := declared(tt.u, tt.base, tt.head); got != tt.want {
+				t.Errorf("declared = %q, want %q", got, tt.want)
+			}
+			if f := indirectFact(tt.u, tt.base, tt.head); !f.Gathered() || f.OK != (tt.want == "") || !strings.Contains(f.Value, tt.want) {
+				t.Errorf("Indirect = %+v, want a gathered %v saying %q", f, tt.want == "", tt.want)
+			}
+		})
+	}
+	// An update nobody looked the root entries up for is not indirect:
+	// the fact has to be made, it is never what is left over.
+	if f := lockFacts(moved("deep", "node_modules/deep"), testPolicy(), "npm").Indirect; f != (allow.Fact{}) {
+		t.Errorf("Indirect of an update without one = %+v, want no fact at all", f)
+	}
 }
 
 func TestInstalledName(t *testing.T) {

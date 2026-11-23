@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/facts"
 )
 
@@ -32,6 +33,11 @@ type update struct {
 	// inside its own tarball, or "(declared)" when the entry only says it
 	// bundles some.
 	Bundled []string
+	// Indirect is the Indirect fact: the root package does not name this
+	// package among its own dependencies. readChangeSet sets it from the
+	// two root entries. An update made any other way has none, which is a
+	// dependency the repository declares.
+	Indirect allow.Fact
 }
 
 // changeSet is what the base and head files amount to.
@@ -134,6 +140,9 @@ func readChangeSet(ctx context.Context, t tool, files []facts.File) (changeSet, 
 	}
 	if len(problems) > 0 {
 		return changeSet{problems: problems}, nil
+	}
+	for i := range updates {
+		updates[i].Indirect = indirectFact(updates[i], baseLock.Root, headLock.Root)
 	}
 
 	var names []string
@@ -467,6 +476,62 @@ func sameButRanges(base, head map[string]any, moved map[string]bool) string {
 			bm, hm := rangeRE.FindStringSubmatch(br), rangeRE.FindStringSubmatch(hr)
 			if bm == nil || hm == nil || bm[1] != hm[1] {
 				return fmt.Sprintf("changes the range of %s in %s by more than its version (%s to %s)", show(name), key, quote(fmt.Sprint(bv)), quote(fmt.Sprint(hv)))
+			}
+		}
+	}
+	return ""
+}
+
+// indirectFact is the Indirect fact of one update (spec section 11,
+// amendment 23): it holds when the root package declares the package
+// nowhere, and the package is in the lock only because another one asks
+// for it.
+func indirectFact(u update, baseRoot, headRoot map[string]any) allow.Fact {
+	const source = "the root entry of package-lock.json at base and head"
+	if where := declared(u, baseRoot, headRoot); where != "" {
+		return allow.No("the root package declares it: "+where, source)
+	}
+	return allow.Yes("in none of the root package's dependencies, devDependencies, optionalDependencies and peerDependencies: another package asks for it", source)
+}
+
+// declared says where the root package names u among its own
+// dependencies, at head or at base, and is empty when it does not. The
+// lock's root entry is npm's copy of package.json's dependency maps, and
+// it is there whether or not package.json changed. It is the only
+// manifest the repository has: a lock with workspace members, whose own
+// package.json files would declare dependencies too, does not have the
+// shape (npm does not read it without them).
+//
+// A package is declared under the name it is installed as, which for an
+// alias is not its own, so both are looked for. A dependency map that is
+// not an object declares everything: that a package is indirect has to
+// be shown, never assumed.
+func declared(u update, baseRoot, headRoot map[string]any) string {
+	names := []string{u.Name}
+	for _, copies := range [][]node{u.Old, u.New} {
+		for _, c := range copies {
+			if n := installedName(c.Path); n != "" && !slices.Contains(names, n) {
+				names = append(names, n)
+			}
+		}
+	}
+	for _, side := range []struct {
+		name string
+		root map[string]any
+	}{{"head", headRoot}, {"base", baseRoot}} {
+		for _, section := range depSections {
+			value, ok := side.root[section]
+			if !ok {
+				continue
+			}
+			deps, isObject := value.(map[string]any)
+			if !isObject {
+				return fmt.Sprintf("%s at %s is not an object", section, side.name)
+			}
+			for _, n := range names {
+				if _, ok := deps[n]; ok {
+					return fmt.Sprintf("in %s at %s", section, side.name)
+				}
 			}
 		}
 	}
