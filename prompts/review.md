@@ -45,10 +45,14 @@ For every update in `evidence.json`:
    or a space. Escapes such as `<0x0D>` (a lone carriage return) or
    `<U+2028>` stand for characters some languages treat as a line break:
    code after one may run.
-   For a GitHub Action whose `actions.dist-residual` is on review, the
-   gate rebuilt the bundle from source and got the committed bytes: read
-   the residual in its `dist.txt` all the same, and judge whether the
-   first-party source and the bundled packages' diffs explain it.
+   For a GitHub Action with an `actions.dist-residual` finding and a
+   `bundle.diffs.md` index, the gate is rebuilding the bundle from source
+   with no locked package changed; the PR merges only if that rebuild
+   reproduces the committed bytes. Read every part of that index (they are
+   required) and judge whether the first-party source diff explains every
+   change in them. Code in the bundle that no first-party change
+   accounts for, or a change you cannot read in full, makes the answer
+   unsure.
 2. Look for supply-chain signals: new or changed network endpoints, HTTP
    calls, DNS lookups, process execution, reads of environment variables or
    credential files the library has no business touching, encoded or

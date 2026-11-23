@@ -1230,6 +1230,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		isEntry[e] = true
 	}
 	var firstParty, bundles, distText, distOther, locks, pkgJSONs []fileChange
+	var maps []fileChange
 	for _, c := range changed {
 		switch {
 		case isLockfile(c.path):
@@ -1237,6 +1238,7 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 		case isEntry[c.path] || isDistPath(c.path):
 			switch {
 			case strings.HasSuffix(c.path, ".map"):
+				maps = append(maps, c) // read with its bundle; any other is shown below
 			case isJS(c.path):
 				bundles = append(bundles, c)
 			case isTextAsset(c.path):
@@ -1252,6 +1254,18 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 			if isBuildConfig(c.path) {
 				fs.add(model.RouteHuman, "actions.build-config-changed", name, "build configuration changed: %s", safePath(c.path))
 			}
+		}
+	}
+	// A source map is read with the bundle it belongs to. A changed map
+	// of no changed bundle runs nowhere, but a build can read it: it is
+	// shown, as bundle content nothing explains.
+	isBundle := map[string]bool{}
+	for _, c := range bundles {
+		isBundle[c.path] = true
+	}
+	for _, c := range maps {
+		if !isBundle[strings.TrimSuffix(c.path, ".map")] {
+			distOther = append(distOther, c)
 		}
 	}
 
@@ -1523,6 +1537,46 @@ func (f *fetcher) analyzeCode(ctx context.Context, env fetch.Env, p *pair, fs *f
 					noClear = safePath(c.path) + " changed outside the first-party diff and the rebuilt directories"
 					break
 				}
+			}
+		}
+		// The relaxed residual is read in full: every changed file under
+		// the rebuilt directories becomes a required part (the summary in
+		// dist.txt cuts long code), so the verdict must examine it, and a
+		// binary one goes to a person.
+		if noClear == "" && slices.ContainsFunc(residual, func(r *bundleReport) bool { return rebuild.Under(r.path, plan.Dirs) }) {
+			var diffs []ecoutil.FileDiff
+			for _, c := range changed {
+				if !rebuild.Under(c.path, plan.Dirs) {
+					continue
+				}
+				if !plainPath(c.path) {
+					noClear = safePath(c.path) + " cannot be diffed by name exactly"
+					break
+				}
+				d, err := up.diff(ctx, p.oldRef, p.newRef, ":(literal)"+c.path)
+				if err != nil {
+					return err
+				}
+				if d == "" {
+					noClear = safePath(c.path) + " has no diff"
+					break
+				}
+				diffs = append(diffs, ecoutil.FileDiff{Path: c.path, Body: []byte(d)})
+			}
+			if noClear == "" {
+				nd := ecoutil.NavDiffs{
+					Eco: "actions", Key: p.label() + " bundle", Update: name, What: "action's rebuilt bundle",
+					Name:     func(suffix string) string { return evName(p, "bundle."+suffix) },
+					Desc:     "index of the full per-file diffs of the rebuilt bundle directories of " + p.label() + ": read every one and list its ID in examined (its residual is on review only with them read)",
+					Diffs:    diffs,
+					SafePath: safePath,
+				}
+				ds, nf, err := nd.Write(env, len(fs.diffs))
+				if err != nil {
+					return err
+				}
+				fs.diffs = append(fs.diffs, ds...)
+				fs.list = append(fs.list, nf...)
 			}
 		}
 		for _, r := range residual {

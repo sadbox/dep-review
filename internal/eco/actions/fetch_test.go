@@ -423,6 +423,16 @@ func TestFetchScenarios(t *testing.T) {
 				if len(res.Rebuilds) != 1 || !residualIfRebuilt(res) {
 					t.Errorf("rebuilds %d, residual not marked IfRebuilt: %+v\n%s", len(res.Rebuilds), res.Findings, ev.files["actions/summary.md"].content)
 				}
+				// The relaxed residual is required reading in full.
+				found := false
+				for _, d := range res.Diffs {
+					if d.Path == "dist/index.js" && d.Required && strings.Contains(string(ev.files[d.File].content), "child_process") {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no required full diff of dist/index.js: %+v", res.Diffs)
+				}
 			}},
 		{name: "residual with a locked package change", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
 			v1: rebuildableLock,
@@ -447,6 +457,10 @@ func TestFetchScenarios(t *testing.T) {
 				if residualIfRebuilt(res) {
 					t.Errorf("residual marked IfRebuilt despite an unshown change: %+v", res.Findings)
 				}
+			}},
+		{name: "stray source map", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
+			v2: func(f map[string]string) {
+				f["tools/dist/banner.js.map"] = `{"version":3,"sources":[],"mappings":"","x":"payload"}`
 			}},
 		{name: "first-party bundle change without source change", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
 			v2: func(f map[string]string) {

@@ -377,9 +377,12 @@ from the bundle, which the attacker writes, so a changed lockfile keeps
 the residual with a person. Fetch marks such a finding `if_rebuilt`;
 publish relaxes it only for a verified result bound to every plan of the
 update.
-The residual stays in `dist.txt` for the reviewer, and the review's
-verdict and accounting decide as for any other review. A build may still
-copy any file of the tree, which the first-party diff shows. A gVisor
+The full diff of every changed file under the rebuilt directories is
+then required reading (navigable parts, examined like any other; a
+binary one goes to a person), and the review's verdict and accounting
+decide as for any other review. A build can also read unchanged files,
+which were accepted with earlier versions; a changed source map that
+belongs to no changed bundle is shown as a residual of its own. A gVisor
 escape could forge a result; at worst that puts the PR on review, never
 past it.
 

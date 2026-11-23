@@ -206,7 +206,7 @@ func TestRenderRebuilds(t *testing.T) {
 		{Update: "o/s", Repo: "o/s", Commit: c, Outcome: "approved"},
 	}
 	out := renderComment(commentData{Evidence: ev, Outcome: Outcome{Decision: model.DecisionHuman}, Rebuild: results})
-	for _, want := range []string{"Bundle rebuilds (3; information only", "`verified`", "rebuilt all 4 files"} {
+	for _, want := range []string{"Bundle rebuilds (3)", "`verified`", "rebuilt all 4 files"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("comment lacks %q:\n%s", want, out)
 		}

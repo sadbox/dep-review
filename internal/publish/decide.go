@@ -31,7 +31,8 @@ type Inputs struct {
 	FetchResult  string // needs.fetch.result
 	ReviewResult string // needs.review.result
 	// Rebuild is the rebuild job's results (rebuild/rebuild.json), shown
-	// in the comment against Evidence.Rebuilds. Decide never reads it.
+	// in the comment against Evidence.Rebuilds. Decide reads it only to
+	// relax IfRebuilt findings of an update whose every plan verified.
 	Rebuild []model.RebuildResult
 }
 

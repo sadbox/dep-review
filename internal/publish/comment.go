@@ -332,10 +332,11 @@ func rebuildOutcome(p model.RebuildPlan, results []model.RebuildResult) (outcome
 	return "not run", "", "the rebuild job produced no result for it"
 }
 
-// renderRebuilds shows the rebuild job's results. They are information:
-// no route depends on them (see package rebuild for what a match shows).
+// renderRebuilds shows the rebuild job's results. Only Decide's
+// relaxation of IfRebuilt findings depends on them (see package rebuild
+// for what a match shows).
 func renderRebuilds(b *strings.Builder, plans []model.RebuildPlan, results []model.RebuildResult) {
-	fmt.Fprintf(b, "\n#### Bundle rebuilds (%d; information only, no route depends on them)\n\n", len(plans))
+	fmt.Fprintf(b, "\n#### Bundle rebuilds (%d)\n\nA verified rebuild only sends an unexplained bundle residual to review (when no locked package changed); everything else is information.\n\n", len(plans))
 	b.WriteString("| Update | Commit | Result | Detail |\n|---|---|---|---|\n")
 	for i, p := range plans {
 		if i == maxRows {
