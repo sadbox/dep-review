@@ -462,11 +462,21 @@ func status(res Result) (state, description string) {
 	return "failure", "needs a person: " + reason
 }
 
+// statusReadTime is the most shown waits for GitHub's answer, retries
+// included. A variable so that a test need not wait for it.
+var statusReadTime = 15 * time.Second
+
 // shown reports whether GitHub's combined status of sha has the gate's
 // context with exactly this state and description (spec section 11,
 // amendment 79). It lists the latest status of each context, 100 a page;
 // a read that fails, or a first page without the gate's context, is no.
+//
+// The read only saves a write, so it has a short time of its own
+// (statusReadTime): one that hangs or is retried must not use up the
+// time the write after it needs.
 func shown(ctx context.Context, cfg Config, sha, state, description string) bool {
+	ctx, cancel := context.WithTimeout(ctx, statusReadTime)
+	defer cancel()
 	var combined struct {
 		Statuses []struct {
 			Context     string `json:"context"`

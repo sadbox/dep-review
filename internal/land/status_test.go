@@ -355,3 +355,50 @@ func TestAWaitDoesNotReachTheStatusLimit(t *testing.T) {
 		t.Errorf("%d statuses", n)
 	}
 }
+
+// The read of the combined status has a short time of its own (amendment
+// 79): one that hangs must not use up the time the write after it needs.
+// Without that, the read ran until Act's context ended and the status was
+// not set at all.
+func TestAStatusReadThatHangsDoesNotStopTheWrite(t *testing.T) {
+	f := newFake(t)
+	hang := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-hang:
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/status") {
+				<-r.Context().Done()
+				return
+			}
+		default:
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := f.config(t0, nil)
+	cfg.GitHub.BaseURL = srv.URL + "/"
+	cfg.Scheduled = true
+	if _, err := publish(t, cfg, files(t, youngFacts(t, t0), clean(t))); err != nil {
+		t.Fatal(err)
+	}
+	close(hang)
+	was := statusReadTime
+	statusReadTime = 50 * time.Millisecond
+	t.Cleanup(func() { statusReadTime = was })
+
+	now := t0.Add(4 * time.Hour)
+	cfg.Now = func() time.Time { return now }
+	dir := files(t, youngFacts(t, now), clean(t))
+	ev, err := Decide(context.Background(), cfg, filepath.Join(dir, wire.FactsFile), filepath.Join(dir, wire.VerdictsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if res, err := Act(ctx, cfg, ev); err != nil || res.Action != ActionWait {
+		t.Fatalf("%+v, %v", res, err)
+	}
+	if s := f.statuses(headA); len(s) != 2 {
+		t.Errorf("statuses %q, want the second one set although the read never answered", s)
+	}
+}
