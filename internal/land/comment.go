@@ -333,10 +333,10 @@ func lead(v view) string {
 	head := code(v.ev.PullRequest.Head)
 	switch v.res.Action {
 	case ActionMerged:
-		return "**Merged** at head " + head + ". Every fact below holds, " + modelSaid(v) + ", and GitHub's required checks allowed the merge.\n"
+		return "**Merged** at head " + head + ". Every fact below holds, " + modelSaid(v) + ", and GitHub's required checks allowed the merge.\n" + ownSaid(v)
 	case ActionRefused:
 		return "**GitHub refused the merge.** Every fact below holds and " + modelSaid(v) + ", so the gate asked GitHub to merge head " + head +
-			". GitHub answered: " + code(v.res.Note) + "\n\n**Way out:** look at the pull request's merge box, then merge by hand or have Dependabot recreate the pull request. The gate does not try this head again.\n"
+			". GitHub answered: " + code(v.res.Note) + "\n" + ownSaid(v) + "\n**Way out:** look at the pull request's merge box, then merge by hand or have Dependabot recreate the pull request. The gate does not try this head again.\n"
 	}
 	if len(d.Reasons) == 0 {
 		return "**No reason was recorded.** Look at the update and merge or close the pull request by hand.\n"
@@ -381,13 +381,50 @@ func lead(v view) string {
 // merge. The model raised no veto only where it was asked. Nothing of an
 // image is read, and two artifacts that hold the same files have nothing
 // to read: neither is put before a model, and the clause holds for both.
+// An own workflow is not put before one either, and there the gate did
+// have something to show: ownSaid says so in a paragraph of its own.
 func modelSaid(v view) string {
-	for _, u := range v.ev.file.Facts.Updates {
+	own := false
+	for i, u := range v.ev.file.Facts.Updates {
 		if u.Prepared.Status == wire.Prepared {
 			return "the model raised no veto"
 		}
+		own = own || ownWorkflow(v, i)
+	}
+	if own {
+		return "no model was asked"
 	}
 	return "no model was asked (the gate had nothing to show one)"
+}
+
+// ownWorkflow reports whether update i is one the gate accepts as the
+// gate owner's own workflow, unread: allow.Decide's test (spec section
+// 11, amendment 60).
+func ownWorkflow(v view, i int) bool {
+	return v.ev.Facts.Ecosystem == allow.GitHubActions && i < len(v.ev.Facts.Updates) && v.ev.Facts.Updates[i].Own.Holds()
+}
+
+// ownAccepted is what the comment says of an update that was accepted as
+// the gate owner's own workflow. Such an update merges with nothing read
+// and no age, and the comment must not leave that to be worked out from
+// the fact table.
+const ownAccepted = "accepted as the gate owner's own workflow, unread: nothing of it was read, no model was asked about it and no age was asked of it. " +
+	"The gate checked where its commit comes from (the repository by its IDs, the tag, the default branch, the old pin) and not what it does"
+
+// ownSaid is the paragraph the lead of a decision to merge owes every
+// update that was accepted as the gate owner's own workflow, or "". The
+// decision is to merge, so every update whose Own holds was accepted.
+func ownSaid(v view) string {
+	var names []string
+	for i, u := range v.ev.Facts.Updates {
+		if ownWorkflow(v, i) {
+			names = append(names, updateName(u))
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return "\n**Own workflow, not read.** " + strings.Join(names, " and ") + ": " + ownAccepted + ".\n"
 }
 
 // A fact's four states, as the tables show them.
@@ -426,6 +463,7 @@ var reasonFact = map[allow.Reason]string{
 	allow.ReasonReadUnknown:         "Read",
 	allow.ReasonReadRefused:         "Read",
 	allow.ReasonMajorUnlisted:       "Major",
+	allow.ReasonMajorOwn:            "Major",
 	allow.ReasonFirstSeenUnknown:    "FirstSeen",
 	allow.ReasonReadDeadline:        "",
 	allow.ReasonSourceDeadline:      "",
@@ -511,12 +549,15 @@ func updateRows(v view, i int) []row {
 		factRow("Known", u.Known), factRow("Listed", u.Listed), factRow("NewName", u.NewName),
 		factRow("Increase", u.Increase), factRow("Major", u.Major),
 	}
-	// The three facts only some updates have are shown where they are in
+	// The four facts only some updates have are shown where they are in
 	// play: whether the repository declares the dependency itself for a Go
-	// module or an npm package, a name's age for a new name, a superseded
-	// pin for an image.
+	// module or an npm package, whether a workflow is the gate owner's
+	// own, a name's age for a new name, a superseded pin for an image.
 	if u.Indirect != (allow.Fact{}) {
 		rows = append(rows, factRow("Indirect", u.Indirect))
+	}
+	if u.Own != (allow.Fact{}) {
+		rows = append(rows, factRow("Own", u.Own))
 	}
 	rows = append(rows, factRow("Bound", u.Bound), timeRow("FirstSeen", u.FirstSeen))
 	if u.NewName.Holds() || u.NameCreated != (allow.TimeFact{}) {
@@ -589,6 +630,10 @@ func updateSection(v view, i int) string {
 	if i < len(v.res.Decision.PerUpdate) {
 		ud := v.res.Decision.PerUpdate[i]
 		switch {
+		case ud.Outcome == allow.Merge && ownWorkflow(v, i):
+			// Whatever becomes of the pull request, this update is not
+			// one that was read.
+			b.WriteString("Does not hold the pull request back: " + ownAccepted + ".")
 		case ud.Outcome == allow.Merge:
 			b.WriteString("Does not hold the pull request back.")
 		default:
@@ -598,7 +643,9 @@ func updateSection(v view, i int) string {
 			}
 			fmt.Fprintf(&b, "On its own: %s (%s).", ud.Outcome, strings.Join(codes, ", "))
 		}
-		if !ud.NotBefore.IsZero() {
+		// No age is asked of an own workflow, so no time says when it is
+		// old enough.
+		if !ud.NotBefore.IsZero() && !ownWorkflow(v, i) {
 			fmt.Fprintf(&b, " Old enough from %s.", stamp(ud.NotBefore))
 		}
 		b.WriteString("\n\n")

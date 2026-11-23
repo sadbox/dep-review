@@ -1,0 +1,13 @@
+{
+  "ecosystem": "github_actions",
+  "created": "2026-01-10T12:00:00Z",
+  "files": [
+    {
+      "path": ".github/workflows/lint.yaml",
+      "base_mode": "100644",
+      "head_mode": "100644",
+      "base": "name: lint\non: [pull_request]\njobs:\n  lint:\n    uses: sadbox/ci/.github/workflows/lint.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v1.5.0\n    permissions:\n      contents: read\n",
+      "head": "name: lint\non: [pull_request]\njobs:\n  lint:\n    uses: sadbox/ci/.github/workflows/lint.yml@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb # v2.0.0\n    permissions:\n      contents: read\n"
+    }
+  ]
+}

@@ -55,6 +55,12 @@ type Config struct {
 	FastPath           bool   `json:"fast_path"`
 	FastPathCompanions string `json:"fast_path_companions"`
 	Listed             Lists  `json:"listed"`
+	// OwnWorkflows is the gate owner's own repositories whose reusable
+	// workflows callers pin (spec section 11, amendment 60): each by its
+	// exact name and the numeric IDs GitHub gave it. An entry grants a
+	// merge with nothing read and no age, so there is no prefix form and
+	// no entry for an owner or an organisation.
+	OwnWorkflows []allow.OwnRepo `json:"own_workflows"`
 
 	// The model settings. internal/veto turns them into its client's
 	// settings (veto.FromConfig) and checks them against each other; the
@@ -91,6 +97,8 @@ type file struct {
 	FastPath           *bool   `json:"fast_path"`
 	FastPathCompanions *string `json:"fast_path_companions"`
 	Listed             Lists   `json:"listed"`
+	// OwnWorkflows is nil for an absent key and empty for an empty list.
+	OwnWorkflows []allow.OwnRepo `json:"own_workflows"`
 
 	Model                 *string `json:"model"`
 	Effort                *string `json:"effort"`
@@ -136,6 +144,7 @@ func (c Config) Policy() allow.Policy {
 			allow.Docker:        append([]string(nil), c.Listed.Docker...),
 			allow.NPM:           append([]string(nil), c.Listed.NPM...),
 		},
+		Own: append([]allow.OwnRepo(nil), c.OwnWorkflows...),
 	}
 }
 
@@ -148,7 +157,7 @@ func complete(b []byte) (Config, error) {
 		return Config{}, err
 	}
 	if f.MinAgeHours == nil || f.UnreadAgeDays == nil || f.MajorAgeDays == nil || f.NewNameAgeDays == nil ||
-		f.WaitDeadlineDays == nil || f.FastPath == nil || f.FastPathCompanions == nil ||
+		f.WaitDeadlineDays == nil || f.FastPath == nil || f.FastPathCompanions == nil || f.OwnWorkflows == nil ||
 		f.Model == nil || f.Effort == nil || f.ContextTokens == nil || f.MaxOutputTokens == nil ||
 		f.ChunkBytes == nil || f.MaxChunks == nil || f.RequestTimeoutSeconds == nil || f.Attempts == nil {
 		return Config{}, errors.New("a key is missing")
@@ -214,7 +223,36 @@ func complete(b []byte) (Config, error) {
 		return Config{}, err
 	}
 	c.Listed = f.Listed
+	if err := checkOwn(f.OwnWorkflows); err != nil {
+		return Config{}, err
+	}
+	c.OwnWorkflows = f.OwnWorkflows
 	return c, nil
+}
+
+// ownRepoRE is an own_workflows name: one owner and one repository, in
+// the lower case GitHub reports these names in.
+var ownRepoRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9][a-z0-9._-]{0,99}$`)
+
+// checkOwn holds every own_workflows entry to one exact repository: a
+// whole owner/repository name, both of GitHub's numeric IDs, and no name
+// twice. allow.OwnRepository matches the whole name byte for byte, so an
+// entry that is a prefix, an owner alone or a pattern would never match;
+// it is refused here so that nobody takes it for one that does.
+func checkOwn(own []allow.OwnRepo) error {
+	seen := map[string]bool{}
+	for _, o := range own {
+		switch {
+		case !ownRepoRE.MatchString(o.Repository):
+			return fmt.Errorf("own_workflows: %q: an entry is one owner/repository in lower case; there is no prefix and no owner alone", o.Repository)
+		case o.RepositoryID < 1 || o.OwnerID < 1:
+			return fmt.Errorf("own_workflows: %q: repository_id and owner_id must be the numbers GitHub reports", o.Repository)
+		case seen[o.Repository]:
+			return fmt.Errorf("own_workflows: %q is there twice", o.Repository)
+		}
+		seen[o.Repository] = true
+	}
+	return nil
 }
 
 // parse decodes one file strictly: one JSON object and nothing after it,

@@ -140,6 +140,7 @@ type Update struct {
 	NoRegress   allow.Fact     `json:"no_regress"`
 	SecurityFix allow.Fact     `json:"security_fix"`
 	Superseded  allow.Fact     `json:"superseded"`
+	Own         allow.Fact     `json:"own"`
 
 	// Hash is the hash Bound was established for (artifact.Pair.New.Hash:
 	// go.sum's h1 of the module zip, the lock's integrity, the action's
@@ -171,10 +172,11 @@ const (
 	// full, on the fetch job's word, which is also all that stands behind
 	// the text of a prepared read (spec section 11, amendment 53).
 	Identical ReadStatus = "identical"
-	// Nothing: there is nothing to read and nothing was fetched. That is
-	// every Docker update, and an update of another ecosystem whose
-	// gatherer named no artifact (its Bound does not hold, or the old
-	// version has no verifiable hash). For Docker it is not-applicable;
+	// Nothing: nothing is read and nothing was fetched. That is every
+	// Docker update, every own workflow (spec section 11, amendment 60),
+	// and an update of another ecosystem whose gatherer named no artifact
+	// (its Bound does not hold, or the old version has no verifiable
+	// hash). For Docker and for an own workflow it is not-applicable;
 	// anywhere else the update is unread, which is person.
 	Nothing ReadStatus = "nothing"
 	// Unavailable: the artifact could not be downloaded this time
@@ -244,8 +246,8 @@ func NewUpdate(u allow.UpdateFacts, prepared Read) Update {
 		Increase: u.Increase, Major: u.Major, Indirect: u.Indirect, Bound: u.Bound,
 		FirstSeen: u.FirstSeen, NameCreated: u.NameCreated,
 		Clean: u.Clean, NoRegress: u.NoRegress, SecurityFix: u.SecurityFix,
-		Superseded: u.Superseded,
-		Prepared:   prepared,
+		Superseded: u.Superseded, Own: u.Own,
+		Prepared: prepared,
 	}
 }
 
@@ -289,11 +291,16 @@ type Verdict struct {
 //
 //   - Docker is not-applicable, whatever was prepared. Nothing of an
 //     image is read.
+//   - An Actions update whose Own holds is not-applicable too: the gate
+//     owner's own workflow is accepted unread (spec section 11, amendment
+//     60). allow.Decide takes that state only for a name on its own
+//     policy's list, and takes no other state for such an update.
 //   - Refused is refused. Unavailable is none.
 //   - Identical is full, with no verdict looked for: the two artifacts
 //     hold the same files, and no model was asked about nothing.
-//   - Nothing, outside Docker, leaves Read unset, which allow.Decide
-//     answers with person: no artifact was verified, so nothing was read.
+//   - Nothing, for any other update, leaves Read unset, which
+//     allow.Decide answers with person: no artifact was verified, so
+//     nothing was read.
 //   - Prepared takes the one verdict with the read's Key and the caller's
 //     fingerprint. Without one, Read is none: not reviewed yet, or
 //     reviewed as another question. With one, Read is the verdict's,
@@ -327,10 +334,12 @@ func Join(f Facts, v Verdicts, fingerprint string) allow.PRFacts {
 			Increase: u.Increase, Major: u.Major, Indirect: u.Indirect, Bound: u.Bound,
 			FirstSeen: u.FirstSeen, NameCreated: u.NameCreated,
 			Clean: u.Clean, NoRegress: u.NoRegress, SecurityFix: u.SecurityFix,
-			Superseded: u.Superseded,
+			Superseded: u.Superseded, Own: u.Own,
 		}
 		switch {
 		case f.Facts.Ecosystem == allow.Docker:
+			joined.Read = allow.ReadNotApplicable
+		case ownWorkflow(f.Facts.Ecosystem, u):
 			joined.Read = allow.ReadNotApplicable
 		case u.Prepared.Status == Refused:
 			joined.Read = allow.ReadRefused
@@ -362,6 +371,14 @@ func Join(f Facts, v Verdicts, fingerprint string) allow.PRFacts {
 		out.Updates = append(out.Updates, joined)
 	}
 	return out
+}
+
+// ownWorkflow reports whether u is an update the gate accepts unread as
+// the gate owner's own workflow: an Actions update whose Own holds. It is
+// allow.Decide's own test, made here to say which read state such an
+// update has.
+func ownWorkflow(ecosystem string, u Update) bool {
+	return ecosystem == allow.GitHubActions && u.Own.Holds()
 }
 
 // strict is how both files are decoded: a member the types do not have is
@@ -468,6 +485,9 @@ func (f Facts) check() error {
 		}
 		if f.Facts.Ecosystem == allow.Docker && u.Prepared.Status != Nothing {
 			return fmt.Errorf("update %d: prepared: status %q for an image, of which nothing is read", i, u.Prepared.Status)
+		}
+		if ownWorkflow(f.Facts.Ecosystem, u) && u.Prepared.Status != Nothing {
+			return fmt.Errorf("update %d: prepared: status %q for an own workflow, of which nothing is read", i, u.Prepared.Status)
 		}
 	}
 	return nil

@@ -1,4 +1,7 @@
 actions-major-unlisted	github_actions	person	major_unlisted	example/setup-tool v1.4.0 -> v2.0.0: major_unlisted
+actions-own-lookalike	github_actions	person	shape,no_updates	shape: .github/workflows/lint.yaml:5: the line pins a reusable workflow that is not a workflow file of a repository on the policy's own list; such a pin never merges without a person
+actions-own-major	github_actions	person	major_own	sadbox/ci v1.5.0 -> v2.0.0: major_own
+actions-own-workflow	github_actions	merge	-	needs 0h after creation
 actions-pin	github_actions	merge	-	needs 72h after creation
 actions-short-tag	github_actions	person	shape,no_updates	shape: .github/workflows/ci.yml:7: the changed line is not an action pin in an accepted shape at both commits
 docker-listed	docker	merge	-	needs 72h after creation
@@ -14,9 +17,9 @@ uv-no-rule	uv	person	no_rule,fact_missing,no_updates	-
 
 ecosystem        total merge  wait person
 docker               2     1     0      1
-github_actions       3     1     0      2
+github_actions       6     2     0      4
 go_modules           7     2     1      4
 uv                   1     0     0      1
-all                 13     4     1      8
+all                 16     5     1     10
 
 Every version is taken to be as old as its pull request. The gate counts from the registry's clock, or from its own first evaluation of the pin where the registry has none.

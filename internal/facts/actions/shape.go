@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/facts"
 	"github.com/sadbox/dep-review/internal/gh"
 )
@@ -33,10 +34,12 @@ const lockSchema = "version: 'v0.0.3'"
 // reusableWorkflowDir starts the path of a `uses:` that calls a reusable
 // workflow: a file in the called repository's .github/workflows. A
 // workflow is not an action. It runs as jobs of its own, with whatever
-// secrets and permissions the caller passes, and the gate's own workflow
-// is one, so a change to such a pin is never granted (spec section 11,
-// amendment 6). Anything under that directory counts, not only *.yml, so
-// that nothing a runner might still take for a workflow slips by.
+// secrets and permissions the caller passes, so a change to such a pin
+// is not read as an action's. The one that is read at all is a workflow
+// of a repository on the policy's own list (readUses; spec section 11,
+// amendment 60, which replaces amendment 6). Anything under that
+// directory counts, not only *.yml, so that nothing a runner might still
+// take for a workflow slips by.
 const reusableWorkflowDir = "/.github/workflows/"
 
 // The token shapes. A version is a plain vX.Y.Z release tag: no
@@ -59,13 +62,14 @@ var (
 	// quotes. A tag pin is the one form that is read: actions.lock holds
 	// its commit. It may end in a comment of printable ASCII, which must
 	// be the same at both commits like everything else that is not a
-	// token. A commit pin with its version in the comment is recognised
-	// only to say why it is refused.
+	// token. A commit pin with its version in the comment is read for one
+	// thing, a reusable workflow of an own repository (readUses), and is
+	// otherwise recognised only to say why it is refused.
 	//
 	//	      - uses: actions/setup-go@v7.1.0
 	//	      - uses: actions/checkout@v7.0.1 # why this step is here
 	//	    uses: owner/repo/.github/workflows/ci.yml@<40 hex> # v0.2.0
-	usesRe = regexp.MustCompile(`^( *(?:- )?uses: )(` + namePat + `)(` + subPathPat + `)@(?:(` + versionPat + `)( +#[ -~]*)?|` + shaPat + ` # ` + versionPat + `)$`)
+	usesRe = regexp.MustCompile(`^( *(?:- )?uses: )(` + namePat + `)(` + subPathPat + `)@(?:(` + versionPat + `)( +#[ -~]*)?|(` + shaPat + `) # (` + versionPat + `))$`)
 
 	// The lines of actions.lock that a bump rewrites (as yaml.v3 writes
 	// them: four-space indent, single quotes), and the workflow key that
@@ -147,6 +151,11 @@ type pin struct {
 	// the move, which is an action that another action uses. From which
 	// directory is then not known.
 	nested bool
+	// own: the pin is a reusable workflow of a repository on the policy's
+	// own list, read from the workflow line alone. actions.lock records
+	// nothing for a called workflow, so the commits are the line's and
+	// the IDs are the list's (spec section 11, amendment 60).
+	own bool
 }
 
 // usedDirs is every directory of the repository that the pull request's
@@ -172,7 +181,8 @@ type usesLine struct {
 	prefix  string // indentation, the optional "- ", and "uses: "
 	name    string // owner/repo
 	subPath string // "/dir/file" after the repository, or ""
-	version string // vX.Y.Z; "" for a commit pin
+	version string // vX.Y.Z: the tag, or the version a commit pin's comment names
+	commit  string // 40 hex; "" for a tag pin
 	comment string // a tag pin's trailing " # ...", or ""
 }
 
@@ -182,7 +192,9 @@ func parseUses(line string) (usesLine, bool) {
 		return usesLine{}, false
 	}
 	// ValidRepo also refuses "." and ".." as a repository name.
-	return usesLine{prefix: m[1], name: m[2], subPath: m[3], version: m[4], comment: m[5]}, gh.ValidRepo(m[2])
+	// One of the two forms matched: a tag (m[4], m[5]) or a commit with
+	// its version (m[6], m[7]).
+	return usesLine{prefix: m[1], name: m[2], subPath: m[3], version: m[4] + m[7], commit: m[6], comment: m[5]}, gh.ValidRepo(m[2])
 }
 
 // lockName is the owner/repo@token of a lockfile key or list line.
@@ -240,6 +252,9 @@ type changes struct {
 	// workflows is every workflow path the lockfile's workflows section
 	// has a key for. It is nil when actions.lock is not a changed file.
 	workflows map[string]bool
+	// own is the changed pins of own reusable workflows, one for each
+	// changed line.
+	own []pin
 }
 
 // readChangeSet reads the pull request's files and returns the pins it
@@ -247,7 +262,7 @@ type changes struct {
 // it says, in the gate's own words, what is not a pin update, and there
 // are no pins. It never quotes a changed line: only validated tokens,
 // paths and line numbers go into it.
-func readChangeSet(files []facts.File) ([]pin, string) {
+func readChangeSet(files []facts.File, policy allow.Policy) ([]pin, string) {
 	if len(files) == 0 {
 		return nil, "no file changed"
 	}
@@ -269,7 +284,7 @@ func readChangeSet(files []facts.File) ([]pin, string) {
 		if isLock {
 			problem = ch.readLock(f.Path, base, head)
 		} else {
-			problem = ch.readUses(f.Path, base, head)
+			problem = ch.readUses(f.Path, base, head, policy)
 		}
 		if problem != "" {
 			return nil, problem
@@ -279,8 +294,9 @@ func readChangeSet(files []facts.File) ([]pin, string) {
 }
 
 // readUses reads the changed lines of one workflow. It returns the
-// problem, or "".
-func (ch *changes) readUses(path string, base, head []string) string {
+// problem, or "". policy says which repositories' reusable workflows are
+// the gate owner's own.
+func (ch *changes) readUses(path string, base, head []string, policy allow.Policy) string {
 	for i := range base {
 		if base[i] == head[i] {
 			continue
@@ -295,9 +311,23 @@ func (ch *changes) readUses(path string, base, head []string) string {
 			return where + ": more than the commit and version changed on the line"
 		}
 		if strings.HasPrefix(b.subPath, reusableWorkflowDir) {
-			return where + ": the line pins a reusable workflow, which never merges without a person (the gate's own pin included)"
+			// The one reusable workflow that is read: a workflow file at
+			// the top level of a repository the policy names as the gate
+			// owner's own, by its whole name, pinned by commit at both
+			// commits. The name and the file are the same at both (checked
+			// above), so only the commit and the version move.
+			entry, isOwn := allow.OwnRepository(policy, b.name)
+			if !isOwn || !workflowPathRe.MatchString(b.subPath[1:]) {
+				return where + ": the line pins a reusable workflow that is not a workflow file of a repository on the policy's own list; such a pin never merges without a person"
+			}
+			if b.commit == "" || h.commit == "" || b.commit == h.commit {
+				return where + ": an own reusable workflow is read only as a commit pin (@<commit> # vX.Y.Z) whose commit changes"
+			}
+			ch.own = append(ch.own, pin{name: b.name, from: b.version, to: h.version, oldCommit: b.commit, newCommit: h.commit,
+				ownerID: entry.OwnerID, repoID: entry.RepositoryID, where: where, own: true})
+			continue
 		}
-		if b.version == "" || h.version == "" {
+		if b.commit != "" || h.commit != "" {
 			// A workflow line records no repository IDs, and the IDs are
 			// the defence against a name that someone else registered
 			// again. Only a tag pin has an actions.lock entry to give them.
@@ -501,13 +531,45 @@ func (ch *changes) pins() ([]pin, string) {
 		}
 	}
 
-	// add records a pin once. A tag-keyed and a commit-keyed entry may
-	// record the same move; they must then agree. Lines that use one
-	// action from different directories are one pin too, and the pin
-	// keeps every directory (subPath, "" for the repository itself). line
-	// says a workflow line names the pin; without one the lockfile alone
-	// does, and it names no directory.
+	// record keeps a pin once. A tag-keyed and a commit-keyed entry may
+	// record the same move, and so may several lines that call an own
+	// workflow; they must then agree. Lines that use one action from
+	// different directories are one pin too, and the pin keeps every
+	// directory.
 	var pins []pin
+	record := func(p pin) string {
+		for i := range pins {
+			q := &pins[i]
+			if q.name != p.name || q.from != p.from || q.to != p.to {
+				continue
+			}
+			if q.own != p.own {
+				// One update would be both read and accepted unread.
+				return p.where + ": the same repository and versions are pinned both as an action and as an own reusable workflow in this pull request"
+			}
+			if q.oldCommit != p.oldCommit || q.newCommit != p.newCommit {
+				return p.where + ": the same action and versions are pinned to other commits elsewhere in this pull request"
+			}
+			if q.ownerID != p.ownerID || q.repoID != p.repoID {
+				return p.where + ": two actions.lock entries record different IDs for the same action"
+			}
+			for _, sub := range p.subPaths {
+				if !slices.Contains(q.subPaths, sub) {
+					q.subPaths = append(q.subPaths, sub)
+					slices.Sort(q.subPaths)
+				}
+			}
+			q.root = q.root || p.root
+			q.nested = q.nested || p.nested
+			return ""
+		}
+		pins = append(pins, p)
+		return ""
+	}
+	// add records the pin of a lockfile entry. subPath is the directory
+	// the action is used from, "" for the repository itself. line says a
+	// workflow line names the pin; without one the lockfile alone does,
+	// and it names no directory.
 	add := func(e *lockEntry, name, subPath, where string, line bool) string {
 		p := pin{name: name, from: e.from, to: e.to, oldCommit: e.oldCommit, newCommit: e.newCommit, ownerID: e.ownerID, repoID: e.repoID, where: where}
 		switch {
@@ -518,27 +580,14 @@ func (ch *changes) pins() ([]pin, string) {
 		default:
 			p.subPaths = []string{subPath}
 		}
-		for i := range pins {
-			q := &pins[i]
-			if q.name != p.name || q.from != p.from || q.to != p.to {
-				continue
-			}
-			if q.oldCommit != p.oldCommit || q.newCommit != p.newCommit {
-				return where + ": the same action and versions are pinned to other commits elsewhere in this pull request"
-			}
-			if q.ownerID != p.ownerID || q.repoID != p.repoID {
-				return where + ": two actions.lock entries record different IDs for the same action"
-			}
-			if subPath != "" && !slices.Contains(q.subPaths, subPath) {
-				q.subPaths = append(q.subPaths, subPath)
-				slices.Sort(q.subPaths)
-			}
-			q.root = q.root || p.root
-			q.nested = q.nested || p.nested
-			return ""
+		return record(p)
+	}
+
+	// An own workflow's line has its commits itself and needs no entry.
+	for _, p := range ch.own {
+		if problem := record(p); problem != "" {
+			return nil, problem
 		}
-		pins = append(pins, p)
-		return ""
 	}
 
 	// A workflow line has no commit of its own: a changed lockfile entry

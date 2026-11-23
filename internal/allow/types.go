@@ -59,7 +59,10 @@ const (
 	// ReadNone: not read yet. The artifact could not be downloaded, or the
 	// model gave no complete answer. Retried until the wait deadline.
 	ReadNone ReadState = "none"
-	// ReadNotApplicable: nothing a model could read. Docker only.
+	// ReadNotApplicable: nothing is put before a model. That is an image,
+	// of which nothing can be read, and a reusable workflow of one of the
+	// gate owner's own repositories, which is accepted unread (spec section
+	// 11, amendment 60). Nowhere else.
 	ReadNotApplicable ReadState = "not-applicable"
 	// ReadRefused: the gate would not read the code, and asking again gives
 	// the same answer (a hash mismatch, an unsafe archive, a reference the
@@ -242,8 +245,15 @@ type UpdateFacts struct {
 	// FirstSeen describe a pin that is about to be replaced and are not
 	// looked at. It never merges while this holds. The zero Fact and a
 	// gathered "no" both mean not superseded.
-	Superseded Fact      `json:"superseded"`
-	Read       ReadState `json:"read"`
+	Superseded Fact `json:"superseded"`
+	// Own: the update moves the commit pin of a reusable workflow in a
+	// repository on the policy's own list (Actions only; spec section 11,
+	// amendment 60). Such an update is granted on where its commit comes
+	// from: nothing of it is read and no age is asked of it. Only a fact
+	// that holds counts, Decide never waits for it, and Decide checks the
+	// name against its own list.
+	Own  Fact      `json:"own"`
+	Read ReadState `json:"read"`
 	// Veto: nil means "no veto" only together with Read; a model that
 	// never answered is ReadNone.
 	Veto *Veto `json:"veto"`
@@ -307,6 +317,29 @@ type Policy struct {
 	// Listed is the owner-kept list, by ecosystem constant. See Listed
 	// for how an entry matches.
 	Listed map[string][]string
+	// Own is the gate owner's own repositories whose reusable workflows
+	// callers pin. See OwnRepository.
+	Own []OwnRepo
+}
+
+// OwnRepo is one repository of the gate's owner, named exactly and with
+// the numeric IDs GitHub gave it, so that neither a look-alike name nor a
+// name someone else registered again is taken for it.
+type OwnRepo struct {
+	Repository   string `json:"repository"`
+	RepositoryID int64  `json:"repository_id"`
+	OwnerID      int64  `json:"owner_id"`
+}
+
+// OwnRepository returns the policy's own entry for name. The match is the
+// whole name, byte for byte: no prefix, no owner alone, no other case.
+func OwnRepository(p Policy, name string) (OwnRepo, bool) {
+	for _, o := range p.Own {
+		if name != "" && o.Repository == name {
+			return o, true
+		}
+	}
+	return OwnRepo{}, false
 }
 
 // UpdateDecision is Decide's answer for one update, before the pull

@@ -335,7 +335,7 @@ func TestReadChangeSetAccepts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, problem := readChangeSet(tt.files(t))
+			got, problem := readChangeSet(tt.files(t), testPolicy())
 			if problem != "" {
 				t.Fatalf("problem %q, want the shape to hold", problem)
 			}
@@ -417,7 +417,7 @@ func TestReadChangeSetRefuses(t *testing.T) {
 			return []facts.File{setupGoBump(t)[0], file(ciPath, "steps:\n"+base, "steps:\n"+head)}
 		}
 	}
-	if pins, problem := readChangeSet(one(step, bumped)(t)); problem != "" || len(pins) != 1 {
+	if pins, problem := readChangeSet(one(step, bumped)(t), testPolicy()); problem != "" || len(pins) != 1 {
 		t.Fatalf("the pull request these cases edit: pins %+v, problem %q", pins, problem)
 	}
 	// lock is setupGoBump with its head lockfile edited further.
@@ -462,7 +462,7 @@ func TestReadChangeSetRefuses(t *testing.T) {
 		}
 	}
 	const (
-		pinsWorkflow = "the line pins a reusable workflow, which never merges without a person"
+		pinsWorkflow = "the line pins a reusable workflow that is not a workflow file of a repository on the policy's own list; such a pin never merges without a person"
 		pinsCommit   = "the line pins a commit; only a tag pin that actions.lock records is read"
 		notAPin      = "the changed line is not an action pin"
 	)
@@ -472,12 +472,15 @@ func TestReadChangeSetRefuses(t *testing.T) {
 		files func(t *testing.T) []facts.File
 		want  string // part of the problem
 	}{
-		// Spec section 11, amendment 6: a changed reusable-workflow pin
-		// never merges, whoever publishes it and whatever the facts say.
+		// Spec section 11, amendment 60: a changed reusable-workflow pin
+		// of a repository that is not on the policy's own list never
+		// merges, whoever publishes it and whatever the facts say. This
+		// policy has no such list, so that is every one; own_test.go has
+		// the ones a list lets through.
 		{"a reusable workflow", reused("actions/setup-go/.github/workflows/x.yml"), ciPath + ":3: " + pinsWorkflow},
 		{"a reusable workflow of a listed publisher", reused("docker/login-action/.github/workflows/lint.yml"), pinsWorkflow},
-		{"the gate's own pin", reused("sadbox/dep-review/.github/workflows/gate.yml"), pinsWorkflow + " (the gate's own pin included)"},
-		{"the shared CI workflow", reused("sadbox/ci/.github/workflows/lint.yml"), pinsWorkflow},
+		{"the gate's own pin, under a policy that does not name it", reused("sadbox/dep-review/.github/workflows/gate.yml"), pinsWorkflow},
+		{"the shared CI workflow, under a policy that does not name it", reused("sadbox/ci/.github/workflows/lint.yml"), pinsWorkflow},
 		{"a reusable workflow named .yaml", reused("actions/setup-go/.github/workflows/x.yaml"), pinsWorkflow},
 		{"anything else under the workflows directory", reused("actions/setup-go/.github/workflows/sub/x"), pinsWorkflow},
 		{"a reusable workflow called from a step position", func(*testing.T) []facts.File {
@@ -736,7 +739,7 @@ func TestReadChangeSetRefuses(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pins, problem := readChangeSet(tt.files(t))
+			pins, problem := readChangeSet(tt.files(t), testPolicy())
 			if problem == "" {
 				t.Fatalf("the shape holds (pins %+v), want a problem with %q", pins, tt.want)
 			}

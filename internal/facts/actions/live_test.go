@@ -130,7 +130,7 @@ func TestPullRequestDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pins, problem := readChangeSet(files)
+	pins, problem := readChangeSet(files, testPolicy())
 	if problem != "" {
 		t.Fatalf("Shape does not hold: %s", problem)
 	}
@@ -147,4 +147,84 @@ func TestPullRequestDir(t *testing.T) {
 	for _, u := range res.Updates {
 		t.Logf("%s %s -> %s\n  bound      %+v\n  no regress %+v\n  clean      %+v\n  first seen %+v", u.Name, u.From, u.To, u.Bound, u.NoRegress, u.Clean, u.FirstSeen)
 	}
+}
+
+// TestLiveOwn asks api.github.com about the two repositories the built-in
+// policy calls the gate owner's own (spec section 11, amendment 60), with
+// the IDs that policy records and tags they had on 2026-11-23. Both are
+// public. It is opt-in like TestLive: DEP_REVIEW_LIVE=1. About 20
+// requests, none for a release or a release branch.
+func TestLiveOwn(t *testing.T) {
+	if os.Getenv("DEP_REVIEW_LIVE") == "" {
+		t.Skip("network test; set DEP_REVIEW_LIVE=1")
+	}
+	const (
+		owner       = 2502941
+		ciID        = 1465779983
+		depReviewID = 1465738661
+
+		gate = "sadbox/dep-review/.github/workflows/gate.yml"
+		lint = "sadbox/ci/.github/workflows/lint.yml"
+
+		gateV017 = "c0f8afd3c0d85bede7bd0780b0a797c15152fda4"
+		gateV018 = "0672ce19fdc12cfa66ce9e836cf0f2156ff8947f"
+		gateV019 = "86f983bd3183934ea41f7ef7e89724a9546f7df7"
+		ciV040   = "9b561c32073a80e3972e8c07fd028358e58732b0"
+		ciV050   = "fbff0f9c424ef3ce793702959ecd1e858861d4b0"
+	)
+	policy := func(ciRepo, depReviewRepo int64) allow.Policy {
+		p := testPolicy()
+		p.Own = []allow.OwnRepo{
+			{Repository: "sadbox/ci", RepositoryID: ciRepo, OwnerID: owner},
+			{Repository: "sadbox/dep-review", RepositoryID: depReviewRepo, OwnerID: owner},
+		}
+		return p
+	}
+	client := gh.New(os.Getenv("GH_TOKEN"))
+	gather := func(t *testing.T, files []facts.File, p allow.Policy) allow.UpdateFacts {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		res, err := New().Gather(ctx, facts.Input{Files: files, Policy: p, GitHub: client, Advisories: noAdvisories()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		u := one(t, res)
+		t.Logf("bound      %+v\nno regress %+v\nclean      %+v\nfirst seen %+v", u.Bound, u.NoRegress, u.Clean, u.FirstSeen)
+		return u
+	}
+	real := policy(ciID, depReviewID)
+
+	t.Run("gate v0.1.8 to v0.1.9", func(t *testing.T) {
+		u := gather(t, ownBump(gate, gateV018, "v0.1.8", gateV019, "v0.1.9"), real)
+		mustHold(t, "Own", u.Own)
+		mustHold(t, "Bound", u.Bound)
+		mustHold(t, "NoRegress", u.NoRegress)
+		mustHold(t, "Clean", u.Clean)
+		if u.FirstSeen.Known() || u.FirstSeen.Source != "" {
+			t.Errorf("FirstSeen = %+v, want it not asked", u.FirstSeen)
+		}
+	})
+	t.Run("ci v0.4.0 to v0.5.0", func(t *testing.T) {
+		u := gather(t, ownBump(lint, ciV040, "v0.4.0", ciV050, "v0.5.0"), real)
+		mustHold(t, "Bound", u.Bound)
+		mustHold(t, "NoRegress", u.NoRegress)
+		mustHold(t, "Clean", u.Clean)
+	})
+	t.Run("the tag names another commit", func(t *testing.T) {
+		// The comment says v0.1.9 and the commit is v0.1.8's.
+		u := gather(t, ownBump(gate, gateV017, "v0.1.7", gateV018, "v0.1.9"), real)
+		mustBeNo(t, "Bound", u.Bound, "tag v0.1.9 is commit "+gateV019)
+		mustBeNo(t, "NoRegress", u.NoRegress, "tag v0.1.9 is commit")
+	})
+	t.Run("a move back that the comments call an increase", func(t *testing.T) {
+		// From v0.1.9's commit, labelled v0.1.6, to v0.1.7's.
+		u := gather(t, ownBump(gate, gateV019, "v0.1.6", gateV017, "v0.1.7"), real)
+		mustHold(t, "Bound", u.Bound)
+		mustBeNo(t, "NoRegress", u.NoRegress, "the new commit does not descend from the old one")
+	})
+	t.Run("the policy records another repository's ID", func(t *testing.T) {
+		u := gather(t, ownBump(gate, gateV018, "v0.1.8", gateV019, "v0.1.9"), policy(ciID, ciID))
+		mustBeNo(t, "Bound", u.Bound, "the policy list own_workflows records repository")
+	})
 }

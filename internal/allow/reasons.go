@@ -46,11 +46,15 @@ const (
 	ReasonRegress            Reason = "regress"
 	ReasonVeto               Reason = "veto"
 	ReasonModelRefused       Reason = "model_refused"
-	// ReasonReadUnknown: Read is empty, not a known state, or
-	// not-applicable outside Docker.
-	ReasonReadUnknown      Reason = "read_unknown"
-	ReasonReadRefused      Reason = "read_refused"
-	ReasonMajorUnlisted    Reason = "major_unlisted"
+	// ReasonReadUnknown: Read is empty, not a known state, not-applicable
+	// for anything but an image or an own workflow, or anything else for
+	// an own workflow.
+	ReasonReadUnknown   Reason = "read_unknown"
+	ReasonReadRefused   Reason = "read_refused"
+	ReasonMajorUnlisted Reason = "major_unlisted"
+	// ReasonMajorOwn: a major update of an own workflow, whatever the
+	// list says of its name.
+	ReasonMajorOwn         Reason = "major_own"
 	ReasonFirstSeenUnknown Reason = "first_seen_unknown"
 )
 
@@ -124,7 +128,7 @@ var reasonTable = []reasonText{
 		"The pull request could not be shown to be Dependabot's alone, on the default branch, at its current head.",
 		"Look at who pushed to the branch, then merge or close by hand. If the ruleset that keeps dependabot/ branches to Dependabot is missing or does not match, fix it there: " + settings},
 	{ReasonShape, Person,
-		"The pull request changes something other than version or hash tokens in this ecosystem's manifest and lock files, or changes a line the gate never grants (a reusable workflow).",
+		"The pull request changes something other than version or hash tokens in this ecosystem's manifest and lock files, or changes a line the gate never grants (a reusable workflow of a repository that is not one of the gate owner's own).",
 		byHand},
 	{ReasonChecksNotConfigured, Person,
 		"The default branch has no required-status-checks rule, so nothing would stop a broken update from merging.",
@@ -177,6 +181,9 @@ var reasonTable = []reasonText{
 	{ReasonMajorUnlisted, Person,
 		"A major update of a name that is not on the list, and that the repository's own manifest does not show to be a dependency of a dependency.",
 		listIt},
+	{ReasonMajorOwn, Person,
+		"A major update of one of the gate owner's own workflows. Nothing of it was read and the pull request does not run the new version: a major is how its owner says that the callers may have to change with it.",
+		byHand},
 	{ReasonFirstSeenUnknown, Person,
 		"When the new version became public could not be established by a clock its publisher cannot set.",
 		rerun},

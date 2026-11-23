@@ -316,6 +316,12 @@ func TestClassify(t *testing.T) {
 		{"nested branch name", func(f *fixture) {
 			f.pr["head"].(map[string]any)["ref"] = "dependabot/go_modules/golang.org/x/net-0.63.0"
 		}, model.KindDependabot, ""},
+		// What Dependabot calls the branch of a reusable workflow's update:
+		// the repository, then the workflow's path with its leading dot
+		// spelled out (spec section 11, amendment 60).
+		{"a reusable workflow's branch name", func(f *fixture) {
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/github_actions/sadbox/ci/dot-github/workflows/lint.yml-0.5.0"
+		}, model.KindDependabot, ""},
 		{"no rules apply", func(f *fixture) { f.rules = nil }, model.KindDependabotUnverified, "no active rule"},
 		// A name of another shape never reaches a request path (the
 		// fixture fails the test if the rules are asked about it).

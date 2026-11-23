@@ -897,3 +897,94 @@ func TestVerifyChunks(t *testing.T) {
 		t.Errorf("NewChunkFile = %+v", c)
 	}
 }
+
+// The gate owner's own workflow (spec section 11, amendment 60): an
+// Actions update whose Own holds is not-applicable, like an image, and
+// nothing may have been prepared for it. The fact does that only when it
+// holds and only for an action; whether the name is one the policy calls
+// own is allow.Decide's to check.
+func TestJoinOwnWorkflow(t *testing.T) {
+	const ownName = "acme-infra/ci"
+	policy := testPolicy()
+	policy.Own = []allow.OwnRepo{{Repository: ownName, RepositoryID: 4242, OwnerID: 77}}
+	holds := allow.Yes(ownName+" is on the own list", "policy")
+	veto := &allow.Veto{Category: "obfuscation", Quotes: []string{"+ eval(atob(x))"}}
+
+	// own is a facts file with one update as the Actions gatherer returns
+	// an own workflow: nothing dates it.
+	own := func(ecosystem, name string, fact allow.Fact, read Read) Facts {
+		u := goodUpdate(name)
+		u.Own = fact
+		u.FirstSeen = allow.TimeFact{Value: "not asked"}
+		f := goodFacts()
+		f.Facts.Ecosystem = ecosystem
+		f.Facts.Updates = []Update{NewUpdate(u, read)}
+		return f
+	}
+	answered := Verdicts{Version: Version, Verdicts: []Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadFull, Veto: veto}}}
+
+	for _, tc := range []struct {
+		name      string
+		ecosystem string
+		fact      allow.Fact
+		verdicts  Verdicts
+		want      allow.ReadState
+		outcome   allow.Outcome
+	}{
+		{"an own workflow", allow.GitHubActions, holds, Verdicts{Version: Version}, allow.ReadNotApplicable, allow.Merge},
+		{"an own workflow, whatever a verdict says", allow.GitHubActions, holds, answered, allow.ReadNotApplicable, allow.Merge},
+		{"Own says no", allow.GitHubActions, allow.No("not own", "policy"), Verdicts{Version: Version}, "", allow.Person},
+		{"Own was not gathered", allow.GitHubActions, allow.Fact{}, Verdicts{Version: Version}, "", allow.Person},
+		{"Own did not answer", allow.GitHubActions, allow.Unavailable("no answer", "policy"), Verdicts{Version: Version}, "", allow.Person},
+		{"Own from nowhere", allow.GitHubActions, allow.Fact{OK: true, Value: "yes"}, Verdicts{Version: Version}, "", allow.Person},
+		{"a Go module that calls itself own", allow.GoModules, holds, Verdicts{Version: Version}, "", allow.Person},
+		{"an npm package that calls itself own", allow.NPM, holds, Verdicts{Version: Version}, "", allow.Person},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := own(tc.ecosystem, ownName, tc.fact, Read{Status: Nothing})
+			b, err := EncodeFacts(f)
+			if err != nil {
+				t.Fatalf("the facts are not valid: %v", err)
+			}
+			if f, err = DecodeFacts(b); err != nil {
+				t.Fatal(err)
+			}
+			joined := Join(f, tc.verdicts, finger)
+			if u := joined.Updates[0]; u.Read != tc.want || u.Veto != nil || u.Own != tc.fact {
+				t.Errorf("Read %q, Veto %+v, Own %+v; want %q, no veto, %+v", u.Read, u.Veto, u.Own, tc.want, tc.fact)
+			}
+			if d := allow.Decide(joined, policy, now); d.Outcome != tc.outcome {
+				t.Errorf("decided %q %v, want %q", d.Outcome, d.Reasons, tc.outcome)
+			}
+		})
+	}
+
+	// Not-applicable is only how the read is recorded. A name the policy
+	// does not call own is a person's all the same.
+	f := own(allow.GitHubActions, "acme-1nfra/ci", holds, Read{Status: Nothing})
+	if d := allow.Decide(Join(f, Verdicts{Version: Version}, finger), policy, now); d.Outcome != allow.Person || !slices.Contains(d.Reasons, allow.ReasonListMismatch) {
+		t.Errorf("a look-alike name: %q %v, want person for list_mismatch", d.Outcome, d.Reasons)
+	}
+
+	// Nothing of an own workflow is read, so a file that carries a read
+	// for one, or the trace of an attempt at one, is not a facts file.
+	for _, read := range []Read{
+		prepared(0, keyA, allow.ReadFull, 1),
+		prepared(0, keyA, allow.ReadPartial, 1),
+		{Status: Identical},
+		{Status: Unavailable},
+		{Status: Refused},
+	} {
+		f := own(allow.GitHubActions, ownName, holds, read)
+		if err := f.check(); err == nil || !strings.Contains(err.Error(), "for an own workflow, of which nothing is read") {
+			t.Errorf("an own workflow with a %q read: %v", read.Status, err)
+		}
+		if _, err := EncodeFacts(f); err == nil {
+			t.Errorf("an own workflow with a %q read is written", read.Status)
+		}
+		// The same read for an action whose Own does not hold is a file.
+		if err := own(allow.GitHubActions, ownName, allow.No("not own", "policy"), read).check(); err != nil {
+			t.Errorf("an action with a %q read: %v", read.Status, err)
+		}
+	}
+}

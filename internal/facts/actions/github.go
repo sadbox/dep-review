@@ -216,7 +216,9 @@ func plainBranch(name string) bool {
 // branch releases are cut from: the repository's default branch, or
 // failing that releases/v<major>, the branch actions/checkout and others
 // cut an older major's releases from. Those two names are the whole
-// search: no branch list is read.
+// search: no branch list is read. With no release branch named (an own
+// workflow, spec section 11, amendment 60) the default branch is the
+// whole search.
 //
 // This is the check that tells a commit of the repository from a commit
 // that only a fork has. GitHub serves a fork's commits through the parent
@@ -241,6 +243,12 @@ func onBranch(ctx context.Context, c *gh.Client, name string, repo repoAnswer, r
 	}
 	if onDefault.holds() {
 		return allow.Yes("on branch "+def, source), nil
+	}
+	if releaseBranch == "" {
+		if onDefault.state == failed || onDefault.state == unreachable {
+			return onDefault.unanswered("the comparison with "+def+" failed", source), nil
+		}
+		return allow.No("the commit is not reachable from "+def+", the default branch", source), nil
 	}
 	onRelease, err := compare(ctx, c, name, releaseBranch, commit)
 	if err != nil {

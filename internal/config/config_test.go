@@ -48,6 +48,12 @@ func specDefaults() Config {
 			Docker:        []string{"docker.io/library/", "gcr.io/distroless/"},
 			NPM:           []string{"tailwindcss", "@tailwindcss/"},
 		},
+		// The IDs are what GitHub reported for the two repositories on
+		// 2026-11-23 (gh api repos/<owner>/<repo> --jq '.id, .owner.id').
+		OwnWorkflows: []allow.OwnRepo{
+			{Repository: "sadbox/ci", RepositoryID: 1465779983, OwnerID: 2502941},
+			{Repository: "sadbox/dep-review", RepositoryID: 1465738661, OwnerID: 2502941},
+		},
 	}
 }
 
@@ -67,6 +73,7 @@ func TestDefaults(t *testing.T) {
 	// One Load's lists are not another's.
 	c := mustLoad(t)
 	c.Listed.NPM[0] = "left-pad"
+	c.OwnWorkflows[0].Repository = "example/other"
 	if again := mustLoad(t); !reflect.DeepEqual(again, specDefaults()) {
 		t.Fatal("changing one Config changed the next")
 	}
@@ -147,6 +154,7 @@ func TestPolicy(t *testing.T) {
 			allow.Docker:        specDefaults().Listed.Docker,
 			allow.NPM:           specDefaults().Listed.NPM,
 		},
+		Own: specDefaults().OwnWorkflows,
 	}
 	if !reflect.DeepEqual(p, want) {
 		t.Fatalf("\n got %+v\nwant %+v", p, want)
@@ -202,10 +210,87 @@ func TestPolicy(t *testing.T) {
 	}
 
 	// A policy is the caller's to keep: changing it changes nothing else.
+	p.Own[0].Repository = "example/other"
 	p.Listed[allow.NPM][0] = "left-pad"
 	p.Listed[allow.GoModules] = append(p.Listed[allow.GoModules], "example.com/")
 	if again := mustLoad(t).Policy(); !reflect.DeepEqual(again, want) {
 		t.Fatal("changing one Policy changed the next")
+	}
+}
+
+// The own list (spec section 11, amendment 60) is two exact repositories
+// with GitHub's IDs for them, and nothing else is on it: no other
+// repository of the owner, no name that looks like one, no other case,
+// and no name that an entry of the owner-kept list covers.
+func TestOwnWorkflows(t *testing.T) {
+	p := mustLoad(t).Policy()
+	for name, want := range map[string]allow.OwnRepo{
+		"sadbox/ci":         {Repository: "sadbox/ci", RepositoryID: 1465779983, OwnerID: 2502941},
+		"sadbox/dep-review": {Repository: "sadbox/dep-review", RepositoryID: 1465738661, OwnerID: 2502941},
+	} {
+		if got, ok := allow.OwnRepository(p, name); !ok || got != want {
+			t.Errorf("%s: %+v, %v; want %+v", name, got, ok, want)
+		}
+	}
+	if len(p.Own) != 2 {
+		t.Errorf("%d own repositories, want the two: %+v", len(p.Own), p.Own)
+	}
+	for _, name := range []string{"sadbox", "sadbox/", "sadbox/ci/", "sadbox/ci-tools", "sadbox/dep-review-next", "sadbox/some-other-repository",
+		"Sadbox/ci", "sadbox/CI", "sadb0x/ci", "sadbox/c1", "sadbox/dep-reviev", "sadbox-ci/ci", "example-org/ci",
+		"actions/checkout", "astral-sh/setup-uv", ""} {
+		if o, ok := allow.OwnRepository(p, name); ok {
+			t.Errorf("%q is on the own list: %+v", name, o)
+		}
+	}
+	// Being on the owner-kept list is not being own, and the other way
+	// round: the two lists grant different things.
+	for _, o := range p.Own {
+		if allow.Listed(p, allow.GitHubActions, o.Repository) {
+			t.Errorf("%s is also on the owner-kept list", o.Repository)
+		}
+	}
+
+	// What the embedded file may say of the list.
+	edit := func(own string) []byte {
+		start := bytes.Index(defaultsJSON, []byte(`"own_workflows": [`))
+		end := bytes.Index(defaultsJSON, []byte(`"model"`))
+		if start < 0 || end < start {
+			t.Fatal("policy/defaults.json has no own_workflows before model")
+		}
+		return slices.Concat(defaultsJSON[:start], []byte(own), defaultsJSON[end:])
+	}
+	const ci = `{"repository": "sadbox/ci", "repository_id": 1465779983, "owner_id": 2502941}`
+	if c, err := complete(edit(`"own_workflows": [` + ci + `],`)); err != nil || len(c.OwnWorkflows) != 1 {
+		t.Errorf("a list of one: %+v, %v", c.OwnWorkflows, err)
+	}
+	// An empty list is a setting: no repository is own.
+	if c, err := complete(edit(`"own_workflows": [],`)); err != nil || len(c.OwnWorkflows) != 0 {
+		t.Errorf("an empty list: %+v, %v", c.OwnWorkflows, err)
+	}
+	for _, tc := range []struct {
+		name, own, want string
+	}{
+		{"no key", ``, "a key is missing"},
+		{"null", `"own_workflows": null,`, "a key is missing"},
+		{"an owner's prefix", `"own_workflows": [{"repository": "sadbox/", "repository_id": 1, "owner_id": 2502941}],`, "no prefix and no owner alone"},
+		{"an owner alone", `"own_workflows": [{"repository": "sadbox", "repository_id": 1, "owner_id": 2502941}],`, "no prefix and no owner alone"},
+		{"a wildcard", `"own_workflows": [{"repository": "sadbox/*", "repository_id": 1, "owner_id": 2502941}],`, "no prefix and no owner alone"},
+		{"a workflow file", `"own_workflows": [{"repository": "sadbox/ci/.github/workflows/lint.yml", "repository_id": 1465779983, "owner_id": 2502941}],`, "no prefix and no owner alone"},
+		{"another case", `"own_workflows": [{"repository": "Sadbox/ci", "repository_id": 1465779983, "owner_id": 2502941}],`, "in lower case"},
+		{"no name", `"own_workflows": [{"repository_id": 1465779983, "owner_id": 2502941}],`, "own_workflows"},
+		{"no repository ID", `"own_workflows": [{"repository": "sadbox/ci", "owner_id": 2502941}],`, "repository_id and owner_id"},
+		{"no owner ID", `"own_workflows": [{"repository": "sadbox/ci", "repository_id": 1465779983}],`, "repository_id and owner_id"},
+		{"an ID of zero", `"own_workflows": [{"repository": "sadbox/ci", "repository_id": 0, "owner_id": 2502941}],`, "repository_id and owner_id"},
+		{"a negative ID", `"own_workflows": [{"repository": "sadbox/ci", "repository_id": 1465779983, "owner_id": -1}],`, "repository_id and owner_id"},
+		{"an ID as text", `"own_workflows": [{"repository": "sadbox/ci", "repository_id": "1465779983", "owner_id": 2502941}],`, "unmarshal JSON"},
+		{"the same repository twice", `"own_workflows": [` + ci + `, ` + ci + `],`, "is there twice"},
+		{"an unknown member", `"own_workflows": [{"repository": "sadbox/ci", "repository_id": 1465779983, "owner_id": 2502941, "any_ref": true}],`, "unknown object member name"},
+		{"a name alone", `"own_workflows": ["sadbox/ci"],`, "unmarshal JSON"},
+		{"not a list", `"own_workflows": {"repository": "sadbox/ci", "repository_id": 1465779983, "owner_id": 2502941},`, "unmarshal JSON"},
+	} {
+		if c, err := complete(edit(tc.own)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %+v, %v; want an error that says %q", tc.name, c.OwnWorkflows, err, tc.want)
+		}
 	}
 }
 

@@ -57,6 +57,9 @@ const (
 	changesSource  = "git: the paths that differ between the merge base and the head"
 	// scriptsOffSource is where Changes.ScriptsOff comes from.
 	scriptsOffSource = "git: the root .npmrc at the base branch's commit"
+	// ownUnread is the detail of a read that was not prepared because the
+	// update is the gate owner's own workflow. The comment quotes it.
+	ownUnread = "nothing of the gate owner's own workflow is read: it is accepted on where its commit comes from, and no model is asked"
 )
 
 // Run gathers the pull request's facts, prepares what the model is to
@@ -267,6 +270,10 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 			// The change set is not to be trusted, the outcome is person
 			// already, and nothing it names is downloaded.
 			u.Prepared.Detail = "the pull request's shape does not hold, so nothing it names was fetched"
+		case pr.Ecosystem == allow.GitHubActions && u.Own.Holds():
+			// Accepted on where its commit comes from (spec section 11,
+			// amendment 60): nothing is fetched and no model is asked.
+			u.Prepared.Detail = ownUnread
 		case !named:
 			u.Prepared.Detail = "the gatherer named no artifact: the pin is not bound, or the old version has no hash to check it against"
 		default:

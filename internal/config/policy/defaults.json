@@ -15,6 +15,10 @@
     "docker": ["docker.io/library/", "gcr.io/distroless/"],
     "npm": ["tailwindcss", "@tailwindcss/"]
   },
+  "own_workflows": [
+    {"repository": "sadbox/ci", "repository_id": 1465779983, "owner_id": 2502941},
+    {"repository": "sadbox/dep-review", "repository_id": 1465738661, "owner_id": 2502941}
+  ],
   "model": "claude-opus-5-5",
   "effort": "high",
   "context_tokens": 1000000,

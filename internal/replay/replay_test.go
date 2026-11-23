@@ -17,7 +17,9 @@ import (
 )
 
 // The records under testdata are made up: example.com modules, an action
-// and an image that do not exist, hashes of one repeated letter. Most are
+// and an image that do not exist, hashes of one repeated letter. The
+// actions-own records name sadbox/ci, which the built-in policy calls the
+// gate owner's own, at versions and commits it does not have. Most are
 // created on 2026-01-10; go-patch-recent on 2026-03-01.
 var (
 	later = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
@@ -34,6 +36,16 @@ func builtIn(t *testing.T) allow.Policy {
 		t.Fatal(err)
 	}
 	return cfg.Policy()
+}
+
+// noOwnList is the built-in policy with no repository called the gate
+// owner's own: every reusable workflow is then refused, as before spec
+// section 11, amendment 60.
+func noOwnList(t *testing.T) allow.Policy {
+	t.Helper()
+	p := builtIn(t)
+	p.Own = nil
+	return p
 }
 
 // noOfficialImages is the built-in policy without Docker Official Images
@@ -68,6 +80,9 @@ func TestRun(t *testing.T) {
 	// of them were created. The other cases list only what differs.
 	base := map[string]string{
 		"actions-major-unlisted": "person major_unlisted",
+		"actions-own-lookalike":  "person shape,no_updates",
+		"actions-own-major":      "person major_own",
+		"actions-own-workflow":   "merge",
 		"actions-pin":            "merge",
 		"actions-short-tag":      "person shape,no_updates",
 		"docker-listed":          "merge",
@@ -88,10 +103,18 @@ func TestRun(t *testing.T) {
 	}{
 		{name: "built-in policy", opt: Options{Policy: builtIn(t), Now: later}},
 		{
+			// And not the own workflow: no age is asked of it.
 			name: "the clock only moves merge to wait",
 			opt:  Options{Policy: builtIn(t), Now: soon},
 			differs: map[string]string{
 				"actions-pin": "wait age", "docker-listed": "wait age", "go-major-listed": "wait age", "go-patch": "wait age",
+			},
+		},
+		{
+			name: "no own list",
+			opt:  Options{Policy: noOwnList(t), Now: later},
+			differs: map[string]string{
+				"actions-own-workflow": "person shape,no_updates", "actions-own-major": "person shape,no_updates",
 			},
 		},
 		{

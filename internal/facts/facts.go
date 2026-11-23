@@ -101,7 +101,10 @@ type Result struct {
 	// Artifacts lists what the model is to read: for each update with
 	// something readable, the old and the new artifact, each with the
 	// hash Bound was established for. An entry belongs to the update with
-	// the same Name, From and To. Empty for Docker.
+	// the same Name, From and To. Empty for Docker. The Actions gatherer
+	// names a pair for the gate owner's own workflow too, of which
+	// nothing is read: the facts file takes the update's commit from it
+	// (spec section 11, amendment 60).
 	Artifacts []artifact.Pair
 }
 

@@ -2,9 +2,12 @@
 // The change set is read without a YAML parser (shape.go): tag pins in
 // workflows and their entries in actions.lock, by exact line shape. The
 // facts about each pin come from GitHub's REST API (github.go), with GET
-// requests only. A pin of a reusable workflow, a commit pin and a
-// workflow without actions.lock make Shape not hold (spec section 11,
-// amendments 6 and 7).
+// requests only. A commit pin and a workflow without actions.lock make
+// Shape not hold (spec section 11, amendments 7 and 29), and so does a
+// pin of a reusable workflow, with one exception: the commit pin of a
+// workflow in a repository on the policy's own list is an update of its
+// own, which is accepted on where its commit comes from and is not read
+// (amendment 60).
 package actions
 
 import (
@@ -36,6 +39,10 @@ const shapeSource = "changed files at the base and head commits"
 // policySource is the Source of the Listed fact.
 const policySource = "policy list " + allow.GitHubActions
 
+// ownSource is the Source of the Own fact, and what Bound says the
+// repository's IDs were compared with for an own workflow.
+const ownSource = "policy list own_workflows"
+
 // Gather implements facts.Gatherer with in.GitHub, in.Advisories and
 // in.Policy.
 func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
@@ -52,7 +59,10 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 			return facts.Result{}, err
 		}
 		// The model reads an artifact only at a commit Bound was
-		// established for.
+		// established for. The pair is named for an own workflow too,
+		// though nothing of one is read (the fetch job skips an update
+		// whose Own holds): it carries the commit that tells one pin from
+		// another in the facts file.
 		if u.Bound.Holds() {
 			res.Artifacts = append(res.Artifacts, artifact.Pair{
 				Ecosystem: allow.GitHubActions,
@@ -84,7 +94,7 @@ func Changes(files []facts.File, policy allow.Policy) facts.Result {
 // update for each pin, in the same order. When Shape does not hold there
 // are no pins.
 func readFiles(files []facts.File, policy allow.Policy) ([]pin, facts.Result) {
-	pins, problem := readChangeSet(files)
+	pins, problem := readChangeSet(files, policy)
 	if problem != "" {
 		return nil, facts.Result{Shape: allow.No(problem, shapeSource)}
 	}
@@ -110,6 +120,9 @@ func fileFacts(p pin, policy allow.Policy) allow.UpdateFacts {
 	}
 	u.Increase = increase(p)
 	u.Major = major(p)
+	if p.own {
+		u.Own = allow.Yes(p.name+" is on the policy's own list, and the line pins one of its workflow files by commit", ownSource)
+	}
 	return u
 }
 
@@ -128,13 +141,23 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 	if err != nil {
 		return err
 	}
-	branch, err := onBranch(ctx, c, p.name, repo, "releases/"+semver.Major(p.to), p.newCommit)
+	releaseBranch := "releases/" + semver.Major(p.to)
+	if p.own {
+		// An own workflow must be on the default branch: that is the
+		// branch whose rules the trust in the repository rests on.
+		releaseBranch = ""
+	}
+	branch, err := onBranch(ctx, c, p.name, repo, releaseBranch, p.newCommit)
 	if err != nil {
 		return err
 	}
-	rel, err := getRelease(ctx, c, p.name, p.to)
-	if err != nil {
-		return err
+	// An own repository need not publish releases, and no age is asked
+	// of its workflow, so the release is not asked for.
+	var rel releaseAnswer
+	if !p.own {
+		if rel, err = getRelease(ctx, c, p.name, p.to); err != nil {
+			return err
+		}
 	}
 	advice, err := askAdvisories(ctx, adv, p, p.name)
 	if err != nil {
@@ -147,7 +170,15 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 	tagged := tagFact(p, tag)
 	u.Bound = tagged.And(repoFact(p, repo))
 	u.NoRegress = aheadFact(p, ahead).And(branch).And(tagged)
-	u.Clean = releaseFact(p, rel).And(facts.AdvisoryClean(advice))
+	if p.own {
+		// The tag on the default branch is the release: Clean is what the
+		// advisory database says, which is asked like any action's.
+		u.Clean = facts.AdvisoryClean(advice)
+		u.FirstSeen = allow.TimeFact{Value: "not asked: no age is asked of an own workflow"}
+	} else {
+		u.Clean = releaseFact(p, rel).And(facts.AdvisoryClean(advice))
+		u.FirstSeen = firstSeen(p, rel)
+	}
 	// An action in a directory of its repository has a name of its own in
 	// the advisory database (owner/repo/path), and an advisory can be
 	// filed under that name alone. The pin is the repository's, so the
@@ -162,7 +193,6 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 		}
 		u.Clean = u.Clean.And(facts.AdvisoryClean(inDir))
 	}
-	u.FirstSeen = firstSeen(p, rel)
 	u.SecurityFix = securityFix(p, advice.SecurityFix)
 	return nil
 }
@@ -259,11 +289,15 @@ func tagFact(p pin, tag tagAnswer) allow.Fact {
 }
 
 // repoFact is the other part of Bound: the repository behind the name is
-// the one the old pin was taken from, by the IDs actions.lock recorded.
-// The IDs are the defence against a name that was registered again by
-// someone else.
+// the one the old pin was taken from, by the IDs actions.lock recorded,
+// or for an own workflow the one the policy's own list names, by the IDs
+// recorded there. The IDs are the defence against a name that was
+// registered again by someone else.
 func repoFact(p pin, repo repoAnswer) allow.Fact {
-	source := "GitHub: repos/" + p.name
+	source, recorded := "GitHub: repos/"+p.name, "actions.lock"
+	if p.own {
+		recorded = "the " + ownSource
+	}
 	switch {
 	case repo.state == failed || repo.state == unreachable:
 		return repo.unanswered("the repository could not be read", source)
@@ -275,9 +309,9 @@ func repoFact(p pin, repo repoAnswer) allow.Fact {
 		// else to register.
 		return allow.No("the name leads to a repository that is now called something else (renamed or transferred)", source)
 	case repo.ID != p.repoID || repo.Owner.ID != p.ownerID:
-		return allow.No(fmt.Sprintf("actions.lock records repository %d of owner %d, GitHub reports repository %d of owner %d", p.repoID, p.ownerID, repo.ID, repo.Owner.ID), source)
+		return allow.No(fmt.Sprintf("%s records repository %d of owner %d, GitHub reports repository %d of owner %d", recorded, p.repoID, p.ownerID, repo.ID, repo.Owner.ID), source)
 	}
-	return allow.Yes(fmt.Sprintf("repository %d of owner %d, as actions.lock records", repo.ID, repo.Owner.ID), source)
+	return allow.Yes(fmt.Sprintf("repository %d of owner %d, as %s records", repo.ID, repo.Owner.ID, recorded), source)
 }
 
 // aheadFact is the first part of NoRegress: the new commit descends from

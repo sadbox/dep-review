@@ -22,7 +22,8 @@
 //   - NameCreated, for a new name that is not listed, is Options.NameCreated,
 //     or not established when that is the zero time;
 //   - every update was read in full (for Docker there is nothing to
-//     read), and nothing was vetoed.
+//     read, and the gate owner's own workflow is not read), and nothing
+//     was vetoed.
 //
 // So, given a NameCreated, the pull requests that do not go to a person
 // here are an upper bound on those that would not in the gate: one that
@@ -315,7 +316,7 @@ func withStandIns(u allow.UpdateFacts, rec Record, opt Options) allow.UpdateFact
 		u.NameCreated = allow.At(opt.NameCreated, standIn)
 	}
 	u.Read = allow.ReadFull
-	if rec.Ecosystem == allow.Docker {
+	if rec.Ecosystem == allow.Docker || (rec.Ecosystem == allow.GitHubActions && u.Own.Holds()) {
 		u.Read = allow.ReadNotApplicable
 	}
 	return u

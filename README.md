@@ -12,6 +12,8 @@ The full specification is [docs/v0.2-spec.md](docs/v0.2-spec.md).
 The default outcome is a person. Deterministic code grants a merge, from
 facts it takes from authoritative sources (the manifests at two commits,
 the registries, GitHub). A model reads the changed code and can only veto.
+One kind of update merges with nothing read: a reusable workflow of the
+gate owner's own repositories (see "The owner's own workflows" below).
 
 Deterministic code never tries to understand what a dependency's code
 does: there is no reachability analysis, no attribution, no build
@@ -91,13 +93,14 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | Increase | `to` is a plain release above `from` (Go: a listed module may also move to a higher pseudo-version) |
 | Major | the leading version component changed (for an image, the tag's: a refresh under an unchanged tag is never a major, also when the tag is `latest` or another name that is not a version and nothing could be compared) |
 | Indirect | the repository's own manifest shows it does not declare the dependency: `// indirect` in `go.mod`, or in none of the root package's dependency maps in `package-lock.json` (Go and npm only) |
-| Bound | the pinned hash, commit or digest is what the registry reports now |
+| Bound | the pinned hash, commit or digest is what the registry reports now; for an action also that the repository has the IDs `actions.lock` records, or for an own workflow the IDs the policy records |
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |
 | NameCreated | when the package name first appeared (new names only) |
-| Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own) |
-| NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json`, and every `.gypi` file, are the old tarball's, none new, changed or gone, while the other files those commands and a `binding.gyp` run are not compared, since the model reads them (none of this is asked where the repository turns install scripts off, see below); provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
+| Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own; an own workflow needs no published release) |
+| NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json`, and every `.gypi` file, are the old tarball's, none new, changed or gone, while the other files those commands and a `binding.gyp` run are not compared, since the model reads them (none of this is asked where the repository turns install scripts off, see below); provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>` (an own workflow: the default branch only), and is what the tag resolves to |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version (Go and npm only: never an image, and never an action, whose tag can be moved after the advisory was reviewed) |
-| Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker). Two artifacts that hold the same files are full with no model asked, and the comment says so |
+| Own | Actions only: the update moves the commit pin of a reusable workflow in one of the gate owner's own repositories (`own_workflows`) |
+| Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker, and an own workflow). Two artifacts that hold the same files are full with no model asked, and the comment says so |
 | Veto | none, or a category and the lines the model quoted |
 
 A fact is in one of four states, and only the first contributes to a
@@ -107,7 +110,8 @@ not answer (wait, then person at the deadline); it was never gathered
 answer for Bound of a Go, npm or Actions update, there is no verified
 hash to read the code against, nothing is read, and an update that was
 not read is a person's at once (`read_unknown`; re-run the gate after
-the outage). A Docker update waits, because nothing of an image is read.
+the outage). A Docker update waits, because nothing of an image is read,
+and so does an own workflow.
 Identity waits like any other fact: when the branch's activity log has
 not caught up with the push, or GitHub does not answer for the log, the
 timeline or the branch's rules, the proof is unfinished, the other facts
@@ -124,6 +128,8 @@ With every fact holding, an update needs an age, measured from FirstSeen:
 | read in part, security fix | `min_age_hours` (72 h) |
 | read in part | `unread_age_days` (14 d) |
 | Docker (nothing is read) | `min_age_hours` (72 h) |
+| the owner's own workflow (nothing is read) | none |
+| major update of the owner's own workflow | person |
 | major update of a listed name, or of an indirect dependency | at least `major_age_days` (14 d) |
 | major update of an unlisted name the repository declares itself | person |
 | new name, unlisted | person unless read in full and the name is `new_name_age_days` (365 d) old |
@@ -161,7 +167,7 @@ needs no age and is not held up.
 |---|---|---|---|---|
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
 | npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json`, `binding.gyp` and `.gypi` files are also checked for install steps: npm's NoRegress holds only once they were, or where the repository turns install scripts off |
-| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included, for an action that runs its repository's own files (`using: nodeNN` or `composite` where the workflows use it from) |
+| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock; or the commit pin line of the owner's own reusable workflow (`uses: owner/repo/.github/workflows/<file>.yml@<40 hex> # vX.Y.Z`) | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable; not asked for an own workflow | the action repository's tarball, `dist/` included, for an action that runs its repository's own files (`using: nodeNN` or `composite` where the workflows use it from); nothing of an own workflow |
 | Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`; for a gcr.io image the gate's first evaluation of the pin | nothing |
 
 Limits that send real pull requests to a person:
@@ -171,13 +177,13 @@ Limits that send real pull requests to a person:
   without the lock entry there is no recorded repository and owner ID to
   compare with. The lock must list the workflow the line is in, and that
   workflow's list must move to the new tag with it: an entry that only
-  another workflow's list names does not count. A line that pins a
-  commit (`@<40 hex> # vX.Y.Z`) and a local `action.yml` are not read. A
-  pin update replaces lines in place: one that adds or removes a line of
-  a workflow or of `actions.lock` (an action that starts or stops using
-  another) goes to a person.
-- A changed `uses:` line that points at a reusable workflow never merges.
-  That includes a caller's pin of this gate.
+  another workflow's list names does not count. A line that pins an
+  action by commit (`@<40 hex> # vX.Y.Z`) and a local `action.yml` are
+  not read. A pin update replaces lines in place: one that adds or
+  removes a line of a workflow or of `actions.lock` (an action that
+  starts or stops using another) goes to a person.
+- A changed `uses:` line that points at a reusable workflow never
+  merges, unless the workflow is one of the owner's own (next section).
 - A container action: `runs.using: docker` in its `action.yml`, with an
   image by reference or built from a Dockerfile, or a composite action
   with a `docker://` step. It runs an image, and nothing of an image is
@@ -207,7 +213,8 @@ Limits that send real pull requests to a person:
   without a rebase leave behind). The pull request that repairs the lock
   is the one that goes to a person.
 - A Go, npm or Actions update whose registry did not answer when its
-  pinned hash was checked (see the four states above).
+  pinned hash was checked (see the four states above). An own workflow
+  waits instead.
 - An update that changes, adds or removes a file whose path has anything
   but ASCII letters, digits and `._/@+-` in it (a space, a parenthesis,
   another script). A path stands on lines the model is told the gate
@@ -229,6 +236,54 @@ Limits that send real pull requests to a person:
   that follows a pre-release (`v1.2.0-rc.1.0.TIME-COMMIT`), goes to a
   person.
 
+## The owner's own workflows
+
+A caller pins this gate, and the shared CI workflows, as reusable
+workflows by commit:
+
+```
+    uses: sadbox/dep-review/.github/workflows/gate.yml@<40 hex> # vX.Y.Z
+```
+
+The gate's owner publishes those, and ruled that the gate trusts them. A
+Dependabot pull request that moves such a line merges at the gate's
+first look at it, once the required checks pass, with **nothing of the
+update read and no age**. The comment says so in those words.
+
+It applies to the repositories in `own_workflows` in `defaults.json` and
+to no other: `sadbox/ci` and `sadbox/dep-review`, each named whole and
+with the repository ID and owner ID GitHub gave it. There is no prefix
+and no entry for an owner or an organisation. What must hold:
+
+- Identity, Shape and ChecksConfigured, as for every pull request. The
+  line keeps its repository and its workflow file; only the commit and
+  the version in the comment move, and no other line changes with it.
+  A tag pin of such a workflow is not read.
+- Increase, from the two versions.
+- Bound: the tag of the new version, in the repository with exactly
+  those two IDs, resolves to the new commit. A look-alike name, a
+  repository that was renamed away, and a name someone else registered
+  again fail here or in Shape.
+- NoRegress: the new commit descends from the old pin and is on the
+  repository's default branch. A release branch does not count, and a
+  commit that only a fork has is on no branch.
+- Clean: no advisory names it. A release is not asked for.
+- Not a major. A major version of an own workflow always goes to a
+  person, listed or not: that is how a release says that callers may
+  have to change with it.
+
+An action in the same (grouped) pull request is read and aged by its own
+rules. Everything about a reusable workflow of any other repository is
+as before: a person.
+
+What this trusts and does not check: that only the owner can put a
+version tag on those two default branches. A gate release reaches every
+caller unread, and no pull request runs the new gate before it merges
+(a new CI workflow is run by the caller's required checks). So a gate
+release that changes `gate.yml`'s inputs or secrets has to be a new
+major. While both repositories are on v0 there are no majors, and that
+safeguard does nothing.
+
 ## Configuration
 
 The settings are built into the gate, in
@@ -248,6 +303,7 @@ between repositories is in the caller's workflow (`app_slug`,
 | `fast_path` | true |
 | `fast_path_companions` | `ride-along` |
 | `listed` | see below |
+| `own_workflows` | `sadbox/ci`, `sadbox/dep-review`, with their IDs (see above) |
 | `chunk_bytes`, `max_chunks` | 400000, 12 |
 | `model`, `effort`, `context_tokens`, `max_output_tokens`, `request_timeout_seconds`, `attempts` | `claude-opus-5-5`, `high`, ... |
 
@@ -342,8 +398,10 @@ model, whatever the comment remembers.
 ## Using it in a repository
 
 1. Copy `examples/dep-review-trigger.yaml` and `examples/dep-review.yaml`
-   into `.github/workflows/`. Pin `gate.yml` by commit SHA, and set
-   `app_slug` and the Anthropic IDs.
+   into `.github/workflows/`. Pin `gate.yml` by the commit of a release
+   tag, with the version in the comment as the example has it
+   (`@<40 hex> # vX.Y.Z`): that is the line the gate reads when
+   Dependabot moves it. Set `app_slug` and the Anthropic IDs.
 2. Create the environment `dep-review` (deployment branches: default
    branch only) with variable `DEP_REVIEW_APP_ID`, secret
    `DEP_REVIEW_APP_KEY` (the gate app's private key), and optionally
@@ -409,6 +467,11 @@ and it then gets no status, comment or notification.
   required age, merges.
 - Anything in a Docker image: images are never read. A listed image whose
   tag still resolves to the pinned digest after 72 hours merges unseen.
+- Anything in the owner's own reusable workflows (`sadbox/ci`,
+  `sadbox/dep-review`): a release of one merges unread and at once.
+  That covers what the owner wrote and whatever third-party update the
+  owner merged there by hand before tagging; neither repository runs the
+  gate on itself, and the gate's jobs run with the gate app's key.
 - What an action or an install script downloads when it runs: a tool, an
   installer, a prebuilt binary. The model sees the lines that fetch it.
 - An install script in a repository whose `.npmrc` turns scripts off, when
@@ -452,7 +515,10 @@ and it then gets no status, comment or notification.
   member that says a model read an update; that comes only from the
   verdicts file, matched by content hash. The one read that counts
   without a verdict is of two artifacts that hold the same files, where
-  there is nothing to show a model and the facts file says so. publish
+  there is nothing to show a model and the facts file says so. The one
+  update that merges with no read at all is the owner's own workflow:
+  the facts file says `own`, and publish takes that only for a name on
+  the list built into its own binary. publish
   believes the facts only about the pull request and head that classify
   proved: the classify job on an event, its own run of the proof on a
   schedule. The policy is built into the gate: no file of a repository

@@ -926,3 +926,117 @@ func TestNeedsChanges(t *testing.T) {
 		})
 	}
 }
+
+// The gate owner's own workflow (spec section 11, amendment 60) is
+// accepted on where its commit comes from: the fetch job downloads
+// nothing of it and prepares nothing for a model, the facts file says so
+// in the gate's words, and publish merges it with no verdict and with
+// nothing that dates it. The gatherer names a pair for it all the same,
+// so the facts file has the commit.
+func TestFetchOwnWorkflow(t *testing.T) {
+	// own is an update as the Actions gatherer returns an own workflow of
+	// a repository the built-in policy names.
+	own := func(name string) allow.UpdateFacts {
+		u := goodUpdate(t, allow.GitHubActions, name)
+		u.From, u.To = "v1.2.3", "v1.3.0"
+		u.Own = allow.Yes(name+" is on the policy's own list", "policy list own_workflows")
+		u.FirstSeen = allow.TimeFact{Value: "not asked: no age is asked of an own workflow"}
+		return u
+	}
+
+	t.Run("nothing is fetched, and it merges", func(t *testing.T) {
+		for _, name := range []string{"sadbox/ci", "sadbox/dep-review"} {
+			j := newJob(t, model.GitHubActions, own(name))
+			dir, f := j.run(t)
+			u := f.Facts.Updates[0]
+			if u.Prepared.Status != wire.Nothing || !strings.Contains(u.Prepared.Detail, "nothing of the gate owner's own workflow is read") {
+				t.Errorf("%s: prepared %+v", name, u.Prepared)
+			}
+			if len(j.preparer.pairs) != 0 || len(chunkFiles(t, dir)) != 0 {
+				t.Errorf("%s: the reader was asked for %+v, and there are %d chunk files", name, j.preparer.pairs, len(chunkFiles(t, dir)))
+			}
+			if !u.Own.Holds() || u.Hash != "new" {
+				t.Errorf("%s: Own %+v, hash %q; want the fact and the pair's commit", name, u.Own, u.Hash)
+			}
+			d := decide(t, f, nil)
+			wantOutcome(t, d, allow.Merge, "")
+			if d.PerUpdate[0].RequiredAge != 0 {
+				t.Errorf("%s: required age %v, want none", name, d.PerUpdate[0].RequiredAge)
+			}
+		}
+	})
+
+	// The fact is the gatherer's word, and the list is the policy's: a
+	// name that only looks like an entry is not read either, and is a
+	// person's.
+	t.Run("a name the built-in policy does not call own", func(t *testing.T) {
+		for _, name := range []string{"sadb0x/ci", "sadbox/ci-tools", "Sadbox/ci", "sadbox/some-other-repository", "example-org/ci"} {
+			j := newJob(t, model.GitHubActions, own(name))
+			_, f := j.run(t)
+			if len(j.preparer.pairs) != 0 {
+				t.Errorf("%s: the reader was asked", name)
+			}
+			wantOutcome(t, decide(t, f, nil), allow.Person, allow.ReasonListMismatch)
+		}
+	})
+
+	// Only a fact that holds, and only for an action: anything else is
+	// read like every update.
+	t.Run("an update that is not own is read", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			eco  model.Ecosystem
+			fact allow.Fact
+		}{
+			"Own says no":            {model.GitHubActions, allow.No("not own", "policy")},
+			"Own did not answer":     {model.GitHubActions, allow.Unavailable("no answer", "policy")},
+			"Own from nowhere":       {model.GitHubActions, allow.Fact{OK: true, Value: "yes"}},
+			"a Go module with Own":   {model.GoModules, allow.Yes("own", "policy")},
+			"an npm package with it": {model.NPM, allow.Yes("own", "policy")},
+		} {
+			u := own("sadbox/ci")
+			u.Own = tc.fact
+			u.FirstSeen = allow.At(now.Add(-100*time.Hour), "registry clock")
+			j := newJob(t, tc.eco, u)
+			_, f := j.run(t)
+			if got := f.Facts.Updates[0].Prepared.Status; got != wire.Prepared || len(j.preparer.pairs) != 1 {
+				t.Errorf("%s: prepared %q after %d calls of the reader, want a prepared read", name, got, len(j.preparer.pairs))
+			}
+			// And it is unread until a model answers.
+			if d := decide(t, f, nil); d.Outcome == allow.Merge {
+				t.Errorf("%s: merged without a verdict", name)
+			}
+		}
+	})
+
+	// Decided per update: an action in the same pull request is fetched,
+	// read and aged as it would be alone.
+	t.Run("beside an action", func(t *testing.T) {
+		young := goodUpdate(t, allow.GitHubActions, "octo-tools/setup")
+		young.FirstSeen = allow.At(now.Add(-time.Hour), "registry clock")
+		j := newJob(t, model.GitHubActions, own("sadbox/ci"), young)
+		_, f := j.run(t)
+		if len(j.preparer.pairs) != 1 || j.preparer.pairs[0].Name != "octo-tools/setup" {
+			t.Errorf("the reader was asked for %+v, want the action alone", j.preparer.pairs)
+		}
+		if f.Facts.Updates[0].Prepared.Status != wire.Nothing || f.Facts.Updates[1].Prepared.Status != wire.Prepared {
+			t.Errorf("prepared %q and %q", f.Facts.Updates[0].Prepared.Status, f.Facts.Updates[1].Prepared.Status)
+		}
+		wantOutcome(t, decide(t, f, nil), allow.Wait, allow.ReasonReadPending)
+		d := decide(t, f, cleanVerdicts(f))
+		wantOutcome(t, d, allow.Wait, allow.ReasonAge)
+		if d.PerUpdate[0].Outcome != allow.Merge || d.PerUpdate[1].RequiredAge != 72*time.Hour {
+			t.Errorf("per update %+v", d.PerUpdate)
+		}
+	})
+
+	// A shape that does not hold is said first, as for every update.
+	t.Run("the shape does not hold", func(t *testing.T) {
+		j := newJob(t, model.GitHubActions, own("sadbox/ci"))
+		j.gatherer.res.Shape = allow.No("a second line changed", "changed files")
+		_, f := j.run(t)
+		if got := f.Facts.Updates[0].Prepared.Detail; !strings.Contains(got, "shape does not hold") || len(j.preparer.pairs) != 0 {
+			t.Errorf("detail %q after %d calls of the reader", got, len(j.preparer.pairs))
+		}
+		wantOutcome(t, decide(t, f, nil), allow.Person, allow.ReasonShape)
+	})
+}

@@ -105,7 +105,7 @@ func Decide(f PRFacts, p Policy, now time.Time) Decision {
 			latest = ud.NotBefore
 		}
 		if u.FirstSeen.Known() {
-			if t := u.FirstSeen.Time.Add(requiredAge(u, ReadFull, p, rideAlongIfRead)); t.After(earliest) {
+			if t := u.FirstSeen.Time.Add(requiredAge(u, f.Ecosystem, ReadFull, p, rideAlongIfRead)); t.After(earliest) {
 				earliest = t
 			}
 		}
@@ -239,6 +239,14 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 		person = append(person, ReasonListMismatch)
 	}
 
+	// An own workflow is granted without a read and without an age, so
+	// which repositories are the owner's is Decide's own policy to say,
+	// like the list: a fact that calls any other name own grants nothing.
+	own := ownWorkflow(u, ecosystem)
+	if _, onList := OwnRepository(p, u.Name); own && !onList {
+		person = append(person, ReasonListMismatch)
+	}
+
 	if answered(known, listed, newName) {
 		switch {
 		case known == factYes:
@@ -319,7 +327,7 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 	switch {
 	case u.Read == ReadRefused:
 		person = append(person, ReasonReadRefused)
-	case !readValid(u.Read, ecosystem):
+	case !readValid(u.Read, ecosystem, own):
 		person = append(person, ReasonReadUnknown)
 	}
 	// A major is the owner's to decide unless they already did (the list)
@@ -327,10 +335,17 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 	// does not declare moves because its parent asked for the new major.
 	// Such an update still needs the major's age, like a listed one.
 	indirect := (ecosystem == GoModules || ecosystem == NPM) && u.Indirect.Holds()
-	if major == factYes && listed == factNo && !indirect {
+	switch {
+	case major == factYes && own:
+		// Unread and with no age, so the list does not speak for it
+		// either: a major of an own workflow is always the owner's.
+		person = append(person, ReasonMajorOwn)
+	case major == factYes && listed == factNo && !indirect:
 		person = append(person, ReasonMajorUnlisted)
 	}
-	if !superseded && !u.FirstSeen.Known() {
+	// No age is asked of an own workflow, so there is nothing to count
+	// from and no clock to wait for.
+	if !superseded && !own && !u.FirstSeen.Known() {
 		if u.FirstSeen.unavailable() {
 			asking = true
 		} else {
@@ -344,7 +359,7 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 		return ud
 	}
 
-	ud.RequiredAge = requiredAge(u, u.Read, p, rideAlong)
+	ud.RequiredAge = requiredAge(u, ecosystem, u.Read, p, rideAlong)
 	if u.FirstSeen.Known() {
 		ud.NotBefore = u.FirstSeen.Time.Add(ud.RequiredAge)
 	}
@@ -374,7 +389,13 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 // takes the fast path. An answer that has not arrived reads as "no"
 // here, which is safe: such an update waits whatever its age, and the age
 // is worked out again once the source has answered.
-func requiredAge(u UpdateFacts, read ReadState, p Policy, rideAlong bool) time.Duration {
+func requiredAge(u UpdateFacts, ecosystem string, read ReadState, p Policy, rideAlong bool) time.Duration {
+	if ownWorkflow(u, ecosystem) {
+		// The age gives a publisher's mistake or a moved tag time to be
+		// noticed by someone else. Here the publisher is the owner, and
+		// there is nobody else to wait for (amendment 60).
+		return 0
+	}
 	securityFix := p.FastPath && u.SecurityFix.Holds() && !u.NewName.Holds()
 	var age time.Duration
 	switch read {
@@ -404,6 +425,15 @@ func requiredAge(u UpdateFacts, read ReadState, p Policy, rideAlong bool) time.D
 	return age
 }
 
+// ownWorkflow reports whether u moves a reusable workflow of one of the
+// gate owner's own repositories (spec section 11, amendment 60). The fact
+// is the Actions gatherer's and means nothing in another ecosystem. Only
+// a fact that holds counts: never gathered, "no" and unavailable are all
+// "not own", which is the answer that grants less.
+func ownWorkflow(u UpdateFacts, ecosystem string) bool {
+	return ecosystem == GitHubActions && u.Own.Holds()
+}
+
 // carriesFastPathUpdate reports whether companions may ride along: the
 // policy says so and the pull request contains a security fix that was
 // fully read. With ifRead it answers as if every update had been read in
@@ -427,15 +457,17 @@ func companion(u UpdateFacts) bool {
 	return u.Known.Holds() && !u.NewName.Holds() && !u.Major.Holds()
 }
 
-// readValid reports whether r is a read state Decide can reason about in
-// this ecosystem. "Nothing to read" is true of Docker only; anywhere else
-// it would be a way to skip the read.
-func readValid(r ReadState, ecosystem string) bool {
+// readValid reports whether r is a read state Decide can reason about
+// for this update. "Nothing is read" is true of Docker and of an own
+// workflow; anywhere else it would be a way to skip the read. It is also
+// the only state an own workflow has: a record that says such an update
+// was read, or is still to be, is not one the gate writes.
+func readValid(r ReadState, ecosystem string, own bool) bool {
 	switch r {
 	case ReadFull, ReadPartial, ReadNone:
-		return true
+		return !own
 	case ReadNotApplicable:
-		return ecosystem == Docker
+		return ecosystem == Docker || own
 	}
 	return false
 }

@@ -414,6 +414,7 @@ var (
 		"NameCreated": "needed for an unlisted new name only, and tried on that baseline",
 		"Superseded":  "unset is not superseded; set, it can only turn a merge into a wait (TestSuperseded)",
 		"Indirect":    "unset is a dependency the repository declares itself; only holding does it change anything (TestIndirect)",
+		"Own":         "unset is not an own workflow; only holding does it change anything (TestOwn, TestOwnNotHolding)",
 	}
 )
 
@@ -470,8 +471,10 @@ func TestUnavailableFact(t *testing.T) {
 		updateType := reflect.TypeOf(UpdateFacts{})
 		for i := 0; i < updateType.NumField(); i++ {
 			field := updateType.Field(i).Name
-			if field == "Indirect" {
-				continue // never waited for: unavailable is direct (TestIndirect)
+			if field == "Indirect" || field == "Own" {
+				// Never waited for: unavailable is direct (TestIndirect),
+				// and not own (TestOwnNotHolding).
+				continue
 			}
 			switch updateType.Field(i).Type {
 			case reflect.TypeOf(Fact{}):
@@ -946,7 +949,8 @@ func TestAgeTable(t *testing.T) {
 
 func TestReadStates(t *testing.T) {
 	p := testPolicy()
-	// Nothing-to-read is Docker's alone; elsewhere it would skip the read.
+	// Nothing-to-read is Docker's, and an own workflow's (TestOwn);
+	// elsewhere it would skip the read.
 	for _, eco := range []string{GoModules, NPM, GitHubActions} {
 		wantOutcome(t, Decide(pr(eco, update(400*day, read(ReadNotApplicable))), p, t0), Person, ReasonReadUnknown)
 	}
@@ -1964,4 +1968,299 @@ func randomPolicy(r *rand.Rand) Policy {
 		p.Listed = nil
 	}
 	return p
+}
+
+// ---- amendment 60: the gate owner's own workflows ----
+
+// ownName is the one repository ownPolicy calls the gate owner's own.
+const ownName = "acme-infra/ci"
+
+// ownPolicy is testPolicy with an own list of one made-up repository.
+func ownPolicy() Policy {
+	p := testPolicy()
+	p.Own = []OwnRepo{{Repository: ownName, RepositoryID: 4242, OwnerID: 77}}
+	return p
+}
+
+// ownUpdate is the commit pin of an own workflow as the Actions gatherer
+// and wire.Join hand it to Decide: every fact about where the commit
+// comes from holds, nothing was read, and nothing dates it.
+func ownUpdate(mods ...func(*UpdateFacts)) UpdateFacts {
+	u := UpdateFacts{
+		Name: ownName, From: "v1.2.3", To: "v1.3.0",
+		Known:       Yes("replaced in place", "the workflow"),
+		Listed:      No("matches no list entry", "policy"),
+		NewName:     No("replaced in place", "the workflow"),
+		Increase:    Yes("v1.2.3 -> v1.3.0", "the workflow"),
+		Major:       No("both v1", "the workflow"),
+		Bound:       Yes("tag v1.3.0 is the pinned commit; repository 4242 of owner 77", "GitHub"),
+		Clean:       Yes("no advisory", "advisories"),
+		NoRegress:   Yes("ahead of the old pin; on branch main", "GitHub"),
+		SecurityFix: No("no advisory names v1.3.0", "advisories"),
+		Own:         Yes(ownName+" is on the own list", "policy"),
+		Read:        ReadNotApplicable,
+	}
+	for _, mod := range mods {
+		mod(&u)
+	}
+	return u
+}
+
+// Own (spec section 11, amendment 60): the commit pin of a reusable
+// workflow in a repository on the policy's own list merges on where its
+// commit comes from, with nothing read and no age. Every other fact must
+// hold as for any update, a major is a person's, and a name the policy
+// Decide was given does not have is not own whatever the fact says.
+func TestOwn(t *testing.T) {
+	p := ownPolicy()
+	// A repository's name on the owner-kept list as well, as a prefix.
+	listedToo := ownPolicy()
+	listedToo.Listed = map[string][]string{GitHubActions: {"acme-infra/"}}
+	isListed := func(u *UpdateFacts) { u.Listed = Yes("acme-infra/", "policy") }
+	named := func(name string) func(*UpdateFacts) { return func(u *UpdateFacts) { u.Name = name } }
+
+	for _, tc := range []struct {
+		name    string
+		policy  Policy
+		eco     string
+		u       UpdateFacts
+		want    Outcome
+		reasons []Reason
+	}{
+		{"merges at once, unread and undated", p, GitHubActions, ownUpdate(), Merge, nil},
+		{"published this instant", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.FirstSeen = At(t0, "the gate's own clock") }), Merge, nil},
+		{"also listed, a minor", listedToo, GitHubActions, ownUpdate(isListed), Merge, nil},
+
+		// The name is Decide's own policy's to say, whole and byte for byte.
+		{"a policy with no own list", testPolicy(), GitHubActions, ownUpdate(), Person, []Reason{ReasonListMismatch}},
+		{"a look-alike owner", p, GitHubActions, ownUpdate(named("acme-1nfra/ci")), Person, []Reason{ReasonListMismatch}},
+		{"a look-alike repository", p, GitHubActions, ownUpdate(named("acme-infra/c1")), Person, []Reason{ReasonListMismatch}},
+		{"a name the entry is a prefix of", p, GitHubActions, ownUpdate(named("acme-infra/ci-tools")), Person, []Reason{ReasonListMismatch}},
+		{"the owner alone", p, GitHubActions, ownUpdate(named("acme-infra")), Person, []Reason{ReasonListMismatch}},
+		{"another repository of the owner", p, GitHubActions, ownUpdate(named("acme-infra/gate")), Person, []Reason{ReasonListMismatch}},
+		{"the name in another case", p, GitHubActions, ownUpdate(named("Acme-infra/ci")), Person, []Reason{ReasonListMismatch}},
+		{"the name with its workflow file", p, GitHubActions, ownUpdate(named(ownName + "/.github/workflows/lint.yml")), Person, []Reason{ReasonListMismatch}},
+
+		// Every other fact, as for any update.
+		{"not bound: the tag is another commit, or the IDs are not the list's", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.Bound = No("tag v1.3.0 is another commit", "GitHub") }), Person, []Reason{ReasonNotBound}},
+		{"not on the default branch, or not a descendant of the old pin", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.NoRegress = No("not reachable from main", "GitHub") }), Person, []Reason{ReasonRegress}},
+		{"not an increase", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.Increase = No("v1.3.0 -> v1.3.0", "the workflow") }), Person, []Reason{ReasonNotIncrease}},
+		{"an advisory names it", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.Clean = No("malware advisory", "advisories") }), Person, []Reason{ReasonNotClean}},
+		{"a veto, from wherever", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.Veto = &Veto{Category: "obfuscation"} }), Person, []Reason{ReasonVeto}},
+		{"Bound did not answer: it waits", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.Bound = Unavailable("HTTP 503", "GitHub") }), Wait, []Reason{ReasonSourceUnavailable}},
+
+		// A major is always the owner's, listed or not.
+		{"a major", p, GitHubActions, ownUpdate(major), Person, []Reason{ReasonMajorOwn}},
+		{"a major of a name that is also listed", listedToo, GitHubActions, ownUpdate(major, isListed), Person, []Reason{ReasonMajorOwn}},
+		{"a major that is not known to be one", p, GitHubActions, ownUpdate(func(u *UpdateFacts) { u.Major = Fact{} }), Person, []Reason{ReasonFactMissing}},
+
+		// Not-applicable is the one read state it has.
+		{"a record that says it was read", p, GitHubActions, ownUpdate(read(ReadFull)), Person, []Reason{ReasonReadUnknown}},
+		{"a record that says it was read in part", p, GitHubActions, ownUpdate(read(ReadPartial)), Person, []Reason{ReasonReadUnknown}},
+		{"a record that says the read is still to come", p, GitHubActions, ownUpdate(read(ReadNone)), Person, []Reason{ReasonReadUnknown}},
+		{"a record with no read", p, GitHubActions, ownUpdate(read("")), Person, []Reason{ReasonReadUnknown}},
+		{"a read the gate refused", p, GitHubActions, ownUpdate(read(ReadRefused)), Person, []Reason{ReasonReadRefused}},
+
+		// The fact means nothing in another ecosystem: unread and undated
+		// is what it is there.
+		{"a Go module", p, GoModules, ownUpdate(), Person, []Reason{ReasonReadUnknown, ReasonFirstSeenUnknown}},
+		{"an npm package", p, NPM, ownUpdate(), Person, []Reason{ReasonReadUnknown, ReasonFirstSeenUnknown}},
+		{"an image", p, Docker, ownUpdate(), Person, []Reason{ReasonNotKnown, ReasonFirstSeenUnknown}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantOutcome(t, Decide(pr(tc.eco, tc.u), tc.policy, t0), tc.want, tc.reasons...)
+		})
+	}
+
+	// No age: the required age is zero whatever else the update is, and a
+	// time the publish job gave it does not hold it back.
+	d := Decide(pr(GitHubActions, ownUpdate(func(u *UpdateFacts) { u.FirstSeen = At(t0, "the gate's own clock") })), p, t0)
+	if d.PerUpdate[0].RequiredAge != 0 || !d.NotBefore.Equal(t0) {
+		t.Errorf("required age %v, not before %v; want none, and t0", d.PerUpdate[0].RequiredAge, d.NotBefore)
+	}
+
+	// Decided per update: beside an action that was read and is too young,
+	// the pull request waits for the action alone.
+	young := update(hour, func(u *UpdateFacts) { u.Name = "octo-tools/setup" })
+	d = Decide(pr(GitHubActions, ownUpdate(), young), p, t0)
+	wantOutcome(t, d, Wait, ReasonAge)
+	if d.PerUpdate[0].Outcome != Merge || d.PerUpdate[1].Outcome != Wait || !d.NotBefore.Equal(t0.Add(71*hour)) {
+		t.Errorf("per update %+v, not before %v", d.PerUpdate, d.NotBefore)
+	}
+	// And an action beside it is not excused its read or its age.
+	wantOutcome(t, Decide(pr(GitHubActions, ownUpdate(), update(400*day, read(ReadNotApplicable))), p, t0), Person, ReasonReadUnknown)
+	wantOutcome(t, Decide(pr(GitHubActions, ownUpdate(), update(400*day, func(u *UpdateFacts) { u.FirstSeen = TimeFact{} })), p, t0), Person, ReasonFirstSeenUnknown)
+}
+
+// An own workflow that merges still has every fact but the two the rule
+// waives: blanking any other field of the record is a person's.
+func TestOwnNeedsEveryOtherFact(t *testing.T) {
+	p := ownPolicy()
+	base := pr(GitHubActions, ownUpdate())
+	wantOutcome(t, Decide(base, p, t0), Merge)
+
+	waived := map[string]string{
+		"FirstSeen": "no age is asked of an own workflow",
+		"Veto":      "nil already",
+	}
+	updateType := reflect.TypeOf(UpdateFacts{})
+	for i := 0; i < updateType.NumField(); i++ {
+		field := updateType.Field(i).Name
+		f := clonePR(base)
+		fv := reflect.ValueOf(&f.Updates[0]).Elem().Field(i)
+		if fv.IsZero() || waived[field] != "" {
+			// Unset in the record that merges (From aside, nothing in it
+			// is): NameCreated, Indirect, Superseded.
+			continue
+		}
+		fv.SetZero()
+		d := Decide(f, p, t0)
+		if field == "From" {
+			// Decides nothing, as for every update.
+			wantOutcome(t, d, Merge)
+			continue
+		}
+		if d.Outcome != Person {
+			t.Errorf("UpdateFacts.%s blank: %q %v, want person", field, d.Outcome, d.Reasons)
+		}
+	}
+	prType := reflect.TypeOf(PRFacts{})
+	for i := 0; i < prType.NumField(); i++ {
+		field := prType.Field(i).Name
+		if exemptPR[field] != "" {
+			continue
+		}
+		f := clonePR(base)
+		reflect.ValueOf(&f).Elem().Field(i).SetZero()
+		if d := Decide(f, p, t0); d.Outcome != Person {
+			t.Errorf("PRFacts.%s blank: %q %v, want person", field, d.Outcome, d.Reasons)
+		}
+	}
+
+	// The same over random records: whatever else is in one, an own
+	// workflow that merges has every fact that must hold, an answer for
+	// every yes/no fact, no veto, no major, the one read state, and a name
+	// on the policy's own list.
+	r := rand.New(rand.NewPCG(60, 2))
+	merges := 0
+	for i := 0; i < 40000; i++ {
+		f, policy := randomPR(r), randomPolicy(r)
+		policy.Own = p.Own
+		f.Ecosystem = GitHubActions
+		for k := range f.Updates {
+			u := &f.Updates[k]
+			u.Own = Yes("own", "policy")
+			if usually(r, 0.9) {
+				u.Name = ownName
+				u.Listed = No("no", "policy")
+			}
+			if usually(r, 0.8) {
+				u.Read, u.Veto = ReadNotApplicable, nil
+			}
+			if usually(r, 0.9) {
+				u.Known, u.NewName = Yes("yes", "base"), No("no", "base")
+			}
+		}
+		now := t0.Add(time.Duration(r.Int64N(int64(30*day))) - 10*day)
+		if Decide(f, policy, now).Outcome != Merge {
+			continue
+		}
+		merges++
+		if !f.Identity.Holds() || !f.Shape.Holds() || !f.ChecksConfigured.Holds() || len(f.Updates) == 0 {
+			t.Fatalf("merged without a pull request fact: %+v", f)
+		}
+		for _, u := range f.Updates {
+			switch {
+			case u.Name != ownName:
+				t.Fatalf("merged a name that is not on the own list: %+v", u)
+			case !u.Increase.Holds(), !u.Bound.Holds(), !u.Clean.Holds(), !u.NoRegress.Holds(), !u.Known.Holds():
+				t.Fatalf("merged without a fact that must hold: %+v", u)
+			case !u.Listed.Gathered(), !u.NewName.Gathered(), !u.Major.Gathered(), !u.SecurityFix.Gathered():
+				t.Fatalf("merged without an answer: %+v", u)
+			case u.Major.Holds():
+				t.Fatalf("merged a major: %+v", u)
+			case u.Veto != nil:
+				t.Fatalf("merged over a veto: %+v", u)
+			case u.Read != ReadNotApplicable:
+				t.Fatalf("merged with a read state an own workflow does not have: %+v", u)
+			}
+		}
+	}
+	if merges < 1000 {
+		t.Fatalf("only %d of the random records merged", merges)
+	}
+}
+
+// Own counts only when it holds, and only for an action: every other
+// state of the fact, and the fact in any other ecosystem, is decided as
+// "not own". Nothing waits for it.
+func TestOwnNotHolding(t *testing.T) {
+	set := func(f PRFacts, fact Fact) PRFacts {
+		out := clonePR(f)
+		for k := range out.Updates {
+			out.Updates[k].Own = fact
+		}
+		return out
+	}
+	r := rand.New(rand.NewPCG(60, 3))
+	changed := 0
+	for i := 0; i < 30000; i++ {
+		f, p := randomPR(r), randomPolicy(r)
+		p.Own = ownPolicy().Own
+		for k := range f.Updates {
+			if usually(r, 0.5) {
+				f.Updates[k].Name = ownName
+			}
+		}
+		now := t0.Add(time.Duration(r.Int64N(int64(30*day))) - 10*day)
+
+		notOwn := Decide(set(f, No("not own", "policy")), p, now)
+		for what, fact := range map[string]Fact{
+			"unset":                        {},
+			"unavailable":                  Unavailable("no answer", "policy"),
+			"true without a source":        {OK: true, Value: "yes"},
+			"true and unavailable":         {OK: true, Unavailable: true, Value: "yes", Source: "policy"},
+			"unavailable without a source": {Unavailable: true, Value: "no answer"},
+		} {
+			if d := Decide(set(f, fact), p, now); !reflect.DeepEqual(d, notOwn) {
+				t.Fatalf("case %d: Own %s is not decided as not own: %q %v, want %q %v", i, what, d.Outcome, d.Reasons, notOwn.Outcome, notOwn.Reasons)
+			}
+		}
+		holding := Decide(set(f, Yes("own", "policy")), p, now)
+		if f.Ecosystem != GitHubActions {
+			if !reflect.DeepEqual(holding, notOwn) {
+				t.Fatalf("case %d: Own changed a decision in %s: %q %v, want %q %v", i, f.Ecosystem, holding.Outcome, holding.Reasons, notOwn.Outcome, notOwn.Reasons)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(holding, notOwn) {
+			changed++
+		}
+	}
+	// The property is empty unless Own sometimes decides.
+	if changed < 500 {
+		t.Fatalf("Own changed the decision of only %d random records", changed)
+	}
+}
+
+// The own list matches a whole name, byte for byte.
+func TestOwnRepository(t *testing.T) {
+	p := ownPolicy()
+	if o, ok := OwnRepository(p, ownName); !ok || o.RepositoryID != 4242 || o.OwnerID != 77 {
+		t.Errorf("OwnRepository(%q) = %+v, %v", ownName, o, ok)
+	}
+	for _, name := range []string{"", "acme-infra", "acme-infra/", "acme-infra/ci/", "acme-infra/ci-tools", "acme-infra/c", "Acme-Infra/ci", "acme-infra/CI",
+		"acme-1nfra/ci", "acme-infra/c1", " acme-infra/ci", "acme-infra/ci ", "acme-infra/ci/.github/workflows/lint.yml", "other/acme-infra/ci"} {
+		if o, ok := OwnRepository(p, name); ok {
+			t.Errorf("OwnRepository(%q) = %+v: only the whole name is on the list", name, o)
+		}
+	}
+	// An entry with no name matches nothing, and neither does a policy
+	// with no list.
+	if _, ok := OwnRepository(Policy{Own: []OwnRepo{{RepositoryID: 1, OwnerID: 1}}}, ""); ok {
+		t.Error("an entry with no name matched the empty name")
+	}
+	if _, ok := OwnRepository(testPolicy(), ownName); ok {
+		t.Error("a policy with no own list has an own repository")
+	}
 }
