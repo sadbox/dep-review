@@ -94,6 +94,12 @@ func recordOf(doc versionDoc, copies []node) (installRecord, error) {
 // own files are the third source for install scripts (InspectTarballs),
 // so this is never an update's NoRegress by itself: it is handed to the
 // fetch command beside the update (facts.Result.NoRegressSoFar).
+//
+// A script here is the command package.json gives a hook ("node
+// install.js"), and that is all that is compared. The file the command
+// runs is code of the package like any other, and it is the model that
+// reads it: the Value says "hook commands" so that a reader of the
+// comment does not take an unchanged command for an unchanged install.js.
 func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnswer, source string) (allow.Fact, error) {
 	source += " and package-lock.json"
 	to, missing, ok := a.version(u.To, source)
@@ -127,7 +133,7 @@ func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnsw
 		case toRecord.registryFlag && !fromRecord.registryFlag:
 			return allow.No("the registry marks "+show(u.To)+" as building on install, and did not mark "+show(u.From), source), nil
 		}
-		scripts = "install scripts unchanged (" + showHooks(toRecord.hooks) + ")"
+		scripts = "install hook commands unchanged (" + showHooks(toRecord.hooks) + ")"
 	}
 
 	provenance, err := provenanceFact(ctx, reg, u, from, to, source)
@@ -356,6 +362,13 @@ const tarballSource = "every package.json and binding.gyp in the verified tarbal
 // "gypfile": false, beside a binding.gyp is how a build starts that no
 // script was added for.
 //
+// What is compared is what package.json and binding.gyp say, and nothing
+// they point at: not the file a script's command runs, not a file a
+// binding.gyp includes or one of its actions runs. Those are in the diff
+// the model reads, like every other file that changed, and a rule that
+// refused them would refuse every update of a package that has an
+// install step. The Value says so.
+//
 // Every package.json and binding.gyp is looked at, wherever it is. That
 // covers bundled dependencies, which are installed from inside this
 // tarball and appear in no other source (spec section 11, amendment 5),
@@ -400,7 +413,7 @@ func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
 	case problem != "":
 		return allow.No(problem, tarballSource)
 	}
-	return allow.Yes(fmt.Sprintf("no install script, gypfile or binding.gyp is new, changed or gone in %d package.json (%d binding.gyp present)", manifests, gyps), tarballSource)
+	return allow.Yes(fmt.Sprintf("no install hook command, gypfile or binding.gyp is new, changed or gone in %d package.json (%d binding.gyp present); the files these run were not compared", manifests, gyps), tarballSource)
 }
 
 // gypProblem says how the binding.gyp at p is not the old tarball's, and

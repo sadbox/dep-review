@@ -343,14 +343,14 @@ func TestNoRegressRealPackages(t *testing.T) {
 		want             string
 		holds            bool
 	}{
-		{"core-js keeps its postinstall", "core-js", "3.38.0", "3.38.1", true, true, "install scripts unchanged (postinstall: ", true},
+		{"core-js keeps its postinstall", "core-js", "3.38.0", "3.38.1", true, true, "install hook commands unchanged (postinstall: ", true},
 		// 2.4.0 builds with node-gyp on install; 2.4.1 ships prebuilt
 		// binaries and has no install script.
 		{"@parcel/watcher drops its install script", "@parcel/watcher", "2.4.0", "2.4.1", true, false, "no install script", true},
 		{"@parcel/watcher gains it going back", "@parcel/watcher", "2.4.1", "2.4.0", false, true, `install scripts change from none to install: "node-gyp rebuild"`, false},
 		{"chart.js has none", "chart.js", "4.4.6", "4.4.7", false, false, "no install script", true},
 		{"the lock flags a script the registry does not show", "chart.js", "4.4.6", "4.4.7", false, true, "the lock marks 4.4.7 as having an install script", false},
-		{"the lock flagged both", "chart.js", "4.4.6", "4.4.7", true, true, "install scripts unchanged (none)", true},
+		{"the lock flagged both", "chart.js", "4.4.6", "4.4.7", true, true, "install hook commands unchanged (none)", true},
 		{"a new name with an install script", "core-js", "", "3.38.1", false, true, "a new dependency with an install script", false},
 		{"a new name without one", "@kurkle/color", "", "0.3.4", false, false, "no install script", true},
 		{"the old version is gone from the registry", "event-stream", "3.3.6", "3.3.5", false, false, "3.3.6 is not on the registry (unpublished)", false},

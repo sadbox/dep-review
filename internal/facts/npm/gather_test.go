@@ -185,7 +185,7 @@ func TestGatherPlain(t *testing.T) {
 			}
 
 			core := findUpdate(t, res, "core-js")
-			if !core.NoRegress.Holds() || !strings.Contains(core.NoRegress.Value, "install scripts unchanged (postinstall: ") {
+			if !core.NoRegress.Holds() || !strings.Contains(core.NoRegress.Value, "install hook commands unchanged (postinstall: ") {
 				t.Errorf("core-js NoRegress = %+v", core.NoRegress)
 			}
 
