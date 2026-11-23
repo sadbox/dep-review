@@ -342,7 +342,7 @@ func TestAsked(t *testing.T) {
 
 	f := newFake(t)
 	f.comments[testPR] = []*fakeComment{{1, testBot, old.String() + rest}}
-	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA); err != nil {
+	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA, Vetoes{}); err != nil {
 		t.Fatal(err)
 	}
 	body := f.gateComment(testPR)
@@ -368,12 +368,12 @@ func TestAsked(t *testing.T) {
 		if name == "no marker" {
 			head = headA
 		}
-		if err := Asked(context.Background(), f.config(t0, nil), testPR, head); err != nil || len(f.writes()) != 0 {
+		if err := Asked(context.Background(), f.config(t0, nil), testPR, head, Vetoes{}); err != nil || len(f.writes()) != 0 {
 			t.Errorf("%s: %v, writes %+v; want nothing", name, err, f.writes())
 		}
 	}
 	f = newFake(t)
-	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA); err != nil || len(f.writes()) != 0 {
+	if err := Asked(context.Background(), f.config(t0, nil), testPR, headA, Vetoes{}); err != nil || len(f.writes()) != 0 {
 		t.Errorf("no comment: %v, writes %+v; want nothing", err, f.writes())
 	}
 }

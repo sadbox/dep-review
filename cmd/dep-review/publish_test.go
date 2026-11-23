@@ -11,15 +11,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/config"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/land"
 	"github.com/sadbox/dep-review/internal/model"
+	"github.com/sadbox/dep-review/internal/veto"
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
@@ -38,6 +41,13 @@ type fakeAPI struct {
 	// calls are the requests, "METHOD path", and bodies what was written.
 	calls  []string
 	bodies []string
+	// proof answers the rest of classify's proof for #7 as for a pull
+	// request that is Dependabot's alone, and the default branch's rules
+	// with a required check.
+	proof bool
+	// statusFails is how many status writes, from the next one, GitHub
+	// answers 502.
+	statusFails int
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +57,12 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call := r.Method + " " + strings.TrimPrefix(r.URL.Path, "/repos/o/r/")
 	f.calls = append(f.calls, call)
 	switch {
+	case f.proof && proofAnswers[call] != "":
+		io.WriteString(w, proofAnswers[call])
+	case strings.HasPrefix(call, "POST statuses/") && f.statusFails > 0:
+		f.statusFails--
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, `{"message":"Server Error"}`)
 	case call == "GET pulls/7" && f.pull != "":
 		io.WriteString(w, f.pull)
 	case call == "GET pulls":
@@ -73,6 +89,18 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"Not Found"}`)
 	}
+}
+
+// proofAnswers are fakeAPI's answers with proof set: one commit by
+// Dependabot that GitHub signed, the branch's creation by Dependabot, an
+// empty timeline, the rules that keep everyone else off the branch, and a
+// required check on main.
+var proofAnswers = map[string]string{
+	"GET pulls/7/commits":     `[{"sha":"` + testHead + `","author":{"login":"dependabot[bot]"},"committer":{"login":"web-flow"},"commit":{"verification":{"verified":true,"reason":"valid"}}}]`,
+	"GET activity":            `[{"before":"0000000000000000000000000000000000000000","after":"` + testHead + `","activity_type":"branch_creation","actor":{"login":"dependabot[bot]"}}]`,
+	"GET issues/7/timeline":   `[]`,
+	"GET rules/branches/main": `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
+	"GET rules/branches/dependabot/go_modules/example.com/m-1.0.1": `[{"type":"creation"},{"type":"update"},{"type":"deletion"}]`,
 }
 
 // config is internal/land's configuration against the fake.
@@ -518,4 +546,88 @@ func TestReadFacts(t *testing.T) {
 	if f, err := readFacts(filepath.Join(dir, "facts.json")); err != nil || f.PullRequest.Number != 7 {
 		t.Errorf("a facts file: %+v, %v", f.PullRequest, err)
 	}
+}
+
+// vetoVerdicts is a verdicts file in which the model vetoes testKey,
+// under the built-in reviewer's fingerprint.
+func vetoVerdicts(t *testing.T) string {
+	t.Helper()
+	conf, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := wire.EncodeVerdicts(wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{{Key: testKey, Fingerprint: veto.FromConfig(conf).Fingerprint(),
+		Read: allow.ReadFull, Veto: &allow.Veto{Category: "exfiltration", Quotes: []string{"sends ~/.ssh to a host"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// vetoesOf is the content keys the marker of a comment remembers a veto
+// for.
+func vetoesOf(t *testing.T, written string) []string {
+	t.Helper()
+	found := markerRE.FindStringSubmatch(written)
+	if found == nil {
+		t.Fatalf("no marker in %s", written)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(found[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Cache []struct {
+			Key  string          `json:"key"`
+			Veto json.RawMessage `json:"veto"`
+		} `json:"cache"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, c := range m.Cache {
+		if string(c.Veto) != "null" && len(c.Veto) > 0 {
+			keys = append(keys, c.Key)
+		}
+	}
+	return keys
+}
+
+// A veto the model gave in a run whose publish then could not write the
+// status is in the marker of what publish writes for that run instead: the
+// report of a run that could not decide on an event, the counted ask on
+// the schedule (spec section 11, amendment 73).
+func TestPublishKeepsAVetoItCouldNotWrite(t *testing.T) {
+	t.Run("on an event", func(t *testing.T) {
+		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), statusFails: 1}
+		in := t.TempDir()
+		writeFacts(t, filepath.Join(in, "facts", "facts.json"), goodFacts())
+		writeFile(t, filepath.Join(in, "verdicts", "verdicts.json"), vetoVerdicts(t))
+		class := model.Classification{Repo: "o/r", PR: 7, HeadSHA: testHead, Kind: model.KindDependabot}
+		if err := publishEvent(context.Background(), api.config(t), in, class); err == nil || !strings.Contains(err.Error(), "502") {
+			t.Fatalf("err = %v, want the status write's", err)
+		}
+		if !strings.Contains(api.comment, "### dep-review: the run failed") || !slices.Equal(vetoesOf(t, api.comment), []string{testKey}) {
+			t.Errorf("the comment after: %s", api.comment)
+		}
+	})
+	t.Run("on the schedule", func(t *testing.T) {
+		const rest = "\n### dep-review: waiting\n\nthe comment's text\n"
+		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), proof: true, statusFails: 1,
+			comment: handMarker(`"outcome":"wait","head":"`+testHead+`"`) + rest}
+		in := t.TempDir()
+		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
+		writeFile(t, filepath.Join(in, "reverdicts", "7", "verdicts.json"), vetoVerdicts(t))
+		entries, err := os.ReadDir(filepath.Join(in, "refreshed"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := refreshed(context.Background(), api.config(t), in, entries[0], nil); err == nil || !strings.Contains(err.Error(), "502") {
+			t.Fatalf("err = %v, want the status write's (requests %v)", err, api.calls)
+		}
+		if asksOf(t, api.comment) != 1 || !strings.HasSuffix(api.comment, rest) || !slices.Equal(vetoesOf(t, api.comment), []string{testKey}) {
+			t.Errorf("the comment after: %s", api.comment)
+		}
+	})
 }

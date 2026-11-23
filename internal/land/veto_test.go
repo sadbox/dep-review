@@ -209,7 +209,7 @@ func TestVetoStands(t *testing.T) {
 			t.Fatalf("the veto: %+v, %v", res, err)
 		}
 		moveTo(f, &facts, headB)
-		if err := Failed(context.Background(), f.config(t0, nil), testPR, headB, "In this run the fetch job ended failure."); err != nil {
+		if err := Failed(context.Background(), f.config(t0, nil), testPR, headB, "In this run the fetch job ended failure.", Vetoes{}); err != nil {
 			t.Fatal(err)
 		}
 		remembersVeto(t, f, "after the failed run", keyA)

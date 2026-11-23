@@ -225,8 +225,10 @@ const unreadNotice = " waits unread: the model has not answered for code the gat
 // asked about at every run. It rewrites the marker line of the gate's
 // comment and nothing else. A comment whose marker is not for head has no
 // count to add to, and is left alone: no model is asked for such a head
-// (askDue).
-func Asked(ctx context.Context, cfg Config, number int, head string) error {
+// (askDue). kept is the vetoes of the run's evaluation, when it got that
+// far, which the marker keeps too: a veto must not hang on the write that
+// failed (spec section 11, amendment 73).
+func Asked(ctx context.Context, cfg Config, number int, head string, kept Vetoes) error {
 	if err := cfg.check(); err != nil {
 		return err
 	}
@@ -239,6 +241,7 @@ func Asked(ctx context.Context, cfg Config, number int, head string) error {
 		return nil
 	}
 	mk.Asks, mk.AskedAt = min(mk.Asks+1, maxAsks), cfg.now()
+	kept.keep(&mk)
 	return remark(ctx, cfg, c, mk)
 }
 
@@ -275,7 +278,10 @@ func unanswered(ev Evaluation) bool {
 // A pull request that is closed or has a newer head is left alone: the
 // newer head has a run of its own, whose comment this must not replace.
 // what is the gate's own sentence about the run, never an error's text.
-func Failed(ctx context.Context, cfg Config, number int, head, what string) error {
+// kept is the vetoes of the run's evaluation, when Decide got that far:
+// the marker keeps them with what it remembered (spec section 11,
+// amendment 73).
+func Failed(ctx context.Context, cfg Config, number int, head, what string, kept Vetoes) error {
 	if err := cfg.check(); err != nil {
 		return err
 	}
@@ -306,6 +312,7 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 		old, _ = parseMarker(prev.Body)
 	}
 	mk := old.next(ActionFailed, head)
+	kept.keep(&mk)
 	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number, told))
 
 	run := "this pull request's dep-review workflow run"

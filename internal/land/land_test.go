@@ -706,7 +706,7 @@ func TestConfigCheck(t *testing.T) {
 		if _, err := Schedule(context.Background(), cfg); err == nil {
 			t.Errorf("%s: Schedule ran", name)
 		}
-		if err := Failed(context.Background(), cfg, testPR, headA, "test"); err == nil {
+		if err := Failed(context.Background(), cfg, testPR, headA, "test", Vetoes{}); err == nil {
 			t.Errorf("%s: Failed ran", name)
 		}
 		if err := Expired(context.Background(), cfg, testPR, headA); err == nil {
@@ -715,7 +715,7 @@ func TestConfigCheck(t *testing.T) {
 		if err := Tell(context.Background(), cfg, testPR); err == nil {
 			t.Errorf("%s: Tell ran", name)
 		}
-		if err := Asked(context.Background(), cfg, testPR, headA); err == nil {
+		if err := Asked(context.Background(), cfg, testPR, headA, Vetoes{}); err == nil {
 			t.Errorf("%s: Asked ran", name)
 		}
 		if _, _, err := Undecided(context.Background(), cfg, testPR); err == nil {

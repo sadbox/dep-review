@@ -184,7 +184,7 @@ func TestTell(t *testing.T) {
 	// remembered apart from a decision's.
 	t.Run("a run that failed", func(t *testing.T) {
 		f := newFake(t)
-		if err := Failed(context.Background(), f.config(t0, down), testPR, headA, "The fetch job ended failure."); err == nil {
+		if err := Failed(context.Background(), f.config(t0, down), testPR, headA, "The fetch job ended failure.", Vetoes{}); err == nil {
 			t.Fatal("Failed did not return the notifier's error")
 		}
 		rec := &recorder{}
@@ -261,7 +261,7 @@ func TestFailedOnTheSchedule(t *testing.T) {
 	if _, ok, err := Undecided(context.Background(), cfg, testPR); err != nil || !ok {
 		t.Fatalf("undecided: %t, %v", ok, err)
 	}
-	if err := Failed(context.Background(), cfg, testPR, headA, "The scheduled run could not evaluate this pull request."); err != nil {
+	if err := Failed(context.Background(), cfg, testPR, headA, "The scheduled run could not evaluate this pull request.", Vetoes{}); err != nil {
 		t.Fatal(err)
 	}
 	if s := f.statuses(headA); len(s) != 1 || s[0] != "error: the scheduled run could not evaluate this pull request; see the comment" {

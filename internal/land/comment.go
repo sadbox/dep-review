@@ -135,6 +135,53 @@ func (old marker) next(outcome Action, head string) marker {
 	return mk
 }
 
+// Vetoes is what an evaluation must leave in the gate's memory even when
+// Act does not get to write the comment: the vetoes it decided with, and
+// whether one was given up (spec section 11, amendment 73). Failed and
+// Asked, which publish calls for a run that wrote nothing, add them to the
+// marker they write. Clean verdicts and first-seen times are not carried:
+// without them the next run asks and dates again, as it did before. The
+// zero Vetoes is none.
+type Vetoes struct {
+	fingerprint string
+	cache       []cached
+	forgot      bool
+}
+
+// Vetoes is ev's.
+func (ev Evaluation) Vetoes() Vetoes {
+	v := Vetoes{fingerprint: ev.fingerprint, forgot: ev.forgot}
+	for _, c := range ev.cache {
+		if c.Veto != nil {
+			v.cache = append(v.cache, c)
+		}
+	}
+	return v
+}
+
+// keep adds v to mk: the vetoes first, then what mk remembered under the
+// same fingerprint and is not among them, to maxCached in all. A marker
+// under another fingerprint has nothing this build looks at, and gives
+// its entries up for v's vetoes, as Act's marker would. The vetoes were
+// cut to what a marker holds (fitted), so String's fit gives up mk's own
+// clean entries before any of them.
+func (v Vetoes) keep(mk *marker) {
+	mk.Forgot = mk.Forgot || v.forgot
+	if len(v.cache) == 0 {
+		return
+	}
+	if mk.Fingerprint != v.fingerprint {
+		mk.Fingerprint, mk.Cache = v.fingerprint, nil
+	}
+	cache := slices.Clone(v.cache)
+	for _, c := range mk.Cache {
+		if !slices.ContainsFunc(v.cache, func(e cached) bool { return e.Key == c.Key }) {
+			cache = append(cache, c)
+		}
+	}
+	mk.Cache = cache[:min(len(cache), maxCached)]
+}
+
 // askGap is how long after the first scheduled ask for a head the model
 // is asked again about a read that still has no answer; every ask after
 // that waits twice as long as the one before: 30 minutes, 1 hour, 2

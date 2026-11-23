@@ -450,7 +450,8 @@ question in every later run, on an event and on the schedule, whatever
 the model answers when it is asked again and also when it does not
 answer. A rebase does not clear it and neither does running the gate
 again. A person does, by merging or closing the pull request; so does
-other code (a new version) and a changed prompt or model. The comment
+other code (a new version) and a changed prompt or model. A run that
+could not write its decision keeps the veto in what it does write. The comment
 keeps a veto's quotes only while there is room, and the veto without
 them after that; a pull request with more vetoes than the comment can
 remember at all needs a person for good (`vetoes_forgotten`).

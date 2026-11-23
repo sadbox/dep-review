@@ -33,7 +33,7 @@ func TestFailed(t *testing.T) {
 	// The notifier is down for the first run: the comment and the status
 	// are written all the same, and the notification is not remembered.
 	down := f.config(t0, &recorder{err: errors.New("pushover is down")})
-	if err := Failed(context.Background(), down, testPR, headA, testWhat); err == nil || !strings.Contains(err.Error(), "pushover is down") {
+	if err := Failed(context.Background(), down, testPR, headA, testWhat, Vetoes{}); err == nil || !strings.Contains(err.Error(), "pushover is down") {
 		t.Fatalf("error %v, want the notifier's", err)
 	}
 	if m, ok := parseMarker(f.gateComment(testPR)); !ok || m.Outcome != ActionFailed || len(m.NotifiedFailed) != 0 {
@@ -44,7 +44,7 @@ func TestFailed(t *testing.T) {
 	cfg := f.config(t0, rec)
 	cfg.RunURL = testRun
 	for run := 1; run <= 2; run++ {
-		if err := Failed(context.Background(), cfg, testPR, headA, testWhat+" `x` | <b>\n### not a heading"); err != nil {
+		if err := Failed(context.Background(), cfg, testPR, headA, testWhat+" `x` | <b>\n### not a heading", Vetoes{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -122,7 +122,7 @@ func TestFailedWritesNothing(t *testing.T) {
 			// A newer run's comment, which must stay.
 			f.comments[testPR] = []*fakeComment{{1, testBot, marker{Outcome: ActionWait, Head: headB}.String() + "\n### dep-review: waiting\n"}}
 			rec := &recorder{}
-			if err := Failed(context.Background(), f.config(t0, rec), tc.number, tc.head, testWhat); (err != nil) != tc.wantErr {
+			if err := Failed(context.Background(), f.config(t0, rec), tc.number, tc.head, testWhat, Vetoes{}); (err != nil) != tc.wantErr {
 				t.Errorf("error %v, want one: %t", err, tc.wantErr)
 			}
 			if w := f.writes(); len(w) != 0 || len(rec.got) != 0 {

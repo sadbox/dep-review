@@ -118,9 +118,10 @@ func publishEvent(ctx context.Context, cfg land.Config, in string, class model.C
 	if err == nil {
 		err = checkFacts(class, facts)
 	}
+	var kept land.Vetoes
 	written := false
 	if err == nil {
-		written, err = decide(ctx, cfg, w)
+		kept, written, err = decide(ctx, cfg, w)
 	}
 	if err != nil && !written {
 		what := fmt.Sprintf("In this run the fetch job ended %s and the review job %s.", jobResult("FETCH_RESULT"), jobResult("REVIEW_RESULT"))
@@ -130,7 +131,7 @@ func publishEvent(ctx context.Context, cfg land.Config, in string, class model.C
 			what = fmt.Sprintf("The facts this run decided on were gathered more than %d hours earlier, or by a clock ahead of this job's: "+
 				"a job that is run again by itself gets the facts of the run's first attempt.", int(land.MaxFactsAge.Hours()))
 		}
-		if ferr := land.Failed(ctx, cfg, class.PR, class.HeadSHA, what); ferr != nil {
+		if ferr := land.Failed(ctx, cfg, class.PR, class.HeadSHA, what, kept); ferr != nil {
 			log.Printf("publish: #%d: the failed run could not be reported on the pull request: %v", class.PR, ferr)
 		}
 	}
@@ -219,7 +220,7 @@ func unevaluated(ctx context.Context, cfg land.Config, number int, ignore map[mo
 	if err != nil || !handled(class.Kind) || class.Kind == model.KindPending {
 		return err
 	}
-	return land.Failed(ctx, cfg, number, head, "The scheduled run looked at this pull request because the gate had no decision for its head, and could not evaluate it: gathering its facts or deciding on them failed.")
+	return land.Failed(ctx, cfg, number, head, "The scheduled run looked at this pull request because the gate had no decision for its head, and could not evaluate it: gathering its facts or deciding on them failed.", land.Vetoes{})
 }
 
 // sweep is what a scheduled publish does from its own look at the open
@@ -299,13 +300,14 @@ func refreshed(ctx context.Context, cfg land.Config, in string, e fs.DirEntry, i
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	written, err := decideRefreshed(ctx, cfg, w, facts, ignore)
+	kept, written, err := decideRefreshed(ctx, cfg, w, facts, ignore)
 	if err != nil && !written && cfg.ModelAsked {
 		// Nothing was written, so nothing counted the ask. It is counted
 		// all the same, whatever kept this job from deciding: its own
 		// proof, the facts, GitHub. Or a pull request that cannot be
-		// decided would be asked about at every run.
-		if aerr := land.Asked(ctx, cfg, number, facts.PullRequest.Head); aerr != nil {
+		// decided would be asked about at every run. A veto of this run's
+		// is remembered with it (spec section 11, amendment 73).
+		if aerr := land.Asked(ctx, cfg, number, facts.PullRequest.Head, kept); aerr != nil {
 			log.Printf("publish: #%d: the ask could not be counted: %v", number, aerr)
 		}
 	}
@@ -313,38 +315,39 @@ func refreshed(ctx context.Context, cfg land.Config, in string, e fs.DirEntry, i
 }
 
 // decideRefreshed is this job's own proof for a refreshed pull request,
-// and then the decision. written is decide's.
-func decideRefreshed(ctx context.Context, cfg land.Config, w decidable, facts wire.Facts, ignore map[model.Ecosystem]bool) (written bool, err error) {
+// and then the decision. kept and written are decide's.
+func decideRefreshed(ctx context.Context, cfg land.Config, w decidable, facts wire.Facts, ignore map[model.Ecosystem]bool) (kept land.Vetoes, written bool, err error) {
 	number := facts.PullRequest.Number
 	class, err := classify.Pull(ctx, cfg.GitHub, cfg.Repo, number, facts.PullRequest.Head, classify.Options{IgnoreEcosystems: ignore})
 	if err != nil {
-		return false, err
+		return kept, false, err
 	}
 	if !handled(class.Kind) {
 		// Closed, moved on (the new head has a run of its own) or
 		// ignored: no longer the gate's to decide.
 		log.Printf("publish: #%d: %s now, nothing to do", number, class.Kind)
-		return false, nil
+		return kept, false, nil
 	}
 	if err := checkFacts(class, facts); err != nil {
-		return false, err
+		return kept, false, err
 	}
 	return decide(ctx, cfg, w)
 }
 
 // decide is Decide and Act for one pull request. written says Act wrote
 // the comment and the status, which it also has when it returns an error
-// for a notification that failed.
-func decide(ctx context.Context, cfg land.Config, w decidable) (written bool, err error) {
+// for a notification that failed. kept is the evaluation's vetoes, for
+// what the caller writes when Act did not.
+func decide(ctx context.Context, cfg land.Config, w decidable) (kept land.Vetoes, written bool, err error) {
 	ev, err := land.Decide(ctx, cfg, w.facts, w.verdicts)
 	if err != nil {
-		return false, err
+		return kept, false, err
 	}
 	res, err := land.Act(ctx, cfg, ev)
 	if res.Action != "" {
 		log.Printf("publish: #%d: %s %v %q", ev.PullRequest.Number, res.Action, res.Decision.Reasons, res.Note)
 	}
-	return res.Action != "", err
+	return ev.Vetoes(), res.Action != "", err
 }
 
 // readFacts reads a facts file.
