@@ -103,12 +103,25 @@ func mustBeNo(t *testing.T, name string, f allow.Fact, want string) {
 	}
 }
 
-// mustBeUnknown checks an ungathered fact (no Source) whose Value says
-// why.
+// mustBeUnknown checks a fact nothing established (no Source) whose Value
+// says why: an answer arrived and could not be read. That is person.
 func mustBeUnknown(t *testing.T, name string, f allow.Fact, want string) {
 	t.Helper()
-	if f.OK || f.Gathered() {
-		t.Errorf("%s = %+v, want ungathered", name, f)
+	if f.OK || f.Unavailable || f.Source != "" {
+		t.Errorf("%s = %+v, want it never gathered", name, f)
+	}
+	if !strings.Contains(f.Value, want) {
+		t.Errorf("%s value %q, want it to contain %q", name, f.Value, want)
+	}
+}
+
+// mustBeUnavailable checks a fact whose source was asked and did not
+// answer, with the request as its Source and why in its Value. That is a
+// wait.
+func mustBeUnavailable(t *testing.T, name string, f allow.Fact, want string) {
+	t.Helper()
+	if f.OK || !f.Unavailable || f.Source == "" || f.Gathered() {
+		t.Errorf("%s = %+v, want it unavailable", name, f)
 	}
 	if !strings.Contains(f.Value, want) {
 		t.Errorf("%s value %q, want it to contain %q", name, f.Value, want)
@@ -375,22 +388,48 @@ func TestGatherRefuses(t *testing.T) {
 		}, nil, []check{bound("more than 3 annotated tags deep")}},
 		{"tag object with an ID that is not one", map[string]canned{refPath: refJSON("tag", "../../../user")}, nil,
 			[]check{bound("unreadable ID")}},
+		// GitHub did not answer (spec section 11, amendment 1): the facts
+		// that needed the answer are unavailable, which waits. It is not a
+		// "no" about the pin and not a person's yet.
 		{"tag lookup fails", map[string]canned{refPath: {500, `{"message":"boom"}`}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
-				mustBeUnknown(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub answered HTTP 500")
-				mustBeUnknown(t, "NoRegress", u.NoRegress, "tag v7.1.0 could not be read")
+				mustBeUnavailable(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub answered HTTP 500")
+				mustBeUnavailable(t, "NoRegress", u.NoRegress, "tag v7.1.0 could not be read")
 			}, holds("Clean")}},
-
+		{"tag lookup is rate limited", map[string]canned{refPath: {403, `{"message":"You have exceeded a secondary rate limit. boom"}`}}, nil,
+			[]check{func(t *testing.T, u allow.UpdateFacts) {
+				mustBeUnavailable(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub answered HTTP 403")
+			}, holds("Clean")}},
 		{"tag lookup gets no answer", map[string]canned{refPath: {}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
-				mustBeUnknown(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub did not answer")
+				mustBeUnavailable(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub did not answer")
 			}}},
 		{"annotated tag whose object cannot be read", map[string]canned{
 			refPath:                             refJSON("tag", tagObject),
 			repoPath + "/git/tags/" + tagObject: {500, ``},
 		}, nil, []check{func(t *testing.T, u allow.UpdateFacts) {
-			mustBeUnknown(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub answered HTTP 500")
+			mustBeUnavailable(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub answered HTTP 500")
 		}}},
+		// GitHub answered, and not with what was asked for: asking again
+		// gets the same, so nothing is established and that is person.
+		{"tag lookup is forbidden", map[string]canned{refPath: {403, `{"message":"Repository access blocked. boom"}`}}, nil,
+			[]check{func(t *testing.T, u allow.UpdateFacts) {
+				mustBeUnknown(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub answered HTTP 403")
+				mustBeUnknown(t, "NoRegress", u.NoRegress, "tag v7.1.0 could not be read")
+			}, holds("Clean")}},
+		{"tag lookup answers something that is not JSON", map[string]canned{refPath: {200, `<html>boom`}}, nil,
+			[]check{func(t *testing.T, u allow.UpdateFacts) {
+				mustBeUnknown(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub's answer could not be read")
+			}}},
+		// One fact, several conditions: a "no" is the answer whatever
+		// went unanswered, and an unreadable answer is not waited out
+		// because another question got none.
+		{"tag deleted while the repository lookup fails", map[string]canned{refPath: {404, notFound}, repoPath: {502, ``}}, nil,
+			[]check{bound("tag v7.1.0 does not exist"), regress("tag v7.1.0 does not exist")}},
+		{"tag lookup forbidden while the repository lookup fails", map[string]canned{refPath: {403, `{"message":"blocked"}`}, repoPath: {502, ``}}, nil,
+			[]check{func(t *testing.T, u allow.UpdateFacts) {
+				mustBeUnknown(t, "Bound", u.Bound, "tag v7.1.0 could not be read: GitHub answered HTTP 403")
+			}}},
 		{"annotated tag whose object is missing", map[string]canned{
 			refPath:                             refJSON("tag", tagObject),
 			repoPath + "/git/tags/" + tagObject: {404, notFound},
@@ -409,8 +448,8 @@ func TestGatherRefuses(t *testing.T) {
 			[]check{bound("the repository was not found"), regress("the repository was not found")}},
 		{"repository lookup fails", map[string]canned{repoPath: {502, ``}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
-				mustBeUnknown(t, "Bound", u.Bound, "the repository could not be read: GitHub answered HTTP 502")
-				mustBeUnknown(t, "NoRegress", u.NoRegress, "the default branch is unknown")
+				mustBeUnavailable(t, "Bound", u.Bound, "the repository could not be read: GitHub answered HTTP 502")
+				mustBeUnavailable(t, "NoRegress", u.NoRegress, "the default branch is unknown")
 			}, holds("Clean")}},
 
 		// Ancestry.
@@ -424,7 +463,7 @@ func TestGatherRefuses(t *testing.T) {
 			[]check{regress("unrecognised status")}},
 		{"comparison fails", map[string]canned{aheadPath: {503, ``}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
-				mustBeUnknown(t, "NoRegress", u.NoRegress, "could not be compared: GitHub answered HTTP 503")
+				mustBeUnavailable(t, "NoRegress", u.NoRegress, "could not be compared: GitHub answered HTTP 503")
 			}, holds("Bound", "Clean")}},
 		{"on no branch", map[string]canned{mainPath: compareJSON("diverged", 1, 30), relBranch: {404, notFound}}, nil,
 			[]check{regress("the commit is not reachable from main or releases/v7"), holds("Bound")}},
@@ -434,11 +473,15 @@ func TestGatherRefuses(t *testing.T) {
 			[]check{regress("not reachable")}},
 		{"branch comparison fails", map[string]canned{mainPath: {500, ``}, relBranch: {404, notFound}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
-				mustBeUnknown(t, "NoRegress", u.NoRegress, "the comparison with main failed")
+				mustBeUnavailable(t, "NoRegress", u.NoRegress, "the comparison with main failed")
 			}}},
 		{"release branch comparison fails", map[string]canned{mainPath: compareJSON("diverged", 1, 30), relBranch: {500, ``}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
-				mustBeUnknown(t, "NoRegress", u.NoRegress, "the comparison with releases/v7 failed")
+				mustBeUnavailable(t, "NoRegress", u.NoRegress, "the comparison with releases/v7 failed")
+			}}},
+		{"one branch comparison unreadable, the other unanswered", map[string]canned{mainPath: {500, ``}, relBranch: {403, `{"message":"blocked"}`}}, nil,
+			[]check{func(t *testing.T, u allow.UpdateFacts) {
+				mustBeUnknown(t, "NoRegress", u.NoRegress, "the comparison with releases/v7 failed: GitHub answered HTTP 403")
 			}}},
 		{"default branch comparison fails and the release branch holds the commit", map[string]canned{mainPath: {500, ``}, relBranch: compareJSON("identical", 0, 0)}, nil,
 			[]check{holds("NoRegress")}},
@@ -462,7 +505,17 @@ func TestGatherRefuses(t *testing.T) {
 			[]check{holds("Clean"), noFirstSeen(true)}},
 		{"release lookup fails", map[string]canned{releasePath: {500, ``}}, nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
-				mustBeUnknown(t, "Clean", u.Clean, "the release could not be read: GitHub answered HTTP 500")
+				mustBeUnavailable(t, "Clean", u.Clean, "the release could not be read: GitHub answered HTTP 500")
+				if !u.FirstSeen.Unavailable || u.FirstSeen.Known() || u.FirstSeen.Source == "" {
+					t.Errorf("FirstSeen = %+v, want it unavailable", u.FirstSeen)
+				}
+			}, holds("Bound", "NoRegress")}},
+		{"release lookup is forbidden", map[string]canned{releasePath: {403, `{"message":"blocked"}`}}, nil,
+			[]check{func(t *testing.T, u allow.UpdateFacts) {
+				mustBeUnknown(t, "Clean", u.Clean, "the release could not be read: GitHub answered HTTP 403")
+				if u.FirstSeen.Unavailable {
+					t.Errorf("FirstSeen = %+v: an answer that arrived is not an outage", u.FirstSeen)
+				}
 			}, noFirstSeen(false), holds("Bound", "NoRegress")}},
 
 		// Advisories.
@@ -482,10 +535,30 @@ func TestGatherRefuses(t *testing.T) {
 				t.Errorf("SecurityFix = %+v, want it left as the checker returned it", u.SecurityFix)
 			}
 		}}},
-		{"advisory database could not be asked", nil, &advisories{err: errors.New("down"), result: advisory.Result{SecurityFix: allow.Yes("stale", "advisories")}}, []check{func(t *testing.T, u allow.UpdateFacts) {
-			mustBeUnknown(t, "Clean", u.Clean, "the advisory database could not be asked")
-			if u.SecurityFix.Gathered() || u.SecurityFix.OK {
-				t.Errorf("SecurityFix = %+v, want ungathered after an error", u.SecurityFix)
+		{"advisory database did not answer", nil, &advisories{result: advisory.Result{
+			SecurityFix:   allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
+			NoMalware:     allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
+			NoNewAdvisory: allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
+		}}, []check{func(t *testing.T, u allow.UpdateFacts) {
+			mustBeUnavailable(t, "Clean", u.Clean, "malware advisory: GitHub's Advisory Database did not answer (HTTP 503")
+			mustBeUnavailable(t, "SecurityFix", u.SecurityFix, "did not answer")
+		}, holds("Bound", "NoRegress")}},
+		{"advisory database did not answer, and the release is a draft", map[string]canned{releasePath: releaseJSON("v7.1.0", true, false, true, `null`)}, &advisories{result: advisory.Result{
+			SecurityFix:   allow.Unavailable("no answer", "advisories"),
+			NoMalware:     allow.Unavailable("no answer", "advisories"),
+			NoNewAdvisory: allow.Unavailable("no answer", "advisories"),
+		}}, []check{notClean("is a draft")}},
+		{"advisory checker says why it could not tell", nil, &advisories{result: advisory.Result{
+			SecurityFix:   allow.Fact{Value: "the answer is not a list"},
+			NoMalware:     allow.Fact{Value: "the answer is not a list"},
+			NoNewAdvisory: allow.Yes("none", "advisories"),
+		}}, []check{func(t *testing.T, u allow.UpdateFacts) {
+			mustBeUnknown(t, "Clean", u.Clean, "malware advisory: the answer is not a list")
+		}}},
+		{"a checker that fails without the context ending", nil, &advisories{err: errors.New("down"), result: advisory.Result{SecurityFix: allow.Yes("stale", "advisories")}}, []check{func(t *testing.T, u allow.UpdateFacts) {
+			mustBeUnknown(t, "Clean", u.Clean, "whether there is a malware advisory is not known")
+			if u.SecurityFix != (allow.Fact{}) {
+				t.Errorf("SecurityFix = %+v, want it blank after an error", u.SecurityFix)
 			}
 		}, holds("Bound", "NoRegress")}},
 		{"security fix is passed through", nil, &advisories{result: advisory.Result{

@@ -273,6 +273,10 @@ func (f *fakeRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 			return answer(http.StatusNotFound, []byte(`{"error":"Not found"}`))
 		case "500":
 			return answer(http.StatusInternalServerError, []byte(`{"error":"boom"}`))
+		case "429":
+			return answer(http.StatusTooManyRequests, []byte(`{"error":"slow down"}`))
+		case "403":
+			return answer(http.StatusForbidden, []byte(`{"error":"forbidden"}`))
 		}
 		return answer(http.StatusOK, []byte(body))
 	}

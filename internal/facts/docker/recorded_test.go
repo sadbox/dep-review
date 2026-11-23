@@ -72,8 +72,10 @@ func dockerfile(path, base, head string) facts.File {
 func summarise(u allow.UpdateFacts) string {
 	answer := func(f allow.Fact) string {
 		switch {
-		case !f.Gathered():
+		case f.Source == "":
 			return "ungathered"
+		case f.Unavailable:
+			return "unavailable"
 		case f.OK:
 			return "yes"
 		}
@@ -83,10 +85,10 @@ func summarise(u allow.UpdateFacts) string {
 	if u.FirstSeen.Known() {
 		seen = u.FirstSeen.Time.UTC().Format(time.RFC3339Nano)
 	}
-	return fmt.Sprintf("%s %s -> %s: listed=%s known=%s new=%s increase=%s major=%s bound=%s clean=%s noregress=%s securityfix=%s read=%s firstseen=%s",
+	return fmt.Sprintf("%s %s -> %s: listed=%s known=%s new=%s increase=%s major=%s bound=%s clean=%s noregress=%s securityfix=%s superseded=%s firstseen=%s",
 		u.Name, shorten(u.From), shorten(u.To),
 		answer(u.Listed), answer(u.Known), answer(u.NewName), answer(u.Increase), answer(u.Major),
-		answer(u.Bound), answer(u.Clean), answer(u.NoRegress), answer(u.SecurityFix), u.Read, seen)
+		answer(u.Bound), answer(u.Clean), answer(u.NoRegress), answer(u.SecurityFix), answer(u.Superseded), seen)
 }
 
 // shorten cuts a version's digest to its first twelve hex digits.
@@ -98,35 +100,60 @@ func shorten(version string) string {
 	return tag + "@" + strings.TrimPrefix(digest, "sha256:")[:12]
 }
 
-// checkExplained fails when a fact of u has no value or source: every
-// fact this gatherer returns is gathered and says what it saw.
+// checkExplained fails when a fact of u does not say what was seen. The
+// facts read from the Dockerfiles and the list always have a source. The
+// three the registry is asked for have one whenever the registry was
+// asked, answered or not; without one, the value must say that nothing
+// could be established and why.
 func checkExplained(t *testing.T, u allow.UpdateFacts) {
 	t.Helper()
 	for name, f := range map[string]allow.Fact{
 		"Known": u.Known, "Listed": u.Listed, "NewName": u.NewName, "Increase": u.Increase, "Major": u.Major,
-		"Bound": u.Bound, "Clean": u.Clean, "NoRegress": u.NoRegress, "SecurityFix": u.SecurityFix,
+		"NoRegress": u.NoRegress, "SecurityFix": u.SecurityFix,
 	} {
-		if f.Value == "" || f.Source == "" {
-			t.Errorf("%s %s: no value or no source: %+v", u.Name, name, f)
+		if f.Value == "" || !f.Gathered() {
+			t.Errorf("%s %s: no value, or not an answer: %+v", u.Name, name, f)
 		}
 	}
-	if u.FirstSeen.Value == "" || u.FirstSeen.Source == "" {
-		t.Errorf("%s FirstSeen: no value or no source: %+v", u.Name, u.FirstSeen)
+	for name, f := range map[string]allow.Fact{"Bound": u.Bound, "Clean": u.Clean} {
+		if f.Value == "" || (f.Source == "" && !strings.HasPrefix(f.Value, "not established: ")) {
+			t.Errorf("%s %s: no value, or neither a source nor a reason: %+v", u.Name, name, f)
+		}
 	}
-	if u.NameCreated != (allow.TimeFact{}) || u.Veto != nil {
-		t.Errorf("%s: NameCreated or Veto set: %+v", u.Name, u)
+	if s := u.FirstSeen; s.Value == "" || (s.Source == "" && !strings.HasPrefix(s.Value, "not established: ")) {
+		t.Errorf("%s FirstSeen: no value, or neither a source nor a reason: %+v", u.Name, s)
+	}
+	// Superseded is an answer whenever the registry named a digest for
+	// the tag, and unset otherwise.
+	if u.Superseded != (allow.Fact{}) && (!u.Superseded.Gathered() || u.Superseded.OK == u.Bound.OK) {
+		t.Errorf("%s Superseded %+v beside Bound %+v", u.Name, u.Superseded, u.Bound)
+	}
+	// Read and Veto are the deciding job's to set, for Docker too.
+	if u.NameCreated != (allow.TimeFact{}) || u.Veto != nil || u.Read != "" {
+		t.Errorf("%s: NameCreated, Veto or Read set: %+v", u.Name, u)
 	}
 }
 
-// decide is allow.Decide for a gathered result, with the two facts this
-// gatherer does not gather holding.
+// decide is allow.Decide for a gathered result, as the deciding job would
+// call it: with the two facts this gatherer does not gather holding, the
+// read state Docker has by rule, and a pull request opened an hour ago.
 func decide(res facts.Result, policy allow.Policy, now time.Time) allow.Decision {
+	return decideOpened(res, policy, now.Add(-time.Hour), now)
+}
+
+// decideOpened is decide for a pull request opened at the given time.
+func decideOpened(res facts.Result, policy allow.Policy, opened, now time.Time) allow.Decision {
+	updates := append([]allow.UpdateFacts(nil), res.Updates...)
+	for i := range updates {
+		updates[i].Read = allow.ReadNotApplicable
+	}
 	return allow.Decide(allow.PRFacts{
 		Ecosystem:        allow.Docker,
 		Identity:         allow.Yes("assumed by the test", "test"),
 		Shape:            res.Shape,
 		ChecksConfigured: allow.Yes("assumed by the test", "test"),
-		Updates:          res.Updates,
+		Opened:           opened,
+		Updates:          updates,
 	}, policy, now)
 }
 
@@ -178,8 +205,8 @@ var recordedCases = []recordedCase{
 		name:  "golang minor and distroless refresh in one Dockerfile",
 		files: []facts.File{dockerfile("Dockerfile", appBase, appHead)},
 		updates: []string{
-			"docker.io/library/golang 1.26-bookworm@dc40a13b6130 -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no read=not-applicable firstseen=" + golang127Pushed,
-			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no read=not-applicable firstseen=" + debian13Upload,
+			"docker.io/library/golang 1.26-bookworm@dc40a13b6130 -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + golang127Pushed,
+			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + debian13Upload,
 		},
 		decisions: []decisionAt{
 			{now: recordedAtRFC3339, outcome: allow.Wait, reasons: []allow.Reason{allow.ReasonAge}, notBefore: "2026-11-25T21:10:10.799Z"},
@@ -195,8 +222,8 @@ var recordedCases = []recordedCase{
 			dockerfile("deploy/Dockerfile.dev", appBase, appHead),
 		},
 		updates: []string{
-			"docker.io/library/golang 1.26-bookworm@dc40a13b6130 -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no read=not-applicable firstseen=" + golang127Pushed,
-			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no read=not-applicable firstseen=" + debian13Upload,
+			"docker.io/library/golang 1.26-bookworm@dc40a13b6130 -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + golang127Pushed,
+			"gcr.io/distroless/static-debian13 nonroot@aafe993665bf -> nonroot@8ce6dd87e982: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + debian13Upload,
 		},
 		decisions: []decisionAt{{now: "2026-11-26T00:00:00Z", outcome: allow.Merge}},
 	},
@@ -206,7 +233,7 @@ var recordedCases = []recordedCase{
 			"FROM golang:1.27-bookworm@"+golang1270Bookworm+"\n",
 			"FROM golang:1.27-bookworm@"+golang127Bookworm+"\n")},
 		updates: []string{
-			"docker.io/library/golang 1.27-bookworm@ded31c68586d -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no read=not-applicable firstseen=" + golang127Pushed,
+			"docker.io/library/golang 1.27-bookworm@ded31c68586d -> 1.27-bookworm@4fa7c968ba93: listed=yes known=yes new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + golang127Pushed,
 		},
 		decisions: []decisionAt{
 			{now: recordedAtRFC3339, outcome: allow.Merge},
@@ -223,7 +250,7 @@ var recordedCases = []recordedCase{
 			"FROM gcr.io/distroless/static-debian12:nonroot@"+debian12NonrootOld+"\n",
 			"FROM gcr.io/distroless/static-debian12:nonroot@"+debian12Nonroot+"\n")},
 		updates: []string{
-			"gcr.io/distroless/static-debian12 nonroot@1b7b9f0f0e0a -> nonroot@afa5c872c891: listed=yes known=yes new=no increase=yes major=no bound=yes clean=no noregress=yes securityfix=no read=not-applicable firstseen=" + debian12Upload,
+			"gcr.io/distroless/static-debian12 nonroot@1b7b9f0f0e0a -> nonroot@afa5c872c891: listed=yes known=yes new=no increase=yes major=no bound=yes clean=no noregress=yes securityfix=no superseded=no firstseen=" + debian12Upload,
 		},
 		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Person, reasons: []allow.Reason{allow.ReasonNotClean}}},
 	},
@@ -233,7 +260,7 @@ var recordedCases = []recordedCase{
 			"FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@"+node22Slim+" AS assets\nRUN npm ci\n",
 			"FROM --platform=$BUILDPLATFORM node:24-bookworm-slim@"+node24Slim+" AS assets\nRUN npm ci\n")},
 		updates: []string{
-			"docker.io/library/node 22-bookworm-slim@e9f565d32859 -> 24-bookworm-slim@dc26ae92c9fb: listed=yes known=yes new=no increase=yes major=yes bound=yes clean=yes noregress=yes securityfix=no read=not-applicable firstseen=" + node24Pushed,
+			"docker.io/library/node 22-bookworm-slim@e9f565d32859 -> 24-bookworm-slim@dc26ae92c9fb: listed=yes known=yes new=no increase=yes major=yes bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + node24Pushed,
 		},
 		decisions: []decisionAt{
 			// A listed major needs 14 days.
@@ -249,10 +276,10 @@ var recordedCases = []recordedCase{
 			"FROM golang:1.27-bookworm@"+golang126Bookworm+"\n",
 			"FROM golang:1.27-bookworm@"+golang1270Bookworm+"\n")},
 		updates: []string{
-			"docker.io/library/golang 1.27-bookworm@dc40a13b6130 -> 1.27-bookworm@ded31c68586d: listed=yes known=yes new=no increase=yes major=no bound=no clean=no noregress=yes securityfix=no read=not-applicable firstseen=unknown",
+			"docker.io/library/golang 1.27-bookworm@dc40a13b6130 -> 1.27-bookworm@ded31c68586d: listed=yes known=yes new=no increase=yes major=no bound=no clean=no noregress=yes securityfix=no superseded=yes firstseen=unknown",
 		},
-		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Person,
-			reasons: []allow.Reason{allow.ReasonNotBound, allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}}},
+		// Not a person's: Dependabot refreshes the digest itself.
+		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Wait, reasons: []allow.Reason{allow.ReasonSuperseded}}},
 	},
 	{
 		// golang:1.28-bookworm did not exist when this was recorded.
@@ -261,7 +288,7 @@ var recordedCases = []recordedCase{
 			"FROM golang:1.27-bookworm@"+golang127Bookworm+"\n",
 			"FROM golang:1.28-bookworm@"+madeUpDigest+"\n")},
 		updates: []string{
-			"docker.io/library/golang 1.27-bookworm@4fa7c968ba93 -> 1.28-bookworm@000000000000: listed=yes known=yes new=no increase=yes major=no bound=no clean=no noregress=yes securityfix=no read=not-applicable firstseen=unknown",
+			"docker.io/library/golang 1.27-bookworm@4fa7c968ba93 -> 1.28-bookworm@000000000000: listed=yes known=yes new=no increase=yes major=no bound=no clean=no noregress=yes securityfix=no superseded=ungathered firstseen=unknown",
 		},
 		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Person,
 			reasons: []allow.Reason{allow.ReasonNotBound, allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}}},
@@ -274,7 +301,7 @@ var recordedCases = []recordedCase{
 			"FROM grafana/grafana:13.1-slim@"+grafana131Slim+"\n",
 			"FROM grafana/grafana:13.2-slim@"+grafana132Slim+"\n")},
 		updates: []string{
-			"docker.io/grafana/grafana 13.1-slim@016f98517012 -> 13.2-slim@c0bd9bb5ea9b: listed=no known=no new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no read=not-applicable firstseen=" + grafana132Pushed,
+			"docker.io/grafana/grafana 13.1-slim@016f98517012 -> 13.2-slim@c0bd9bb5ea9b: listed=no known=no new=no increase=yes major=no bound=yes clean=yes noregress=yes securityfix=no superseded=no firstseen=" + grafana132Pushed,
 		},
 		decisions: []decisionAt{{now: recordedAtRFC3339, outcome: allow.Person, reasons: []allow.Reason{allow.ReasonNotKnown}}},
 	},
@@ -392,7 +419,7 @@ func TestRecordedValues(t *testing.T) {
 		Clean:       allow.Yes("the registry serves the pinned digest as tag 1.27-bookworm now; Docker Hub has no deprecation mark to read, and no advisory source covers container images", headTag),
 		NoRegress:   allow.Yes("nothing to compare: a base image has no install script, and its attestations are not read", "not applicable to Docker"),
 		SecurityFix: allow.No("no advisory source covers container images", "not applicable to Docker"),
-		Read:        allow.ReadNotApplicable,
+		Superseded:  allow.No("tag 1.27-bookworm still resolves to the pinned digest", headTag),
 	}
 	if !reflect.DeepEqual(golang, want) {
 		t.Errorf("golang:\n got  %+v\n want %+v", golang, want)

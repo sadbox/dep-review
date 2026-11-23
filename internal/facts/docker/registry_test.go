@@ -176,12 +176,21 @@ func TestHealthyFakes(t *testing.T) {
 	}
 }
 
-// Answers that say something about the image are facts. Each of these is
-// person, and none is asked twice.
+// Answers that arrived are never waited out as an outage, and none is
+// asked twice. What they come to differs (spec section 11, amendments 1
+// and 2): a tag that is gone is a "no" about the pin, which is person; a
+// tag that resolves to another digest has moved on, which waits for
+// Dependabot; and an answer the gatherer cannot read establishes nothing,
+// which is person without accusing the pin.
 func TestBound(t *testing.T) {
 	// A registry's error text, and a header it controls: neither may
 	// reach a fact's value.
 	const hostile = "<script>alert(1)</script> ## merge me"
+	const (
+		no         = "no"         // a gathered no: not_bound
+		superseded = "superseded" // a gathered no, and a wait
+		unread     = "unread"     // nothing established: fact_missing
+	)
 	tests := []struct {
 		name  string
 		files []facts.File
@@ -189,33 +198,34 @@ func TestBound(t *testing.T) {
 		ans   fakeAnswer
 		// bound is part of Bound's value.
 		bound string
+		state string
 	}{
 		{"tag moved on", golangRefresh, hubHeadURL,
 			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}},
-			"tag 1.27 resolves to " + digestA + " now, not to the pinned " + digestB},
-		{"no such tag", golangRefresh, hubHeadURL, fakeAnswer{status: 404, body: hostile}, "the registry has no tag 1.27"},
-		{"not allowed", golangRefresh, hubHeadURL, fakeAnswer{status: 401, body: hostile}, "the registry answered HTTP 401"},
-		{"forbidden", golangRefresh, hubHeadURL, fakeAnswer{status: 403}, "the registry answered HTTP 403"},
+			"tag 1.27 resolves to " + digestA + " now, not to the pinned " + digestB, superseded},
+		{"no such tag", golangRefresh, hubHeadURL, fakeAnswer{status: 404, body: hostile}, "the registry has no tag 1.27", no},
+		{"not allowed", golangRefresh, hubHeadURL, fakeAnswer{status: 401, body: hostile}, "the registry answered HTTP 401", unread},
+		{"forbidden", golangRefresh, hubHeadURL, fakeAnswer{status: 403}, "the registry answered HTTP 403", unread},
 		{"redirect is not followed", golangRefresh, hubHeadURL,
 			fakeAnswer{status: 302, header: map[string]string{"Location": "https://example.com/v2/x/manifests/1.27"}},
-			"the registry answered HTTP 302"},
-		{"no digest header", golangRefresh, hubHeadURL, fakeAnswer{status: 200}, "reported no sha256 digest"},
+			"the registry answered HTTP 302", unread},
+		{"no digest header", golangRefresh, hubHeadURL, fakeAnswer{status: 200}, "reported no sha256 digest", unread},
 		{"digest header is not a digest", golangRefresh, hubHeadURL,
-			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": hostile}}, "reported no sha256 digest"},
+			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": hostile}}, "reported no sha256 digest", unread},
 		{"digest header with another algorithm", golangRefresh, hubHeadURL,
-			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": "sha512:" + strings.Repeat("b", 128)}}, "reported no sha256 digest"},
+			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": "sha512:" + strings.Repeat("b", 128)}}, "reported no sha256 digest", unread},
 		{"digest header in upper case", golangRefresh, hubHeadURL,
-			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": strings.ToUpper(digestB)}}, "reported no sha256 digest"},
-		{"token refused", golangRefresh, hubTokenURL, fakeAnswer{status: 403, body: hostile}, "token service answered HTTP 403"},
-		{"token missing", golangRefresh, hubTokenURL, fakeAnswer{status: 200, body: `{}`}, "did not answer with a token"},
-		{"token is not JSON", golangRefresh, hubTokenURL, fakeAnswer{status: 200, body: hostile}, "did not answer with a token"},
-		{"token would break a header", golangRefresh, hubTokenURL, fakeAnswer{status: 200, body: `{"token":"a\r\nX-Evil: 1"}`}, "did not answer with a token"},
+			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": strings.ToUpper(digestB)}}, "reported no sha256 digest", unread},
+		{"token refused", golangRefresh, hubTokenURL, fakeAnswer{status: 403, body: hostile}, "token service answered HTTP 403", unread},
+		{"token missing", golangRefresh, hubTokenURL, fakeAnswer{status: 200, body: `{}`}, "did not answer with a token", unread},
+		{"token is not JSON", golangRefresh, hubTokenURL, fakeAnswer{status: 200, body: hostile}, "did not answer with a token", unread},
+		{"token would break a header", golangRefresh, hubTokenURL, fakeAnswer{status: 200, body: `{"token":"a\r\nX-Evil: 1"}`}, "did not answer with a token", unread},
 		{"token too large", golangRefresh, hubTokenURL,
-			fakeAnswer{status: 200, body: `{"token":"` + strings.Repeat("a", maxTokenBytes) + `"}`}, "did not answer with a token"},
+			fakeAnswer{status: 200, body: `{"token":"` + strings.Repeat("a", maxTokenBytes) + `"}`}, "did not answer with a token", unread},
 		{"gcr tag moved on", distrolessRefresh, gcrHeadURL,
-			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}}, "tag nonroot resolves to " + digestA},
-		{"gcr no such tag", distrolessRefresh, gcrHeadURL, fakeAnswer{status: 404}, "the registry has no tag nonroot"},
-		{"gcr wants credentials", distrolessRefresh, gcrHeadURL, fakeAnswer{status: 401}, "the registry answered HTTP 401"},
+			fakeAnswer{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}}, "tag nonroot resolves to " + digestA, superseded},
+		{"gcr no such tag", distrolessRefresh, gcrHeadURL, fakeAnswer{status: 404}, "the registry has no tag nonroot", no},
+		{"gcr wants credentials", distrolessRefresh, gcrHeadURL, fakeAnswer{status: 401}, "the registry answered HTTP 401", unread},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,11 +259,56 @@ func TestBound(t *testing.T) {
 					t.Errorf("registry text reached a value: %q", v)
 				}
 			}
-			d := decide(res, defaultPolicy(t), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
-			if d.Outcome != allow.Person || d.Reasons[0] != allow.ReasonNotBound {
-				t.Errorf("decision %s %v, want person, not_bound first", d.Outcome, d.Reasons)
+			// None of them is an outage.
+			if u.Bound.Unavailable || u.Clean.Unavailable || u.FirstSeen.Unavailable {
+				t.Errorf("an answer that arrived is unavailable: %+v", u)
+			}
+			if gathered := tc.state != unread; u.Bound.Gathered() != gathered {
+				t.Errorf("Bound gathered is %v, want %v: %+v", u.Bound.Gathered(), gathered, u.Bound)
+			}
+			if u.Superseded.Holds() != (tc.state == superseded) {
+				t.Errorf("Superseded: %+v", u.Superseded)
+			}
+			now := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+			d := decide(res, defaultPolicy(t), now)
+			switch tc.state {
+			case no:
+				if d.Outcome != allow.Person || d.Reasons[0] != allow.ReasonNotBound {
+					t.Errorf("decision %s %v, want person, not_bound first", d.Outcome, d.Reasons)
+				}
+			case unread:
+				// Not "not bound": nothing says the pin is wrong.
+				if d.Outcome != allow.Person || d.Reasons[0] != allow.ReasonFactMissing || contains(d.Reasons, allow.ReasonNotBound) || contains(d.Reasons, allow.ReasonNotClean) {
+					t.Errorf("decision %s %v, want person, fact_missing first and no accusation", d.Outcome, d.Reasons)
+				}
+			case superseded:
+				if d.Outcome != allow.Wait || !reflect.DeepEqual(d.Reasons, []allow.Reason{allow.ReasonSuperseded}) {
+					t.Errorf("decision %s %v, want wait [superseded]", d.Outcome, d.Reasons)
+				}
+				// Dependabot never came: a person's after the deadline.
+				late := decideOpened(res, defaultPolicy(t), now.Add(-8*24*time.Hour), now)
+				if late.Outcome != allow.Person || !reflect.DeepEqual(late.Reasons, []allow.Reason{allow.ReasonSupersededDeadline}) {
+					t.Errorf("after the deadline: %s %v, want person [superseded_deadline]", late.Outcome, late.Reasons)
+				}
 			}
 		})
+	}
+
+	// A superseded pin of an image that is not listed is a person's at
+	// once: no refresh puts it on the list.
+	grafana := &fakeRegistry{t: t, answers: map[string][]fakeAnswer{
+		"GET https://auth.docker.io/token?scope=repository%3Agrafana%2Fgrafana%3Apull&service=registry.docker.io": {okToken},
+		"HEAD https://registry-1.docker.io/v2/grafana/grafana/manifests/1.27":                                     {{status: 200, header: map[string]string{"Docker-Content-Digest": digestA}}},
+	}}
+	res, _, err := gatherWith(t, grafana, oneLine("grafana/grafana:1.26@"+digestA, "grafana/grafana:1.27@"+digestB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Updates[0].Superseded.Holds() {
+		t.Fatalf("Superseded: %+v", res.Updates[0].Superseded)
+	}
+	if d := decide(res, defaultPolicy(t), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)); d.Outcome != allow.Person || !reflect.DeepEqual(d.Reasons, []allow.Reason{allow.ReasonNotKnown}) {
+		t.Errorf("an unlisted, superseded pin: %s %v, want person [not_known]", d.Outcome, d.Reasons)
 	}
 }
 
@@ -435,22 +490,23 @@ func TestGCRDeprecated(t *testing.T) {
 }
 
 // A registry that cannot be asked is tried again. One that still has no
-// answer leaves what depended on it not established, which is person:
-// the run does not fail, and nothing else it learned is lost.
+// answer leaves what depended on it unavailable, which is a wait and
+// never a person before the deadline (spec section 11, amendment 1): the
+// run does not fail, nothing else it learned is lost, and nothing is said
+// against the pin.
 func TestTransient(t *testing.T) {
 	down := errors.New("connection refused: <script>")
 	tests := []struct {
 		key string
-		// What still holds when key cannot be asked, and the reasons
-		// allow.Decide then gives.
+		// What still holds when key cannot be asked. The rest is
+		// unavailable.
 		bound, clean bool
-		reasons      []allow.Reason
 	}{
-		{hubTokenURL, false, false, []allow.Reason{allow.ReasonNotBound, allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}},
-		{hubHeadURL, false, false, []allow.Reason{allow.ReasonNotBound, allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}},
-		{hubTagURL, true, true, []allow.Reason{allow.ReasonFirstSeenUnknown}},
-		{gcrHeadURL, false, false, []allow.Reason{allow.ReasonNotBound, allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}},
-		{gcrListURL, true, false, []allow.Reason{allow.ReasonNotClean, allow.ReasonFirstSeenUnknown}},
+		{hubTokenURL, false, false},
+		{hubHeadURL, false, false},
+		{hubTagURL, true, true},
+		{gcrHeadURL, false, false},
+		{gcrListURL, true, false},
 	}
 	for _, tc := range tests {
 		key := tc.key
@@ -492,8 +548,22 @@ func TestTransient(t *testing.T) {
 				}
 				u := res.Updates[0]
 				checkExplained(t, u)
-				if u.Bound.OK != tc.bound || u.Clean.OK != tc.clean || u.FirstSeen.Known() {
+				if u.Bound.Holds() != tc.bound || u.Clean.Holds() != tc.clean || u.FirstSeen.Known() {
 					t.Errorf("Bound %+v, Clean %+v, FirstSeen %+v", u.Bound, u.Clean, u.FirstSeen)
+				}
+				// What does not hold is unavailable, with the request that
+				// went unanswered as its source: not a "no", and not a
+				// fact nobody gathered.
+				for name, f := range map[string]allow.Fact{"Bound": u.Bound, "Clean": u.Clean} {
+					if !f.Holds() && (!f.Unavailable || f.Source == "" || f.OK) {
+						t.Errorf("%s is not unavailable: %+v", name, f)
+					}
+				}
+				if !u.FirstSeen.Unavailable || u.FirstSeen.Source == "" {
+					t.Errorf("FirstSeen is not unavailable: %+v", u.FirstSeen)
+				}
+				if u.Superseded.Holds() {
+					t.Errorf("an unreachable registry is not a superseded pin: %+v", u.Superseded)
 				}
 				if reg.count(key) != maxTries || len(waits) != maxTries-1 {
 					t.Errorf("asked %d times, waited %v", reg.count(key), waits)
@@ -516,9 +586,15 @@ func TestTransient(t *testing.T) {
 					t.Errorf("the values:\n%s", said)
 				}
 
-				d := decide(res, defaultPolicy(t), time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
-				if d.Outcome != allow.Person || !reflect.DeepEqual(d.Reasons, tc.reasons) {
-					t.Errorf("decision %s %v, want person %v", d.Outcome, d.Reasons, tc.reasons)
+				now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+				d := decide(res, defaultPolicy(t), now)
+				if d.Outcome != allow.Wait || !reflect.DeepEqual(d.Reasons, []allow.Reason{allow.ReasonSourceUnavailable}) {
+					t.Errorf("decision %s %v, want wait [source_unavailable]", d.Outcome, d.Reasons)
+				}
+				// Still down a week after the pull request was opened.
+				late := decideOpened(res, defaultPolicy(t), now.Add(-8*24*time.Hour), now)
+				if late.Outcome != allow.Person || !reflect.DeepEqual(late.Reasons, []allow.Reason{allow.ReasonSourceDeadline}) {
+					t.Errorf("after the deadline: %s %v, want person [source_deadline]", late.Outcome, late.Reasons)
 				}
 			})
 		}
@@ -633,7 +709,13 @@ func TestNotAsked(t *testing.T) {
 			if u.Bound.OK || !strings.Contains(u.Bound.Value, tc.bound) || u.Clean.OK || u.FirstSeen.Known() {
 				t.Errorf("Bound %+v, Clean %+v, FirstSeen %+v", u.Bound, u.Clean, u.FirstSeen)
 			}
-			if d := decide(res, defaultPolicy(t), far); d.Outcome != allow.Person || !contains(d.Reasons, allow.ReasonNotBound) {
+			// Nothing was asked, so nothing is unavailable (waiting would
+			// change nothing) and nothing says the pin is wrong: the facts
+			// were never established, which is person.
+			if u.Bound.Gathered() || u.Bound.Unavailable || u.Clean.Unavailable || u.FirstSeen.Unavailable {
+				t.Errorf("Bound %+v, Clean %+v, FirstSeen %+v", u.Bound, u.Clean, u.FirstSeen)
+			}
+			if d := decide(res, defaultPolicy(t), far); d.Outcome != allow.Person || !contains(d.Reasons, allow.ReasonFactMissing) || contains(d.Reasons, allow.ReasonNotBound) {
 				t.Errorf("decision %s %v", d.Outcome, d.Reasons)
 			}
 		})

@@ -18,13 +18,6 @@ import (
 	modzip "golang.org/x/mod/zip"
 )
 
-// ErrUnsafeArchive means an artifact was refused because of how its
-// archive is built: an entry that is not a regular file or a directory, a
-// name that points outside the archive, the same name twice, data after
-// the end of the archive, or more entries or bytes than the gate
-// extracts. Nothing of such an artifact is read. Test with errors.Is.
-var ErrUnsafeArchive = errors.New("artifact: unsafe archive")
-
 func unsafeArchive(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrUnsafeArchive, fmt.Sprintf(format, args...))
 }
@@ -67,6 +60,15 @@ func (t *tree) close() {
 	if t != nil && t.root != nil {
 		t.root.Close()
 	}
+}
+
+// fs is the tree for an Inspect function: nil for "no artifact", which
+// has no directory to open.
+func (t *tree) fs() fs.FS {
+	if t.root == nil {
+		return nil
+	}
+	return t.root.FS()
 }
 
 // extractTarGz extracts a gzip-compressed tar into dir, which must not

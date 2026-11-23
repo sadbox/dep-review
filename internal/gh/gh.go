@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -83,6 +84,10 @@ type Error struct {
 	Path       string
 	StatusCode int
 	Message    string // GitHub's "message" field, if any
+	// RateLimited: GitHub refused the request for a rate limit: a 429, or
+	// a 403 that carries one of its rate-limit signals (see retryable).
+	// The client has retried it already.
+	RateLimited bool
 }
 
 func (e *Error) Error() string {
@@ -102,6 +107,25 @@ var ErrNotFound = errors.New("not found")
 // Is makes errors.Is(err, ErrNotFound) true for a 404.
 func (e *Error) Is(target error) bool {
 	return target == ErrNotFound && e.StatusCode == http.StatusNotFound
+}
+
+// Unavailable reports whether err, from a call on a Client, means GitHub
+// was asked and did not answer: no response at all (a network error or a
+// timeout), a server error, or a rate limit, each after the client's own
+// retries. Such a failure says nothing about what was asked for, and the
+// v0.2 gate waits and asks again (docs/v0.2-spec.md, section 11,
+// amendment 1). Every other error is an answer: a 404, a 403 that is not
+// a rate limit, a body that could not be decoded.
+//
+// A caller whose own context has ended must look at that first: a
+// deadline that ran out is a timeout here too.
+func Unavailable(err error) bool {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.RateLimited || e.StatusCode >= 500
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 // StatusCode returns the HTTP status of a *Error anywhere in err's chain,
@@ -302,7 +326,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) (http
 			retry = method == http.MethodGet && ctx.Err() == nil
 		} else {
 			retry, wait = c.retryable(method, &http.Response{StatusCode: status, Header: h}, body)
-			err = &Error{Method: method, Path: path, StatusCode: status, Message: apiMessage(body)}
+			// retryable says yes to a 403 only for a rate limit.
+			limited := status == http.StatusTooManyRequests || (status == http.StatusForbidden && retry)
+			err = &Error{Method: method, Path: path, StatusCode: status, Message: apiMessage(body), RateLimited: limited}
 		}
 		if !retry || attempt >= c.MaxRetries {
 			return h, err

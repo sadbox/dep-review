@@ -8,7 +8,109 @@ import (
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/artifact"
+	"github.com/sadbox/dep-review/internal/config"
 )
+
+// The numbers live in two places: internal/config embeds them, and
+// DefaultConfig documents how they follow from the model's window. They
+// are the same numbers, and the embedded ones are a valid client config.
+func TestFromConfig(t *testing.T) {
+	embedded, err := config.Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := FromConfig(embedded)
+	if got != DefaultConfig() {
+		t.Errorf("the embedded model settings are not DefaultConfig:\n got %+v\nwant %+v", got, DefaultConfig())
+	}
+	if err := got.Validate(); err != nil {
+		t.Errorf("the embedded model settings are not valid: %v", err)
+	}
+
+	// What a repository lowered reaches the client, and the artifact
+	// limits the fetch job takes from the same value.
+	lowered, err := config.Load([]byte(`{"chunk_bytes": 1000, "max_chunks": 2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := FromConfig(lowered)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a lowered budget is not valid: %v", err)
+	}
+	if got, want := c.Limits(), (artifact.Limits{ChunkBytes: 1000, MaxChunks: 2}); got != want {
+		t.Errorf("Limits = %+v, want %+v", got, want)
+	}
+	// The smallest read a repository may ask for is still one the client
+	// and the artifact reader accept.
+	floor, err := config.Load([]byte(`{"chunk_bytes": 256, "max_chunks": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FromConfig(floor).Validate(); err != nil || FromConfig(floor).Limits().ChunkBytes != artifact.MinChunkBytes {
+		t.Errorf("the floor: %v, %+v", err, FromConfig(floor).Limits())
+	}
+	// A lowered budget is the same question to the model: a stored
+	// verdict is found by the read's key, which the budget shapes.
+	if c.Fingerprint() != DefaultConfig().Fingerprint() {
+		t.Error("the chunk budget changed the fingerprint")
+	}
+}
+
+// The fingerprint covers what the model is asked and nothing else (spec
+// section 11, amendment 11).
+func TestFingerprint(t *testing.T) {
+	base := DefaultConfig()
+	fp := base.Fingerprint()
+	if !isSHA256Hex(fp) || fp != DefaultConfig().Fingerprint() {
+		t.Fatalf("fingerprint %q is not a stable SHA-256", fp)
+	}
+	for name, edit := range map[string]func(*Config){
+		"model":  func(c *Config) { c.Model = "claude-haiku-4-5" },
+		"effort": func(c *Config) { c.Effort = "medium" },
+	} {
+		c := base
+		edit(&c)
+		if c.Fingerprint() == fp {
+			t.Errorf("a change of %s leaves the fingerprint as it was", name)
+		}
+	}
+	for name, edit := range map[string]func(*Config){
+		"chunk_bytes":       func(c *Config) { c.ChunkBytes = 1000 },
+		"max_chunks":        func(c *Config) { c.MaxChunks = 1 },
+		"request_timeout":   func(c *Config) { c.RequestTimeout = time.Second },
+		"attempts":          func(c *Config) { c.Attempts = 1 },
+		"base_url":          func(c *Config) { c.BaseURL = "http://127.0.0.1:1" },
+		"context_tokens":    func(c *Config) { c.ContextTokens = 200_000 },
+		"max_output_tokens": func(c *Config) { c.MaxOutputTokens = 8000 },
+	} {
+		c := base
+		edit(&c)
+		if c.Fingerprint() != fp {
+			t.Errorf("a change of %s changes the fingerprint", name)
+		}
+	}
+
+	// It is the hash of exactly these parts, and each of them counts.
+	schema, err := encode(newAnswerSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := []string{systemPrompt, artifact.TextFormat, requestLayout, string(schema), base.Model, base.Effort}
+	if fingerprint(parts...) != fp {
+		t.Fatal("Fingerprint is not the hash of the prompt, the diff format, the layout, the schema, the model and the effort")
+	}
+	for i := range parts {
+		changed := append([]string(nil), parts...)
+		changed[i] += " "
+		if fingerprint(changed...) == fp {
+			t.Errorf("part %d is not in the fingerprint", i)
+		}
+	}
+	// Parts are framed: text moved from one to the next is another hash.
+	if fingerprint("ab", "c") == fingerprint("a", "bc") || fingerprint("a", "") == fingerprint("a") {
+		t.Error("the parts are not length-framed")
+	}
+}
 
 func TestDefaultConfig(t *testing.T) {
 	c := DefaultConfig()
@@ -183,6 +285,23 @@ func TestPrompt(t *testing.T) {
 		if strings.Contains(strings.ToLower(systemPrompt), mustNot) {
 			t.Errorf("the prompt contains %q", mustNot)
 		}
+	}
+	// The diff's layout is described once, by the package that produces
+	// it, and sent word for word in the header. The prompt points there
+	// and keeps no paraphrase that could drift.
+	if !strings.Contains(systemPrompt, "`diff format`") {
+		t.Error("the prompt does not point at the header's diff format")
+	}
+	for _, paraphrase := range []string{"starts a hunk", "continues the line above", "<U+XXXX>", "marker character"} {
+		if strings.Contains(systemPrompt, paraphrase) {
+			t.Errorf("the prompt describes the diff format itself (%q)", paraphrase)
+		}
+		if !strings.Contains(artifact.TextFormat, paraphrase) {
+			t.Errorf("artifact.TextFormat no longer says %q; this test is out of date", paraphrase)
+		}
+	}
+	if u := userMessage(prepared("x\n"), 0, strings.Repeat("a", 32)); !strings.Contains(u, "\ndiff format:\n"+artifact.TextFormat+"\n") {
+		t.Error("the header does not carry artifact.TextFormat word for word")
 	}
 	// The block names the prompt explains are the ones the request uses.
 	p := prepared("x\n")

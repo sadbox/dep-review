@@ -464,6 +464,9 @@ func TestReviewHTTPErrors(t *testing.T) {
 				if errors.Is(err, ErrNoVerdict) {
 					t.Error("an HTTP failure is reported as ErrNoVerdict")
 				}
+				if errors.Is(err, ErrUnusable) {
+					t.Error("an HTTP failure is reported as an unusable read")
+				}
 				var apiErr *APIError
 				if !errors.As(err, &apiErr) || apiErr.Status != tc.wantStatus {
 					t.Errorf("error %v is not an APIError with status %d", err, tc.wantStatus)
@@ -584,6 +587,11 @@ func TestReviewRefusesBadReads(t *testing.T) {
 			if err == nil {
 				t.Fatalf("Review = %+v, want an error", v)
 			}
+			// The typed error: the caller records this as a refused read,
+			// which is person at once, not as "no answer yet".
+			if !errors.Is(err, ErrUnusable) || errors.Is(err, ErrNoVerdict) {
+				t.Errorf("error %v is not ErrUnusable alone", err)
+			}
 			if n := len(f.recordedRequests()); n != 0 {
 				t.Errorf("%d requests, want 0", n)
 			}
@@ -651,6 +659,8 @@ func TestHeaderAndUnreadList(t *testing.T) {
 		"\necosystem: npm\n", "\npackage: @scope/pkg\n", "\nfrom: 1.2.3\n", "\nto: 1.2.4\n",
 		"\npart: 2 of 2\n", "\nchanged files not shown: 105\n",
 		"\n(5 more files are not listed.)\n",
+		// internal/artifact's description of the diff, word for word.
+		"\ndiff format:\n" + artifact.TextFormat + "\n\n=====BEGIN UNREAD FILES ",
 		"\nsecond without a final newline\n=====END DIFF ",
 	} {
 		if !strings.Contains(u, line) {

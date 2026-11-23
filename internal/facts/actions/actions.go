@@ -23,8 +23,20 @@
 //   - FirstSeen: the release's published_at, when the release is
 //     immutable. For any other release it is left unknown with its Source
 //     set to the release that was read: GitHub was asked and has no clock
-//     for this version that the publisher cannot set again, and the caller
-//     may substitute the time it first observed the version itself.
+//     for this version that the publisher cannot set again. The fetch
+//     command then uses the pull request's creation time (spec section
+//     11, amendment 4).
+//
+// Two kinds of change never merge, by rule (spec section 11, amendments 6
+// and 7). A changed line that pins a reusable workflow makes Shape not
+// hold, the gate's own pin included: the gate never approves its
+// successor. And a commit pin that no changed actions.lock entry records
+// has no baseline for the repository's IDs, so its Bound does not hold.
+//
+// A question GitHub did not answer (a server error, a rate limit, the
+// network) leaves the facts that depend on it unavailable, which is a
+// wait; an answer that could not be read leaves them without a source,
+// which is person.
 //
 // The gatherer holds no state and makes only GET requests. It changes no
 // setting anywhere. Where one of these facts depends on a setting of a
@@ -72,7 +84,8 @@ const policySource = "policy list " + allow.GitHubActions
 // The error is for a run that cannot produce a result: no GitHub client
 // or advisory checker, or a context that ended. A question GitHub did not
 // answer is not an error: the facts that depend on it are returned
-// ungathered (no Source) with the reason in their Value, which is person.
+// unavailable, with the reason in their Value, and the next evaluation
+// asks again.
 func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
 	if in.GitHub == nil {
 		return facts.Result{}, errors.New("actions: no GitHub client")
@@ -146,19 +159,24 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, policy a
 	if err != nil {
 		return u, err
 	}
+	// The checker puts whatever it learned, or failed to learn, into its
+	// facts. Its error is the context's; from any other checker it leaves
+	// the facts blank, which is person.
 	advice, advErr := adv.Check(ctx, advisory.Query{Ecosystem: allow.GitHubActions, Name: p.name, From: p.from, To: p.to})
 	if ctx.Err() != nil {
 		return u, fmt.Errorf("actions: advisories for %s: %w", p.name, ctx.Err())
 	}
+	if advErr != nil {
+		advice = advisory.Result{}
+	}
 
 	u.Bound = bound(p, repo, tag)
 	u.NoRegress = noRegress(p, tag, ahead, branch)
-	u.Clean = clean(p, rel, advice, advErr == nil)
+	u.Clean = clean(p, rel, advice)
 	u.FirstSeen = firstSeen(p, rel)
-	if advErr == nil {
-		// As the checker returned it: ungathered when it could not tell.
-		u.SecurityFix = advice.SecurityFix
-	}
+	// As the checker returned it: unavailable or never gathered when it
+	// could not tell.
+	u.SecurityFix = advice.SecurityFix
 	return u, nil
 }
 
@@ -194,12 +212,15 @@ func major(p pin) allow.Fact {
 	return allow.No("both "+to, p.where)
 }
 
-// parts collects the conditions of one fact. A condition that is false
-// makes the fact a gathered "no". Otherwise a condition that could not be
-// read leaves the fact ungathered: its Value says why and its Source
-// stays empty, which allow reads as unknown.
+// parts collects the conditions of one fact, in the order allow.Fact.And
+// combines facts. A condition that is false makes the fact a gathered
+// "no". Otherwise a condition whose answer could not be read leaves the
+// fact ungathered: its Value says why and its Source stays empty, which
+// allow reads as never gathered. Otherwise a condition GitHub did not
+// answer for makes it unavailable, so the fact is a wait only when
+// waiting could still make it hold.
 type parts struct {
-	yes, no, unknown []string
+	yes, no, unknown, unavailable []string
 }
 
 func (p *parts) fact(source string) allow.Fact {
@@ -208,16 +229,28 @@ func (p *parts) fact(source string) allow.Fact {
 		return allow.No(strings.Join(p.no, "; "), source)
 	case len(p.unknown) > 0:
 		return allow.Fact{Value: "not established: " + strings.Join(p.unknown, "; ")}
+	case len(p.unavailable) > 0:
+		return allow.Unavailable(strings.Join(p.unavailable, "; "), source)
 	}
 	return allow.Yes(strings.Join(p.yes, "; "), source)
+}
+
+// unanswered files a lookup that has no usable answer under the bucket
+// its state calls for.
+func (p *parts) unanswered(state lookup, what string) {
+	if state == unreachable {
+		p.unavailable = append(p.unavailable, what)
+	} else {
+		p.unknown = append(p.unknown, what)
+	}
 }
 
 // tagPart adds "the new tag resolves to the pinned commit" to a fact. It
 // is part of Bound and of NoRegress.
 func tagPart(ps *parts, p pin, tag tagAnswer) {
 	switch {
-	case tag.state == failed:
-		ps.unknown = append(ps.unknown, "tag "+p.to+" could not be read: "+tag.why())
+	case tag.state == failed || tag.state == unreachable:
+		ps.unanswered(tag.state, "tag "+p.to+" could not be read: "+tag.why())
 	case tag.state == missing:
 		ps.no = append(ps.no, "tag "+p.to+" does not exist")
 	case tag.problem != "":
@@ -236,8 +269,8 @@ func bound(p pin, repo repoAnswer, tag tagAnswer) allow.Fact {
 	tagPart(&ps, p, tag)
 
 	switch {
-	case repo.state == failed:
-		ps.unknown = append(ps.unknown, "the repository could not be read: "+repo.why())
+	case repo.state == failed || repo.state == unreachable:
+		ps.unanswered(repo.state, "the repository could not be read: "+repo.why())
 	case repo.state == missing:
 		ps.no = append(ps.no, "the repository was not found")
 	case !strings.EqualFold(repo.FullName, p.name):
@@ -263,8 +296,8 @@ func bound(p pin, repo repoAnswer, tag tagAnswer) allow.Fact {
 func noRegress(p pin, tag tagAnswer, ahead compareAnswer, branch reach) allow.Fact {
 	var ps parts
 	switch {
-	case ahead.state == failed:
-		ps.unknown = append(ps.unknown, "the old and new commits could not be compared: "+ahead.why())
+	case ahead.state == failed || ahead.state == unreachable:
+		ps.unanswered(ahead.state, "the old and new commits could not be compared: "+ahead.why())
 	case ahead.state == missing:
 		ps.no = append(ps.no, "GitHub cannot compare the old and new commits: one of them is not in the repository")
 	case !ahead.isAhead():
@@ -273,8 +306,8 @@ func noRegress(p pin, tag tagAnswer, ahead compareAnswer, branch reach) allow.Fa
 		ps.yes = append(ps.yes, fmt.Sprintf("%d commit(s) ahead of the old pin", ahead.AheadBy))
 	}
 	switch branch.state {
-	case failed:
-		ps.unknown = append(ps.unknown, branch.detail)
+	case failed, unreachable:
+		ps.unanswered(branch.state, branch.detail)
 	case missing:
 		ps.no = append(ps.no, branch.detail)
 	default:
@@ -296,11 +329,11 @@ func compareStatus(s string) string {
 
 // clean is the Clean fact: the version is a published release, and the
 // advisory database has no malware advisory and no new advisory for it.
-func clean(p pin, rel releaseAnswer, adv advisory.Result, advAsked bool) allow.Fact {
+func clean(p pin, rel releaseAnswer, adv advisory.Result) allow.Fact {
 	var ps parts
 	switch {
-	case rel.state == failed:
-		ps.unknown = append(ps.unknown, "the release could not be read: "+rel.why())
+	case rel.state == failed || rel.state == unreachable:
+		ps.unanswered(rel.state, "the release could not be read: "+rel.why())
 	case rel.state == missing:
 		ps.no = append(ps.no, "tag "+p.to+" has no release")
 	case rel.TagName != p.to:
@@ -312,19 +345,20 @@ func clean(p pin, rel releaseAnswer, adv advisory.Result, advAsked bool) allow.F
 	default:
 		ps.yes = append(ps.yes, "release "+p.to+" is published, not a draft or a prerelease")
 	}
-	if !advAsked {
-		ps.unknown = append(ps.unknown, "the advisory database could not be asked")
-	} else {
-		advisoryPart(&ps, adv.NoMalware, "malware advisory")
-		advisoryPart(&ps, adv.NoNewAdvisory, "new advisory")
-	}
+	advisoryPart(&ps, adv.NoMalware, "malware advisory")
+	advisoryPart(&ps, adv.NoNewAdvisory, "new advisory")
 	return ps.fact("GitHub: repos/" + p.name + "/releases/tags/" + p.to + " and the advisory database")
 }
 
 // advisoryPart adds one of the advisory checker's facts to Clean. Its
-// Value is the checker's own text (advisory IDs).
+// Value is the checker's own text (advisory IDs, or why it could not
+// tell).
 func advisoryPart(ps *parts, f allow.Fact, what string) {
 	switch {
+	case f.Unavailable && f.Source != "":
+		ps.unavailable = append(ps.unavailable, what+": "+f.Value)
+	case !f.Gathered() && f.Value != "":
+		ps.unknown = append(ps.unknown, what+": "+f.Value)
 	case !f.Gathered():
 		ps.unknown = append(ps.unknown, "whether there is a "+what+" is not known")
 	case !f.OK:
@@ -340,11 +374,15 @@ func advisoryPart(ps *parts, f allow.Fact, what string) {
 // immutable can be deleted and published again under the same tag with a
 // new time, so its published_at proves nothing about when this commit
 // became public. The fact is then unknown, with the release as its
-// Source, and the caller falls back to its own first observation.
+// Source, and the fetch command falls back to the time the pull request
+// was opened.
 func firstSeen(p pin, rel releaseAnswer) allow.TimeFact {
 	source := "GitHub: repos/" + p.name + "/releases/tags/" + p.to
-	if rel.state == failed {
-		// Never asked successfully: no Source either.
+	switch rel.state {
+	case unreachable:
+		return allow.UnavailableTime("the release could not be read: "+rel.why(), source)
+	case failed:
+		// An answer that could not be read: no Source either.
 		return allow.TimeFact{Value: "not established: the release could not be read: " + rel.why()}
 	}
 	if !rel.published(p.to) {

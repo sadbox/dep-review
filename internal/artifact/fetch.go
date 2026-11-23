@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -66,14 +67,22 @@ type netFetcher struct {
 	retryDelay time.Duration
 }
 
+// fetch implements fetcher. Of its errors only those that mean "the
+// registry was asked and did not deliver" are ErrUnavailable: a failure
+// that was retried to the last attempt, the download's own time running
+// out, and the one go command error that is recognisably the module
+// proxy's outage. The caller's context ending is the caller's error.
 func (f *netFetcher) fetch(ctx context.Context, ref Ref, dir string) (string, error) {
+	caller := ctx
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
+	var archive string
+	var err error
 	switch ref.Kind {
 	case GoModuleZip:
-		return f.moduleZip(ctx, ref, dir)
+		archive, err = f.moduleZip(ctx, ref, dir)
 	case NPMTarball:
-		return f.download(ctx, f.registry, npmTarballURL(ref.Name, ref.Version), nil, dir)
+		archive, err = f.download(ctx, f.registry, npmTarballURL(ref.Name, ref.Version), nil, dir)
 	case ActionTarball:
 		header := http.Header{}
 		header.Set("Accept", "application/vnd.github+json")
@@ -83,9 +92,33 @@ func (f *netFetcher) fetch(ctx context.Context, ref Ref, dir string) (string, er
 			// to another host, so the token stays with the API.
 			header.Set("Authorization", "Bearer "+f.githubToken)
 		}
-		return f.download(ctx, f.github, f.githubAPI+actionTarballPath(ref.Name, ref.Hash), header, dir)
+		archive, err = f.download(ctx, f.github, f.githubAPI+actionTarballPath(ref.Name, ref.Hash), header, dir)
+	default:
+		return "", fmt.Errorf("%w: kind %q", ErrBadRef, ref.Kind)
 	}
-	return "", fmt.Errorf("%w: kind %q", ErrBadRef, ref.Kind)
+	if err != nil {
+		return "", fetchError(err, caller.Err(), ctx.Err() != nil)
+	}
+	return archive, nil
+}
+
+// fetchError settles which class a failed fetch is in. callerErr is the
+// caller's context error, if it has ended; timedOut says the download's
+// own time ran out.
+func fetchError(err, callerErr error, timedOut bool) error {
+	switch {
+	case callerErr != nil:
+		// Whatever the download made of it, this is the caller giving up,
+		// which says nothing about the registry.
+		return callerErr
+	case errors.Is(err, ErrHashMismatch), errors.Is(err, ErrUnsafeArchive), errors.Is(err, ErrBadRef), errors.Is(err, ErrUnavailable):
+		// Already in a class. A refusal in particular is never turned
+		// into a wait, however late it arrived.
+		return err
+	case timedOut:
+		return fmt.Errorf("%w: no complete download within %s: %v", ErrUnavailable, downloadTimeout, err)
+	}
+	return err
 }
 
 // npmTarballURL is where registry.npmjs.org serves name@version: the
@@ -123,7 +156,9 @@ func redirects(hosts ...string) func(*http.Request, []*http.Request) error {
 }
 
 // download GETs rawURL into a new file under dir. Network errors, 429 and
-// 5xx are retried; anything else is final.
+// 5xx are retried, and when the last attempt ends in one of them the
+// error is ErrUnavailable. Any other answer is final, and is not: a 404
+// or a 403 arrived, and says something.
 func (f *netFetcher) download(ctx context.Context, client *http.Client, rawURL string, header http.Header, dir string) (string, error) {
 	out, err := os.CreateTemp(dir, "download-*")
 	if err != nil {
@@ -136,8 +171,11 @@ func (f *netFetcher) download(ctx context.Context, client *http.Client, rawURL s
 		if err == nil {
 			return out.Name(), out.Close()
 		}
-		if !retry || attempt == downloadAttempts || ctx.Err() != nil {
+		if !retry {
 			return "", err
+		}
+		if attempt == downloadAttempts || ctx.Err() != nil {
+			return "", fmt.Errorf("%w: %w", ErrUnavailable, err)
 		}
 		select {
 		case <-ctx.Done():
@@ -234,7 +272,12 @@ func (f *netFetcher) moduleZip(ctx context.Context, ref Ref, dir string) (string
 		return "", fmt.Errorf("go mod download %s@%s: %v: %s", ref.Name, ref.Version, runErr, clip(stderr.String()))
 	}
 	switch {
+	case goProxyOutageRE.MatchString(m.Error):
+		return "", fmt.Errorf("%w: go mod download %s@%s: %s", ErrUnavailable, ref.Name, ref.Version, clip(m.Error))
 	case m.Error != "":
+		// Everything else the go command says stays unclassified, a
+		// checksum mismatch it found itself included: its text is not
+		// taken apart any further than the one shape above.
 		return "", fmt.Errorf("go mod download %s@%s: %s", ref.Name, ref.Version, clip(m.Error))
 	case runErr != nil:
 		return "", fmt.Errorf("go mod download %s@%s: %v: %s", ref.Name, ref.Version, runErr, clip(stderr.String()))
@@ -245,6 +288,22 @@ func (f *netFetcher) moduleZip(ctx context.Context, ref Ref, dir string) (string
 	}
 	return m.Zip, nil
 }
+
+// goProxyOutageRE is the one shape of go command error that is read as
+// "the module proxy was asked and did not answer": the error for the
+// module itself (not one nested in another), about a URL of the proxy,
+// and either a 429 or 5xx status or no response at all. The two forms are
+// cmd/go/internal/web's: an HTTPError is "reading URL: STATUS" (for some
+// answers with the server's text after it), and a request that got no
+// response is net/http's own error, `Get "URL": ...`, passed on as it is.
+// Both stand behind the module the go command was asked for; a 404 in the
+// first form is in internal/facts/gomod's recorded output. Nothing else
+// in the go command's text is interpreted: an error that does not start
+// exactly like this is not an outage. internal/facts/gomod has the same
+// shape for the same reason.
+var goProxyOutageRE = regexp.MustCompile(`^[^ \n]+@[^ \n]+: (?:` +
+	`reading ` + regexp.QuoteMeta(goProxy) + `/[^ \n]+: (?:429|5[0-9][0-9]) ` +
+	`|Get "` + regexp.QuoteMeta(goProxy) + `/[^" \n]+": )`)
 
 // goEnv is the whole environment of the go command. Nothing is inherited
 // but PATH, so no GOFLAGS, GOPROXY or GONOSUMDB of the job can redirect

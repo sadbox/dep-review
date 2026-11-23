@@ -12,11 +12,20 @@
 // and can add list entries. It cannot lower an age, cannot remove a list
 // entry, and has no key that switches a fact off: an unknown key is an
 // error, not something to ignore.
+//
+// The model settings (spec section 11, amendment 10) are built in the
+// same way, and a repository has even less say over them: it may make a
+// read smaller (chunk_bytes, max_chunks), which can only make a read
+// partial and an update wait longer, and it may not set any of the
+// others. Which model reads the code, and how hard it thinks, is not a
+// repository's choice.
 package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed" // for defaults.json
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +53,12 @@ const (
 	// (about 292 years) or park a pull request for longer than anyone
 	// will remember it.
 	maxDays = 3650
+	// minChunkBytes is the smallest chunk_bytes a repository may ask for.
+	// It is internal/artifact's own minimum (below it a file header may
+	// not fit in a chunk); a test keeps the two equal. A smaller value
+	// here would not be a stricter gate, only one whose every read is
+	// refused.
+	minChunkBytes = 256
 )
 
 // Lists is the owner-kept list, per ecosystem. How an entry matches a
@@ -66,6 +81,28 @@ type Config struct {
 	FastPath           bool   `json:"fast_path"`
 	FastPathCompanions string `json:"fast_path_companions"`
 	Listed             Lists  `json:"listed"`
+
+	// The model settings. internal/veto turns them into its client's
+	// settings (veto.FromConfig) and checks them against each other; the
+	// fetch job takes its artifact limits from the same values, so a read
+	// is always prepared within what the review job will accept.
+
+	// Model is the model ID the veto request names.
+	Model string `json:"model"`
+	// Effort is how hard the model is asked to think.
+	Effort string `json:"effort"`
+	// ContextTokens is Model's documented context window.
+	ContextTokens int `json:"context_tokens"`
+	// MaxOutputTokens is the most the model may write for one chunk.
+	MaxOutputTokens int `json:"max_output_tokens"`
+	// ChunkBytes is the most escaped text one chunk may hold.
+	ChunkBytes int `json:"chunk_bytes"`
+	// MaxChunks is the most chunks one update may be split into.
+	MaxChunks int `json:"max_chunks"`
+	// RequestTimeoutSeconds bounds one attempt at one chunk.
+	RequestTimeoutSeconds int `json:"request_timeout_seconds"`
+	// Attempts is how many times one chunk's request is sent.
+	Attempts int `json:"attempts"`
 }
 
 // file is what either file may say. Pointers tell an absent key from a
@@ -79,6 +116,15 @@ type file struct {
 	FastPath           *bool   `json:"fast_path"`
 	FastPathCompanions *string `json:"fast_path_companions"`
 	Listed             Lists   `json:"listed"`
+
+	Model                 *string `json:"model"`
+	Effort                *string `json:"effort"`
+	ContextTokens         *int    `json:"context_tokens"`
+	MaxOutputTokens       *int    `json:"max_output_tokens"`
+	ChunkBytes            *int    `json:"chunk_bytes"`
+	MaxChunks             *int    `json:"max_chunks"`
+	RequestTimeoutSeconds *int    `json:"request_timeout_seconds"`
+	Attempts              *int    `json:"attempts"`
 }
 
 // Load returns the embedded defaults with a repository's file applied on
@@ -131,6 +177,22 @@ func (c Config) Policy() allow.Policy {
 	}
 }
 
+// Fingerprint is a hash of every resolved setting (lower-case hex
+// SHA-256). The fetch job writes it into the facts file, and a later job
+// that resolves the configuration itself compares: facts gathered under
+// other settings (another list, another chunk size) are not decided on.
+func (c Config) Fingerprint() string {
+	// Config holds only strings, numbers, a flag and lists of strings, so
+	// encoding it cannot fail, and encoding/json writes a struct's fields
+	// in their declared order.
+	b, err := json.Marshal(c)
+	if err != nil {
+		panic("config: " + err.Error())
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // defaults parses the embedded file, which must set everything.
 func defaults() (Config, error) {
 	f, err := parse(defaultsJSON)
@@ -138,17 +200,50 @@ func defaults() (Config, error) {
 		return Config{}, err
 	}
 	if f.MinAgeHours == nil || f.UnreadAgeDays == nil || f.MajorAgeDays == nil || f.NewNameAgeDays == nil ||
-		f.WaitDeadlineDays == nil || f.FastPath == nil || f.FastPathCompanions == nil {
+		f.WaitDeadlineDays == nil || f.FastPath == nil || f.FastPathCompanions == nil ||
+		f.Model == nil || f.Effort == nil || f.ContextTokens == nil || f.MaxOutputTokens == nil ||
+		f.ChunkBytes == nil || f.MaxChunks == nil || f.RequestTimeoutSeconds == nil || f.Attempts == nil {
 		return Config{}, errors.New("a key is missing")
 	}
 	c := Config{
-		MinAgeHours:        *f.MinAgeHours,
-		UnreadAgeDays:      *f.UnreadAgeDays,
-		MajorAgeDays:       *f.MajorAgeDays,
-		NewNameAgeDays:     *f.NewNameAgeDays,
-		WaitDeadlineDays:   *f.WaitDeadlineDays,
-		FastPath:           *f.FastPath,
-		FastPathCompanions: *f.FastPathCompanions,
+		MinAgeHours:           *f.MinAgeHours,
+		UnreadAgeDays:         *f.UnreadAgeDays,
+		MajorAgeDays:          *f.MajorAgeDays,
+		NewNameAgeDays:        *f.NewNameAgeDays,
+		WaitDeadlineDays:      *f.WaitDeadlineDays,
+		FastPath:              *f.FastPath,
+		FastPathCompanions:    *f.FastPathCompanions,
+		Model:                 *f.Model,
+		Effort:                *f.Effort,
+		ContextTokens:         *f.ContextTokens,
+		MaxOutputTokens:       *f.MaxOutputTokens,
+		ChunkBytes:            *f.ChunkBytes,
+		MaxChunks:             *f.MaxChunks,
+		RequestTimeoutSeconds: *f.RequestTimeoutSeconds,
+		Attempts:              *f.Attempts,
+	}
+	// Only that each is there and is not nonsense. Whether they fit each
+	// other and the model (chunk size against the context window) is
+	// internal/veto's Validate, which knows the request they go into; a
+	// test there runs it on these values.
+	if c.Model == "" || c.Effort == "" {
+		return Config{}, errors.New("model or effort is empty")
+	}
+	for _, n := range []struct {
+		key   string
+		value int
+		min   int
+	}{
+		{"context_tokens", c.ContextTokens, 1},
+		{"max_output_tokens", c.MaxOutputTokens, 1},
+		{"chunk_bytes", c.ChunkBytes, minChunkBytes},
+		{"max_chunks", c.MaxChunks, 1},
+		{"request_timeout_seconds", c.RequestTimeoutSeconds, 1},
+		{"attempts", c.Attempts, 1},
+	} {
+		if n.value < n.min {
+			return Config{}, fmt.Errorf("%s is %d, want at least %d", n.key, n.value, n.min)
+		}
 	}
 	for _, age := range []struct {
 		key        string
@@ -243,6 +338,47 @@ func apply(c *Config, f file) error {
 				*f.FastPathCompanions, c.FastPathCompanions)
 		}
 		c.FastPathCompanions = *f.FastPathCompanions
+	}
+
+	// The model settings a repository may not touch at all. Writing the
+	// built-in value is refused too: the file would then break the day
+	// the built-in changes, and until then it says nothing.
+	for _, fixed := range []struct {
+		key string
+		set bool
+	}{
+		{"model", f.Model != nil},
+		{"effort", f.Effort != nil},
+		{"context_tokens", f.ContextTokens != nil},
+		{"max_output_tokens", f.MaxOutputTokens != nil},
+		{"request_timeout_seconds", f.RequestTimeoutSeconds != nil},
+		{"attempts", f.Attempts != nil},
+	} {
+		if fixed.set {
+			return fmt.Errorf("%s is built in: a repository can make a read smaller (chunk_bytes, max_chunks), and cannot change the model or how it is asked", fixed.key)
+		}
+	}
+	// The two it may lower. A smaller read is at worst a partial read,
+	// which waits longer; a larger one would be refused by the reviewer.
+	for _, size := range []struct {
+		key  string
+		have *int
+		want *int
+		min  int
+	}{
+		{"chunk_bytes", &c.ChunkBytes, f.ChunkBytes, minChunkBytes},
+		{"max_chunks", &c.MaxChunks, f.MaxChunks, 1},
+	} {
+		if size.want == nil {
+			continue
+		}
+		if *size.want > *size.have {
+			return fmt.Errorf("%s is %d, above the built-in %d: a repository can lower it, not raise it", size.key, *size.want, *size.have)
+		}
+		if *size.want < size.min {
+			return fmt.Errorf("%s is %d, want at least %d", size.key, *size.want, size.min)
+		}
+		*size.have = *size.want
 	}
 
 	return extend(&c.Listed, f.Listed)

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/gh"
 )
 
 // These tests are about answers the real API has not given (yet): pages
@@ -316,23 +317,60 @@ func TestFirstPatchedVersionOfAnotherPackage(t *testing.T) {
 	}
 }
 
-// A request that fails is an error with an empty Result, whichever of
-// the requests it is, so a caller that drops the error still has nothing
-// that reads as clean.
-func TestFailedRequestIsAnError(t *testing.T) {
-	boom := errors.New("github: GET advisories: 503")
-	t.Run("npm", func(t *testing.T) {
-		for _, key := range []string{"reviewed pkg@1.0.0", "reviewed pkg@1.0.1", "malware pkg@1.0.1"} {
-			api := &fakeAPI{t: t, pages: fixPages(), fail: map[string]error{key: boom}}
-			got, err := New(api).Check(context.Background(), fixQuery)
-			if !errors.Is(err, boom) {
-				t.Errorf("%s failed: err = %v", key, err)
-			}
-			if got != (Result{}) {
-				t.Errorf("%s failed: Result is not empty: %+v", key, got)
+// A request that fails settles all three facts, whichever of the requests
+// it is, and none of them reads as clean. Which state they are in depends
+// on whether GitHub answered at all (spec section 11, amendment 1): no
+// answer is unavailable, which waits; an error that asking again would
+// not change is never gathered, which is person.
+func TestFailedRequest(t *testing.T) {
+	failures := []struct {
+		name        string
+		err         error
+		unavailable bool
+		wantValue   string
+	}{
+		{"503", &gh.Error{Method: "GET", Path: "advisories", StatusCode: 503, Message: "<b>Service</b> down"}, true, "did not answer (HTTP 503"},
+		{"rate limit", &gh.Error{Method: "GET", Path: "advisories", StatusCode: 403, Message: "API rate limit exceeded", RateLimited: true}, true, "did not answer (HTTP 403"},
+		{"429", &gh.Error{Method: "GET", Path: "advisories", StatusCode: 429, RateLimited: true}, true, "did not answer (HTTP 429"},
+		{"no response", &url.Error{Op: "Get", URL: "https://api.github.com/advisories", Err: errors.New("dial tcp: no such host")}, true, "did not answer (no response"},
+		{"forbidden", &gh.Error{Method: "GET", Path: "advisories", StatusCode: 403, Message: "Forbidden"}, false, "answered with an error (HTTP 403)"},
+		{"unprocessable", &gh.Error{Method: "GET", Path: "advisories", StatusCode: 422, Message: "Validation Failed"}, false, "answered with an error (HTTP 422)"},
+		{"an answer that is not JSON", errors.New("github: GET advisories: decoding: invalid character '<'"), false, "gave an answer that could not be used"},
+	}
+	check := func(t *testing.T, what string, got Result, err error, unavailable bool, wantValue string) {
+		t.Helper()
+		if err != nil {
+			t.Errorf("%s: err = %v; a failed request is a state of the facts, not an error", what, err)
+		}
+		if got.SecurityFix != got.NoMalware || got.NoMalware != got.NoNewAdvisory {
+			t.Errorf("%s: the three facts differ: %+v", what, got)
+		}
+		f := got.NoMalware
+		if f.Holds() || f.Gathered() || f.OK {
+			t.Errorf("%s: a fact reads as an answer: %+v", what, f)
+		}
+		if f.Unavailable != unavailable || (f.Source != "") != unavailable {
+			t.Errorf("%s: unavailable is %v with source %q, want unavailable %v", what, f.Unavailable, f.Source, unavailable)
+		}
+		if !strings.Contains(f.Value, wantValue) {
+			t.Errorf("%s: value %q, want it to contain %q", what, f.Value, wantValue)
+		}
+		// GitHub's own message is not carried into the comment.
+		for _, text := range []string{"Service", "rate limit exceeded", "Forbidden", "Validation", "no such host", "invalid character"} {
+			if strings.Contains(f.Value, text) {
+				t.Errorf("%s: value quotes the error: %q", what, f.Value)
 			}
 		}
-	})
+	}
+	for _, fail := range failures {
+		t.Run("npm, "+fail.name, func(t *testing.T) {
+			for _, key := range []string{"reviewed pkg@1.0.0", "reviewed pkg@1.0.1", "malware pkg@1.0.1"} {
+				api := &fakeAPI{t: t, pages: fixPages(), fail: map[string]error{key: fail.err}}
+				got, err := New(api).Check(context.Background(), fixQuery)
+				check(t, key, got, err, fail.unavailable, fail.wantValue)
+			}
+		})
+	}
 	t.Run("actions", func(t *testing.T) {
 		pages := map[string][]string{
 			"reviewed o/r":       {"[" + adv(idA, "reviewed", "null", "actions", "O/R", `"1.0.1"`) + "]"},
@@ -347,13 +385,10 @@ func TestFailedRequestIsAnError(t *testing.T) {
 			t.Fatalf("baseline: %+v, %v", got, err)
 		}
 		for key := range pages {
-			api := &fakeAPI{t: t, pages: pages, fail: map[string]error{key: boom}}
-			got, err := New(api).Check(context.Background(), q)
-			if !errors.Is(err, boom) {
-				t.Errorf("%s failed: err = %v", key, err)
-			}
-			if got != (Result{}) {
-				t.Errorf("%s failed: Result is not empty: %+v", key, got)
+			for _, fail := range failures {
+				api := &fakeAPI{t: t, pages: pages, fail: map[string]error{key: fail.err}}
+				got, err := New(api).Check(context.Background(), q)
+				check(t, key+", "+fail.name, got, err, fail.unavailable, fail.wantValue)
 			}
 		}
 	})

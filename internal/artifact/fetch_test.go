@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -458,11 +459,21 @@ func TestDownloadFailures(t *testing.T) {
 			r[npmOldURL] = &route{status: http.StatusNotFound}
 			return r
 		}, nil, nil, 1},
-		{"npm: 503 three times is an error", recordedNPM, func() map[string]*route {
+		{"npm: 503 three times is unavailable", recordedNPM, func() map[string]*route {
 			r := npmRoutes()
 			r[npmOldURL].failures = 3
 			return r
-		}, nil, nil, 3},
+		}, nil, ErrUnavailable, 3},
+		{"npm: 429 three times is unavailable", recordedNPM, func() map[string]*route {
+			r := npmRoutes()
+			r[npmNewURL] = &route{status: http.StatusTooManyRequests}
+			return r
+		}, nil, ErrUnavailable, 4},
+		{"action: 502 from the download host is unavailable", recordedAction, func() map[string]*route {
+			r := actionRoutes()
+			r[codeloadOldURL] = &route{status: http.StatusBadGateway}
+			return r
+		}, nil, ErrUnavailable, 6},
 		{"npm: a redirect is refused", recordedNPM, func() map[string]*route {
 			r := npmRoutes()
 			r[npmOldURL] = &route{status: http.StatusFound, location: "https://codeload.github.com/x/y/legacy.tar.gz/z"}
@@ -511,10 +522,102 @@ func TestDownloadFailures(t *testing.T) {
 			case tt.wantErr == nil && (errors.Is(err, ErrHashMismatch) || errors.Is(err, ErrUnsafeArchive) || errors.Is(err, ErrBadRef)):
 				t.Errorf("error %v: a failed download is none of the package's refusals", err)
 			}
+			// Only a failure that was retried to the end is a wait. An
+			// answer that arrived (404, 403, a redirect, other bytes) must
+			// not be waited out.
+			if got := errors.Is(err, ErrUnavailable); got != (tt.wantErr == ErrUnavailable) {
+				t.Errorf("error %v: unavailable is %v", err, got)
+			}
 			if got := len(rp.urls()); got != tt.requests {
 				t.Errorf("%d requests %v, want %d", got, rp.urls(), tt.requests)
 			}
 		})
+	}
+}
+
+// The caller's context ending is the caller's error, whatever the
+// download was doing: it is in none of the package's classes, so nobody
+// reads it as "the registry is down, wait".
+func TestCallerContextIsNoClass(t *testing.T) {
+	routes := npmRoutes()
+	routes[npmOldURL].failures = 3
+	r, _ := replayReader(t, routes, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel while the fetcher waits between two attempts.
+	r.fetch.(*netFetcher).retryDelay = time.Hour
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, err := r.Prepare(ctx, recordedNPM, roomy)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v, want the context's", err)
+	}
+	for _, class := range []error{ErrUnavailable, ErrHashMismatch, ErrUnsafeArchive, ErrBadRef} {
+		if errors.Is(err, class) {
+			t.Errorf("a cancelled Prepare is %v", class)
+		}
+	}
+}
+
+// What a failed fetch is: the caller's own error when the caller gave up,
+// a refusal when it is one however late it arrived, a wait when the
+// download's time ran out, and otherwise nothing this package names.
+func TestFetchError(t *testing.T) {
+	plain := errors.New("go mod download: exit status 1")
+	mismatch := hashMismatch(recordedNPM.New, "the tarball is other bytes")
+	for _, tc := range []struct {
+		name      string
+		err       error
+		callerErr error
+		timedOut  bool
+		want      error // the class; nil for none of the package's
+	}{
+		{"a hash mismatch", mismatch, nil, false, ErrHashMismatch},
+		{"a hash mismatch found after the time ran out", mismatch, nil, true, ErrHashMismatch},
+		{"an unsafe archive found after the time ran out", unsafeArchive("a symbolic link"), nil, true, ErrUnsafeArchive},
+		{"a bad reference after the time ran out", badRef("kind %q", "x"), nil, true, ErrBadRef},
+		{"retries used up", fmt.Errorf("%w: HTTP 503", ErrUnavailable), nil, false, ErrUnavailable},
+		{"retries used up as the time ran out", fmt.Errorf("%w: HTTP 503", ErrUnavailable), nil, true, ErrUnavailable},
+		{"the go command killed when the time ran out", plain, nil, true, ErrUnavailable},
+		{"the go command failed", plain, nil, false, nil},
+		{"the caller gave up", plain, context.Canceled, true, context.Canceled},
+		{"the caller gave up on a download that was failing", fmt.Errorf("%w: HTTP 503", ErrUnavailable), context.DeadlineExceeded, true, context.DeadlineExceeded},
+	} {
+		got := fetchError(tc.err, tc.callerErr, tc.timedOut)
+		for _, class := range []error{ErrHashMismatch, ErrUnsafeArchive, ErrBadRef, ErrUnavailable, context.Canceled, context.DeadlineExceeded} {
+			if errors.Is(got, class) != (class == tc.want) {
+				t.Errorf("%s: %v: errors.Is(%v) is %v", tc.name, got, class, errors.Is(got, class))
+			}
+		}
+	}
+}
+
+// The go command's errors are text. One exact shape of it is read as the
+// module proxy not answering; everything else is left alone.
+func TestGoProxyOutage(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		want       bool
+	}{
+		{"503", "github.com/fsnotify/fsnotify@v1.5.4: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.4.zip: 503 Service Unavailable", true},
+		{"500 with the server's text", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 500 Internal Server Error\n\tserver response: oops", true},
+		{"429", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 429 Too Many Requests", true},
+		{"no response", `golang.org/x/text@v0.3.3: Get "https://proxy.golang.org/golang.org/x/text/@v/v0.3.3.info": dial tcp: i/o timeout`, true},
+		{"no response from another host", `example.com/m@v1.0.0: Get "https://example.com/m?go-get=1": dial tcp: i/o timeout`, false},
+		{"a quoted URL that only starts like the proxy's", `example.com/m@v1.0.0: Get "https://proxy.golang.org.evil.example/m": EOF`, false},
+		// The recorded answer for a version that does not exist.
+		{"404", "github.com/fsnotify/fsnotify@v1.5.99: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.99.info: 404 Not Found\n\tserver response: not found: github.com/fsnotify/fsnotify@v1.5.99: invalid version: unknown revision v1.5.99", false},
+		{"410", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 410 Gone", false},
+		// The recorded answer for a module that fails the checksum database.
+		{"checksum mismatch", "github.com/fsnotify/fsnotify@v1.5.4: verifying go.mod: checksum mismatch\n\tdownloaded: h1:KOil/w6cxr3ALagyF6SIPYeoV9XN+Pjkp5hICIRMzgM=\n\tsum.golang.org: h1:OVB6XrOHzAwXMpEM7uPOzcehqUV2UqJxmVXmkdnm1bU=\n\nSECURITY ERROR\n", false},
+		{"a 503 quoted in a 404's text", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 404 Not Found\n\tserver response: example.com/m@v1.0.0: reading https://proxy.golang.org/x: 503 Service Unavailable", false},
+		{"another host", "example.com/m@v1.0.0: reading https://proxy.golang.org.evil.example/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
+		{"plain http", "example.com/m@v1.0.0: reading http://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
+		{"not at the start", "go: example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
+		{"a status that only starts with 5", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 5030 Odd", false},
+		{"empty", "", false},
+	} {
+		if got := goProxyOutageRE.MatchString(tc.text); got != tc.want {
+			t.Errorf("%s: outage is %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

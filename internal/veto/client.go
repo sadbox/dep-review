@@ -143,7 +143,7 @@ func (c *Client) Review(ctx context.Context, req Request) (Verdict, error) {
 	p := req.Read
 	if err := checkRead(c.cfg, p); err != nil {
 		// %q: the name has not passed the check that makes it printable.
-		return Verdict{}, fmt.Errorf("veto: %q: not sent: %w", clip(p.Pair.Name, 80), err)
+		return Verdict{}, fmt.Errorf("%w: %q: not sent: %w", ErrUnusable, clip(p.Pair.Name, 80), err)
 	}
 	total := len(p.Chunks)
 	var notes []string

@@ -16,8 +16,13 @@
 //     deprecation notice, "go list -m -versions -json" as the proof that
 //     the retractions were really loaded, and the advisory checker.
 //
-// A fact the package could not establish is returned as not holding,
-// with a value that starts "unknown:". It is never guessed.
+// A fact the package could not establish is never guessed. It is returned
+// in the state that says why (see internal/facts): unavailable when the
+// proxy, the index or the advisory database was asked and did not answer,
+// which is a wait; and without a source, with a value that starts
+// "unknown:", when the go command printed nothing about the module. What
+// the go command reports as an error for a module is a gathered "no"
+// unless it has the one shape of a proxy outage (proxyOutageRE).
 package gomod
 
 import (
@@ -26,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -146,15 +152,23 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 
 		u.Bound = boundFact(up, cs, d, downloadedOK)
 
+		// The checker puts whatever it learned, or failed to learn, into
+		// its facts. An error is the context's, which ends this run below;
+		// from any other checker it leaves the facts blank, which is
+		// person.
 		adv, advErr := in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.GoModules, Name: up.name, From: up.from, To: up.to})
-		if advErr == nil {
-			u.SecurityFix = adv.SecurityFix
+		if advErr != nil {
+			adv = advisory.Result{}
 		}
-		u.Clean = cleanFact(up, d, downloadedOK, info, infoOK, versions, versionsOK, adv, advErr)
+		u.SecurityFix = adv.SecurityFix
+		u.Clean = cleanFact(up, d, downloadedOK, info, infoOK, versions, versionsOK, adv)
 
-		if infoOK && info.Error == nil && info.Time != nil {
+		switch {
+		case infoOK && info.Error == nil && info.Time != nil:
 			u.FirstSeen = seenFact(ctx, ix, up.name, up.to, *info.Time, now)
-		} else {
+		case infoOK && info.Error != nil && proxyOutageRE.MatchString(info.Error.Err):
+			u.FirstSeen = allow.UnavailableTime("the module proxy did not answer, so there is no commit time to start reading the index from", sourceList)
+		default:
 			u.FirstSeen = unknownTime("go list reported no commit time to start reading the index from")
 		}
 		// The age of the name is asked for only where the decision needs
@@ -318,9 +332,9 @@ func boundFact(up update, cs changeSet, d downloaded, reported bool) allow.Fact 
 	case !haveMod:
 		return allow.No("go.sum at head has no hash for the go.mod of "+target, sourceManifests)
 	case !reported:
-		return allow.No("unknown: go mod download did not report "+target, sourceDownload)
+		return unknownFact("go mod download did not report " + target)
 	case d.Error != "":
-		return allow.No("unknown: go mod download failed: "+show(d.Error), sourceDownload)
+		return goFailure("go mod download failed", d.Error, sourceDownload)
 	case d.Sum != zip:
 		return allow.No(fmt.Sprintf("go.sum pins %s for the module zip; the go command got %s", zip, show(d.Sum)), sourceDownload)
 	case d.GoModSum != mod:
@@ -329,57 +343,95 @@ func boundFact(up update, cs changeSet, d downloaded, reported bool) allow.Fact 
 	return allow.Yes(zip+" (zip) and "+mod+" (go.mod) match the checksum database", sourceDownload)
 }
 
+// proxyOutageRE is the one shape of go command error that is read as "the
+// module proxy was asked and did not answer": the error for the module
+// itself (not one nested in another), about a URL of the proxy, and
+// either a 429 or 5xx status or no response at all. The two forms are
+// cmd/go/internal/web's: an HTTPError is "reading URL: STATUS" (for some
+// answers with the server's text after it), and a request that got no
+// response is net/http's own error, `Get "URL": ...`, passed on as it is.
+// Both stand behind the module, as testdata/go has them for a 404. There
+// is no tool to ask whether a go command error was an outage, so this is
+// an exact anchored shape, and anything else is not one: a checksum
+// mismatch, a version that does not exist and every error this package
+// has never seen stay a "no", which is person. internal/artifact has the
+// same shape for its own download.
+var proxyOutageRE = regexp.MustCompile(`^(?:loading module retractions for )?[^ \n]+@[^ \n]+: (?:` +
+	`reading https://proxy\.golang\.org/[^ \n]+: (?:429|5[0-9][0-9]) ` +
+	`|Get "https://proxy\.golang\.org/[^" \n]+": )`)
+
+// goFailure is the fact for an error the go command reported about one
+// module: unavailable when the error is the proxy's outage, and otherwise
+// a "no" that says what failed.
+func goFailure(what, text, source string) allow.Fact {
+	if proxyOutageRE.MatchString(text) {
+		return allow.Unavailable("the module proxy did not answer: "+show(text), source)
+	}
+	return allow.No(what+": "+show(text), source)
+}
+
+// unknownFact is a fact nothing established: the go command, or the
+// advisory checker, said nothing about the module. It has no source,
+// which allow reads as never gathered.
+func unknownFact(why string) allow.Fact { return allow.Fact{Value: "unknown: " + why} }
+
 // cleanFact is the Clean fact: the proxy still serves the version, it is
 // not retracted, the module is not deprecated, and the advisory database
-// has nothing new against it. The first part that fails is the value.
-func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK bool, versions listed, versionsOK bool, adv advisory.Result, advErr error) allow.Fact {
-	const sourceAll = "go mod download, go list -m -u -retracted, go list -m -versions, advisory database"
+// has nothing new against it. Each of the four is a fact of its own and
+// they are combined with allow.Fact.And, so a "no" from any of them is
+// the answer whatever else went unanswered.
+func cleanFact(up update, d downloaded, downloadedOK bool, info listed, infoOK bool, versions listed, versionsOK bool, adv advisory.Result) allow.Fact {
+	served := allow.Yes("served by the proxy", sourceDownload)
 	switch {
 	case !downloadedOK:
-		return allow.No("unknown: go mod download did not report the version", sourceDownload)
+		served = unknownFact("go mod download did not report the version")
 	case d.Error != "":
-		return allow.No("unknown: the proxy did not serve the version: "+show(d.Error), sourceDownload)
+		served = goFailure("the proxy did not serve the version", d.Error, sourceDownload)
+	}
 
+	current := allow.Yes("not retracted, not deprecated", sourceList)
+	switch {
 	case !infoOK:
-		return allow.No("unknown: go list did not report the version", sourceList)
+		current = unknownFact("go list did not report the version")
 	case info.Error != nil:
-		return allow.No("unknown: go list failed: "+show(info.Error.Err), sourceList)
+		current = goFailure("go list failed", info.Error.Err, sourceList)
 	case len(info.Retracted) > 0:
-		return allow.No("retracted: "+show(strings.Join(info.Retracted, "; ")), sourceList)
+		current = allow.No("retracted: "+show(strings.Join(info.Retracted, "; ")), sourceList)
 	case info.Deprecated != "":
-		return allow.No("the module is deprecated: "+show(info.Deprecated), sourceList)
+		current = allow.No("the module is deprecated: "+show(info.Deprecated), sourceList)
 
 	// An empty Retracted is not enough: see the comment in Gather.
 	case !versionsOK:
-		return allow.No("unknown: go list did not report the module's versions", sourceList)
+		current = unknownFact("go list did not report the module's versions")
 	case versions.Error != nil:
-		return allow.No("unknown: the module's retractions could not be loaded: "+show(versions.Error.Err), sourceList)
+		current = goFailure("the module's retractions could not be loaded", versions.Error.Err, sourceList)
 	case module.IsPseudoVersion(up.to):
-		return allow.No("unknown: "+up.to+" is not a tagged version, so the version list cannot confirm it is not retracted", sourceList)
+		current = allow.No(up.to+" is not a tagged version, so the version list cannot confirm it is not retracted", sourceList)
 	case !slices.Contains(versions.Versions, up.to):
-		return allow.No("unknown: "+up.to+" is not in the module's list of versions that are not retracted", sourceList)
-
-	case advErr != nil:
-		return allow.No("unknown: the advisory database could not be asked: "+show(advErr.Error()), "advisory database")
-	case !adv.NoMalware.Holds():
-		return advisoryNo(adv.NoMalware, "unknown: malware advisories were not checked")
-	case !adv.NoNewAdvisory.Holds():
-		return advisoryNo(adv.NoNewAdvisory, "unknown: new advisories were not checked")
+		current = allow.No(up.to+" is not in the module's list of versions that are not retracted", sourceList)
 	}
-	return allow.Yes("served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory", sourceAll)
+
+	clean := served.And(current).
+		And(advised(adv.NoMalware, "malware advisories were not checked")).
+		And(advised(adv.NoNewAdvisory, "new advisories were not checked"))
+	if clean.Holds() {
+		return allow.Yes("served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory",
+			"go mod download, go list -m -u -retracted, go list -m -versions, advisory database")
+	}
+	return clean
 }
 
-// advisoryNo turns one of the advisory checker's facts that does not
-// hold into the Clean fact. A fact the checker left ungathered has no
-// value or source of its own.
-func advisoryNo(f allow.Fact, ungathered string) allow.Fact {
-	if !f.Gathered() {
-		return allow.No(ungathered, "advisory database")
+// advised is one of the advisory checker's facts as a part of Clean. A
+// fact the checker left blank still has to say what is missing.
+func advised(f allow.Fact, blank string) allow.Fact {
+	if f == (allow.Fact{}) {
+		return unknownFact(blank)
 	}
-	return allow.No(f.Value, f.Source)
+	return f
 }
 
-// unknownTime is a time fact that could not be established.
+// unknownTime is a time fact that could not be established, by a clock
+// that was asked and answered.
 func unknownTime(why string) allow.TimeFact {
 	return allow.TimeFact{Value: "unknown: " + why, Source: sourceIndex}
 }
@@ -387,8 +439,10 @@ func unknownTime(why string) allow.TimeFact {
 // seenFact looks a version up in the index, starting a little before its
 // commit time.
 func seenFact(ctx context.Context, ix *index, name, version string, commit, now time.Time) allow.TimeFact {
-	seen, why := ix.firstSeen(ctx, name, version, commit.Add(-indexStartMargin))
+	seen, why, down := ix.firstSeen(ctx, name, version, commit.Add(-indexStartMargin))
 	switch {
+	case down:
+		return allow.UnavailableTime(why, sourceIndex)
 	case seen.IsZero():
 		return unknownTime(why)
 	case seen.After(now):
@@ -402,6 +456,9 @@ func seenFact(ctx context.Context, ix *index, name, version string, commit, now 
 // the latest, so the answer can make a name look younger than it is and
 // never older.
 func nameCreated(ctx context.Context, tool goTool, ix *index, name string, versions listed, versionsOK bool, now time.Time) (allow.TimeFact, error) {
+	if versionsOK && versions.Error != nil && proxyOutageRE.MatchString(versions.Error.Err) {
+		return allow.UnavailableTime("the module proxy did not answer for the module's version list", sourceList), nil
+	}
 	if !versionsOK || versions.Error != nil || len(versions.Versions) == 0 {
 		return unknownTime("the module's version list could not be read"), nil
 	}
@@ -418,9 +475,15 @@ func nameCreated(ctx context.Context, tool goTool, ix *index, name string, versi
 	if err != nil {
 		return allow.TimeFact{}, err
 	}
-	why := "go list reported no commit time for the module's earliest versions"
+	// down: a lookup went unanswered. If no other candidate dates the
+	// name, asking again may.
+	why, down := "go list reported no commit time for the module's earliest versions", false
 	for _, q := range queries {
 		info, ok := infos[q]
+		if ok && info.Error != nil && proxyOutageRE.MatchString(info.Error.Err) {
+			why, down = q.Version+": the module proxy did not answer", true
+			continue
+		}
 		if !ok || info.Error != nil || info.Time == nil {
 			continue
 		}
@@ -430,6 +493,10 @@ func nameCreated(ctx context.Context, tool goTool, ix *index, name string, versi
 			return f, nil
 		}
 		why = q.Version + ": " + strings.TrimPrefix(f.Value, "unknown: ")
+		down = down || f.Unavailable
+	}
+	if down {
+		return allow.UnavailableTime(why, sourceIndex), nil
 	}
 	return unknownTime(why), nil
 }

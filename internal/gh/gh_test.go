@@ -221,3 +221,80 @@ func TestValid(t *testing.T) {
 		t.Error("ValidSHA")
 	}
 }
+
+// Unavailable tells "GitHub did not answer" from every answer GitHub
+// gave, after the client's own retries.
+func TestUnavailable(t *testing.T) {
+	type resp struct {
+		status int
+		header map[string]string
+		body   string
+	}
+	for _, tc := range []struct {
+		name string
+		resp resp
+		want bool
+	}{
+		{"500", resp{500, nil, `{"message":"boom"}`}, true},
+		{"502", resp{502, nil, ""}, true},
+		{"503", resp{503, nil, ""}, true},
+		{"429", resp{429, nil, ""}, true},
+		{"secondary rate limit", resp{403, nil, `{"message":"You have exceeded a secondary rate limit."}`}, true},
+		{"primary rate limit", resp{403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0"}, `{"message":"API rate limit exceeded"}`}, true},
+		{"a 403 with retry-after", resp{403, map[string]string{"Retry-After": "1"}, ""}, true},
+		{"plain 403", resp{403, nil, `{"message":"Resource not accessible by integration"}`}, false},
+		{"a 403 whose text only mentions a rate limit", resp{403, nil, `{"message":"Repository access blocked; see the rate limit documentation"}`}, false},
+		{"404", resp{404, nil, `{"message":"Not Found"}`}, false},
+		{"401", resp{401, nil, `{"message":"Bad credentials"}`}, false},
+		{"422", resp{422, nil, `{"message":"Validation Failed"}`}, false},
+		{"a 200 that is not JSON", resp{200, nil, `<html>`}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.resp.header {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.resp.status)
+				io.WriteString(w, tc.resp.body)
+			}))
+			defer srv.Close()
+			c, _ := testClient(srv)
+			var out struct{ N int }
+			err := c.Get(context.Background(), "x", &out)
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if got := Unavailable(err); got != tc.want {
+				t.Errorf("Unavailable(%v) = %v, want %v", err, got, tc.want)
+			}
+			if got := Unavailable(fmt.Errorf("advisory: asking: %w", err)); got != tc.want {
+				t.Errorf("wrapped: Unavailable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("nothing listening", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		c, _ := testClient(srv)
+		srv.Close()
+		if err := c.Get(context.Background(), "x", nil); err == nil || !Unavailable(err) {
+			t.Errorf("Unavailable(%v) is false", err)
+		}
+	})
+	t.Run("an attempt that times out", func(t *testing.T) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+		defer srv.Close()
+		defer close(release)
+		c, _ := testClient(srv)
+		c.Timeout, c.MaxRetries = 50*time.Millisecond, 0
+		if err := c.Get(context.Background(), "x", nil); err == nil || !Unavailable(err) {
+			t.Errorf("Unavailable(%v) is false", err)
+		}
+	})
+	for _, err := range []error{nil, errors.New("github: bad path"), context.Canceled, ErrNotFound} {
+		if Unavailable(err) {
+			t.Errorf("Unavailable(%v) is true", err)
+		}
+	}
+}

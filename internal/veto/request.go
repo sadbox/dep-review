@@ -2,6 +2,7 @@ package veto
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed" // for prompt.md
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,41 @@ var systemPrompt string
 // answerNoVeto is the one value of the answer's "verdict" that is not a
 // category.
 const answerNoVeto = "no_veto"
+
+// requestLayout names the layout of the user message (userMessage). The
+// text around the data is code, which a fingerprint cannot hash, so this
+// stands in for it: whoever changes that layout raises the number, and
+// every stored verdict stops being reused.
+const requestLayout = "1"
+
+// Fingerprint identifies everything about the question that is not the
+// read itself: the system prompt, the description of the diff format, the
+// layout of the user message, the answer schema, the model and the effort
+// (lower-case hex SHA-256). A verdict is stored and reused under the
+// read's Key together with this, so a clean verdict does not survive a
+// change to any of them (spec section 11, amendment 11). Settings that do
+// not change what the model is asked (timeouts, attempts, the chunk
+// budget, which already shapes the read's Key) are not part of it.
+func (c Config) Fingerprint() string {
+	schema, err := encode(newAnswerSchema())
+	if err != nil {
+		// The schema is a fixed struct of strings and lists of strings.
+		panic("veto: " + err.Error())
+	}
+	return fingerprint(systemPrompt, artifact.TextFormat, requestLayout, string(schema), c.Model, c.Effort)
+}
+
+// fingerprint hashes its parts, each behind its length so that no two
+// lists of parts hash alike.
+func fingerprint(parts ...string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "dep-review veto question:%d:", len(parts))
+	for _, p := range parts {
+		fmt.Fprintf(h, "%d:", len(p))
+		io.WriteString(h, p)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 const (
 	// maxUnreadListed is how many unread files one request names. More
@@ -119,7 +155,8 @@ func newAnswerSchema() answerSchema {
 // checkRead refuses a prepared read this client must not send: one that
 // is over the configured budget, or one that is not what internal/artifact
 // documents. Nothing is repaired or cut to fit, because the verdict is
-// stored under the read's key and must be about exactly that read.
+// stored under the read's key and must be about exactly that read. Review
+// returns what this function says as ErrUnusable.
 func checkRead(cfg Config, p artifact.Prepared) error {
 	if p.State != allow.ReadFull && p.State != allow.ReadPartial {
 		return fmt.Errorf("read state is %q, want %q or %q", p.State, allow.ReadFull, allow.ReadPartial)
@@ -217,6 +254,9 @@ func containsMarker(p artifact.Prepared, chunk int, marker string) bool {
 // then the publisher's text inside blocks that begin and end with the
 // marker. The header's values passed checkRead, so no line of it can be
 // something the publisher shaped beyond a name or a version.
+//
+// A change to what this function writes around the data changes what the
+// model is asked: raise requestLayout with it.
 func userMessage(p artifact.Prepared, chunk int, marker string) string {
 	var b strings.Builder
 	from := p.Pair.From
@@ -231,6 +271,9 @@ func userMessage(p artifact.Prepared, chunk int, marker string) string {
 	fmt.Fprintf(&b, "part: %d of %d\n", chunk+1, len(p.Chunks))
 	fmt.Fprintf(&b, "changed files not shown: %d\n", len(p.Unread))
 	fmt.Fprintf(&b, "marker: %s\n", marker)
+	// internal/artifact's own description of the text it produced, word
+	// for word, so the two cannot drift apart.
+	fmt.Fprintf(&b, "\ndiff format:\n%s\n", artifact.TextFormat)
 
 	if len(p.Unread) > 0 {
 		fmt.Fprintf(&b, "\n=====BEGIN UNREAD FILES %s=====\n", marker)

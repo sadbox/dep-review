@@ -256,9 +256,11 @@ func TestAnyVetoIsPerson(t *testing.T) {
 	wantOutcome(t, Decide(f, p, t0), Person, ReasonModelRefused)
 }
 
-// Invariant 2: a missing or unreadable fact is person, never merge or
-// wait. Every field of the two fact records is blanked in turn, on every
-// kind of record that merges.
+// Invariant 2, as amended (spec section 11): a fact that is missing or
+// false is person, never merge or wait. Every field of the two fact
+// records is blanked in turn, on every kind of record that merges.
+// TestUnavailableFact has the third state, and TestMergeNeedsEveryFact
+// the other half: nothing but a holding fact contributes to a merge.
 func TestUnknownFactIsPerson(t *testing.T) {
 	p := testPolicy()
 
@@ -274,29 +276,7 @@ func TestUnknownFactIsPerson(t *testing.T) {
 	// All of the pull request's own facts hold, and it moves nothing.
 	wantOutcome(t, Decide(pr(GoModules), p, t0), Person, ReasonNoUpdates)
 
-	baselines := map[string]PRFacts{
-		"established":       pr(GoModules, update(100*hour)),
-		"listed":            pr(GoModules, update(100*hour, listed)),
-		"listed new name":   pr(GoModules, update(100*hour, newListed)),
-		"listed major":      pr(GoModules, update(15*day, listed, major)),
-		"security fix":      pr(GoModules, update(0, securityFix)),
-		"partial read":      pr(NPM, update(15*day, read(ReadPartial))),
-		"docker":            pr(Docker, update(100*hour, read(ReadNotApplicable))),
-		"seasoned new name": pr(NPM, update(100*hour, newUnlisted(400*day))),
-		"ride-along":        pr(GoModules, update(0, securityFix), update(hour)),
-	}
-
-	// Fields whose zero value is not a missing fact.
-	exemptPR := map[string]string{
-		"Opened": "not a fact of the spec; it cannot grant (TestOpenedOnlyMovesTheDeadline)",
-	}
-	exemptUpdate := map[string]string{
-		"From":        "empty for a new name; decides nothing",
-		"Veto":        "nil is the absence of an objection; a model that never answered is Read none",
-		"NameCreated": "needed for an unlisted new name only, and blanked on that baseline below",
-	}
-
-	for name, base := range baselines {
+	for name, base := range mergingBaselines() {
 		if d := Decide(base, p, t0); d.Outcome != Merge {
 			t.Fatalf("%s: the baseline must merge for this test to mean anything: %q %v", name, d.Outcome, d.Reasons)
 		}
@@ -328,19 +308,26 @@ func TestUnknownFactIsPerson(t *testing.T) {
 				t.Errorf("%s: UpdateFacts.%s blank: %q, want person", name, field, d.Outcome)
 			}
 
-			// "Yes" from nowhere is as unknown as nothing at all.
+			// "Yes" from nowhere is as unknown as nothing at all, and so is
+			// "unavailable" from nowhere.
 			switch fv.Interface().(type) {
 			case Fact:
-				f := clonePR(base)
-				reflect.ValueOf(&f.Updates[last]).Elem().Field(i).Set(reflect.ValueOf(Fact{OK: true, Value: "yes"}))
-				if d := Decide(f, p, t0); d.Outcome != Person {
-					t.Errorf("%s: UpdateFacts.%s true without a source: %q, want person", name, field, d.Outcome)
+				for what, fact := range map[string]Fact{
+					"true without a source":        {OK: true, Value: "yes"},
+					"unavailable without a source": {Unavailable: true, Value: "no answer"},
+				} {
+					f := clonePR(base)
+					reflect.ValueOf(&f.Updates[last]).Elem().Field(i).Set(reflect.ValueOf(fact))
+					if d := Decide(f, p, t0); d.Outcome != Person || !reflect.DeepEqual(d.Reasons, []Reason{ReasonFactMissing}) {
+						t.Errorf("%s: UpdateFacts.%s %s: %q %v, want person [fact_missing]", name, field, what, d.Outcome, d.Reasons)
+					}
 				}
 			case TimeFact:
 				for what, tf := range map[string]TimeFact{
-					"without a source": {OK: true, Time: t0.Add(-1000 * day)},
-					"without a time":   {OK: true, Source: "registry"},
-					"not ok":           {OK: false, Time: t0.Add(-1000 * day), Source: "registry"},
+					"without a source":             {OK: true, Time: t0.Add(-1000 * day)},
+					"without a time":               {OK: true, Source: "registry"},
+					"not ok":                       {OK: false, Time: t0.Add(-1000 * day), Source: "registry"},
+					"unavailable without a source": {Unavailable: true, Time: t0.Add(-1000 * day)},
 				} {
 					f := clonePR(base)
 					reflect.ValueOf(&f.Updates[last]).Elem().Field(i).Set(reflect.ValueOf(tf))
@@ -351,14 +338,20 @@ func TestUnknownFactIsPerson(t *testing.T) {
 			}
 		}
 
-		// A fact that was gathered and is false.
+		// A fact that was gathered and is false has its own reason. One
+		// that nobody gathered does not borrow it: "not bound" tells the
+		// owner not to merge, and that is not what a gap in the gate's own
+		// knowledge means.
 		for field, reason := range map[string]Reason{
 			"Increase": ReasonNotIncrease, "Bound": ReasonNotBound,
 			"Clean": ReasonNotClean, "NoRegress": ReasonRegress,
 		} {
 			f := clonePR(base)
-			reflect.ValueOf(&f.Updates[last]).Elem().FieldByName(field).Set(reflect.ValueOf(No("no", "test")))
+			fv := reflect.ValueOf(&f.Updates[last]).Elem().FieldByName(field)
+			fv.Set(reflect.ValueOf(No("no", "test")))
 			wantOutcome(t, Decide(f, p, t0), Person, reason)
+			fv.Set(reflect.ValueOf(Fact{Value: "the answer could not be read"}))
+			wantOutcome(t, Decide(f, p, t0), Person, ReasonFactMissing)
 		}
 		for field, reason := range map[string]Reason{
 			"Identity": ReasonIdentity, "Shape": ReasonShape, "ChecksConfigured": ReasonChecksNotConfigured,
@@ -367,8 +360,200 @@ func TestUnknownFactIsPerson(t *testing.T) {
 			reflect.ValueOf(&f).Elem().FieldByName(field).Set(reflect.ValueOf(No("no", "test")))
 			wantOutcome(t, Decide(f, p, t0), Person, reason)
 			reflect.ValueOf(&f).Elem().FieldByName(field).Set(reflect.ValueOf(Fact{OK: true}))
-			wantOutcome(t, Decide(f, p, t0), Person, reason)
+			wantOutcome(t, Decide(f, p, t0), Person, ReasonFactMissing)
 		}
+	}
+}
+
+// mergingBaselines is one pull request of every kind that merges at t0
+// under testPolicy.
+func mergingBaselines() map[string]PRFacts {
+	return map[string]PRFacts{
+		"established":       pr(GoModules, update(100*hour)),
+		"listed":            pr(GoModules, update(100*hour, listed)),
+		"listed new name":   pr(GoModules, update(100*hour, newListed)),
+		"listed major":      pr(GoModules, update(15*day, listed, major)),
+		"security fix":      pr(GoModules, update(0, securityFix)),
+		"partial read":      pr(NPM, update(15*day, read(ReadPartial))),
+		"docker":            pr(Docker, update(100*hour, read(ReadNotApplicable))),
+		"seasoned new name": pr(NPM, update(100*hour, newUnlisted(400*day))),
+		"ride-along":        pr(GoModules, update(0, securityFix), update(hour)),
+	}
+}
+
+// Fields of the two fact records whose zero value is not a missing fact.
+var (
+	exemptPR = map[string]string{
+		"Opened": "not a fact of the spec; it cannot grant (TestOpenedOnlyMovesTheDeadline)",
+	}
+	exemptUpdate = map[string]string{
+		"From":        "empty for a new name; decides nothing",
+		"Veto":        "nil is the absence of an objection; a model that never answered is Read none",
+		"NameCreated": "needed for an unlisted new name only, and tried on that baseline",
+		"Superseded":  "unset is not superseded; set, it can only turn a merge into a wait (TestSuperseded)",
+	}
+)
+
+// The third state (spec section 11, amendment 1): a fact whose source was
+// asked and did not answer is wait, never merge and never person before
+// the deadline, and person at the deadline. Every fact field is made
+// unavailable in turn, on every kind of record that merges.
+func TestUnavailableFact(t *testing.T) {
+	p := testPolicy()
+	for name, base := range mergingBaselines() {
+		last := len(base.Updates) - 1
+		check := func(field string, f PRFacts) {
+			t.Helper()
+			d := Decide(f, p, t0)
+			// The answer that has not arrived may also have been the one
+			// that excused the age (a security fix, a ride along), so "too
+			// young" can come with it. Nothing else can.
+			want := []Reason{ReasonSourceUnavailable}
+			if len(d.Reasons) == 2 {
+				want = append(want, ReasonAge)
+			}
+			if d.Outcome != Wait || !reflect.DeepEqual(d.Reasons, want) {
+				t.Errorf("%s: %s unavailable: %q %v, want wait [source_unavailable]", name, field, d.Outcome, d.Reasons)
+				return
+			}
+			if !d.Deadline.After(t0) {
+				t.Errorf("%s: %s unavailable: deadline %v is not in the future", name, field, d.Deadline)
+			}
+			if got := Decide(f, p, d.Deadline.Add(-1)); got.Outcome != Wait || got.Reasons[0] != ReasonSourceUnavailable {
+				t.Errorf("%s: %s unavailable, a moment before the deadline: %q %v", name, field, got.Outcome, got.Reasons)
+			}
+			for _, later := range []time.Duration{0, day, 1000 * day} {
+				got := Decide(f, p, d.Deadline.Add(later))
+				if got.Outcome != Person || !reflect.DeepEqual(got.Reasons, []Reason{ReasonSourceDeadline}) {
+					t.Errorf("%s: %s unavailable, %v after the deadline: %q %v, want person [source_deadline]", name, field, later, got.Outcome, got.Reasons)
+				}
+			}
+		}
+
+		// OK set as well must not turn "no answer" into "yes".
+		facts := []Fact{Unavailable("HTTP 503, 3 tries", "registry"), {OK: true, Unavailable: true, Value: "HTTP 503", Source: "registry"}}
+
+		prType := reflect.TypeOf(PRFacts{})
+		for i := 0; i < prType.NumField(); i++ {
+			if prType.Field(i).Type != reflect.TypeOf(Fact{}) {
+				continue
+			}
+			for _, fact := range facts {
+				f := clonePR(base)
+				reflect.ValueOf(&f).Elem().Field(i).Set(reflect.ValueOf(fact))
+				check("PRFacts."+prType.Field(i).Name, f)
+			}
+		}
+		updateType := reflect.TypeOf(UpdateFacts{})
+		for i := 0; i < updateType.NumField(); i++ {
+			field := updateType.Field(i).Name
+			switch updateType.Field(i).Type {
+			case reflect.TypeOf(Fact{}):
+				for _, fact := range facts {
+					f := clonePR(base)
+					reflect.ValueOf(&f.Updates[last]).Elem().Field(i).Set(reflect.ValueOf(fact))
+					check("UpdateFacts."+field, f)
+				}
+			case reflect.TypeOf(TimeFact{}):
+				if field == "NameCreated" && name != "seasoned new name" {
+					continue // not looked at
+				}
+				for _, tf := range []TimeFact{
+					UnavailableTime("HTTP 503", "registry"),
+					{OK: true, Unavailable: true, Time: t0.Add(-1000 * day), Value: "HTTP 503", Source: "registry"},
+				} {
+					f := clonePR(base)
+					reflect.ValueOf(&f.Updates[last]).Elem().Field(i).Set(reflect.ValueOf(tf))
+					check("UpdateFacts."+field, f)
+				}
+			}
+		}
+	}
+
+	// A fact that failed is not waited out because another is unavailable.
+	down := func(u *UpdateFacts) {
+		u.Clean = Unavailable("the advisory database did not answer", "advisories")
+		u.SecurityFix = Unavailable("the advisory database did not answer", "advisories")
+	}
+	for reason, breakIt := range map[Reason]func(*UpdateFacts){
+		ReasonNotBound:      func(u *UpdateFacts) { u.Bound = No("hash differs", "go mod download") },
+		ReasonFactMissing:   func(u *UpdateFacts) { u.NoRegress = Fact{} },
+		ReasonMajorUnlisted: major,
+		ReasonVeto:          func(u *UpdateFacts) { u.Veto = &Veto{Category: "obfuscation"} },
+		ReasonReadRefused:   read(ReadRefused),
+	} {
+		wantOutcome(t, Decide(pr(GoModules, update(100*hour, down, breakIt)), p, t0), Person, reason)
+	}
+	// It waits together with whatever else is only waiting, and when the
+	// source answers the rest still has to be true.
+	u := update(hour, down, read(ReadNone))
+	d := Decide(pr(GoModules, u), p, t0)
+	wantOutcome(t, d, Wait, ReasonSourceUnavailable, ReasonReadPending, ReasonAge)
+	wantOutcome(t, Decide(pr(GoModules, u), p, d.Deadline), Person, ReasonSourceDeadline, ReasonReadDeadline)
+	// An unavailable pull request fact, with an update that only waits.
+	f := pr(GoModules, update(hour))
+	f.ChecksConfigured = Unavailable("HTTP 502", "rules/branches")
+	wantOutcome(t, Decide(f, p, t0), Wait, ReasonSourceUnavailable, ReasonAge)
+
+	// An answer that has not arrived is never read as the answer that
+	// grants more: a major whose listing is not known does not get the
+	// listed major's age, and a fix that is not confirmed is not a fix.
+	notListedYet := update(15*day, listed, major, func(u *UpdateFacts) { u.Listed = Unavailable("no answer", "policy") })
+	wantOutcome(t, Decide(pr(GoModules, notListedYet), p, t0), Wait, ReasonSourceUnavailable)
+	unconfirmedFix := update(hour, func(u *UpdateFacts) { u.SecurityFix = Unavailable("no answer", "advisories") })
+	d = Decide(pr(GoModules, unconfirmedFix), p, t0)
+	wantOutcome(t, d, Wait, ReasonSourceUnavailable, ReasonAge)
+	if d.PerUpdate[0].RequiredAge != 72*hour {
+		t.Fatalf("an unconfirmed fix needs %v", d.PerUpdate[0].RequiredAge)
+	}
+	// And it gives no companion a ride.
+	d = Decide(pr(GoModules, unconfirmedFix, update(hour)), p, t0)
+	if d.PerUpdate[1].RequiredAge != 72*hour {
+		t.Fatalf("a companion of an unconfirmed fix needs %v", d.PerUpdate[1].RequiredAge)
+	}
+}
+
+// The other half of invariant 2: nothing but a holding fact contributes
+// to a merge. Whatever the record, a merge means every fact the decision
+// rests on was gathered and holds.
+func TestMergeNeedsEveryFact(t *testing.T) {
+	r := rand.New(rand.NewPCG(2, 11))
+	merges := 0
+	for i := 0; i < 60000; i++ {
+		f, p := randomPR(r), randomPolicy(r)
+		now := t0.Add(time.Duration(r.Int64N(int64(30*day))) - 10*day)
+		if Decide(f, p, now).Outcome != Merge {
+			continue
+		}
+		merges++
+		if !f.Identity.Holds() || !f.Shape.Holds() || !f.ChecksConfigured.Holds() || len(f.Updates) == 0 {
+			t.Fatalf("merged without a pull request fact: %+v", f)
+		}
+		for _, u := range f.Updates {
+			switch {
+			case !u.Increase.Holds(), !u.Bound.Holds(), !u.Clean.Holds(), !u.NoRegress.Holds():
+				t.Fatalf("merged without a fact that must hold: %+v", u)
+			case !u.Known.Gathered(), !u.Listed.Gathered(), !u.NewName.Gathered(), !u.Major.Gathered(), !u.SecurityFix.Gathered():
+				t.Fatalf("merged without an answer: %+v", u)
+			case !u.FirstSeen.Known(), now.Before(u.FirstSeen.Time):
+				t.Fatalf("merged without a first-seen time in the past: %+v", u)
+			case u.Veto != nil:
+				t.Fatalf("merged over a veto: %+v", u)
+			case u.Read != ReadFull && u.Read != ReadPartial && !(u.Read == ReadNotApplicable && f.Ecosystem == Docker):
+				t.Fatalf("merged unread: %+v", u)
+			case f.Ecosystem == Docker && u.Superseded.Holds():
+				t.Fatalf("merged a superseded pin: %+v", u)
+			case u.Major.Holds() && !u.Listed.Holds():
+				t.Fatalf("merged an unlisted major: %+v", u)
+			case u.NewName.Holds() && !u.Listed.Holds() && (!u.NameCreated.Known() || u.Read != ReadFull):
+				t.Fatalf("merged an unlisted new name without its conditions: %+v", u)
+			case !u.Known.Holds() && !(u.NewName.Holds() && !u.Listed.Holds()):
+				t.Fatalf("merged a name that is not known: %+v", u)
+			}
+		}
+	}
+	if merges < 3000 {
+		t.Fatalf("only %d of the random records merged", merges)
 	}
 }
 
@@ -378,7 +563,8 @@ func TestPersonBeforeWait(t *testing.T) {
 	p := testPolicy()
 	breakers := map[Reason]func(*UpdateFacts){
 		ReasonNotIncrease:      func(u *UpdateFacts) { u.Increase = No("downgrade", "x/mod/semver") },
-		ReasonNotBound:         func(u *UpdateFacts) { u.Bound = Fact{} },
+		ReasonNotBound:         func(u *UpdateFacts) { u.Bound = No("hash differs", "go mod download") },
+		ReasonReadRefused:      read(ReadRefused),
 		ReasonNotClean:         func(u *UpdateFacts) { u.Clean = No("retracted", "go list") },
 		ReasonRegress:          func(u *UpdateFacts) { u.NoRegress = No("new install script", "registry") },
 		ReasonFirstSeenUnknown: func(u *UpdateFacts) { u.FirstSeen = TimeFact{} },
@@ -388,11 +574,14 @@ func TestPersonBeforeWait(t *testing.T) {
 		ReasonVeto:             func(u *UpdateFacts) { u.Veto = &Veto{Category: "obfuscation"} },
 	}
 	for reason, breakIt := range breakers {
-		// Too young and unread, each of which alone is wait.
+		// Too young, unread and waiting on a source, each of which alone
+		// is wait. (breakIt comes last: one of the breakers is a read
+		// state.)
 		for _, u := range []UpdateFacts{
 			update(hour, breakIt),
 			update(100*hour, read(ReadNone), breakIt),
 			update(hour, read(ReadNone), breakIt),
+			update(hour, func(u *UpdateFacts) { u.Clean = Unavailable("HTTP 503", "registry") }, breakIt),
 		} {
 			wantOutcome(t, Decide(pr(GoModules, u), p, t0), Person, reason)
 			// And beside an update that is only waiting.
@@ -534,6 +723,27 @@ func TestReasonsClosed(t *testing.T) {
 	// A value from outside the set is person and says nothing.
 	if r := Reason("merge"); r.Outcome() != Person || r.Explain() != "" || r.Hint() != "" {
 		t.Errorf("unknown reason: %q %q %q", r.Outcome(), r.Explain(), r.Hint())
+	}
+
+	// A reason for something the gate could not find out never reads like
+	// a finding: an unreachable registry is not a bad pin.
+	for _, r := range []Reason{ReasonFactMissing, ReasonSourceUnavailable, ReasonSourceDeadline, ReasonReadPending, ReasonReadDeadline,
+		ReasonFirstSeenUnknown, ReasonReadUnknown, ReasonListMismatch, ReasonInconsistent} {
+		text := strings.ToLower(r.Explain() + " " + r.Hint())
+		for _, accusing := range []string{"do not merge", "disagree", "close the pull request, or", "is not what"} {
+			if strings.Contains(text, accusing) {
+				t.Errorf("%q is the gate not knowing, and its text says %q: %s", r, accusing, text)
+			}
+		}
+	}
+	for _, r := range []Reason{ReasonSourceUnavailable, ReasonSourceDeadline, ReasonFactMissing} {
+		if !strings.Contains(r.Explain(), "Nothing was found wrong with the update") {
+			t.Errorf("%q does not say that nothing was found wrong: %q", r, r.Explain())
+		}
+	}
+	// And the reason for a pin the registry contradicts does say so.
+	if !strings.Contains(ReasonNotBound.Hint(), "Do not merge") || !strings.Contains(ReasonNotBound.Explain(), "The registry answered") {
+		t.Errorf("not_bound lost its warning: %q %q", ReasonNotBound.Explain(), ReasonNotBound.Hint())
 	}
 
 	// The reasons fixed in repository settings say where those live.
@@ -731,6 +941,68 @@ func TestReadStates(t *testing.T) {
 	wantOutcome(t, Decide(pr(GoModules, update(400*day, listed, major, read(ReadNone))), p, t0), Wait, ReasonReadPending)
 	// A security fix does not merge unread either.
 	wantOutcome(t, Decide(pr(GoModules, update(hour, securityFix, read(ReadNone))), p, t0), Wait, ReasonReadPending)
+
+	// A read the gate refused (a hash mismatch, an unsafe archive, an
+	// unusable read) is person at once, in every ecosystem, however old
+	// and however listed the update is: asking again gives the same.
+	for _, eco := range []string{GoModules, NPM, GitHubActions, Docker} {
+		wantOutcome(t, Decide(pr(eco, update(400*day, read(ReadRefused))), p, t0), Person, ReasonReadRefused)
+	}
+	wantOutcome(t, Decide(pr(GoModules, update(400*day, listed, securityFix, read(ReadRefused))), p, t0), Person, ReasonReadRefused)
+}
+
+// A Docker pin whose tag has moved on waits for Dependabot's refresh
+// (spec section 11, amendment 2). It never merges while superseded, and
+// only what a refresh would change is excused.
+func TestSuperseded(t *testing.T) {
+	p := testPolicy()
+	// What the Docker gatherer reports for such a pin.
+	moved := func(u *UpdateFacts) {
+		u.Read = ReadNotApplicable
+		u.Superseded = Yes("tag 1.27 resolves to sha256:bbb now, not to the pinned sha256:aaa", "HEAD registry")
+		u.Bound = No("tag 1.27 resolves to sha256:bbb now, not to the pinned sha256:aaa", "HEAD registry")
+		u.Clean = No("the registry no longer serves the pinned digest under tag 1.27", "HEAD registry")
+		u.FirstSeen = TimeFact{Value: "not asked: the tag has moved on", Source: "HEAD registry"}
+	}
+	f := pr(Docker, update(0, moved))
+	d := Decide(f, p, t0)
+	wantOutcome(t, d, Wait, ReasonSuperseded)
+	if want := f.Opened.Add(7 * day); !d.Deadline.Equal(want) || !d.NotBefore.IsZero() {
+		t.Fatalf("deadline %v (want %v), not before %v", d.Deadline, want, d.NotBefore)
+	}
+	wantOutcome(t, Decide(f, p, d.Deadline.Add(-1)), Wait, ReasonSuperseded)
+	wantOutcome(t, Decide(f, p, d.Deadline), Person, ReasonSupersededDeadline)
+	wantOutcome(t, Decide(f, p, d.Deadline.Add(1000*day)), Person, ReasonSupersededDeadline)
+
+	// Superseded never merges, even with every other fact holding and the
+	// version old enough: it can only take a merge away.
+	old := pr(Docker, update(400*day, read(ReadNotApplicable)))
+	wantOutcome(t, Decide(old, p, t0), Merge)
+	old.Updates[0].Superseded = Yes("the tag has moved on", "HEAD registry")
+	wantOutcome(t, Decide(old, p, t0), Wait, ReasonSuperseded)
+	old.Updates[0].Superseded = No("the tag still resolves to the pin", "HEAD registry")
+	wantOutcome(t, Decide(old, p, t0), Merge)
+
+	// What a refresh would not change is still person, at once.
+	for reason, breakIt := range map[Reason]func(*UpdateFacts){
+		ReasonNotKnown:      func(u *UpdateFacts) { u.Known = No("image is not listed", "policy") },
+		ReasonNotIncrease:   func(u *UpdateFacts) { u.Increase = No("a lower tag", "tags") },
+		ReasonRegress:       func(u *UpdateFacts) { u.NoRegress = No("no", "test") },
+		ReasonMajorUnlisted: major,
+		ReasonFactMissing:   func(u *UpdateFacts) { u.Major = Fact{} },
+		ReasonReadUnknown:   read(ReadFull + "?"),
+	} {
+		wantOutcome(t, Decide(pr(Docker, update(0, moved, breakIt)), p, t0), Person, reason)
+	}
+
+	// It is a Docker state. Elsewhere a version is immutable and nothing
+	// refreshes a pin, so the flag is not honoured and the facts decide.
+	for _, eco := range []string{GoModules, NPM, GitHubActions} {
+		d := Decide(pr(eco, update(400*day, moved, read(ReadFull))), p, t0)
+		wantOutcome(t, d, Person, ReasonNotBound, ReasonNotClean, ReasonFirstSeenUnknown)
+		ok := pr(eco, update(400*day, func(u *UpdateFacts) { u.Superseded = Yes("moved on", "registry") }))
+		wantOutcome(t, Decide(ok, p, t0), Merge)
+	}
 }
 
 func TestNewNames(t *testing.T) {
@@ -761,8 +1033,15 @@ func TestNewNames(t *testing.T) {
 			Person, []Reason{ReasonNewNameYoung}},
 		{"unlisted, regressed", NPM, update(400*day, newUnlisted(400*day), func(u *UpdateFacts) { u.NoRegress = No("install script", "registry") }),
 			Person, []Reason{ReasonRegress}},
-		{"unlisted, no-regress unknown", NPM, update(400*day, newUnlisted(400*day), func(u *UpdateFacts) { u.NoRegress = Fact{} }),
-			Person, []Reason{ReasonRegress}},
+		{"unlisted, no-regress never gathered", NPM, update(400*day, newUnlisted(400*day), func(u *UpdateFacts) { u.NoRegress = Fact{} }),
+			Person, []Reason{ReasonFactMissing}},
+		{"unlisted, no-regress unavailable", NPM, update(400*day, newUnlisted(400*day), func(u *UpdateFacts) { u.NoRegress = Unavailable("HTTP 503", "registry") }),
+			Wait, []Reason{ReasonSourceUnavailable}},
+		{"unlisted, name age unavailable", NPM, update(400*day, newUnlisted(400*day), func(u *UpdateFacts) { u.NameCreated = UnavailableTime("HTTP 503", "registry") }),
+			Wait, []Reason{ReasonSourceUnavailable}},
+		{"unlisted, name age unavailable, read partial: person first", NPM,
+			update(400*day, newUnlisted(400*day), read(ReadPartial), func(u *UpdateFacts) { u.NameCreated = UnavailableTime("HTTP 503", "registry") }),
+			Person, []Reason{ReasonNewNameUnread}},
 		{"unlisted: a security fix is no shortcut", NPM, update(71*hour, newUnlisted(400*day), securityFix), Wait, []Reason{ReasonAge}},
 		{"unlisted, major", NPM, update(400*day, newUnlisted(400*day), major), Person, []Reason{ReasonMajorUnlisted}},
 
@@ -1026,6 +1305,33 @@ func TestWaitDeadline(t *testing.T) {
 	done := clonePR(unread)
 	done.Updates[0].Read = ReadFull
 	wantOutcome(t, Decide(done, p, t0.Add(300*day)), Merge)
+
+	// What the model returned does not buy a failing retry more time. A
+	// partial read needs 14 days, and a source that is not answering is
+	// still given up on 7 days after the 72 hours a full read would need.
+	// (This is what keeps invariant 1 true at the deadline.)
+	down := func(u *UpdateFacts) { u.Clean = Unavailable("HTTP 503", "registry") }
+	for _, r := range []ReadState{ReadFull, ReadPartial, ReadNone} {
+		f := pr(GoModules, update(hour, down, read(r)))
+		d := Decide(f, p, t0)
+		if d.Outcome != Wait || !d.Deadline.Equal(t0.Add(71*hour+7*day)) {
+			t.Fatalf("read %s: %q, deadline %v", r, d.Outcome, d.Deadline)
+		}
+		if got := Decide(f, p, d.Deadline); got.Outcome != Person || got.Reasons[0] != ReasonSourceDeadline {
+			t.Fatalf("read %s at the deadline: %q %v", r, got.Outcome, got.Reasons)
+		}
+	}
+	// Without a retry pending the deadline is for GitHub's refusal, and
+	// runs from the time the pull request can really merge.
+	partial := pr(GoModules, update(hour, read(ReadPartial)))
+	d = Decide(partial, p, t0)
+	wantOutcome(t, d, Wait, ReasonAge)
+	if want := t0.Add(-hour + 14*day + 7*day); !d.Deadline.Equal(want) {
+		t.Fatalf("deadline %v, want %v", d.Deadline, want)
+	}
+	merged := Decide(partial, p, d.NotBefore)
+	wantOutcome(t, merged, Merge)
+	wantOutcome(t, ChecksRefused(merged, d.NotBefore), Wait, ReasonChecksPending)
 }
 
 // Opened is not a fact: it can move the deadline later and do nothing
@@ -1201,6 +1507,57 @@ func TestFactHelpers(t *testing.T) {
 	if (Fact{}).Holds() || (Fact{}).Gathered() || (TimeFact{}).Known() {
 		t.Error("zero facts")
 	}
+	if f := Unavailable("v", "s"); f.Holds() || f.Gathered() || !f.Unavailable || f.OK {
+		t.Error("Unavailable")
+	}
+	if f := (Fact{OK: true, Unavailable: true, Value: "v", Source: "s"}); f.Holds() || f.Gathered() {
+		t.Error("an unavailable fact that also says yes")
+	}
+	if tf := UnavailableTime("v", "s"); tf.Known() || !tf.unavailable() {
+		t.Error("UnavailableTime")
+	}
+	if tf := (TimeFact{OK: true, Unavailable: true, Time: t0, Source: "s"}); tf.Known() {
+		t.Error("an unavailable time that also has a time")
+	}
+	if (TimeFact{Unavailable: true}).unavailable() {
+		t.Error("unavailable from nowhere")
+	}
+
+	// And: both must hold; otherwise the one that settles more, and the
+	// first of two that are level.
+	yes, yes2 := Yes("a", "s1"), Yes("b", "s2")
+	no, no2 := No("no", "s3"), No("no too", "s4")
+	missing := Fact{Value: "unreadable answer"}
+	down := Unavailable("HTTP 503", "s5")
+	if got := yes.And(yes2); got != Yes("a; b", "s1; s2") {
+		t.Errorf("yes and yes: %+v", got)
+	}
+	for _, tc := range []struct {
+		name string
+		a, b Fact
+		want Fact
+	}{
+		{"yes, no", yes, no, no},
+		{"no, yes", no, yes, no},
+		{"no, no", no, no2, no},
+		{"yes, missing", yes, missing, missing},
+		{"missing, yes", missing, yes, missing},
+		{"yes, unavailable", yes, down, down},
+		{"unavailable, yes", down, yes, down},
+		{"unavailable, no: the no is not hidden", down, no, no},
+		{"no, unavailable", no, down, no},
+		{"missing, no", missing, no, no},
+		{"unavailable, missing: waiting cannot help", down, missing, missing},
+		{"missing, unavailable", missing, down, missing},
+		{"yes, the zero fact", yes, Fact{}, Fact{}},
+	} {
+		if got := tc.a.And(tc.b); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+		if tc.a.And(tc.b).Holds() {
+			t.Errorf("%s holds", tc.name)
+		}
+	}
 	at := At(t0, "registry")
 	if !at.Known() || at.Value != "2026-11-22T12:00:00Z" {
 		t.Errorf("At: %+v", at)
@@ -1216,24 +1573,34 @@ func TestFactHelpers(t *testing.T) {
 func usually(r *rand.Rand, p float64) bool { return r.Float64() < p }
 
 // randomFact is a good fact most of the time, and otherwise one of the
-// ways a fact can be false or unknown.
+// ways a fact can be false, unavailable or never gathered.
 func randomFact(r *rand.Rand, good float64) Fact {
 	if usually(r, good) {
 		return Yes("yes", "source")
 	}
-	switch r.IntN(3) {
+	switch r.IntN(6) {
 	case 0:
 		return No("no", "source")
 	case 1:
 		return Fact{OK: true, Value: "yes, says nobody"}
+	case 2:
+		return Unavailable("no answer", "source")
+	case 3:
+		return Fact{OK: true, Unavailable: true, Value: "no answer, and yes", Source: "source"}
+	case 4:
+		return Fact{Unavailable: true, Value: "no answer, says nobody"}
 	}
 	return Fact{}
 }
 
-// randomAnswer is a gathered yes or no, and now and then nothing.
+// randomAnswer is a gathered yes or no, and now and then nothing or no
+// answer.
 func randomAnswer(r *rand.Rand, yes float64) Fact {
 	if usually(r, 0.02) {
 		return Fact{}
+	}
+	if usually(r, 0.01) {
+		return Unavailable("no answer", "source")
 	}
 	if usually(r, yes) {
 		return Yes("yes", "source")
@@ -1243,11 +1610,15 @@ func randomAnswer(r *rand.Rand, yes float64) Fact {
 
 func randomTime(r *rand.Rand, known float64, within time.Duration) TimeFact {
 	if !usually(r, known) {
-		switch r.IntN(3) {
+		switch r.IntN(5) {
 		case 0:
 			return TimeFact{OK: true, Time: t0.Add(-within)}
 		case 1:
 			return TimeFact{OK: true, Source: "registry"}
+		case 2:
+			return UnavailableTime("no answer", "registry")
+		case 3:
+			return TimeFact{OK: true, Unavailable: true, Time: t0.Add(-within), Source: "registry"}
 		}
 		return TimeFact{}
 	}
@@ -1255,7 +1626,7 @@ func randomTime(r *rand.Rand, known float64, within time.Duration) TimeFact {
 }
 
 func randomRead(r *rand.Rand) ReadState {
-	states := []ReadState{ReadFull, ReadFull, ReadFull, ReadPartial, ReadPartial, ReadNone, ReadNone, ReadNotApplicable, "", "FULL"}
+	states := []ReadState{ReadFull, ReadFull, ReadFull, ReadPartial, ReadPartial, ReadNone, ReadNone, ReadNotApplicable, ReadRefused, "", "FULL"}
 	return states[r.IntN(len(states))]
 }
 

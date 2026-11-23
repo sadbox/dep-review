@@ -10,9 +10,10 @@
 //   - Shape: only files named Dockerfile* changed, and in them only the
 //     tag and digest of FROM lines of one anchored shape (shape.go).
 //     There is no Dockerfile parser.
-//   - Known: the image is on the owner's list. For the other ecosystems
-//     being a dependency at the base commit is enough to be known; for an
-//     image that nothing reads it is not.
+//   - Known: the image is on the owner's list, and only that (spec
+//     section 11, amendment 3). For the other ecosystems being a
+//     dependency at the base commit is enough to be known; for an image
+//     that nothing reads it is not.
 //   - Increase and Major: a comparator for dotted numeric tags with an
 //     identical suffix; the same tag with a new digest is an increase
 //     (tag.go).
@@ -24,10 +25,14 @@
 //     holds with nothing to compare.
 //
 // Only docker.io and gcr.io are asked. An image anywhere else has no
-// Bound and no FirstSeen, which is person. So has an image whose registry
-// could not be asked after a few tries: a gatherer has no way to say
-// "wait and ask again", and a source that could not be asked is a fact
-// not established for every gatherer.
+// Bound and no FirstSeen, which is person.
+//
+// Two outcomes are a wait and not a person (spec section 11, amendments 1
+// and 2). A registry that could not be asked after a few tries leaves the
+// facts it is the source of unavailable, and the next evaluation asks
+// again. And a tag that resolves to another digest than the pinned one
+// has moved on since Dependabot wrote the pin: the update is Superseded,
+// and Dependabot refreshes the digest itself.
 package docker
 
 import (
@@ -61,8 +66,8 @@ func New() *Gatherer { return &Gatherer{} }
 //
 // When Shape does not hold nothing is asked and Updates is empty. A
 // registry that could not be asked leaves the facts it is the source of
-// not established. An error means there is no HTTP client to ask with, or
-// the context ended.
+// unavailable. An error means there is no HTTP client to ask with, or the
+// context ended.
 func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
 	changes, shape := readShape(in.Files)
 	res := facts.Result{Shape: shape}
@@ -114,7 +119,9 @@ func (a *asker) update(ctx context.Context, c change, policy allow.Policy) (allo
 		// The Advisory Database has no container image ecosystem, and
 		// with nothing read there is no fast path to take anyway.
 		SecurityFix: allow.No("no advisory source covers container images", "not applicable to Docker"),
-		Read:        allow.ReadNotApplicable,
+		// Read is not set here: that nothing of an image is read is the
+		// deciding job's to say (allow.ReadNotApplicable, from the
+		// ecosystem), like every other read state.
 	}
 
 	if allow.Listed(policy, allow.Docker, name) {
@@ -127,10 +134,10 @@ func (a *asker) update(ctx context.Context, c change, policy allow.Policy) (allo
 
 	u.Increase, u.Major = compareTags(c.fromTag, c.toTag)
 
-	var err error
-	u.Bound, u.Clean, u.FirstSeen, err = a.ask(ctx, c)
+	f, err := a.ask(ctx, c)
 	if err != nil {
 		return allow.UpdateFacts{}, err
 	}
+	u.Bound, u.Clean, u.FirstSeen, u.Superseded = f.bound, f.clean, f.firstSeen, f.superseded
 	return u, nil
 }

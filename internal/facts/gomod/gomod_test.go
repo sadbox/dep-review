@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -247,7 +248,7 @@ func TestGatherBound(t *testing.T) {
 		files   []facts.File
 		tool    func(*fakeTool)
 		want    string // substring of x/text's Bound value; empty: it holds
-		unknown bool   // the value says "unknown:"
+		unknown bool   // never gathered: no source, and the value says "unknown:"
 	}{
 		{"go.sum pins what the checksum database has", pr(baseMod, headMod, baseSum, headSum), nil, "", false},
 		{"go.sum pins another zip hash", pr(baseMod, headMod, baseSum, strings.Replace(headSum, hText033, hText032, 1)), nil,
@@ -264,7 +265,7 @@ func TestGatherBound(t *testing.T) {
 			f.inline[download] = `{"Path":"golang.org/x/mod","Version":"v0.5.1","Sum":"` + hMod051 + `","GoModSum":"` + hMod051Mod + `"}
 {"Path":"golang.org/x/text","Version":"v0.3.3","Error":"golang.org/x/text@v0.3.3: reading https://proxy.golang.org/golang.org/x/text/@v/v0.3.3.info: 410 Gone"}`
 			f.errs[download] = errors.New("exit status 1")
-		}, "go mod download failed: golang.org/x/text@v0.3.3: reading", true},
+		}, "go mod download failed: golang.org/x/text@v0.3.3: reading", false},
 		{"the go command said nothing about it", pr(baseMod, headMod, baseSum, headSum), func(f *fakeTool) {
 			f.inline[download] = `{"Path":"golang.org/x/mod","Version":"v0.5.1","Sum":"` + hMod051 + `","GoModSum":"` + hMod051Mod + `"}`
 		}, "go mod download did not report golang.org/x/text@v0.3.3", true},
@@ -294,8 +295,10 @@ func TestGatherBound(t *testing.T) {
 				}
 				return
 			}
-			if bound.OK || !bound.Gathered() || !strings.Contains(bound.Value, tc.want) || strings.HasPrefix(bound.Value, "unknown:") != tc.unknown {
-				t.Errorf("Bound = %+v, want a no with %q", bound, tc.want)
+			// A "no" has a source; a fact nothing established has none.
+			// Neither is an outage.
+			if bound.OK || bound.Unavailable || bound.Gathered() == tc.unknown || !strings.Contains(bound.Value, tc.want) || strings.HasPrefix(bound.Value, "unknown:") != tc.unknown {
+				t.Errorf("Bound = %+v, want it not to hold with %q (never gathered: %v)", bound, tc.want, tc.unknown)
 			}
 			if hasArtifact(res, "golang.org/x/text") {
 				t.Error("an artifact is named for an update that is not bound")
@@ -441,22 +444,46 @@ func TestGatherUnknowns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// An index that did not answer is unavailable, not unknown: the
+		// next evaluation asks again.
 		for _, u := range res.Updates {
-			if u.FirstSeen.Known() || !strings.Contains(u.FirstSeen.Value, "unknown: the index could not be read") || u.FirstSeen.Source == "" {
+			if u.FirstSeen.Known() || !u.FirstSeen.Unavailable || !strings.Contains(u.FirstSeen.Value, "the index did not answer: status 502") || u.FirstSeen.Source == "" {
 				t.Errorf("%s FirstSeen = %+v", u.Name, u.FirstSeen)
 			}
 		}
-		if nc := find(t, res, "golang.org/x/mod").NameCreated; nc.Known() || !strings.Contains(nc.Value, "unknown: v0.3.0: the index could not be read") {
+		if nc := find(t, res, "golang.org/x/mod").NameCreated; nc.Known() || !nc.Unavailable || !strings.Contains(nc.Value, "v0.3.0: the index did not answer: status 502") {
 			t.Errorf("NameCreated = %+v", nc)
 		}
 		// Bound does not depend on the index.
 		if !find(t, res, "golang.org/x/text").Bound.Holds() {
 			t.Error("Bound was lost with the index")
 		}
+		// With the code read, all that is missing is the index: a wait.
+		updates := append([]allow.UpdateFacts(nil), res.Updates...)
+		for i := range updates {
+			updates[i].Read = allow.ReadFull
+		}
 		d := allow.Decide(allow.PRFacts{Ecosystem: allow.GoModules, Identity: allow.Yes("y", "t"), Shape: res.Shape,
-			ChecksConfigured: allow.Yes("y", "t"), Updates: res.Updates}, in.Policy, testNow)
-		if d.Outcome != allow.Person {
-			t.Errorf("Decide = %s, want person", d.Outcome)
+			ChecksConfigured: allow.Yes("y", "t"), Opened: testNow.Add(-time.Hour), Updates: updates}, in.Policy, testNow)
+		if d.Outcome != allow.Wait || !reflect.DeepEqual(d.Reasons, []allow.Reason{allow.ReasonSourceUnavailable}) {
+			t.Errorf("Decide = %s %v, want wait [source_unavailable]", d.Outcome, d.Reasons)
+		}
+	})
+
+	t.Run("the index answers something else than a page", func(t *testing.T) {
+		in, _, _ := input(t, files)
+		in.HTTP = &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
+			return respond(req, http.StatusOK, "<html>\n"), nil
+		})}
+		res, err := gatherer(goFixtures(t)).Gather(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// An answer arrived. Asking again would get the same one.
+		for _, u := range res.Updates {
+			if u.FirstSeen.Known() || u.FirstSeen.Unavailable || !strings.Contains(u.FirstSeen.Value, "unknown: the index could not be read") || u.FirstSeen.Source == "" {
+				t.Errorf("%s FirstSeen = %+v", u.Name, u.FirstSeen)
+			}
 		}
 	})
 
@@ -487,7 +514,12 @@ func TestGatherUnknowns(t *testing.T) {
 		if text.FirstSeen.Known() || !strings.Contains(text.FirstSeen.Value, "no commit time") {
 			t.Errorf("FirstSeen = %+v", text.FirstSeen)
 		}
-		if text.Clean.OK || !strings.Contains(text.Clean.Value, "unknown: go list failed") {
+		// The recorded error is the proxy not answering, so nothing is
+		// said against the version: both facts are unavailable.
+		if !text.FirstSeen.Unavailable {
+			t.Errorf("FirstSeen = %+v, want it unavailable", text.FirstSeen)
+		}
+		if text.Clean.OK || !text.Clean.Unavailable || !strings.Contains(text.Clean.Value, "the module proxy did not answer") {
 			t.Errorf("Clean = %+v", text.Clean)
 		}
 		for _, since := range fixtures.requests {
@@ -497,19 +529,36 @@ func TestGatherUnknowns(t *testing.T) {
 		}
 	})
 
-	t.Run("the advisory database cannot be asked", func(t *testing.T) {
+	t.Run("the advisory database does not answer", func(t *testing.T) {
 		in, _, adv := input(t, files)
-		adv.result, adv.err = advisory.Result{}, errors.New("status 503")
+		down := allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories")
+		adv.result = advisory.Result{SecurityFix: down, NoMalware: down, NoNewAdvisory: down}
 		res, err := gatherer(goFixtures(t)).Gather(context.Background(), in)
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The checker's own state is passed on: a wait, not a person.
 		text := find(t, res, "golang.org/x/text")
-		if text.Clean.OK || !strings.Contains(text.Clean.Value, "unknown: the advisory database could not be asked: status 503") {
+		if text.Clean != down || text.SecurityFix != down {
+			t.Errorf("Clean = %+v, SecurityFix = %+v; want both unavailable as the checker said", text.Clean, text.SecurityFix)
+		}
+	})
+
+	t.Run("a checker that fails without the context ending", func(t *testing.T) {
+		in, _, adv := input(t, files)
+		adv.result, adv.err = nothingKnown(), errors.New("boom")
+		res, err := gatherer(goFixtures(t)).Gather(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Whatever came with the error is not used: nothing was
+		// established, which is person.
+		text := find(t, res, "golang.org/x/text")
+		if text.Clean.Gathered() || text.Clean.Unavailable || !strings.Contains(text.Clean.Value, "unknown: malware advisories were not checked") {
 			t.Errorf("Clean = %+v", text.Clean)
 		}
-		if text.SecurityFix.Gathered() {
-			t.Errorf("SecurityFix = %+v, want it not gathered", text.SecurityFix)
+		if text.SecurityFix != (allow.Fact{}) {
+			t.Errorf("SecurityFix = %+v, want it blank", text.SecurityFix)
 		}
 	})
 
@@ -646,21 +695,21 @@ func TestCleanRecorded(t *testing.T) {
 		{"a deprecated module", mv("github.com/golang/protobuf", "v1.5.4"), "list_retracted.json", "list_versions_retracted.json",
 			"the module is deprecated: Use the"},
 		{"a version that does not exist", mv(fsnotify, "v1.5.99"), "list_retracted.json", "list_versions_retracted.json",
-			"unknown: go list failed"},
+			"go list failed: github.com/fsnotify/fsnotify@v1.5.99: reading https://proxy.golang.org/"},
 		// The go command printed no Retracted for v1.5.3 here, because the
 		// proxy answered 404 for the go.mod that holds the retractions. The
 		// version list is what gives it away.
 		{"a retracted version whose retraction could not be loaded", mv(fsnotify, "v1.5.3"), "list_retracted_unloadable.json", "list_versions_unloadable.json",
-			"unknown: the module's retractions could not be loaded"},
+			"the module's retractions could not be loaded"},
 		{"the same, with a version list that did load", mv(fsnotify, "v1.5.3"), "list_retracted_unloadable.json", "list_versions_retracted.json",
-			"unknown: v1.5.3 is not in the module's list of versions that are not retracted"},
+			"v1.5.3 is not in the module's list of versions that are not retracted"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			info, infoOK := listedFixture(t, tc.infoFile, tc.target)
 			versions, versionsOK := listedFixture(t, tc.versionsFile, mv(tc.target.Path, ""))
 			up := update{name: tc.target.Path, from: "v1.0.0", to: tc.target.Version}
-			got := cleanFact(up, downloaded{Sum: "h1:x", GoModSum: "h1:y"}, true, info, infoOK, versions, versionsOK, nothingKnown(), nil)
+			got := cleanFact(up, downloaded{Sum: "h1:x", GoModSum: "h1:y"}, true, info, infoOK, versions, versionsOK, nothingKnown())
 			checkFact(t, got, tc.want)
 		})
 	}
@@ -684,73 +733,195 @@ func TestClean(t *testing.T) {
 	info := listed{Path: up.name, Version: up.to}
 	versions := listed{Path: up.name, Versions: []string{"v1.0.0", "v1.1.0"}}
 	goErr := &struct{ Err string }{"boom"}
+	// The two shapes of a proxy that did not answer, as the go command
+	// reports them for a module, and the one for the retractions.
+	const (
+		proxy503     = "example.com/m@v1.1.0: reading https://proxy.golang.org/example.com/m/@v/v1.1.0.info: 503 Service Unavailable"
+		proxyTimeout = `example.com/m@v1.1.0: Get "https://proxy.golang.org/example.com/m/@v/v1.1.0.info": dial tcp: i/o timeout`
+		retract502   = "loading module retractions for example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.1.0.mod: 502 Bad Gateway"
+	)
+	advisoriesDown := advisory.Result{
+		SecurityFix:   allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
+		NoMalware:     allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
+		NoNewAdvisory: allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories"),
+	}
 
+	// What a fact that does not hold is: a gathered no, a fact nothing
+	// established (no source, "unknown:"), or an unavailable one.
+	const (
+		no          = "no"
+		unknown     = "unknown"
+		unavailable = "unavailable"
+	)
 	tests := []struct {
-		name string
-		call func() allow.Fact
-		want string
+		name  string
+		call  func() allow.Fact
+		state string // "" when Clean holds
+		want  string // substring of the value
 	}{
 		{"everything fine", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, versions, true, nothingKnown(), nil)
-		}, ""},
+			return cleanFact(up, good, true, info, true, versions, true, nothingKnown())
+		}, "", "served by the proxy, not retracted, not deprecated, no malware advisory, no new advisory"},
 		{"not downloaded", func() allow.Fact {
-			return cleanFact(up, downloaded{}, false, info, true, versions, true, nothingKnown(), nil)
-		}, "unknown: go mod download did not report"},
+			return cleanFact(up, downloaded{}, false, info, true, versions, true, nothingKnown())
+		}, unknown, "unknown: go mod download did not report"},
 		{"download failed", func() allow.Fact {
-			return cleanFact(up, downloaded{Error: "410 Gone"}, true, info, true, versions, true, nothingKnown(), nil)
-		}, "unknown: the proxy did not serve the version: 410 Gone"},
+			return cleanFact(up, downloaded{Error: "410 Gone"}, true, info, true, versions, true, nothingKnown())
+		}, no, "the proxy did not serve the version: 410 Gone"},
+		{"the proxy did not answer the download", func() allow.Fact {
+			return cleanFact(up, downloaded{Error: proxy503}, true, info, true, versions, true, nothingKnown())
+		}, unavailable, "the module proxy did not answer: example.com/m@v1.1.0: reading"},
 		{"go list silent", func() allow.Fact {
-			return cleanFact(up, good, true, listed{}, false, versions, true, nothingKnown(), nil)
-		}, "unknown: go list did not report the version"},
+			return cleanFact(up, good, true, listed{}, false, versions, true, nothingKnown())
+		}, unknown, "unknown: go list did not report the version"},
 		{"go list error", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Error: goErr}, true, versions, true, nothingKnown(), nil)
-		}, "unknown: go list failed: boom"},
+			return cleanFact(up, good, true, listed{Error: goErr}, true, versions, true, nothingKnown())
+		}, no, "go list failed: boom"},
+		{"the proxy did not answer go list", func() allow.Fact {
+			return cleanFact(up, good, true, listed{Error: &struct{ Err string }{proxyTimeout}}, true, versions, true, nothingKnown())
+		}, unavailable, "the module proxy did not answer"},
 		{"retracted", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Retracted: []string{"bad release", "really"}}, true, versions, true, nothingKnown(), nil)
-		}, "retracted: bad release; really"},
+			return cleanFact(up, good, true, listed{Retracted: []string{"bad release", "really"}}, true, versions, true, nothingKnown())
+		}, no, "retracted: bad release; really"},
 		{"retraction text is escaped", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Retracted: []string{"line one\nline two"}}, true, versions, true, nothingKnown(), nil)
-		}, `retracted: line one\nline two`},
+			return cleanFact(up, good, true, listed{Retracted: []string{"line one\nline two"}}, true, versions, true, nothingKnown())
+		}, no, `retracted: line one\nline two`},
 		{"deprecated", func() allow.Fact {
-			return cleanFact(up, good, true, listed{Deprecated: "use v2"}, true, versions, true, nothingKnown(), nil)
-		}, "the module is deprecated: use v2"},
+			return cleanFact(up, good, true, listed{Deprecated: "use v2"}, true, versions, true, nothingKnown())
+		}, no, "the module is deprecated: use v2"},
 		{"no version list", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, listed{}, false, nothingKnown(), nil)
-		}, "unknown: go list did not report the module's versions"},
+			return cleanFact(up, good, true, info, true, listed{}, false, nothingKnown())
+		}, unknown, "unknown: go list did not report the module's versions"},
 		{"version list error", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, listed{Error: goErr}, true, nothingKnown(), nil)
-		}, "unknown: the module's retractions could not be loaded: boom"},
+			return cleanFact(up, good, true, info, true, listed{Error: goErr}, true, nothingKnown())
+		}, no, "the module's retractions could not be loaded: boom"},
+		{"the proxy did not answer for the retractions", func() allow.Fact {
+			return cleanFact(up, good, true, info, true, listed{Error: &struct{ Err string }{retract502}}, true, nothingKnown())
+		}, unavailable, "the module proxy did not answer: loading module retractions"},
 		{"version not in the list", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, listed{Versions: []string{"v1.0.0"}}, true, nothingKnown(), nil)
-		}, "unknown: v1.1.0 is not in the module's list"},
+			return cleanFact(up, good, true, info, true, listed{Versions: []string{"v1.0.0"}}, true, nothingKnown())
+		}, no, "v1.1.0 is not in the module's list"},
 		{"advisory database down", func() allow.Fact {
-			return cleanFact(up, good, true, info, true, versions, true, advisory.Result{}, errors.New("503"))
-		}, "unknown: the advisory database could not be asked: 503"},
+			return cleanFact(up, good, true, info, true, versions, true, advisoriesDown)
+		}, unavailable, "GitHub's Advisory Database did not answer (HTTP 503"},
+		{"the checker returned nothing", func() allow.Fact {
+			return cleanFact(up, good, true, info, true, versions, true, advisory.Result{})
+		}, unknown, "unknown: malware advisories were not checked"},
 		{"malware", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.No("GHSA-mal", "advisories")
-			return cleanFact(up, good, true, info, true, versions, true, adv, nil)
-		}, "GHSA-mal"},
+			return cleanFact(up, good, true, info, true, versions, true, adv)
+		}, no, "GHSA-mal"},
 		{"malware not checked", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoMalware = allow.Fact{}
-			return cleanFact(up, good, true, info, true, versions, true, adv, nil)
-		}, "unknown: malware advisories were not checked"},
+			return cleanFact(up, good, true, info, true, versions, true, adv)
+		}, unknown, "unknown: malware advisories were not checked"},
+		{"malware could not be asked about", func() allow.Fact {
+			adv := nothingKnown()
+			adv.NoMalware = allow.Fact{Value: "the package name is not one the advisory query can carry; nothing was asked"}
+			return cleanFact(up, good, true, info, true, versions, true, adv)
+		}, unknown, "nothing was asked"},
 		{"new advisory", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoNewAdvisory = allow.No("GHSA-new affects v1.1.0", "advisories")
-			return cleanFact(up, good, true, info, true, versions, true, adv, nil)
-		}, "GHSA-new affects v1.1.0"},
+			return cleanFact(up, good, true, info, true, versions, true, adv)
+		}, no, "GHSA-new affects v1.1.0"},
 		{"new advisories not checked", func() allow.Fact {
 			adv := nothingKnown()
 			adv.NoNewAdvisory = allow.Fact{}
-			return cleanFact(up, good, true, info, true, versions, true, adv, nil)
-		}, "unknown: new advisories were not checked"},
+			return cleanFact(up, good, true, info, true, versions, true, adv)
+		}, unknown, "unknown: new advisories were not checked"},
+
+		// A "no" is the answer whatever else went unanswered, and an
+		// outage is never reported where waiting could not help.
+		{"retracted, and the advisory database is down", func() allow.Fact {
+			return cleanFact(up, good, true, listed{Retracted: []string{"bad release"}}, true, versions, true, advisoriesDown)
+		}, no, "retracted: bad release"},
+		{"the proxy is down, and there is a malware advisory", func() allow.Fact {
+			adv := nothingKnown()
+			adv.NoMalware = allow.No("GHSA-mal", "advisories")
+			return cleanFact(up, downloaded{Error: proxy503}, true, info, true, versions, true, adv)
+		}, no, "GHSA-mal"},
+		{"the advisory database is down, and go list said nothing", func() allow.Fact {
+			return cleanFact(up, good, true, listed{}, false, versions, true, advisoriesDown)
+		}, unknown, "unknown: go list did not report the version"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			checkFact(t, tc.call(), tc.want)
+			got := tc.call()
+			var state string
+			switch {
+			case got.Holds():
+			case got.Unavailable:
+				state = unavailable
+			case got.Source == "":
+				state = unknown
+			default:
+				state = no
+			}
+			if state != tc.state || !strings.Contains(got.Value, tc.want) {
+				t.Errorf("fact = %+v (%s), want %q with %q", got, state, tc.state, tc.want)
+			}
+			if (state == unknown) != strings.HasPrefix(got.Value, "unknown: ") && !strings.Contains(got.Value, "nothing was asked") {
+				t.Errorf("the value's \"unknown:\" does not go with its state %q: %q", state, got.Value)
+			}
 		})
+	}
+}
+
+// The go command's errors are text. One exact shape of it is read as the
+// module proxy not answering; everything else is a "no".
+func TestProxyOutage(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		want       bool
+	}{
+		{"503", "github.com/fsnotify/fsnotify@v1.5.4: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.4.zip: 503 Service Unavailable", true},
+		{"500 with the server's text", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 500 Internal Server Error\n\tserver response: oops", true},
+		{"429", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 429 Too Many Requests", true},
+		{"no response", `golang.org/x/text@v0.3.3: Get "https://proxy.golang.org/golang.org/x/text/@v/v0.3.3.info": dial tcp: i/o timeout`, true},
+		{"the retractions, 502", "loading module retractions for example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.1.0.mod: 502 Bad Gateway", true},
+		// The two recorded answers for a version that does not exist.
+		{"404", "github.com/fsnotify/fsnotify@v1.5.99: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.99.info: 404 Not Found\n\tserver response: not found: github.com/fsnotify/fsnotify@v1.5.99: invalid version: unknown revision v1.5.99", false},
+		{"the retractions, 404 (recorded against a local proxy)", "loading module retractions for github.com/fsnotify/fsnotify@v0.8.10: reading http://127.0.0.1:18482/github.com/fsnotify/fsnotify/@v/v1.10.1.mod: 404 Not Found\n\tserver response: not found", false},
+		{"410", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 410 Gone", false},
+		// The recorded answer for a module that fails the checksum database.
+		{"checksum mismatch", "github.com/fsnotify/fsnotify@v1.5.4: verifying go.mod: checksum mismatch\n\tdownloaded: h1:KOil/w6cxr3ALagyF6SIPYeoV9XN+Pjkp5hICIRMzgM=\n\tsum.golang.org: h1:OVB6XrOHzAwXMpEM7uPOzcehqUV2UqJxmVXmkdnm1bU=\n\nSECURITY ERROR\n", false},
+		{"a 503 quoted in a 404's text", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 404 Not Found\n\tserver response: example.com/m@v1.0.0: reading https://proxy.golang.org/x: 503 Service Unavailable", false},
+		{"another host", "example.com/m@v1.0.0: reading https://proxy.golang.org.evil.example/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
+		{"no response from another host", `example.com/m@v1.0.0: Get "https://example.com/m?go-get=1": dial tcp: i/o timeout`, false},
+		{"plain http", "example.com/m@v1.0.0: reading http://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
+		{"not at the start", "go: example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
+		{"boom", "boom", false},
+		{"empty", "", false},
+	} {
+		if got := proxyOutageRE.MatchString(tc.text); got != tc.want {
+			t.Errorf("%s: outage is %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// The recorded errors themselves, not copies of them.
+	for file, want := range map[string]bool{"download_missing.json": false, "download_tampered.json": false} {
+		got, err := download(context.Background(), &fakeTool{t: t, files: map[string]string{"mod download -json --": file}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed := 0
+		for _, d := range got {
+			if d.Error == "" {
+				continue
+			}
+			failed++
+			if proxyOutageRE.MatchString(d.Error) != want {
+				t.Errorf("%s: %q: outage is %v", file, d.Error, !want)
+			}
+			if f := goFailure("go mod download failed", d.Error, sourceDownload); !f.Gathered() || f.OK {
+				t.Errorf("%s: %+v, want a gathered no", file, f)
+			}
+		}
+		if failed == 0 {
+			t.Errorf("%s has no failed module", file)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/artifact"
+	"github.com/sadbox/dep-review/internal/config"
 )
 
 // The model facts below come from Anthropic's published model table and
@@ -83,7 +84,10 @@ type Config struct {
 	BaseURL string
 }
 
-// DefaultConfig returns the settings the gate uses for DefaultModel.
+// DefaultConfig returns the settings the gate uses for DefaultModel. They
+// are the values internal/config embeds (policy/defaults.json), where the
+// gate reads them from; a test keeps the two equal, so the derivation
+// below is the derivation of the embedded numbers.
 //
 // How the chunk budget follows from the model's documented window:
 //
@@ -120,6 +124,29 @@ func DefaultConfig() Config {
 		RequestTimeout: 10 * time.Minute,
 		Attempts:       3,
 		BaseURL:        DefaultBaseURL,
+	}
+}
+
+// FromConfig returns the client's settings for the gate's resolved
+// configuration: the embedded model settings, with chunk_bytes and
+// max_chunks as a repository may have lowered them. The API is always
+// DefaultBaseURL; where the gate sends code is not a setting. The result
+// still has to pass Validate.
+//
+// Both jobs go through here: review builds its client from it, and fetch
+// takes Limits from it, so a read is prepared within exactly what the
+// reviewer accepts.
+func FromConfig(c config.Config) Config {
+	return Config{
+		Model:           c.Model,
+		ContextTokens:   c.ContextTokens,
+		MaxOutputTokens: c.MaxOutputTokens,
+		Effort:          c.Effort,
+		ChunkBytes:      c.ChunkBytes,
+		MaxChunks:       c.MaxChunks,
+		RequestTimeout:  time.Duration(c.RequestTimeoutSeconds) * time.Second,
+		Attempts:        c.Attempts,
+		BaseURL:         DefaultBaseURL,
 	}
 }
 

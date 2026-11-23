@@ -47,15 +47,13 @@ type packument struct {
 // the package.json its publisher uploaded, so every field but dist is the
 // publisher's word, and is kept raw until its shape has been checked.
 type versionDoc struct {
-	Name                string         `json:"name"`
-	Version             string         `json:"version"`
-	Scripts             jsontext.Value `json:"scripts"`
-	Deprecated          jsontext.Value `json:"deprecated"`
-	Gypfile             jsontext.Value `json:"gypfile"`
-	HasInstallScript    jsontext.Value `json:"hasInstallScript"`
-	BundleDependencies  jsontext.Value `json:"bundleDependencies"`
-	BundledDependencies jsontext.Value `json:"bundledDependencies"`
-	Dist                struct {
+	Name             string         `json:"name"`
+	Version          string         `json:"version"`
+	Scripts          jsontext.Value `json:"scripts"`
+	Deprecated       jsontext.Value `json:"deprecated"`
+	Gypfile          jsontext.Value `json:"gypfile"`
+	HasInstallScript jsontext.Value `json:"hasInstallScript"`
+	Dist             struct {
 		Tarball      string         `json:"tarball"`
 		Integrity    string         `json:"integrity"`
 		Attestations jsontext.Value `json:"attestations"`
@@ -68,8 +66,31 @@ type packumentAnswer struct {
 	doc *packument
 	// gone: the registry says there is no such package (404).
 	gone bool
-	// failed says why there is no answer at all.
+	// failed says why there is no usable answer.
 	failed string
+	// unreachable goes with failed: the registry was asked and did not
+	// answer (no response, a 429 or a 5xx), so asking again may. Without
+	// it the answer arrived and cannot be used, or the question was never
+	// put, and asking again would change nothing.
+	unreachable bool
+}
+
+// unanswered is the fact for a question a failed answer leaves open:
+// unavailable, which is a wait, when the registry did not answer, and
+// otherwise never gathered, which is person.
+func (a packumentAnswer) unanswered(source string) allow.Fact {
+	if a.unreachable {
+		return allow.Unavailable(a.failed, source)
+	}
+	return allow.Fact{Value: a.failed}
+}
+
+// unansweredTime is unanswered for a time.
+func (a packumentAnswer) unansweredTime(source string) allow.TimeFact {
+	if a.unreachable {
+		return allow.UnavailableTime(a.failed, source)
+	}
+	return allow.TimeFact{Value: a.failed}
 }
 
 // registry asks registry.npmjs.org, once per name.
@@ -101,6 +122,21 @@ func tarballURL(name, version string) string {
 // errGone is the registry's 404.
 var errGone = errors.New("the registry has no such document (404)")
 
+// errUnreachable is the error of a request the registry did not answer:
+// no response, a 429 or a 5xx. It says nothing about the package. Every
+// other error of get is an answer that arrived.
+var errUnreachable = errors.New("the registry did not answer")
+
+// why renders an error of get for a fact's Value: whether the registry
+// did not answer or answered something that cannot be used, and then the
+// error's own text, quoted, because it can carry what the other end sent.
+func why(err error) string {
+	if errors.Is(err, errUnreachable) {
+		return "the registry did not answer: " + quote(strings.TrimPrefix(err.Error(), errUnreachable.Error()+": "))
+	}
+	return "the registry's answer could not be used: " + quote(err.Error())
+}
+
 // get fetches one document of at most max bytes.
 func (r *registry) get(ctx context.Context, url string, max int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -112,7 +148,7 @@ func (r *registry) get(ctx context.Context, url string, max int64) ([]byte, erro
 	req.Header.Set("Accept", "application/json")
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errUnreachable, err)
 	}
 	defer resp.Body.Close()
 	// The registry answers these URLs itself. An answer that came from
@@ -123,12 +159,14 @@ func (r *registry) get(ctx context.Context, url string, max int64) ([]byte, erro
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, errGone
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		return nil, fmt.Errorf("%w: HTTP status %d", errUnreachable, resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errUnreachable, err)
 	}
 	if int64(len(body)) > max {
 		return nil, fmt.Errorf("more than %d MB", max>>20)
@@ -157,7 +195,7 @@ func (r *registry) fetchPackument(ctx context.Context, name string) packumentAns
 		return packumentAnswer{gone: true}
 	}
 	if err != nil {
-		return packumentAnswer{failed: "the registry did not answer: " + quote(err.Error())}
+		return packumentAnswer{failed: why(err), unreachable: errors.Is(err, errUnreachable)}
 	}
 	var doc packument
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -249,7 +287,7 @@ func boundFact(u update, a packumentAnswer, source string) allow.Fact {
 
 	switch {
 	case a.failed != "":
-		return allow.Fact{Value: a.failed}
+		return a.unanswered(source)
 	case a.gone:
 		return allow.No("the registry has no package of this name", source)
 	}
@@ -278,7 +316,7 @@ func boundFact(u update, a packumentAnswer, source string) allow.Fact {
 func timeFacts(u update, a packumentAnswer, source string) (firstSeen, nameCreated allow.TimeFact) {
 	switch {
 	case a.failed != "":
-		return allow.TimeFact{Value: a.failed}, allow.TimeFact{Value: a.failed}
+		return a.unansweredTime(source), a.unansweredTime(source)
 	case a.gone:
 		const gone = "the registry has no package of this name"
 		return allow.TimeFact{Value: gone}, allow.TimeFact{Value: gone}
@@ -296,47 +334,34 @@ func timeFacts(u update, a packumentAnswer, source string) (firstSeen, nameCreat
 
 // cleanFact is the Clean fact. The registry knows whether the version is
 // still published and whether it is deprecated; the advisory database
-// knows the rest. A "no" from either is a gathered no; when either could
-// not be asked and nothing said no, the fact is left ungathered.
-func cleanFact(u update, a packumentAnswer, source string, adv advisory.Result, advFailed string) allow.Fact {
-	registrySays := ""
+// knows the rest. The three answers are combined with allow.Fact.And: a
+// "no" from any of them is the answer whatever else went unanswered, and
+// the fact is unavailable only when nothing said no, every answer that
+// arrived could be read, and a source did not answer.
+func cleanFact(u update, a packumentAnswer, source string, adv advisory.Result) allow.Fact {
+	return publishedFact(u, a, source).And(adv.NoMalware).And(adv.NoNewAdvisory)
+}
+
+// publishedFact is the registry's part of Clean: the version is still
+// published and not deprecated.
+func publishedFact(u update, a packumentAnswer, source string) allow.Fact {
 	switch {
 	case a.failed != "":
-		// Not asked: decided below, after the advisories had their say.
+		return a.unanswered(source)
 	case a.gone:
 		return allow.No("the registry has no package of this name", source)
-	default:
-		doc, published, problem := a.doc.version(u.To)
-		switch {
-		case !published:
-			return allow.No(show(u.To)+" is not on the registry (unpublished)", source)
-		case problem != "":
-			return allow.Fact{Value: problem}
-		}
-		// The registry sets "deprecated" to the publisher's message. An
-		// empty message is how a deprecation is withdrawn.
-		if present(doc.Deprecated) && string(doc.Deprecated) != `""` {
-			return allow.No("deprecated on the registry: "+quote(string(doc.Deprecated)), source)
-		}
-		registrySays = "published and not deprecated"
 	}
-
-	if advFailed == "" {
-		for _, f := range []allow.Fact{adv.NoMalware, adv.NoNewAdvisory} {
-			if f.Gathered() && !f.OK {
-				return allow.No(f.Value, f.Source)
-			}
-		}
-	}
+	doc, published, problem := a.doc.version(u.To)
 	switch {
-	case a.failed != "":
-		return allow.Fact{Value: a.failed}
-	case advFailed != "":
-		return allow.Fact{Value: registrySays + "; " + advFailed}
-	case !adv.NoMalware.Gathered() || !adv.NoNewAdvisory.Gathered():
-		return allow.Fact{Value: registrySays + "; the advisory database gave no answer about malware or new advisories"}
+	case !published:
+		return allow.No(show(u.To)+" is not on the registry (unpublished)", source)
+	case problem != "":
+		return allow.Fact{Value: problem}
 	}
-	return allow.Yes(
-		registrySays+"; "+adv.NoMalware.Value+"; "+adv.NoNewAdvisory.Value,
-		source+"; "+adv.NoMalware.Source+"; "+adv.NoNewAdvisory.Source)
+	// The registry sets "deprecated" to the publisher's message. An
+	// empty message is how a deprecation is withdrawn.
+	if present(doc.Deprecated) && string(doc.Deprecated) != `""` {
+		return allow.No("deprecated on the registry: "+quote(string(doc.Deprecated)), source)
+	}
+	return allow.Yes("published and not deprecated", source)
 }

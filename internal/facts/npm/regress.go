@@ -1,6 +1,7 @@
 package npm
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -90,22 +91,16 @@ func recordOf(doc versionDoc, copies []node) (installRecord, error) {
 }
 
 // noRegressFact is the NoRegress fact as far as the registry and the lock
-// can show it: the update bundles nothing, has no install script the old
-// version did not have word for word, and was built by the same
-// provenance identity. The tarball's own package.json is the third source
-// for install scripts; TarballNoRegress adds it once the artifact reader
-// has the verified tarballs.
+// can show it: the update has no install script the old version did not
+// have word for word, and was built by the same provenance identity. The
+// tarball's own files are the third source for install scripts, and the
+// only one for the packages it bundles; InspectTarballs reads them once
+// the artifact reader has the verified tarballs.
 func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnswer, source string) (allow.Fact, error) {
 	source += " and package-lock.json"
-	// Bundled dependencies are installed from inside this package's
-	// tarball. The registry and the lock say nothing of their install
-	// scripts, and their names never pass Known.
-	if len(u.Bundled) > 0 {
-		return allow.No("bundles dependencies inside its own tarball ("+list(u.Bundled, 8)+"), which the gate has no rule for", source), nil
-	}
 	switch {
 	case a.failed != "":
-		return allow.Fact{Value: a.failed}, nil
+		return a.unanswered(source), nil
 	case a.gone:
 		return allow.No("the registry has no package of this name", source), nil
 	}
@@ -116,9 +111,6 @@ func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnsw
 		return allow.No(show(u.To)+" is not on the registry (unpublished)", source), nil
 	case problem != "":
 		return allow.Fact{Value: problem}, nil
-	}
-	if declaresBundle(to.BundleDependencies) || declaresBundle(to.BundledDependencies) {
-		return allow.No("the registry says it bundles dependencies inside its own tarball, which the gate has no rule for", source), nil
 	}
 	toRecord, err := recordOf(to, u.New)
 	if err != nil {
@@ -165,16 +157,17 @@ func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnsw
 		return allow.No(provenance, source), nil
 	case unknown:
 		return allow.Fact{Value: provenance}, nil
+	case unreachable:
+		return allow.Unavailable(provenance, source), nil
 	}
-	// The Value says what has not been looked at yet, so a reader of the
-	// comment does not take the registry's word for the tarball's.
-	return allow.Yes(scripts+"; "+provenance+notYetTarball, source), nil
+	// The Value says whose word this is, so a reader of the comment does
+	// not take the registry's for the tarball's.
+	value := scripts + "; " + provenance + ", by the registry's metadata and the lock"
+	if len(u.Bundled) > 0 {
+		value += "; bundles " + list(u.Bundled, 8) + ", which are read and inspected with its tarball"
+	}
+	return allow.Yes(value, source), nil
 }
-
-// notYetTarball ends the Value of a NoRegress fact that holds on the
-// registry's and the lock's word alone. TarballNoRegress replaces it with
-// what the tarball showed.
-const notYetTarball = "; from the registry's metadata and the lock, not yet from the tarball itself"
 
 // identity is who built a version, according to its SLSA provenance. The
 // git ref and commit are left out on purpose: they differ for every
@@ -221,9 +214,12 @@ type verdict int
 const (
 	holds verdict = iota
 	fails
-	// unknown: nothing was learned (the registry did not answer). The
-	// fact is then left ungathered, which is not the same as a no.
+	// unknown: nothing was learned from an answer that arrived. The fact
+	// is then left ungathered, which is not the same as a no.
 	unknown
+	// unreachable: the registry was asked and did not answer. The fact is
+	// then unavailable, which is a wait.
+	unreachable
 )
 
 // compareProvenance compares who built From and who built To. It holds
@@ -253,12 +249,12 @@ func compareProvenance(ctx context.Context, reg *registry, u update, from, to ve
 	}
 	var ids [2]identity
 	for i, side := range []struct{ version, hash string }{{u.From, oldHash}, {u.To, newHash}} {
-		id, problem, answered, err := reg.provenance(ctx, u.Name, side.version, side.hash)
+		id, problem, state, err := reg.provenance(ctx, u.Name, side.version, side.hash)
 		switch {
 		case err != nil:
 			return "", unknown, err
-		case !answered:
-			return "provenance of " + show(side.version) + ": " + problem, unknown, nil
+		case state != holds:
+			return "provenance of " + show(side.version) + ": " + problem, state, nil
 		case problem != "":
 			return "provenance of " + show(side.version) + ": " + problem, fails, nil
 		}
@@ -279,23 +275,28 @@ const (
 // provenance reads the identity in name@version's SLSA provenance
 // statement. integrity is the lock's hash for that version: the statement
 // must be about those bytes. The string says why no identity could be
-// read. answered is false when the registry gave no answer at all, so
-// nothing was learned. The error is the context's.
-func (r *registry) provenance(ctx context.Context, name, version, integrity string) (id identity, problem string, answered bool, err error) {
-	id, problem, answered = r.readProvenance(ctx, name, version, integrity)
+// read. The verdict is holds when the registry answered (the identity is
+// then read, or the string says what is wrong with the answer),
+// unreachable when it did not answer, and unknown when its answer could
+// not be used; in the last two nothing was learned. The error is the
+// context's.
+func (r *registry) provenance(ctx context.Context, name, version, integrity string) (id identity, problem string, state verdict, err error) {
+	id, problem, state = r.readProvenance(ctx, name, version, integrity)
 	if ctx.Err() != nil {
-		return identity{}, "", false, ctx.Err()
+		return identity{}, "", unknown, ctx.Err()
 	}
-	return id, problem, answered, nil
+	return id, problem, state, nil
 }
 
-func (r *registry) readProvenance(ctx context.Context, name, version, integrity string) (identity, string, bool) {
+func (r *registry) readProvenance(ctx context.Context, name, version, integrity string) (identity, string, verdict) {
 	body, err := r.get(ctx, attestationURL(name, version), maxAttestation)
-	if errors.Is(err, errGone) {
-		return identity{}, "the registry has no attestations for it", true
-	}
-	if err != nil {
-		return identity{}, "the registry did not answer: " + quote(err.Error()), false
+	switch {
+	case errors.Is(err, errGone):
+		return identity{}, "the registry has no attestations for it", holds
+	case errors.Is(err, errUnreachable):
+		return identity{}, why(err), unreachable
+	case err != nil:
+		return identity{}, why(err), unknown
 	}
 	var doc struct {
 		Attestations []struct {
@@ -309,23 +310,23 @@ func (r *registry) readProvenance(ctx context.Context, name, version, integrity 
 		} `json:"attestations"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return identity{}, "the attestations could not be read: " + quote(err.Error()), true
+		return identity{}, "the attestations could not be read: " + quote(err.Error()), holds
 	}
 	var payloads []string
 	for _, a := range doc.Attestations {
 		if a.PredicateType == slsaPredicate {
 			if a.Bundle.Envelope.PayloadType != intotoPayload {
-				return identity{}, "the provenance is not an in-toto statement", true
+				return identity{}, "the provenance is not an in-toto statement", holds
 			}
 			payloads = append(payloads, a.Bundle.Envelope.Payload)
 		}
 	}
 	if len(payloads) != 1 {
-		return identity{}, fmt.Sprintf("%d SLSA v1 provenance statements, where the gate reads exactly one", len(payloads)), true
+		return identity{}, fmt.Sprintf("%d SLSA v1 provenance statements, where the gate reads exactly one", len(payloads)), holds
 	}
 	raw, err := base64.StdEncoding.DecodeString(payloads[0])
 	if err != nil {
-		return identity{}, "the provenance statement is not base64", true
+		return identity{}, "the provenance statement is not base64", holds
 	}
 	var st struct {
 		Type    string `json:"_type"`
@@ -358,16 +359,16 @@ func (r *registry) readProvenance(ctx context.Context, name, version, integrity 
 		} `json:"predicate"`
 	}
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return identity{}, "the provenance statement could not be read: " + quote(err.Error()), true
+		return identity{}, "the provenance statement could not be read: " + quote(err.Error()), holds
 	}
 	if st.Type != intotoStatement || st.PredicateType != slsaPredicate {
-		return identity{}, "the provenance statement is not SLSA v1", true
+		return identity{}, "the provenance statement is not SLSA v1", holds
 	}
 	// The statement must be about this package's tarball, or it says
 	// nothing about what the lock pins.
 	sum, _ := sha512Of(integrity)
 	if len(st.Subject) != 1 || st.Subject[0].Name != purl(name, version) || st.Subject[0].Digest["sha512"] != hex.EncodeToString(sum) {
-		return identity{}, "the provenance statement is not about the tarball the lock pins", true
+		return identity{}, "the provenance statement is not about the tarball the lock pins", holds
 	}
 	def := st.Predicate.BuildDefinition
 	id := identity{
@@ -379,9 +380,9 @@ func (r *registry) readProvenance(ctx context.Context, name, version, integrity 
 		OwnerID:      def.InternalParameters.GitHub.OwnerID,
 	}
 	if id.BuildType == "" || id.Builder == "" || id.Repository == "" || id.Workflow == "" {
-		return identity{}, "the provenance statement names no source repository, workflow and builder in the shape the gate reads", true
+		return identity{}, "the provenance statement names no source repository, workflow and builder in the shape the gate reads", holds
 	}
-	return id, "", true
+	return id, "", holds
 }
 
 // purl is the package URL npm puts in a provenance statement's subject.
@@ -389,118 +390,140 @@ func purl(name, version string) string {
 	return "pkg:npm/" + strings.Replace(name, "@", "%40", 1) + "@" + version
 }
 
-// maxPackageJSON bounds a tarball's package.json.
+// maxPackageJSON bounds one package.json or binding.gyp of a tarball.
 const maxPackageJSON = 8 << 20
 
-// tarballRecord is what a package's own files say about its install step.
-type tarballRecord struct {
-	hooks map[string]string
-	// gyp: the package has a binding.gyp. npm builds such a package on
-	// install when it has no install or preinstall script, whatever the
-	// registry and the lock say.
-	gyp bool
-	// bundles: package.json declares bundled dependencies, or the
-	// tarball has a node_modules directory.
-	bundles bool
+// tarballSource is the Source of InspectTarballs' fact.
+const tarballSource = "every package.json and binding.gyp in the verified tarballs"
+
+// InspectTarballs is the tarballs' own word on the install step: the
+// third source for install scripts, and the one a publisher cannot keep
+// out of sight, because npm runs what the files say whatever the
+// registry's metadata and the lock say. It holds when no package.json in
+// the new tarball has an install script, and no binding.gyp is there,
+// that the old tarball did not have at the same path, word for word.
+//
+// Every package.json and binding.gyp is looked at, wherever it is. That
+// covers bundled dependencies, which are installed from inside this
+// tarball and appear in no other source (spec section 11, amendment 5),
+// and it is deliberately more than npm runs: a package.json in a test
+// fixture counts too. Nothing here decides which directories npm treats
+// as packages.
+//
+// It has the signature of artifact.Inspect, so the fetch command can hand
+// it to the artifact reader for artifact.NPMTarball; internal/artifact
+// cannot import this package. oldPkg and newPkg are the extracted
+// packages: each is the directory that holds the package's own
+// package.json (the tarball with its first path element dropped, as npm
+// unpacks it). oldPkg is nil for a new name. The fetch command ANDs the
+// answer into the update's NoRegress, so an update whose tarballs were
+// never inspected does not keep a NoRegress that holds.
+func InspectTarballs(oldPkg, newPkg fs.FS) allow.Fact {
+	if newPkg == nil {
+		return allow.Fact{Value: "the new tarball was not given"}
+	}
+	if _, err := fs.Stat(newPkg, "package.json"); err != nil {
+		return allow.No("the new tarball has no package.json at its root", tarballSource)
+	}
+	manifests, gyps := 0, 0
+	var problem string
+	err := fs.WalkDir(newPkg, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || (d.Name() != "package.json" && d.Name() != "binding.gyp") {
+			return nil
+		}
+		is, err := readSmall(newPkg, p)
+		if err != nil {
+			return err
+		}
+		// Whether the old tarball has the file, and with the same bytes.
+		// A file that did not change brings nothing new, whatever it says:
+		// that is what keeps a fixture nobody can parse from stopping an
+		// update that left it alone.
+		var was []byte
+		had := false
+		if oldPkg != nil {
+			if was, err = readSmall(oldPkg, p); err == nil {
+				had = true
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+
+		if d.Name() == "binding.gyp" {
+			gyps++
+			if !had {
+				problem = fmt.Sprintf("%s is new: npm builds a package that has a binding.gyp when it is installed", show(p))
+				return fs.SkipAll
+			}
+			return nil
+		}
+
+		manifests++
+		if had && bytes.Equal(was, is) {
+			return nil
+		}
+		hooks, err := manifestHooks(is)
+		if err != nil {
+			problem = fmt.Sprintf("%s in the new tarball: %v", show(p), err)
+			return fs.SkipAll
+		}
+		if len(hooks) == 0 {
+			return nil
+		}
+		if !had {
+			problem = fmt.Sprintf("%s is new and has an install script (%s)", show(p), showHooks(hooks))
+			return fs.SkipAll
+		}
+		before, err := manifestHooks(was)
+		if err != nil {
+			problem = fmt.Sprintf("%s in the old tarball: %v", show(p), err)
+			return fs.SkipAll
+		}
+		if !maps.Equal(before, hooks) {
+			problem = fmt.Sprintf("the install scripts of %s change from %s to %s", show(p), showHooks(before), showHooks(hooks))
+			return fs.SkipAll
+		}
+		return nil
+	})
+	switch {
+	case err != nil:
+		// The trees are the gate's own extraction of verified bytes. One
+		// it cannot read back establishes nothing.
+		return allow.Fact{Value: "the tarballs could not be read: " + quote(err.Error())}
+	case problem != "":
+		return allow.No(problem, tarballSource)
+	}
+	return allow.Yes(fmt.Sprintf("no new or changed install script in %d package.json, and no new binding.gyp (%d present)", manifests, gyps), tarballSource)
 }
 
-// readTarball reads the install step out of one extracted package.
-func readTarball(pkgRoot fs.FS) (tarballRecord, error) {
-	f, err := pkgRoot.Open("package.json")
+// readSmall reads one file of an extracted tarball, refusing one too
+// large to be a package.json or a binding.gyp anyone wrote.
+func readSmall(tree fs.FS, name string) ([]byte, error) {
+	f, err := tree.Open(name)
 	if err != nil {
-		return tarballRecord{}, errors.New("no package.json at the tarball's root")
+		return nil, err
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxPackageJSON+1))
-	if err != nil || len(data) > maxPackageJSON {
-		return tarballRecord{}, errors.New("package.json could not be read in full")
+	if err != nil {
+		return nil, err
 	}
+	if len(data) > maxPackageJSON {
+		return nil, fmt.Errorf("%s is larger than %d MB", show(name), maxPackageJSON>>20)
+	}
+	return data, nil
+}
+
+// manifestHooks reads the install scripts out of one package.json.
+func manifestHooks(data []byte) (map[string]string, error) {
 	var manifest struct {
-		Scripts             jsontext.Value `json:"scripts"`
-		BundleDependencies  jsontext.Value `json:"bundleDependencies"`
-		BundledDependencies jsontext.Value `json:"bundledDependencies"`
+		Scripts jsontext.Value `json:"scripts"`
 	}
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return tarballRecord{}, errors.New("package.json is not JSON the gate can read")
+		return nil, errors.New("not JSON the gate can read")
 	}
-	hooks, err := readHooks(manifest.Scripts)
-	if err != nil {
-		return tarballRecord{}, err
-	}
-	r := tarballRecord{hooks: hooks}
-	if _, err := fs.Stat(pkgRoot, "binding.gyp"); err == nil {
-		r.gyp = true
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return tarballRecord{}, errors.New("binding.gyp could not be looked for")
-	}
-	r.bundles = declaresBundle(manifest.BundleDependencies) || declaresBundle(manifest.BundledDependencies)
-	if _, err := fs.Stat(pkgRoot, "node_modules"); err == nil {
-		r.bundles = true
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return tarballRecord{}, errors.New("node_modules could not be looked for")
-	}
-	return r, nil
-}
-
-// TarballNoRegress finishes an update's NoRegress fact with the third
-// source for install scripts, the one a publisher cannot keep out of the
-// registry's metadata: the verified tarball's own package.json, and
-// whether it has a binding.gyp. It is to be called once the artifact
-// reader has extracted both tarballs, and its answer replaces the
-// update's NoRegress.
-//
-// internal/artifact cannot import this package (internal/facts imports
-// internal/artifact), which is why the signature needs nothing but allow
-// and io/fs: whoever wires the reader and the gatherer together can hand
-// the function over as a value.
-//
-// gathered is the update's NoRegress fact as Gather returned it. oldPkg
-// and newPkg are the extracted packages: each is the directory that holds
-// the package's own package.json (the tarball with its first path element
-// dropped, as npm unpacks it). oldPkg is nil for a new name.
-//
-// The result can only be stricter than gathered: a fact that does not
-// hold is returned as it is, and one that holds stays so only when the
-// new tarball bundles nothing and has no install script and no
-// binding.gyp that the old tarball did not have, word for word.
-func TarballNoRegress(gathered allow.Fact, oldPkg, newPkg fs.FS) allow.Fact {
-	if !gathered.Holds() {
-		return gathered
-	}
-	source := gathered.Source + " and the tarballs' package.json"
-	if newPkg == nil {
-		return allow.No("the new tarball was not given", source)
-	}
-	is, err := readTarball(newPkg)
-	if err != nil {
-		return allow.No("the new tarball: "+err.Error(), source)
-	}
-	if is.bundles {
-		return allow.No("the new tarball bundles dependencies (bundleDependencies or a node_modules directory), which the gate has no rule for", source)
-	}
-	said := strings.TrimSuffix(gathered.Value, notYetTarball)
-	if len(is.hooks) == 0 && !is.gyp {
-		return allow.Yes(said+"; the tarball's package.json has no install script and there is no binding.gyp", source)
-	}
-	if oldPkg == nil {
-		return allow.No("a new dependency whose tarball has an install script or a binding.gyp ("+showHooks(is.hooks)+")", source)
-	}
-	was, err := readTarball(oldPkg)
-	if err != nil {
-		return allow.No("the old tarball: "+err.Error(), source)
-	}
-	if !maps.Equal(was.hooks, is.hooks) {
-		return allow.No(fmt.Sprintf("the tarball's install scripts change from %s to %s", showHooks(was.hooks), showHooks(is.hooks)), source)
-	}
-	if is.gyp && !was.gyp {
-		return allow.No("the new tarball has a binding.gyp, which npm builds on install, and the old one had none", source)
-	}
-	return allow.Yes(said+"; the tarball's install scripts are unchanged ("+showHooks(is.hooks)+gypNote(is.gyp)+")", source)
-}
-
-func gypNote(gyp bool) string {
-	if gyp {
-		return ", binding.gyp as before"
-	}
-	return ""
+	return readHooks(manifest.Scripts)
 }

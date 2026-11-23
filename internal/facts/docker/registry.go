@@ -89,7 +89,11 @@ type answer struct {
 	tooLarge bool
 	// failed: the registry could not be asked. Every try ended without a
 	// connection, in a rate limit or in a server error. status is then
-	// the last try's, or 0 when it had none.
+	// the last try's, or 0 when it had none. That says nothing about the
+	// image, so what depended on the answer is unavailable, and it is
+	// kept apart from every answer that did arrive: a 404 is a "no", and
+	// an answer the gatherer cannot read (another status, a body in
+	// another shape) establishes nothing however often it is asked for.
 	failed bool
 }
 
@@ -117,9 +121,9 @@ func transient(status int) bool {
 // do makes one request, up to maxTries times. Every answer that says
 // something about the image, 404 and 401 included, is returned as it is.
 // A registry that could not be asked on any try is an answer too, in the
-// failed state: what depended on it is not established, which is person,
-// as for the other gatherers' sources. The error is non-nil only when the
-// context is done: then the run itself is over and there is no result.
+// failed state: what depended on it is unavailable. The error is non-nil
+// only when the context is done: then the run itself is over and there is
+// no result.
 func (a *asker) do(ctx context.Context, method, rawURL, accept, bearer string, maxBody int64) (answer, error) {
 	for try := 1; ; try++ {
 		ans, err := a.once(ctx, method, rawURL, accept, bearer, maxBody)
@@ -190,33 +194,56 @@ func unknownTime(why, source string) allow.TimeFact {
 	return allow.TimeFact{Value: why, Source: source}
 }
 
-// ask establishes the three facts a registry is the source of, for the
-// head side of one change: Bound, Clean and FirstSeen.
-//
-// An error means the context ended. Whatever a registry answered is a
-// fact, and so is a registry that could not be asked: nothing that
-// depended on it is established.
-func (a *asker) ask(ctx context.Context, c change) (bound, clean allow.Fact, firstSeen allow.TimeFact, err error) {
-	notAsked := func(why string) (allow.Fact, allow.Fact, allow.TimeFact, error) {
-		return allow.No(why, shapeSource),
-			allow.No("not established: "+why, shapeSource),
-			unknownTime("not established: "+why, shapeSource), nil
+// registryFacts is what the registry is the source of, for the head side
+// of one change.
+type registryFacts struct {
+	bound, clean, superseded allow.Fact
+	firstSeen                allow.TimeFact
+}
+
+// all is the same outcome for the three facts that need the tag's digest,
+// when it could not be had. unreachable says the source was asked and did
+// not answer, which is a wait; otherwise nothing can establish the facts
+// and they are left without a source, which is person.
+func all(why, source string, unreachable bool) registryFacts {
+	if unreachable {
+		return registryFacts{
+			bound:     allow.Unavailable(why, source),
+			clean:     allow.Unavailable(why, source),
+			firstSeen: allow.UnavailableTime(why, source),
+		}
 	}
+	return registryFacts{
+		bound:     allow.Fact{Value: "not established: " + why},
+		clean:     allow.Fact{Value: "not established: " + why},
+		firstSeen: allow.TimeFact{Value: "not established: " + why},
+	}
+}
+
+// ask establishes the facts a registry is the source of, for the head
+// side of one change: Bound, Clean, FirstSeen, and whether the pin has
+// been superseded.
+//
+// An error means the context ended. Everything else is a fact in one of
+// its states: what the registry answered (yes or no), a registry that was
+// asked and did not answer (unavailable), or a question the gate has no
+// way to put or an answer it cannot read (not established).
+func (a *asker) ask(ctx context.Context, c change) (registryFacts, error) {
 	if c.toTag == "" {
 		// Docker pulls such a line by digest alone. Guessing "latest"
 		// would be asking about a tag the Dockerfile never named.
-		return notAsked("the image is pinned without a tag, so there is no tag to ask the registry about")
+		return all("the image is pinned without a tag, so there is no tag to ask the registry about", "", false), nil
 	}
 
 	var manifestURL, bearer string
 	switch c.image.registry {
 	case "docker.io":
-		token, why, err := a.hubToken(ctx, c.image.repo)
+		token, why, unreachable, err := a.hubToken(ctx, c.image.repo)
 		if err != nil {
-			return allow.Fact{}, allow.Fact{}, allow.TimeFact{}, err
+			return registryFacts{}, err
 		}
 		if why != "" {
-			return notAsked(why)
+			return all(why, "GET https://auth.docker.io/token", unreachable), nil
 		}
 		bearer = token
 		manifestURL = "https://registry-1.docker.io/v2/" + c.image.repo + "/manifests/" + c.toTag
@@ -224,36 +251,48 @@ func (a *asker) ask(ctx context.Context, c change) (bound, clean allow.Fact, fir
 		// Public GCR repositories answer without a token.
 		manifestURL = "https://gcr.io/v2/" + c.image.repo + "/manifests/" + c.toTag
 	default:
-		return notAsked(fmt.Sprintf("%s is not a registry the gate knows how to ask (docker.io and gcr.io are)", c.image.registry))
+		return all(fmt.Sprintf("%s is not a registry the gate knows how to ask (docker.io and gcr.io are)", c.image.registry), "", false), nil
 	}
 
 	source := "HEAD " + manifestURL
 	ans, err := a.do(ctx, http.MethodHead, manifestURL, acceptManifests, bearer, 0)
 	if err != nil {
-		return allow.Fact{}, allow.Fact{}, allow.TimeFact{}, err
+		return registryFacts{}, err
 	}
 	switch {
 	case ans.failed:
-		bound = allow.No("not established: "+ans.unreachable("the registry"), source)
+		return all(ans.unreachable("the registry"), source, true), nil
 	case ans.status == http.StatusNotFound:
-		bound = allow.No(fmt.Sprintf("the registry has no tag %s", c.toTag), source)
+		// An answer, and it is no: the tag the pull request pins is gone.
+		why := fmt.Sprintf("the registry has no tag %s", c.toTag)
+		return registryFacts{
+			bound:     allow.No(why, source),
+			clean:     allow.No(why, source),
+			firstSeen: allow.TimeFact{Value: "not asked: " + why, Source: source},
+		}, nil
 	case ans.status != http.StatusOK:
-		bound = allow.No(fmt.Sprintf("the registry answered HTTP %d for tag %s", ans.status, c.toTag), source)
+		return all(fmt.Sprintf("the registry answered HTTP %d for tag %s", ans.status, c.toTag), "", false), nil
 	case !digestRe.MatchString(ans.digest):
-		bound = allow.No(fmt.Sprintf("the registry reported no sha256 digest for tag %s", c.toTag), source)
+		return all(fmt.Sprintf("the registry reported no sha256 digest for tag %s", c.toTag), "", false), nil
 	case ans.digest != c.toDigest:
-		bound = allow.No(fmt.Sprintf("tag %s resolves to %s now, not to the pinned %s", c.toTag, ans.digest, c.toDigest), source)
-	default:
-		bound = allow.Yes(fmt.Sprintf("tag %s resolves to the pinned %s now", c.toTag, c.toDigest), source)
+		// The tag has moved on since Dependabot wrote the pin: an official
+		// tag is rebuilt often, and Dependabot refreshes the digest on its
+		// next run. So this is not a person's yet (spec section 11,
+		// amendment 2). What the registry says about the old pin is still
+		// reported as it is; allow.Decide sets it aside while Superseded
+		// holds. Nothing more is asked: Docker Hub dates a tag, not a
+		// digest, and the date it has now is the new image's.
+		why := fmt.Sprintf("tag %s resolves to %s now, not to the pinned %s", c.toTag, ans.digest, c.toDigest)
+		return registryFacts{
+			bound:      allow.No(why, source),
+			clean:      allow.No("the registry no longer serves the pinned digest under the tag: "+why, source),
+			superseded: allow.Yes(why, source),
+			firstSeen:  allow.TimeFact{Value: "not asked: " + why, Source: source},
+		}, nil
 	}
-	if !bound.OK {
-		// Nothing more is asked about a pin the registry does not serve
-		// under that tag: the update is a person's already, and Docker
-		// Hub could not date such a digest anyway.
-		why := strings.TrimPrefix(bound.Value, "not established: ")
-		clean = allow.No("not established: "+why, source)
-		firstSeen = unknownTime("not asked: "+why, source)
-		return bound, clean, firstSeen, nil
+	f := registryFacts{
+		bound:      allow.Yes(fmt.Sprintf("tag %s resolves to the pinned %s now", c.toTag, c.toDigest), source),
+		superseded: allow.No(fmt.Sprintf("tag %s still resolves to the pinned digest", c.toTag), source),
 	}
 
 	// "Still published" is the answer just received. Beyond that there is
@@ -262,23 +301,24 @@ func (a *asker) ask(ctx context.Context, c change) (bound, clean allow.Fact, fir
 	// deprecation mark.
 	served := fmt.Sprintf("the registry serves the pinned digest as tag %s now", c.toTag)
 	if c.image.registry == "docker.io" {
-		clean = allow.Yes(served+"; Docker Hub has no deprecation mark to read, and no advisory source covers container images", source)
-		firstSeen, err = a.hubFirstSeen(ctx, c.image.repo, c.toTag, c.toDigest)
+		f.clean = allow.Yes(served+"; Docker Hub has no deprecation mark to read, and no advisory source covers container images", source)
+		f.firstSeen, err = a.hubFirstSeen(ctx, c.image.repo, c.toTag, c.toDigest)
 	} else {
-		clean, firstSeen, err = a.gcrCleanAndFirstSeen(ctx, c.image.repo, c.toDigest, served)
+		f.clean, f.firstSeen, err = a.gcrCleanAndFirstSeen(ctx, c.image.repo, c.toDigest, served)
 	}
 	if err != nil {
-		return allow.Fact{}, allow.Fact{}, allow.TimeFact{}, err
+		return registryFacts{}, err
 	}
-	return bound, clean, firstSeen, nil
+	return f, nil
 }
 
 // hubToken gets Docker Hub's anonymous pull token for one repository. No
-// credentials are sent. why is set, and the token empty, when the token
-// service answered and did not give one.
-func (a *asker) hubToken(ctx context.Context, repo string) (token, why string, err error) {
+// credentials are sent. why is set, and the token empty, when there is no
+// token; unreachable then says the token service was asked and did not
+// answer, as opposed to answering without one.
+func (a *asker) hubToken(ctx context.Context, repo string) (token, why string, unreachable bool, err error) {
 	if token, ok := a.hubTokens[repo]; ok {
-		return token, "", nil
+		return token, "", false, nil
 	}
 	query := url.Values{
 		"service": {"registry.docker.io"},
@@ -286,30 +326,30 @@ func (a *asker) hubToken(ctx context.Context, repo string) (token, why string, e
 	}
 	ans, err := a.do(ctx, http.MethodGet, "https://auth.docker.io/token?"+query.Encode(), "application/json", "", maxTokenBytes)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if ans.failed {
-		return "", ans.unreachable("Docker Hub's token service"), nil
+		return "", ans.unreachable("Docker Hub's token service"), true, nil
 	}
 	if ans.status != http.StatusOK {
-		return "", fmt.Sprintf("Docker Hub's token service answered HTTP %d", ans.status), nil
+		return "", fmt.Sprintf("Docker Hub's token service answered HTTP %d", ans.status), false, nil
 	}
 	var doc struct {
 		Token       string `json:"token"`
 		AccessToken string `json:"access_token"`
 	}
 	if ans.tooLarge || json.Unmarshal(ans.body, &doc) != nil {
-		return "", "Docker Hub's token service did not answer with a token", nil
+		return "", "Docker Hub's token service did not answer with a token", false, nil
 	}
 	token = doc.Token
 	if token == "" {
 		token = doc.AccessToken
 	}
 	if !tokenRe.MatchString(token) {
-		return "", "Docker Hub's token service did not answer with a token", nil
+		return "", "Docker Hub's token service did not answer with a token", false, nil
 	}
 	a.hubTokens[repo] = token
-	return token, "", nil
+	return token, "", false, nil
 }
 
 // hubFirstSeen reads when Docker Hub last saw the tag pushed. The time
@@ -324,7 +364,7 @@ func (a *asker) hubFirstSeen(ctx context.Context, repo, tag, digest string) (all
 		return allow.TimeFact{}, err
 	}
 	if ans.failed {
-		return unknownTime(ans.unreachable("Docker Hub"), source), nil
+		return allow.UnavailableTime(ans.unreachable("Docker Hub"), source), nil
 	}
 	if ans.status != http.StatusOK {
 		return unknownTime(fmt.Sprintf("Docker Hub answered HTTP %d for tag %s", ans.status, tag), source), nil
@@ -373,8 +413,10 @@ type gcrManifest struct {
 // gcrList is one repository's tag list, reduced to what is read from it.
 type gcrList struct {
 	manifests map[string]gcrManifest
-	// why is set when the list could not be read.
-	why string
+	// why is set when the list could not be read; unreachable then says
+	// the registry was asked for it and did not answer.
+	why         string
+	unreachable bool
 }
 
 // gcrCleanAndFirstSeen reads GCR's tag list for the two things it knows
@@ -396,13 +438,18 @@ func (a *asker) gcrCleanAndFirstSeen(ctx context.Context, repo, digest, served s
 		list = readGCRList(ans)
 		a.gcrLists[repo] = list
 	}
-	if list.why != "" {
-		return allow.No("not established: "+list.why, source), unknownTime(list.why, seenSource), nil
+	switch {
+	case list.unreachable:
+		return allow.Unavailable(list.why, source), allow.UnavailableTime(list.why, seenSource), nil
+	case list.why != "":
+		// An answer that cannot be read establishes nothing, and asking
+		// again would get the same one.
+		return allow.Fact{Value: "not established: " + list.why}, unknownTime(list.why, seenSource), nil
 	}
 	m, ok := list.manifests[digest]
 	if !ok {
 		const why = "the registry's tag list has no manifest with the pinned digest"
-		return allow.No("not established: "+why, source), unknownTime(why, seenSource), nil
+		return allow.Fact{Value: "not established: " + why}, unknownTime(why, seenSource), nil
 	}
 
 	clean := allow.Yes(served+" and does not mark it deprecated; no advisory source covers container images", source)
@@ -420,7 +467,7 @@ func (a *asker) gcrCleanAndFirstSeen(ctx context.Context, repo, digest, served s
 // readGCRList decodes a tags/list answer.
 func readGCRList(ans answer) gcrList {
 	if ans.failed {
-		return gcrList{why: ans.unreachable("the registry's tag list")}
+		return gcrList{why: ans.unreachable("the registry's tag list"), unreachable: true}
 	}
 	if ans.status != http.StatusOK {
 		return gcrList{why: fmt.Sprintf("the registry answered HTTP %d for its tag list", ans.status)}

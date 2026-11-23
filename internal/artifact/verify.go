@@ -7,7 +7,6 @@ import (
 	"compress/gzip"
 	"crypto/sha512"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,10 +15,6 @@ import (
 
 	"golang.org/x/mod/sumdb/dirhash"
 )
-
-// ErrHashMismatch means a downloaded artifact is not the one the pull
-// request is bound to. Nothing of it is read. Test with errors.Is.
-var ErrHashMismatch = errors.New("artifact: does not match its bound hash")
 
 func hashMismatch(ref Ref, format string, args ...any) error {
 	return fmt.Errorf("%w: %s %s@%s: %s", ErrHashMismatch, ref.Kind, ref.Name, ref.Version, fmt.Sprintf(format, args...))

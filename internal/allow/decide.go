@@ -43,11 +43,14 @@ func entryMatches(entry, name string) bool {
 }
 
 // Decide answers what to do with a pull request (docs/v0.2-spec.md,
-// section 4). It is a pure function: it reads nothing but its arguments
-// and changes none of them.
+// section 4 and the amendments of section 11). It is a pure function: it
+// reads nothing but its arguments and changes none of them.
 //
 // Every reason for Person is collected before anything can be Wait, so a
-// missing model read or a young version never hides a failed fact.
+// missing model read, a young version or a source that did not answer
+// never hides a failed fact. Only a fact that holds contributes to Merge:
+// one that is false or was never gathered is Person, and one that is
+// unavailable is Wait until the deadline and Person after it.
 func Decide(f PRFacts, p Policy, now time.Time) Decision {
 	var person []Reason
 	if !policyUsable(p) {
@@ -56,24 +59,39 @@ func Decide(f PRFacts, p Policy, now time.Time) Decision {
 	if !HasRule(f.Ecosystem) {
 		person = append(person, ReasonNoRule)
 	}
-	if !f.Identity.Holds() {
-		person = append(person, ReasonIdentity)
-	}
-	if !f.Shape.Holds() {
-		person = append(person, ReasonShape)
-	}
-	if !f.ChecksConfigured.Holds() {
-		person = append(person, ReasonChecksNotConfigured)
+	asking := false // a source did not answer
+	for _, need := range []struct {
+		fact Fact
+		no   Reason
+	}{
+		{f.Identity, ReasonIdentity},
+		{f.Shape, ReasonShape},
+		{f.ChecksConfigured, ReasonChecksNotConfigured},
+	} {
+		switch stateOf(need.fact) {
+		case factNo:
+			person = append(person, need.no)
+		case factMissing:
+			person = appendNew(person, ReasonFactMissing)
+		case factUnavailable:
+			asking = true
+		}
 	}
 	if len(f.Updates) == 0 {
 		person = append(person, ReasonNoUpdates)
 	}
 
-	rideAlong := carriesFastPathUpdate(f.Updates, p)
+	rideAlong := carriesFastPathUpdate(f.Updates, p, false)
+	rideAlongIfRead := carriesFastPathUpdate(f.Updates, p, true)
 
 	d := Decision{PerUpdate: make([]UpdateDecision, 0, len(f.Updates))}
 	var waiting []Reason
-	var latest time.Time
+	if asking {
+		waiting = append(waiting, ReasonSourceUnavailable)
+	}
+	// latest is the latest required time. earliest is what it would be
+	// had every update been read in full.
+	var latest, earliest time.Time
 	for _, u := range f.Updates {
 		ud := decideUpdate(u, f.Ecosystem, p, now, rideAlong)
 		d.PerUpdate = append(d.PerUpdate, ud)
@@ -86,6 +104,11 @@ func Decide(f PRFacts, p Policy, now time.Time) Decision {
 		if ud.NotBefore.After(latest) {
 			latest = ud.NotBefore
 		}
+		if u.FirstSeen.Known() {
+			if t := u.FirstSeen.Time.Add(requiredAge(u, ReadFull, p, rideAlongIfRead)); t.After(earliest) {
+				earliest = t
+			}
+		}
 	}
 
 	if len(person) > 0 {
@@ -94,35 +117,52 @@ func Decide(f PRFacts, p Policy, now time.Time) Decision {
 		return d
 	}
 
-	// The deadline runs from the latest required time. A pull request
-	// opened long after its versions were published would otherwise be
-	// past its deadline before the gate first saw it, so it never starts
+	// What is being retried, as the reasons it has when it never comes:
+	// a model read, a source's answer, Dependabot's refresh of a
+	// superseded pin. Waiting for an age is not a retry and has no
+	// deadline: when the age is reached the pull request merges.
+	var gaveUp []Reason
+	for _, w := range waiting {
+		switch w {
+		case ReasonReadPending:
+			gaveUp = append(gaveUp, ReasonReadDeadline)
+		case ReasonSourceUnavailable:
+			gaveUp = append(gaveUp, ReasonSourceDeadline)
+		case ReasonSuperseded:
+			gaveUp = append(gaveUp, ReasonSupersededDeadline)
+		}
+	}
+
+	// The deadline runs from the latest required time. While something is
+	// being retried that is the time a full read would give: a partial
+	// read needs a longer age, and what the model returned must not buy a
+	// failing retry more time (invariant 1). A pull request opened long
+	// after its versions were published would otherwise be past its
+	// deadline before the gate first saw it, so the deadline never starts
 	// before the pull request existed. An unknown Opened is the zero
 	// time, which leaves the latest required time alone.
 	start := latest
+	if len(gaveUp) > 0 {
+		start = earliest
+	}
 	if f.Opened.After(start) {
 		start = f.Opened
 	}
 	d.NotBefore = latest
 	d.Deadline = start.Add(p.WaitDeadline)
 
-	if len(waiting) > 0 {
-		// The deadline is after every update's NotBefore, so nothing is
-		// still waiting for its age here: what is left is a model read
-		// that never completed.
-		if !now.Before(d.Deadline) {
-			d.Outcome = Person
-			d.Reasons = []Reason{ReasonReadDeadline}
-			d.NotBefore = time.Time{}
-			d.Deadline = time.Time{}
-			return d
-		}
+	switch {
+	case len(gaveUp) > 0 && !now.Before(d.Deadline):
+		d.Outcome = Person
+		d.Reasons = gaveUp
+		d.NotBefore = time.Time{}
+		d.Deadline = time.Time{}
+	case len(waiting) > 0:
 		d.Outcome = Wait
 		d.Reasons = waiting
-		return d
+	default:
+		d.Outcome = Merge
 	}
-
-	d.Outcome = Merge
 	return d
 }
 
@@ -156,67 +196,105 @@ func ChecksRefused(d Decision, now time.Time) Decision {
 func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, rideAlong bool) UpdateDecision {
 	ud := UpdateDecision{Name: u.Name, From: u.From, To: u.To}
 	var person []Reason
+	asking := false // a source did not answer
 
-	// The yes/no facts have no safe default (an ungathered Major read as
-	// "not a major" would grant something), so each must have been
-	// gathered. Below they are read only as gathered answers.
-	if u.Name == "" || u.To == "" || !u.Known.Gathered() || !u.Listed.Gathered() ||
-		!u.NewName.Gathered() || !u.Major.Gathered() || !u.SecurityFix.Gathered() {
+	if u.Name == "" || u.To == "" {
 		person = append(person, ReasonFactMissing)
 	}
-	listed := u.Listed.Holds()
-	newName := u.NewName.Holds()
-	major := u.Major.Holds()
+
+	// The yes/no facts have no safe default (an ungathered Major read as
+	// "not a major" would grant something), so each must have an answer.
+	known, listed, newName, major := stateOf(u.Known), stateOf(u.Listed), stateOf(u.NewName), stateOf(u.Major)
+	for _, s := range []factState{known, listed, newName, major, stateOf(u.SecurityFix)} {
+		switch s {
+		case factMissing:
+			person = appendNew(person, ReasonFactMissing)
+		case factUnavailable:
+			asking = true
+		}
+	}
+	// A rule that reads several answers is applied only when all of them
+	// arrived. With one unavailable the update waits, and the rule is
+	// applied at the evaluation that has the answer.
+	answered := func(states ...factState) bool {
+		for _, s := range states {
+			if s != factYes && s != factNo {
+				return false
+			}
+		}
+		return true
+	}
 
 	// The list is the owner's, and the policy handed to Decide is the
 	// authority for it. A gatherer that ran with another list (the file
 	// changed between the jobs) does not get to grant with it.
-	if u.Listed.Gathered() && listed != Listed(p, ecosystem, u.Name) {
+	if answered(listed) && (listed == factYes) != Listed(p, ecosystem, u.Name) {
 		person = append(person, ReasonListMismatch)
 	}
 
-	switch {
-	case !u.Known.Gathered():
-		// Counted as missing above.
-	case u.Known.Holds():
-		if newName && !listed {
+	if answered(known, listed, newName) {
+		switch {
+		case known == factYes:
+			if newName == factYes && listed == factNo {
+				person = append(person, ReasonInconsistent)
+			}
+		case newName == factYes && listed == factNo:
+			// The new-name rule: an unlisted new name is allowed only when it
+			// was fully read, did not regress (checked below, for every
+			// update) and its name is old enough. A read that is still
+			// missing is not a refusal: it is retried like any other.
+			switch {
+			case u.NameCreated.Known():
+				if now.Sub(u.NameCreated.Time) < p.NewNameAge {
+					person = append(person, ReasonNewNameYoung)
+				}
+			case u.NameCreated.unavailable():
+				asking = true
+			default:
+				person = append(person, ReasonNameCreatedUnknown)
+			}
+			if u.Read == ReadPartial || u.Read == ReadNotApplicable {
+				person = append(person, ReasonNewNameUnread)
+			}
+		case listed == factYes:
+			// A listed name is known by definition. Telling the owner to list
+			// it would send them to an entry that is already there.
 			person = append(person, ReasonInconsistent)
+		default:
+			// Present at the base commit, and the gatherer still says it is
+			// not known: its ecosystem asks for more than presence (Docker).
+			person = append(person, ReasonNotKnown)
 		}
-	case newName && !listed:
-		// The new-name rule: an unlisted new name is allowed only when it
-		// was fully read, did not regress (checked below, for every
-		// update) and its name is old enough. A read that is still
-		// missing is not a refusal: it is retried like any other.
-		if !u.NameCreated.Known() {
-			person = append(person, ReasonNameCreatedUnknown)
-		} else if now.Sub(u.NameCreated.Time) < p.NewNameAge {
-			person = append(person, ReasonNewNameYoung)
-		}
-		if u.Read == ReadPartial || u.Read == ReadNotApplicable {
-			person = append(person, ReasonNewNameUnread)
-		}
-	case listed:
-		// A listed name is known by definition. Telling the owner to list
-		// it would send them to an entry that is already there.
-		person = append(person, ReasonInconsistent)
-	default:
-		// Present at the base commit, and the gatherer still says it is
-		// not known: its ecosystem asks for more than presence.
-		person = append(person, ReasonNotKnown)
 	}
 
-	if !u.Increase.Holds() {
-		person = append(person, ReasonNotIncrease)
+	// The facts that must hold. Each can fail in three ways, and they are
+	// kept apart: a gathered "no" is the fact's own reason, a fact nobody
+	// gathered is the gate not knowing, and an unavailable one is a wait.
+	hold := func(f Fact, no Reason) {
+		switch stateOf(f) {
+		case factNo:
+			person = append(person, no)
+		case factMissing:
+			person = appendNew(person, ReasonFactMissing)
+		case factUnavailable:
+			asking = true
+		}
 	}
-	if !u.Bound.Holds() {
-		person = append(person, ReasonNotBound)
+	// A superseded pin is about to be replaced by Dependabot. What the
+	// registry says about it now (not the tag's digest, so not bound, not
+	// served, no date) is true and beside the point, so those three facts
+	// are not looked at and the update waits. Everything else about the
+	// update is still checked: a refresh would not change it.
+	superseded := ecosystem == Docker && u.Superseded.Holds()
+	if stateOf(u.Superseded) == factUnavailable {
+		asking = true
 	}
-	if !u.Clean.Holds() {
-		person = append(person, ReasonNotClean)
+	hold(u.Increase, ReasonNotIncrease)
+	if !superseded {
+		hold(u.Bound, ReasonNotBound)
+		hold(u.Clean, ReasonNotClean)
 	}
-	if !u.NoRegress.Holds() {
-		person = append(person, ReasonRegress)
-	}
+	hold(u.NoRegress, ReasonRegress)
 	if u.Veto != nil {
 		if u.Veto.Category == VetoModelRefused {
 			person = append(person, ReasonModelRefused)
@@ -224,14 +302,21 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 			person = append(person, ReasonVeto)
 		}
 	}
-	if !readValid(u.Read, ecosystem) {
+	switch {
+	case u.Read == ReadRefused:
+		person = append(person, ReasonReadRefused)
+	case !readValid(u.Read, ecosystem):
 		person = append(person, ReasonReadUnknown)
 	}
-	if major && !listed {
+	if major == factYes && listed == factNo {
 		person = append(person, ReasonMajorUnlisted)
 	}
-	if !u.FirstSeen.Known() {
-		person = append(person, ReasonFirstSeenUnknown)
+	if !superseded && !u.FirstSeen.Known() {
+		if u.FirstSeen.unavailable() {
+			asking = true
+		} else {
+			person = append(person, ReasonFirstSeenUnknown)
+		}
 	}
 
 	if len(person) > 0 {
@@ -240,11 +325,40 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 		return ud
 	}
 
-	// The age table. A new name has no old version an advisory could
-	// affect, so it never takes the fast path.
-	securityFix := p.FastPath && u.SecurityFix.Holds() && !newName
+	ud.RequiredAge = requiredAge(u, u.Read, p, rideAlong)
+	if u.FirstSeen.Known() {
+		ud.NotBefore = u.FirstSeen.Time.Add(ud.RequiredAge)
+	}
+	if superseded {
+		ud.Reasons = append(ud.Reasons, ReasonSuperseded)
+	}
+	if asking {
+		ud.Reasons = append(ud.Reasons, ReasonSourceUnavailable)
+	}
+	if u.Read == ReadNone {
+		ud.Reasons = append(ud.Reasons, ReasonReadPending)
+	}
+	if u.FirstSeen.Known() && now.Before(ud.NotBefore) {
+		ud.Reasons = append(ud.Reasons, ReasonAge)
+	}
+	ud.Outcome = Wait
+	if len(ud.Reasons) == 0 {
+		ud.Outcome = Merge
+	}
+	return ud
+}
+
+// requiredAge is the age table of spec section 4 for one update whose
+// read state is read: how long its new version must have been public.
+//
+// A new name has no old version an advisory could affect, so it never
+// takes the fast path. An answer that has not arrived reads as "no"
+// here, which is safe: such an update waits whatever its age, and the age
+// is worked out again once the source has answered.
+func requiredAge(u UpdateFacts, read ReadState, p Policy, rideAlong bool) time.Duration {
+	securityFix := p.FastPath && u.SecurityFix.Holds() && !u.NewName.Holds()
 	var age time.Duration
-	switch u.Read {
+	switch read {
 	case ReadFull, ReadNone:
 		// For a missing read this is the age a full read would need: the
 		// earliest the update could merge once the retry succeeds.
@@ -252,7 +366,7 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 		if securityFix {
 			age = 0
 		}
-		if rideAlong && u.Read == ReadFull && companion(u) {
+		if rideAlong && read == ReadFull && companion(u) {
 			age = 0
 		}
 	case ReadPartial:
@@ -265,35 +379,22 @@ func decideUpdate(u UpdateFacts, ecosystem string, p Policy, now time.Time, ride
 	case ReadNotApplicable:
 		age = p.MinAge
 	}
-	if major {
+	if u.Major.Holds() {
 		age = longer(age, p.MajorAge)
 	}
-
-	ud.RequiredAge = age
-	ud.NotBefore = u.FirstSeen.Time.Add(age)
-	if u.Read == ReadNone {
-		ud.Outcome = Wait
-		ud.Reasons = append(ud.Reasons, ReasonReadPending)
-	}
-	if now.Before(ud.NotBefore) {
-		ud.Outcome = Wait
-		ud.Reasons = append(ud.Reasons, ReasonAge)
-	}
-	if ud.Outcome == "" {
-		ud.Outcome = Merge
-	}
-	return ud
+	return age
 }
 
 // carriesFastPathUpdate reports whether companions may ride along: the
 // policy says so and the pull request contains a security fix that was
-// fully read.
-func carriesFastPathUpdate(us []UpdateFacts, p Policy) bool {
+// fully read. With ifRead it answers as if every update had been read in
+// full.
+func carriesFastPathUpdate(us []UpdateFacts, p Policy, ifRead bool) bool {
 	if !p.FastPath || p.Companions != RideAlong {
 		return false
 	}
 	for _, u := range us {
-		if u.SecurityFix.Holds() && !u.NewName.Holds() && u.Read == ReadFull {
+		if u.SecurityFix.Holds() && !u.NewName.Holds() && (ifRead || u.Read == ReadFull) {
 			return true
 		}
 	}

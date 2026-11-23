@@ -23,6 +23,16 @@ import (
 // lockPath is the workflow lockfile `gh actions-lock` writes.
 const lockPath = ".github/workflows/actions.lock"
 
+// reusableWorkflowDir starts the path of a `uses:` that calls a reusable
+// workflow: a file in the called repository's .github/workflows. A
+// workflow is not an action. It runs as jobs of its own, with whatever
+// secrets and permissions the caller passes, and the gate's own workflow
+// is one, so a change to such a pin is never granted (spec section 11,
+// amendment 6): Shape does not hold, whatever the facts about the commit
+// would be. Anything under that directory counts, not only *.yml, so that
+// nothing a runner might still take for a workflow slips by.
+const reusableWorkflowDir = "/.github/workflows/"
+
 // regularFile is the only git mode a changed file may have, at both
 // commits. A symlink, a submodule, an executable bit, or a file that is
 // added or deleted is not a pin update.
@@ -54,7 +64,7 @@ var (
 	// commits like everything else that is not a token.
 	//
 	//	      - uses: actions/setup-go@<40 hex> # v7.1.0
-	//	    uses: owner/repo/.github/workflows/x.yml@<40 hex> # v0.2.0
+	//	    uses: owner/repo/dir/of/an/action@<40 hex> # v0.2.0
 	//	      - uses: actions/setup-go@v7.1.0
 	//	      - uses: actions/checkout@v7.0.1 # why this step is here
 	usesCommitRe = regexp.MustCompile(`^( *(?:- )?uses: )(` + namePat + `)(` + subPathPat + `)@(` + shaPat + `) # (` + versionPat + `)$`)
@@ -237,6 +247,9 @@ func (ch *changes) readUses(path string, base, head []string) string {
 		}
 		if b.prefix != h.prefix || b.name != h.name || b.subPath != h.subPath || b.comment != h.comment {
 			return where + ": more than the commit and version changed on the line"
+		}
+		if strings.HasPrefix(b.subPath, reusableWorkflowDir) {
+			return where + ": the line pins a reusable workflow, which never merges without a person (the gate's own pin included)"
 		}
 		if b.commit == "" {
 			ch.tags = append(ch.tags, tagChange{where: where, name: b.name, from: b.version, to: h.version})

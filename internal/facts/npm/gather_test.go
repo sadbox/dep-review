@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,9 @@ func decide(res facts.Result) allow.Decision {
 		Shape:            res.Shape,
 		ChecksConfigured: allow.Yes("test", "test"),
 	}
+	// As the deciding job would have it: a pull request opened an hour
+	// ago, with the model's read in.
+	pr.Opened = testNow.Add(-time.Hour)
 	for _, u := range res.Updates {
 		u.Read = allow.ReadFull
 		pr.Updates = append(pr.Updates, u)
@@ -194,8 +198,26 @@ func TestGatherPlain(t *testing.T) {
 	}
 }
 
+// Bundled dependencies are part of their parent's artifact (spec section
+// 11, amendment 5): one update, the parent's; one artifact, the parent's
+// tarball, which holds them; and a NoRegress that the registry and the
+// lock can vouch for as for any other package. What only the tarball can
+// show about the bundled packages is InspectTarballs'.
 func TestGatherBundled(t *testing.T) {
-	res := gatherCase(t, loadCase(t, "bundled"), nil, fakeAdvisories{})
+	const (
+		name    = "@tailwindcss/oxide-wasm32-wasi"
+		oldHash = "sha512-bjO9WmoM687p8AoCIyw1DUqzpAs4JICLvNmIPxIWDmhw8IOsdubtWQLShyJmISnDKtRy1BBApHVOUl6sNFQQJA=="
+		newHash = "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw=="
+		repo    = "https://github.com/tailwindlabs/tailwindcss"
+		release = ".github/workflows/release.yml"
+	)
+	// The registry lists provenance for both versions. Their attestations
+	// were not recorded, so they are built here for the lock's own hashes.
+	override := map[string]string{
+		attestationURL(name, "4.3.4"): attestationJSON(t, name, "4.3.4", oldHash, repo, release),
+		attestationURL(name, "4.3.5"): attestationJSON(t, name, "4.3.5", newHash, repo, release),
+	}
+	res := gatherCase(t, loadCase(t, "bundled"), override, fakeAdvisories{})
 	if !res.Shape.Holds() {
 		t.Fatalf("Shape: %+v", res.Shape)
 	}
@@ -203,15 +225,24 @@ func TestGatherBundled(t *testing.T) {
 		t.Fatalf("updates: got %s, want %s (bundled entries are not updates of their own)", got, want)
 	}
 	u := res.Updates[0]
-	if u.NoRegress.OK || !u.NoRegress.Gathered() || !strings.Contains(u.NoRegress.Value, "bundles dependencies") || !strings.Contains(u.NoRegress.Value, "@emnapi/core") {
-		t.Errorf("NoRegress = %+v, want a gathered no naming the bundled packages", u.NoRegress)
+	if !u.NoRegress.Holds() || !strings.Contains(u.NoRegress.Value, "bundles ") || !strings.Contains(u.NoRegress.Value, "@emnapi/core") ||
+		!strings.Contains(u.NoRegress.Value, "read and inspected with its tarball") {
+		t.Errorf("NoRegress = %+v, want it to hold and to name the bundled packages", u.NoRegress)
 	}
-	if !u.Bound.Holds() || !u.Listed.Holds() {
-		t.Errorf("Bound = %+v, Listed = %+v", u.Bound, u.Listed)
+	if !u.Bound.Holds() || !u.Listed.Holds() || !u.Known.Holds() {
+		t.Errorf("Bound = %+v, Listed = %+v, Known = %+v", u.Bound, u.Listed, u.Known)
 	}
-	d := decide(res)
-	if d.Outcome != allow.Person || len(d.Reasons) != 1 || d.Reasons[0] != allow.ReasonRegress {
-		t.Errorf("Decide = %s %v, want person for regress alone", d.Outcome, d.Reasons)
+	// One artifact: the parent's two tarballs, at the lock's hashes.
+	want := artifact.Pair{
+		Ecosystem: allow.NPM, Name: name, From: "4.3.4", To: "4.3.5",
+		Old: artifact.Ref{Kind: artifact.NPMTarball, Name: name, Version: "4.3.4", Hash: oldHash},
+		New: artifact.Ref{Kind: artifact.NPMTarball, Name: name, Version: "4.3.5", Hash: newHash},
+	}
+	if len(res.Artifacts) != 1 || res.Artifacts[0] != want {
+		t.Errorf("artifacts:\n got %+v\nwant %+v", res.Artifacts, want)
+	}
+	if d := decide(res); d.Outcome != allow.Merge {
+		t.Errorf("Decide = %s %v, want merge: tailwind's own packages are listed", d.Outcome, d.Reasons)
 	}
 }
 
@@ -497,11 +528,14 @@ func TestGatherRegistrySays(t *testing.T) {
 		update   string
 		// fact picks the fact under test.
 		fact func(u allow.UpdateFacts) allow.Fact
-		// gathered: the fact is a gathered no. Otherwise it is left
-		// ungathered.
+		// gathered: the fact is a gathered no. Otherwise it has no
+		// answer: never gathered, or (reason source_unavailable)
+		// unavailable.
 		gathered bool
 		want     string
-		reason   allow.Reason
+		// reason is what allow.Decide says, with the outcome that reason
+		// leads to. Empty: the fact holds and the pull request merges.
+		reason allow.Reason
 	}{
 		{
 			name:     "registry reports another hash",
@@ -534,28 +568,44 @@ func TestGatherRegistrySays(t *testing.T) {
 			gathered: true, want: `deprecated on the registry: "\"do not use\""`, reason: allow.ReasonNotClean,
 		},
 		{
+			// A registry that does not answer is a wait, for every fact
+			// it is the source of, and never a word against the pin.
 			name:     "registry down",
 			override: map[string]string{chartURL: "500"},
 			update:   "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Bound },
-			want: "the registry did not answer", reason: allow.ReasonNotBound,
+			want: `the registry did not answer: "HTTP status 500"`, reason: allow.ReasonSourceUnavailable,
 		},
 		{
-			name:     "registry down leaves clean ungathered",
+			name:     "registry rate limited",
+			override: map[string]string{chartURL: "429"},
+			update:   "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Bound },
+			want: `the registry did not answer: "HTTP status 429"`, reason: allow.ReasonSourceUnavailable,
+		},
+		{
+			name:     "registry down leaves clean unavailable",
 			override: map[string]string{chartURL: "500"},
 			update:   "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Clean },
-			want: "the registry did not answer", reason: allow.ReasonNotClean,
+			want: "the registry did not answer", reason: allow.ReasonSourceUnavailable,
 		},
 		{
-			name:     "registry down leaves no-regress ungathered",
+			name:     "registry down leaves no-regress unavailable",
 			override: map[string]string{chartURL: "500"},
 			update:   "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.NoRegress },
-			want: "the registry did not answer", reason: allow.ReasonRegress,
+			want: "the registry did not answer", reason: allow.ReasonSourceUnavailable,
+		},
+		{
+			// An answer that arrived and cannot be used is not waited
+			// out: asking again gets the same.
+			name:     "registry forbids",
+			override: map[string]string{chartURL: "403"},
+			update:   "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Bound },
+			want: `the registry's answer could not be used: "HTTP status 403"`, reason: allow.ReasonFactMissing,
 		},
 		{
 			name:     "duplicate key in the registry's document",
 			override: map[string]string{chartURL: `{"name":"chart.js","name":"chart.js","time":{},"versions":{}}`},
 			update:   "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Bound },
-			want: "the registry's document could not be read", reason: allow.ReasonNotBound,
+			want: "the registry's document could not be read", reason: allow.ReasonFactMissing,
 		},
 		{
 			name:     "new install script",
@@ -590,10 +640,12 @@ func TestGatherRegistrySays(t *testing.T) {
 			want: "", reason: "",
 		},
 		{
+			// Bundling is not a regression. What the bundled packages do
+			// at install is the tarball's to show (InspectTarballs).
 			name:     "registry says the new version bundles dependencies",
 			override: chart(fakeVersion{extra: map[string]any{"bundleDependencies": []string{"left-pad"}}}),
 			update:   "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.NoRegress },
-			gathered: true, want: "the registry says it bundles dependencies", reason: allow.ReasonRegress,
+			want: "", reason: "",
 		},
 		{
 			name: "provenance lost",
@@ -642,19 +694,49 @@ func TestGatherRegistrySays(t *testing.T) {
 			name:     "attestations not answered",
 			override: map[string]string{attestationURL("tailwindcss", "4.3.4"): "500"},
 			update:   "tailwindcss", fact: func(u allow.UpdateFacts) allow.Fact { return u.NoRegress },
-			want: "provenance of 4.3.4: the registry did not answer", reason: allow.ReasonRegress,
+			want: "provenance of 4.3.4: the registry did not answer", reason: allow.ReasonSourceUnavailable,
 		},
 		{
-			name:   "advisory database down",
+			name:     "attestations forbidden",
+			override: map[string]string{attestationURL("tailwindcss", "4.3.4"): "403"},
+			update:   "tailwindcss", fact: func(u allow.UpdateFacts) allow.Fact { return u.NoRegress },
+			want: "provenance of 4.3.4: the registry's answer could not be used", reason: allow.ReasonFactMissing,
+		},
+		{
+			// The checker's own "the database did not answer" is passed
+			// on as it is: a wait.
+			name: "advisory database down",
+			adv: fakeAdvisories{byName: map[string]advisory.Result{"chart.js": {
+				SecurityFix:   allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 502, after retries)", "GET api.github.com/advisories"),
+				NoMalware:     allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 502, after retries)", "GET api.github.com/advisories"),
+				NoNewAdvisory: allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 502, after retries)", "GET api.github.com/advisories"),
+			}}},
+			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.SecurityFix },
+			want: "GitHub's Advisory Database did not answer (HTTP 502", reason: allow.ReasonSourceUnavailable,
+		},
+		{
+			name: "advisory database down leaves clean unavailable",
+			adv: fakeAdvisories{byName: map[string]advisory.Result{"chart.js": {
+				SecurityFix:   allow.Unavailable("no answer", "advisories"),
+				NoMalware:     allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 502, after retries)", "GET api.github.com/advisories"),
+				NoNewAdvisory: allow.Unavailable("no answer", "advisories"),
+			}}},
+			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Clean },
+			want: "GitHub's Advisory Database did not answer (HTTP 502", reason: allow.ReasonSourceUnavailable,
+		},
+		{
+			// A checker that fails without the context ending tells
+			// nothing: nothing was established, which is person.
+			name:   "advisory checker fails",
 			adv:    fakeAdvisories{err: errors.New("HTTP 502")},
 			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.SecurityFix },
-			want: `the advisory database could not be asked: "HTTP 502"`, reason: allow.ReasonFactMissing,
+			want: `the advisory checker failed: "HTTP 502"`, reason: allow.ReasonFactMissing,
 		},
 		{
-			name:   "advisory database down leaves clean ungathered",
+			name:   "advisory checker fails, and clean is not established",
 			adv:    fakeAdvisories{err: errors.New("HTTP 502")},
 			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Clean },
-			want: "published and not deprecated; the advisory database could not be asked", reason: allow.ReasonNotClean,
+			want: `the advisory checker failed: "HTTP 502"`, reason: allow.ReasonFactMissing,
 		},
 		{
 			name: "malware advisory",
@@ -673,7 +755,7 @@ func TestGatherRegistrySays(t *testing.T) {
 				NoNewAdvisory: allow.Yes("none", "test"),
 			}}},
 			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Clean },
-			want: "the advisory database gave no answer", reason: allow.ReasonNotClean,
+			want: "the advisory database gave no answer", reason: allow.ReasonFactMissing,
 		},
 	}
 	for _, tt := range tests {
@@ -696,6 +778,11 @@ func TestGatherRegistrySays(t *testing.T) {
 			if f.OK || f.Gathered() != tt.gathered {
 				t.Errorf("fact = %+v, want OK false and gathered %v", f, tt.gathered)
 			}
+			// Unavailable goes with a source that was asked; a fact
+			// nothing established has none.
+			if unavailable := tt.reason == allow.ReasonSourceUnavailable; f.Unavailable != unavailable || (!tt.gathered && (f.Source != "") != unavailable) {
+				t.Errorf("fact = %+v, want unavailable %v", f, unavailable)
+			}
 			if !strings.Contains(f.Value, tt.want) {
 				t.Errorf("fact.Value = %q, want it to say %q", f.Value, tt.want)
 			}
@@ -704,8 +791,13 @@ func TestGatherRegistrySays(t *testing.T) {
 			for _, r := range d.Reasons {
 				found = found || r == tt.reason
 			}
-			if d.Outcome != allow.Person || !found {
-				t.Errorf("Decide = %s %v, want person with %s", d.Outcome, d.Reasons, tt.reason)
+			if d.Outcome != tt.reason.Outcome() || !found {
+				t.Errorf("Decide = %s %v, want %s with %s", d.Outcome, d.Reasons, tt.reason.Outcome(), tt.reason)
+			}
+			// A wait is never bought with a "no" elsewhere: nothing in a
+			// waiting decision says person.
+			if d.Outcome == allow.Wait && !reflect.DeepEqual(d.Reasons, []allow.Reason{allow.ReasonSourceUnavailable}) {
+				t.Errorf("Decide = wait %v, want [source_unavailable] alone", d.Reasons)
 			}
 		})
 	}

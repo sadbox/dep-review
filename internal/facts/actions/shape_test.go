@@ -147,15 +147,17 @@ func TestReadChangeSetAccepts(t *testing.T) {
 			},
 		},
 		{
-			name: "commit lines, step and job level, no lockfile",
+			// The workflow also calls a reusable workflow, on a line this
+			// pull request leaves alone: only a changed line is judged.
+			name: "commit lines, no lockfile, beside an unchanged reusable-workflow line",
 			files: func(t *testing.T) []facts.File {
 				return []facts.File{file(ciPath, ciCommits, edit(t, ciCommits,
 					setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0",
-					loginV470+" # v4.7.0", loginV480+" # v4.8.0"))}
+					checkoutV700+" # v7.0.0", checkoutV701+" # v7.0.1"))}
 			},
 			want: []pin{
+				{name: "actions/checkout", from: "v7.0.0", to: "v7.0.1", oldCommit: checkoutV700, newCommit: checkoutV701, where: ciPath + ":7"},
 				{name: "actions/setup-go", from: "v7.0.0", to: "v7.1.0", oldCommit: setupGoV700, newCommit: setupGoV710, where: ciPath + ":9"},
-				{name: "docker/login-action", from: "v4.7.0", to: "v4.8.0", oldCommit: loginV470, newCommit: loginV480, where: ciPath + ":12"},
 			},
 		},
 		{
@@ -218,11 +220,11 @@ func TestReadChangeSetAccepts(t *testing.T) {
 			},
 		},
 		{
-			name: "a job-level commit line takes the IDs of the lockfile entry for the same move",
+			name: "a commit line for an action in a directory takes the IDs of the lockfile entry for the same move",
 			files: func(t *testing.T) []facts.File {
 				fs := setupGoBump(t)
-				reuse := "jobs:\n  lint:\n    uses: actions/setup-go/.github/workflows/x.yml@" + setupGoV700 + " # v7.0.0\n"
-				return append(fs, file(".github/workflows/lint.yaml", reuse, edit(t, reuse, setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0")))
+				sub := "jobs:\n  lint:\n    steps:\n      - uses: actions/setup-go/sub/action@" + setupGoV700 + " # v7.0.0\n"
+				return append(fs, file(".github/workflows/lint.yaml", sub, edit(t, sub, setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0")))
 			},
 			want: []pin{with(setupGoLocked, ciPath+":9")},
 		},
@@ -264,11 +266,55 @@ func TestReadChangeSetRefuses(t *testing.T) {
 		}
 	}
 
+	// A line that calls a reusable workflow, and the same line bumped. The
+	// commit and the version are setup-go's real ones: nothing about the
+	// pin itself is wrong, and it is refused all the same.
+	reusable := func(path string) (string, string) {
+		line := "    uses: " + path + "@" + setupGoV700 + " # v7.0.0\n"
+		return line, strings.ReplaceAll(line, setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0")
+	}
+	reused := func(path string) func(*testing.T) []facts.File {
+		base, head := reusable(path)
+		return func(*testing.T) []facts.File {
+			return []facts.File{file(ciPath, "jobs:\n  lint:\n"+base, "jobs:\n  lint:\n"+head)}
+		}
+	}
+	const pinsWorkflow = "the line pins a reusable workflow, which never merges without a person"
+
 	tests := []struct {
 		name  string
 		files func(t *testing.T) []facts.File
 		want  string // part of the problem
 	}{
+		// Spec section 11, amendment 6: a changed reusable-workflow pin
+		// never merges, whoever publishes it and whatever the facts say.
+		{"a reusable workflow", reused("actions/setup-go/.github/workflows/x.yml"), ciPath + ":3: " + pinsWorkflow},
+		{"a reusable workflow of a listed publisher", reused("docker/login-action/.github/workflows/lint.yml"), pinsWorkflow},
+		{"the gate's own pin", reused("sadbox/dep-review/.github/workflows/gate.yml"), pinsWorkflow + " (the gate's own pin included)"},
+		{"the shared CI workflow", reused("sadbox/ci/.github/workflows/lint.yml"), pinsWorkflow},
+		{"a reusable workflow named .yaml", reused("actions/setup-go/.github/workflows/x.yaml"), pinsWorkflow},
+		{"anything else under the workflows directory", reused("actions/setup-go/.github/workflows/sub/x"), pinsWorkflow},
+		{"a reusable workflow called from a step position", func(*testing.T) []facts.File {
+			base, head := reusable("actions/setup-go/.github/workflows/x.yml")
+			return []facts.File{file(ciPath, "steps:\n  - "+strings.TrimLeft(base, " "), "steps:\n  - "+strings.TrimLeft(head, " "))}
+		}, pinsWorkflow},
+		{"a reusable workflow beside an action that would pass", func(t *testing.T) []facts.File {
+			return []facts.File{file(ciPath, ciCommits, edit(t, ciCommits,
+				setupGoV700+" # v7.0.0", setupGoV710+" # v7.1.0",
+				loginV470+" # v4.7.0", loginV480+" # v4.8.0"))}
+		}, ciPath + ":12: " + pinsWorkflow},
+		{"a reusable workflow that actions.lock records too", func(t *testing.T) []facts.File {
+			fs := setupGoBump(t)
+			base, head := reusable("actions/setup-go/.github/workflows/x.yml")
+			return append(fs, file(".github/workflows/lint.yaml", "jobs:\n  lint:\n"+base, "jobs:\n  lint:\n"+head))
+		}, ".github/workflows/lint.yaml:3: " + pinsWorkflow},
+		{"a reusable workflow pinned by tag", func(t *testing.T) []facts.File {
+			fs := setupGoBump(t)
+			return append(fs, file(".github/workflows/lint.yaml",
+				"jobs:\n  lint:\n    uses: actions/setup-go/.github/workflows/x.yml@v7.0.0\n",
+				"jobs:\n  lint:\n    uses: actions/setup-go/.github/workflows/x.yml@v7.1.0\n"))
+		}, pinsWorkflow},
+
 		{"no files", func(*testing.T) []facts.File { return nil }, "no file changed"},
 		{"another file changed too", func(t *testing.T) []facts.File {
 			return append(setupGoBump(t), file("go.mod", "module x\n", "module y\n"))

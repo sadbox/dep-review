@@ -241,54 +241,90 @@ func TestTimeFacts(t *testing.T) {
 
 func TestCleanFact(t *testing.T) {
 	ok := nothingKnown()
+	// What the advisory checker returns when the database did not answer,
+	// and what gatherUpdate makes of a fact the checker left blank.
+	down := allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories")
+	blank := allow.Fact{Value: "the advisory database gave no answer"}
+	const (
+		yes         = "yes"
+		no          = "no"
+		unknown     = "never gathered"
+		unavailable = "unavailable"
+	)
+	state := func(f allow.Fact) string {
+		switch {
+		case f.Holds():
+			return yes
+		case f.Unavailable:
+			return unavailable
+		case f.Source == "":
+			return unknown
+		}
+		return no
+	}
 	tests := []struct {
 		name, pkg, from, to string
 		adv                 advisory.Result
-		advFailed           string
-		// gathered and holds describe the fact; want is a piece of its
+		// state is which of the four the fact is; want is a piece of its
 		// Value.
-		gathered, holds bool
-		want            string
+		state string
+		want  string
 	}{
-		{"published, not deprecated, nothing known", "chart.js", "4.4.6", "4.4.7", ok, "", true, true, "published and not deprecated; no malware advisory; no new advisory"},
+		{"published, not deprecated, nothing known", "chart.js", "4.4.6", "4.4.7", ok, yes, "published and not deprecated; no malware advisory; no new advisory"},
 		// Every version of left-pad is deprecated on the real registry.
-		{"deprecated", "left-pad", "1.2.0", "1.3.0", ok, "", true, false, `deprecated on the registry: "\"use String.prototype.padStart()\""`},
+		{"deprecated", "left-pad", "1.2.0", "1.3.0", ok, no, `deprecated on the registry: "\"use String.prototype.padStart()\""`},
 		// event-stream 3.3.6 was removed from the real registry.
-		{"unpublished", "event-stream", "3.3.5", "3.3.6", ok, "", true, false, "3.3.6 is not on the registry (unpublished)"},
-		{"malware", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: allow.No("GHSA-1 (malware)", "advisories"), NoNewAdvisory: ok.NoNewAdvisory}, "", true, false, "GHSA-1 (malware)"},
-		{"a new advisory", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: ok.NoMalware, NoNewAdvisory: allow.No("GHSA-2 affects 4.4.7 and not 4.4.6", "advisories")}, "", true, false, "GHSA-2"},
-		{"advisories not asked", "chart.js", "4.4.6", "4.4.7", advisory.Result{}, "the advisory database could not be asked", false, false, "could not be asked"},
-		{"advisories silent on one question", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: ok.NoMalware}, "", false, false, "gave no answer"},
-		// A deprecation is a no even when the advisories are unknown.
-		{"deprecated and advisories not asked", "left-pad", "1.2.0", "1.3.0", advisory.Result{}, "down", true, false, "deprecated on the registry"},
+		{"unpublished", "event-stream", "3.3.5", "3.3.6", ok, no, "3.3.6 is not on the registry (unpublished)"},
+		{"malware", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: allow.No("GHSA-1 (malware)", "advisories"), NoNewAdvisory: ok.NoNewAdvisory}, no, "GHSA-1 (malware)"},
+		{"a new advisory", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: ok.NoMalware, NoNewAdvisory: allow.No("GHSA-2 affects 4.4.7 and not 4.4.6", "advisories")}, no, "GHSA-2"},
+		{"the advisory database did not answer", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: down, NoNewAdvisory: down}, unavailable, "did not answer (HTTP 503"},
+		{"advisories silent", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: blank, NoNewAdvisory: blank}, unknown, "gave no answer"},
+		{"advisories silent on one question", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: ok.NoMalware, NoNewAdvisory: blank}, unknown, "gave no answer"},
+		{"one question unanswered, the other unreadable", "chart.js", "4.4.6", "4.4.7", advisory.Result{NoMalware: down, NoNewAdvisory: blank}, unknown, "gave no answer"},
+		// A deprecation is a no whatever the advisory database did.
+		{"deprecated and advisories silent", "left-pad", "1.2.0", "1.3.0", advisory.Result{NoMalware: blank, NoNewAdvisory: blank}, no, "deprecated on the registry"},
+		{"deprecated and the advisory database down", "left-pad", "1.2.0", "1.3.0", advisory.Result{NoMalware: down, NoNewAdvisory: down}, no, "deprecated on the registry"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := fixturePackument(t, tt.pkg)
-			f := cleanFact(fromRegistry(t, a, tt.pkg, tt.from, tt.to), a, "registry", tt.adv, tt.advFailed)
-			if f.Gathered() != tt.gathered || f.Holds() != tt.holds || !strings.Contains(f.Value, tt.want) {
-				t.Errorf("Clean = %+v, want gathered %v, holds %v, saying %q", f, tt.gathered, tt.holds, tt.want)
+			f := cleanFact(fromRegistry(t, a, tt.pkg, tt.from, tt.to), a, "registry", tt.adv)
+			if state(f) != tt.state || !strings.Contains(f.Value, tt.want) {
+				t.Errorf("Clean = %+v (%s), want %s, saying %q", f, state(f), tt.state, tt.want)
 			}
 		})
 	}
 
-	t.Run("registry did not answer, advisories fine", func(t *testing.T) {
-		f := cleanFact(update{Name: "x", To: "1.0.0"}, packumentAnswer{failed: "the registry did not answer"}, "registry", ok, "")
-		if f.Gathered() || f.OK {
-			t.Errorf("Clean = %+v, want it left ungathered", f)
-		}
-	})
-	t.Run("registry did not answer, malware known", func(t *testing.T) {
-		adv := advisory.Result{NoMalware: allow.No("GHSA-1 (malware)", "advisories"), NoNewAdvisory: ok.NoNewAdvisory}
-		f := cleanFact(update{Name: "x", To: "1.0.0"}, packumentAnswer{failed: "the registry did not answer"}, "registry", adv, "")
-		if !f.Gathered() || f.OK {
-			t.Errorf("Clean = %+v, want a gathered no", f)
-		}
-	})
+	// The registry itself: not answering is unavailable, an answer that
+	// cannot be used is never gathered, and a "no" from the advisories is
+	// the answer either way.
+	unreachable := packumentAnswer{failed: "the registry did not answer: HTTP status 503", unreachable: true}
+	unusable := packumentAnswer{failed: "the registry's answer could not be used: HTTP status 403"}
+	malware := advisory.Result{NoMalware: allow.No("GHSA-1 (malware)", "advisories"), NoNewAdvisory: ok.NoNewAdvisory}
+	for _, tt := range []struct {
+		name  string
+		a     packumentAnswer
+		adv   advisory.Result
+		state string
+	}{
+		{"registry did not answer, advisories fine", unreachable, ok, unavailable},
+		{"registry did not answer, malware known", unreachable, malware, no},
+		{"registry and advisory database both down", unreachable, advisory.Result{NoMalware: down, NoNewAdvisory: down}, unavailable},
+		{"registry answer unusable, advisories fine", unusable, ok, unknown},
+		{"registry answer unusable, malware known", unusable, malware, no},
+		{"registry answer unusable, advisory database down", unusable, advisory.Result{NoMalware: down, NoNewAdvisory: down}, unknown},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := cleanFact(update{Name: "x", To: "1.0.0"}, tt.a, "registry", tt.adv)
+			if state(f) != tt.state || f.Value == "" {
+				t.Errorf("Clean = %+v (%s), want %s", f, state(f), tt.state)
+			}
+		})
+	}
 	t.Run("a deprecation that was withdrawn", func(t *testing.T) {
 		a := fixturePackument(t, "left-pad")
 		a.doc.Versions["1.3.0"] = []byte(strings.Replace(string(a.doc.Versions["1.3.0"]), `"use String.prototype.padStart()"`, `""`, 1))
-		f := cleanFact(fromRegistry(t, a, "left-pad", "1.2.0", "1.3.0"), a, "registry", ok, "")
+		f := cleanFact(fromRegistry(t, a, "left-pad", "1.2.0", "1.3.0"), a, "registry", ok)
 		if !f.Holds() {
 			t.Errorf("Clean = %+v, want an empty deprecation message to be no deprecation", f)
 		}
@@ -350,8 +386,8 @@ func TestProvenanceRecorded(t *testing.T) {
 		OwnerID:      "67109815",
 	}
 	for version, integrity := range map[string]string{"4.3.4": tailwindOld, "4.3.5": tailwindNew} {
-		id, problem, answered, err := reg.provenance(context.Background(), "tailwindcss", version, integrity)
-		if err != nil || problem != "" || !answered {
+		id, problem, state, err := reg.provenance(context.Background(), "tailwindcss", version, integrity)
+		if err != nil || problem != "" || state != holds {
 			t.Fatalf("%s: %q, %v", version, problem, err)
 		}
 		if id != want {
@@ -390,8 +426,8 @@ func TestProvenanceShapes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &registry{client: newFakeRegistry(t, map[string]string{url: tt.body}), packuments: map[string]packumentAnswer{}}
-			id, problem, answered, err := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew)
-			if err != nil || !answered {
+			id, problem, state, err := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew)
+			if err != nil || state != holds {
 				t.Fatal(err)
 			}
 			if tt.want == "" {
@@ -405,19 +441,22 @@ func TestProvenanceShapes(t *testing.T) {
 			}
 		})
 	}
-	// A 404 is the registry's answer; a 500 is no answer, and nothing was
-	// learned from it.
+	// A 404 is the registry's answer. A 500 or a 429 is no answer:
+	// nothing was learned, and asking again may. A 403 is an answer that
+	// cannot be used: nothing was learned, and asking again will not.
 	for _, tt := range []struct {
 		status, want string
-		answered     bool
+		state        verdict
 	}{
-		{"404", "the registry has no attestations for it", true},
-		{"500", "the registry did not answer", false},
+		{"404", "the registry has no attestations for it", holds},
+		{"500", `the registry did not answer: "HTTP status 500"`, unreachable},
+		{"429", `the registry did not answer: "HTTP status 429"`, unreachable},
+		{"403", "the registry's answer could not be used", unknown},
 	} {
 		reg := &registry{client: newFakeRegistry(t, map[string]string{url: tt.status}), packuments: map[string]packumentAnswer{}}
-		_, problem, answered, err := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew)
-		if err != nil || answered != tt.answered || !strings.Contains(problem, tt.want) {
-			t.Errorf("status %s: problem = %q, answered %v, %v; want %q, answered %v", tt.status, problem, answered, err, tt.want, tt.answered)
+		_, problem, state, err := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew)
+		if err != nil || state != tt.state || !strings.Contains(problem, tt.want) {
+			t.Errorf("status %s: problem = %q, state %v, %v; want %q, state %v", tt.status, problem, state, err, tt.want, tt.state)
 		}
 	}
 }

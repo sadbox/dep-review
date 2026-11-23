@@ -18,6 +18,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/gh"
 )
 
 // How this file talks to GitHub, and what was checked against the real
@@ -94,11 +95,15 @@ func New(api Pager) *GitHub {
 // about a version when the database has no advisory under the name at
 // all.
 //
-// A request that fails, after the client's own retries, is an error and
-// the Result is empty. An answer that arrived but is not what the API
-// documents, or a name or version the API cannot be asked about, leaves
-// the facts that depend on it ungathered: their Source is empty and their
-// Value says why.
+// A request that fails, after the client's own retries, settles all
+// three facts at once, since nothing can be said from half the answers.
+// When GitHub did not answer (no response, a server error, a rate limit)
+// they are unavailable, which is a wait. When it answered with an error
+// that asking again would not change, they are left ungathered. An answer
+// that arrived but is not what the API documents, or a name or version
+// the API cannot be asked about, leaves the facts that depend on it
+// ungathered too: their Source is empty and their Value says why. The
+// error return is the context's.
 func (g *GitHub) Check(ctx context.Context, q Query) (Result, error) {
 	eco, covered := databaseEcosystem(q.Ecosystem)
 	if !covered {
@@ -107,6 +112,33 @@ func (g *GitHub) Check(ctx context.Context, q Query) (Result, error) {
 	if why := unaskable(eco, q); why != "" {
 		return Result{SecurityFix: unknown(why), NoMalware: unknown(why), NoNewAdvisory: unknown(why)}, nil
 	}
+	res, err := g.ask(ctx, eco, q)
+	switch {
+	case err == nil:
+		return res, nil
+	case ctx.Err() != nil:
+		return Result{}, fmt.Errorf("advisory: %w", ctx.Err())
+	}
+	// The status and nothing else of the error: its text can carry
+	// GitHub's own message, and a fact's Value ends up in a comment.
+	const source = "GET api.github.com/advisories"
+	var f allow.Fact
+	switch status := gh.StatusCode(err); {
+	case gh.Unavailable(err) && status != 0:
+		f = allow.Unavailable(fmt.Sprintf("GitHub's Advisory Database did not answer (HTTP %d, after retries)", status), source)
+	case gh.Unavailable(err):
+		f = allow.Unavailable("GitHub's Advisory Database did not answer (no response, after retries)", source)
+	case status != 0:
+		f = unknown(fmt.Sprintf("GitHub's Advisory Database answered with an error (HTTP %d); asking again would get the same", status))
+	default:
+		f = unknown("GitHub's Advisory Database gave an answer that could not be used; asking again would get the same")
+	}
+	return Result{SecurityFix: f, NoMalware: f, NoNewAdvisory: f}, nil
+}
+
+// ask makes the requests for one update. The error is the first request
+// that failed.
+func (g *GitHub) ask(ctx context.Context, eco string, q Query) (Result, error) {
 	from, to := bare(eco, q.From), bare(eco, q.To)
 
 	reviewedNames, err := g.spellings(ctx, eco, typeReviewed, q.Name)
@@ -182,9 +214,11 @@ func notCovered(ecosystem string) Result {
 	}
 }
 
-// unknown is a fact that could not be established. Its Source is empty,
-// so allow reads it as never gathered whatever else it holds; Value only
-// carries the reason to the pull request comment.
+// unknown is a fact that could not be established, for a reason that
+// asking again does not change. Its Source is empty, so allow reads it as
+// never gathered whatever else it holds; Value only carries the reason to
+// the pull request comment. (A database that did not answer is not this:
+// see Check.)
 func unknown(why string) allow.Fact { return allow.Fact{Value: why} }
 
 var (
@@ -246,8 +280,9 @@ func plainRelease(eco, v string) bool {
 }
 
 // bare drops the leading "v" that Go module versions and action tags
-// carry and the database's versions do not. It is the only change ever
-// made to a version: the comparison with first_patched_version is
+// carry and the database's versions do not, so that "v1.2.3" and "1.2.3"
+// are one version (spec section 11, amendment 8). It is the only change
+// ever made to a version: the comparison with first_patched_version is
 // otherwise byte for byte.
 func bare(eco, v string) string {
 	if eco == ecoGo || eco == ecoActions {

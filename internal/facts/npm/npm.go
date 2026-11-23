@@ -32,8 +32,19 @@
 //   - Bound: a source that is not the registry's own tarball for that name
 //     and version (git, file, link, another host, an alias), a hash that
 //     is not one sha512, or a hash the registry does not report.
-//   - NoRegress: a new or changed install script, a provenance identity
-//     that changed or was lost, or a package that bundles dependencies.
+//   - NoRegress: a new or changed install script, or a provenance identity
+//     that changed or was lost. The registry and the lock are two of the
+//     three sources for install scripts and are read here. The third is
+//     the tarball's own files, which InspectTarballs reads once the
+//     artifact reader has verified and extracted the tarballs; the fetch
+//     command ANDs its answer into NoRegress.
+//
+// Bundled dependencies are part of their parent's artifact, not updates
+// of their own (spec section 11, amendment 5). They have no source and no
+// hash in the lock: their bytes are the parent's tarball, so the model
+// reads them with it and InspectTarballs looks at their package.json and
+// binding.gyp files like the parent's. Shape still requires that a
+// bundled entry changes only together with the package that carries it.
 //
 // Every JSON document is read with encoding/json/v2: names match case
 // sensitively and a duplicate name is an error. npm copies unknown lock
@@ -73,7 +84,8 @@ var _ facts.Gatherer = Gatherer{}
 // npm or node is not installed, npm is a version this package was not
 // tested with, or the scratch directory could not be written. A registry
 // or an advisory database that does not answer is not an error: the facts
-// it feeds are left ungathered, with what failed in their Value.
+// it feeds are unavailable, with what failed in their Value, and the next
+// evaluation asks again.
 func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
 	if in.HTTP == nil {
 		return facts.Result{}, errors.New("npm: no HTTP client for the registry")
@@ -178,28 +190,32 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 	uf.NoRegress = nr
 
 	// The advisory database is the other half of Clean and all of
-	// SecurityFix.
+	// SecurityFix. The checker puts whatever it learned, or failed to
+	// learn, into its facts: unavailable when the database did not
+	// answer, without a source when it could not tell. Its error is the
+	// context's. A fact it left blank, and all three when there is no
+	// checker or it failed some other way, is given a reason here and
+	// stays never gathered, which is person.
 	var adv advisory.Result
-	advFailed := "no advisory checker was configured"
+	blank := "no advisory checker was configured"
 	if in.Advisories != nil {
-		var err error
-		adv, err = in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To})
+		res, err := in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To})
 		switch {
 		case ctx.Err() != nil:
 			return uf, nil, ctx.Err()
 		case err != nil:
-			adv = advisory.Result{}
-			advFailed = "the advisory database could not be asked: " + quote(err.Error())
+			blank = "the advisory checker failed: " + quote(err.Error())
 		default:
-			advFailed = ""
+			adv, blank = res, "the advisory database gave no answer"
 		}
 	}
-	if advFailed == "" {
-		uf.SecurityFix = adv.SecurityFix
-	} else {
-		uf.SecurityFix = allow.Fact{Value: advFailed}
+	for _, f := range []*allow.Fact{&adv.SecurityFix, &adv.NoMalware, &adv.NoNewAdvisory} {
+		if *f == (allow.Fact{}) {
+			*f = allow.Fact{Value: blank}
+		}
 	}
-	uf.Clean = cleanFact(u, doc, source, adv, advFailed)
+	uf.SecurityFix = adv.SecurityFix
+	uf.Clean = cleanFact(u, doc, source, adv)
 
 	var pair *artifact.Pair
 	if uf.Bound.Holds() {

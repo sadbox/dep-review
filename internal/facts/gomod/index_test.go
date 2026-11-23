@@ -88,7 +88,7 @@ func TestFirstSeenRecorded(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fixtures := &indexFixtures{t: t}
 			ix := &index{client: &http.Client{Transport: fixtures}, url: defaultIndexURL, limit: 100, perVersion: tc.perVersion, left: tc.left}
-			seen, why := ix.firstSeen(context.Background(), tc.path, tc.version, ts(tc.since))
+			seen, why, _ := ix.firstSeen(context.Background(), tc.path, tc.version, ts(tc.since))
 			if tc.want == "" {
 				if !seen.IsZero() || !strings.Contains(why, tc.why) {
 					t.Errorf("seen = %v, why = %q; want not found with %q", seen, why, tc.why)
@@ -122,8 +122,8 @@ func TestFirstSeenSharesPages(t *testing.T) {
 	fixtures := &indexFixtures{t: t}
 	ix := &index{client: &http.Client{Transport: fixtures}, url: defaultIndexURL, limit: 100, perVersion: 50, left: 150}
 	since := ts("2021-09-22T20:16:12Z")
-	first, _ := ix.firstSeen(context.Background(), "golang.org/x/mod", "v0.5.1", since)
-	again, why := ix.firstSeen(context.Background(), "golang.org/x/mod", "v0.5.1", since)
+	first, _, _ := ix.firstSeen(context.Background(), "golang.org/x/mod", "v0.5.1", since)
+	again, why, _ := ix.firstSeen(context.Background(), "golang.org/x/mod", "v0.5.1", since)
 	if first.IsZero() || !again.Equal(first) {
 		t.Errorf("first %v, again %v (%s)", first, again, why)
 	}
@@ -132,7 +132,7 @@ func TestFirstSeenSharesPages(t *testing.T) {
 	}
 	// A page that is already here is not charged to a spent budget.
 	ix.left = 0
-	if spent, why := ix.firstSeen(context.Background(), "golang.org/x/mod", "v0.5.1", since); !spent.Equal(first) {
+	if spent, why, _ := ix.firstSeen(context.Background(), "golang.org/x/mod", "v0.5.1", since); !spent.Equal(first) {
 		t.Errorf("with no budget left: %v (%s)", spent, why)
 	}
 }
@@ -155,7 +155,7 @@ func TestFirstSeenBadIndex(t *testing.T) {
 		{"found", 200, other + target, "2024-01-01T00:00:05Z", ""},
 		{"a short page is the end of the index", 200, other, "", "and its end"},
 		{"an empty page is the end of the index", 200, "", "", "and its end"},
-		{"server error", 500, "", "", "could not be read: status 500"},
+		{"server error", 500, "", "", "the index did not answer: status 500"},
 		{"bad request", 400, "400 bad request\n", "", "could not be read: status 400"},
 		{"not JSON", 200, "<html>\n", "", "could not be read: line 1 is not JSON"},
 		{"a line without a version", 200, line("example.com/m", "", "2024-01-01T00:00:05Z"), "", "not in the documented form or order"},
@@ -173,7 +173,7 @@ func TestFirstSeenBadIndex(t *testing.T) {
 				return respond(req, tc.status, tc.body), nil
 			})}
 			ix := &index{client: client, url: defaultIndexURL, limit: 3, perVersion: 2, left: 10}
-			seen, why := ix.firstSeen(context.Background(), "example.com/m", "v1.0.0", since)
+			seen, why, _ := ix.firstSeen(context.Background(), "example.com/m", "v1.0.0", since)
 			if tc.want == "" {
 				if !seen.IsZero() || !strings.Contains(why, tc.why) {
 					t.Errorf("seen = %v, why = %q; want not found with %q", seen, why, tc.why)
@@ -190,8 +190,48 @@ func TestFirstSeenTransportError(t *testing.T) {
 		return nil, fmt.Errorf("dial tcp: no route to host")
 	})}
 	ix := &index{client: client, url: defaultIndexURL, limit: 3, perVersion: 2, left: 10}
-	seen, why := ix.firstSeen(context.Background(), "example.com/m", "v1.0.0", ts("2024-01-01T00:00:00Z"))
-	if !seen.IsZero() || !strings.Contains(why, "could not be read") {
-		t.Errorf("seen = %v, why = %q", seen, why)
+	seen, why, down := ix.firstSeen(context.Background(), "example.com/m", "v1.0.0", ts("2024-01-01T00:00:00Z"))
+	if !seen.IsZero() || !strings.Contains(why, "the index did not answer: ") || !down {
+		t.Errorf("seen = %v, why = %q, down = %v", seen, why, down)
+	}
+}
+
+// An index that was asked and did not answer is told apart from every
+// answer it gave: only the first is worth asking again.
+func TestFirstSeenDown(t *testing.T) {
+	other := line("example.com/other", "v1.0.0", "2024-01-01T00:00:03Z")
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		down   bool
+	}{
+		{"500", 500, "", true},
+		{"502", 502, "", true},
+		{"503", 503, "", true},
+		{"429", 429, "", true},
+		{"400", 400, "400 bad request\n", false},
+		{"404", 404, "", false},
+		{"403", 403, "", false},
+		{"not JSON", 200, "<html>\n", false},
+		{"not in the index", 200, other, false},
+		{"lines out of order", 200, line("example.com/x", "v1.0.0", "2023-01-01T00:00:00Z"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
+				return respond(req, tc.status, tc.body), nil
+			})}
+			ix := &index{client: client, url: defaultIndexURL, limit: 3, perVersion: 2, left: 10}
+			seen, why, down := ix.firstSeen(context.Background(), "example.com/m", "v1.0.0", ts("2024-01-01T00:00:00Z"))
+			if !seen.IsZero() || why == "" || down != tc.down {
+				t.Errorf("seen = %v, why = %q, down = %v; want down = %v", seen, why, down, tc.down)
+			}
+			// And the fact built from it.
+			ix = &index{client: client, url: defaultIndexURL, limit: 3, perVersion: 2, left: 10}
+			f := seenFact(context.Background(), ix, "example.com/m", "v1.0.0", ts("2024-01-01T00:10:00Z"), testNow)
+			if f.Known() || f.Unavailable != tc.down || f.Source == "" {
+				t.Errorf("fact %+v, want unavailable = %v", f, tc.down)
+			}
+		})
 	}
 }

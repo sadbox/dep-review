@@ -2,7 +2,6 @@ package artifact
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,12 +16,6 @@ import (
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/gh"
 )
-
-// ErrBadRef means a Pair, a Ref or the Limits are not something the gate
-// can prepare a read for: an unknown kind, a name or version that is not
-// in the kind's exact shape, a hash of the wrong form, two sides that do
-// not belong together. Nothing is downloaded. Test with errors.Is.
-var ErrBadRef = errors.New("artifact: bad reference")
 
 func badRef(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrBadRef, fmt.Sprintf(format, args...))
@@ -44,6 +37,10 @@ type Options struct {
 	// api.github.com without a token, which is enough for public
 	// actions at the unauthenticated rate limit.
 	GitHub *gh.Client
+	// Inspect holds, by Kind, the function that looks at the extracted
+	// artifacts of every pair of that kind; its answer is
+	// Prepared.Inspected. A kind without an entry is not inspected.
+	Inspect map[Kind]Inspect
 }
 
 // New returns the Preparer that downloads from the module proxy, the npm
@@ -85,7 +82,7 @@ func New(o Options) (Preparer, error) {
 	github.CheckRedirect = redirects(codeloadHost, apiHost)
 	f.registry, f.github = &registry, &github
 
-	return &reader{scratch: o.Scratch, git: git, fetch: f, limits: defaultExtractLimits, read: defaultReadLimits}, nil
+	return &reader{scratch: o.Scratch, git: git, fetch: f, limits: defaultExtractLimits, read: defaultReadLimits, inspect: o.Inspect}, nil
 }
 
 // reader is the Preparer.
@@ -95,6 +92,7 @@ type reader struct {
 	fetch   fetcher
 	limits  extractLimits
 	read    readLimits
+	inspect map[Kind]Inspect
 }
 
 // Shapes of npm names and versions. The registry URL is built from them,
@@ -192,10 +190,10 @@ func checkPair(p Pair) error {
 
 // Prepare implements Preparer.
 func (r *reader) Prepare(ctx context.Context, p Pair, lim Limits) (Prepared, error) {
-	if lim.ChunkBytes < minChunkBytes || lim.MaxChunks < 1 ||
+	if lim.ChunkBytes < MinChunkBytes || lim.MaxChunks < 1 ||
 		lim.ChunkBytes > maxBudgetBytes || lim.MaxChunks > maxBudgetBytes/lim.ChunkBytes {
 		return Prepared{}, badRef("limits %+v: want at least %d bytes per chunk, at least 1 chunk, and at most %d bytes in all",
-			lim, minChunkBytes, maxBudgetBytes)
+			lim, MinChunkBytes, maxBudgetBytes)
 	}
 	if err := checkPair(p); err != nil {
 		return Prepared{}, err
@@ -235,7 +233,13 @@ func (r *reader) Prepare(ctx context.Context, p Pair, lim Limits) (Prepared, err
 	if err != nil {
 		return Prepared{}, err
 	}
-	return assemble(p, sections, unread, removed, lim), nil
+	out := assemble(p, sections, unread, removed, lim)
+	// After the content key is settled: the answer is about the
+	// artifacts, not about what the model reads.
+	if inspect := r.inspect[p.New.Kind]; inspect != nil {
+		out.Inspected = inspect(oldTree.fs(), newTree.fs())
+	}
+	return out, nil
 }
 
 // extract downloads one side's artifact, verifies it and extracts it

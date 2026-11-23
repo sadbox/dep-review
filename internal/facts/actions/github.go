@@ -19,14 +19,21 @@ import (
 type lookup int
 
 const (
-	// failed: GitHub did not answer (a server error, a rate limit, the
-	// network). Nothing is known, which is not the same as "no".
+	// failed: GitHub answered, and the answer is neither the thing asked
+	// for nor a 404 (a 403 that is not a rate limit, a body that is not
+	// what the API documents). Nothing is known, and asking again would
+	// get the same: the fact is left without a source, which is person.
 	failed lookup = iota
 	// found: a 2xx answer.
 	found
 	// missing: a 404. For a public action that is an answer: the tag, the
 	// release, the branch or the repository is not there.
 	missing
+	// unreachable: GitHub was asked and did not answer (a server error, a
+	// rate limit, the network), after the client's own retries. Nothing
+	// is known either, but asking again may tell: the fact is
+	// unavailable, which is a wait.
+	unreachable
 )
 
 // answer is the outcome of one GET.
@@ -37,18 +44,22 @@ type answer struct {
 	status int
 }
 
-// why describes a failed lookup for a fact's Value. It never includes the
-// error text, which can carry GitHub's own message.
+// why describes a failed or unreachable lookup for a fact's Value. It
+// never includes the error text, which can carry GitHub's own message.
 func (a answer) why() string {
-	if a.status != 0 {
+	switch {
+	case a.status != 0:
 		return fmt.Sprintf("GitHub answered HTTP %d", a.status)
+	case a.state == unreachable:
+		return "GitHub did not answer"
 	}
-	return "GitHub did not answer"
+	return "GitHub's answer could not be read"
 }
 
 // get asks one question. The error is non-nil only when the context is
 // done: then the run itself is over and there is no result to report.
-// Every other failure is an answer in the failed state.
+// Every other failure is an answer in the failed or the unreachable
+// state; gh.Unavailable tells the two apart.
 func get(ctx context.Context, c *gh.Client, path string, v any) (answer, error) {
 	err := c.Get(ctx, path, v)
 	switch {
@@ -58,6 +69,8 @@ func get(ctx context.Context, c *gh.Client, path string, v any) (answer, error) 
 		return answer{}, fmt.Errorf("actions: GET %s: %w", path, ctx.Err())
 	case errors.Is(err, gh.ErrNotFound):
 		return answer{state: missing, status: 404}, nil
+	case gh.Unavailable(err):
+		return answer{state: unreachable, status: gh.StatusCode(err)}, nil
 	}
 	return answer{state: failed, status: gh.StatusCode(err)}, nil
 }
@@ -139,8 +152,12 @@ func resolveTag(ctx context.Context, c *gh.Client, name, tag string) (tagAnswer,
 		}
 		if a.state != found {
 			// The ref exists and its tag object could not be read: the
-			// tag's commit is unknown either way.
+			// tag's commit is unknown either way. It is worth asking
+			// again only when GitHub did not answer.
 			t.answer = answer{state: failed, status: a.status}
+			if a.state == unreachable {
+				t.answer.state = unreachable
+			}
 			return t, nil
 		}
 		obj = next.Object
@@ -198,8 +215,8 @@ func plainBranch(name string) bool {
 // reach is whether the new commit is on a branch releases are cut from.
 type reach struct {
 	// state is found when a branch holds the commit, missing when GitHub
-	// answered for every branch tried and none does, failed when a
-	// question went unanswered.
+	// answered for every branch tried and none does, and failed or
+	// unreachable when a question had no usable answer.
 	state  lookup
 	branch string // the branch that holds it, when found
 	detail string // for the fact's Value
@@ -217,8 +234,8 @@ type reach struct {
 // no branch of the repository holds it.
 func findBranch(ctx context.Context, c *gh.Client, name string, repo repoAnswer, releaseBranch, commit string) (reach, error) {
 	switch repo.state {
-	case failed:
-		return reach{state: failed, detail: "the default branch is unknown: " + repo.why()}, nil
+	case failed, unreachable:
+		return reach{state: repo.state, detail: "the default branch is unknown: " + repo.why()}, nil
 	case missing:
 		return reach{state: missing, detail: "the repository was not found"}, nil
 	}
@@ -240,11 +257,16 @@ func findBranch(ctx context.Context, c *gh.Client, name string, repo repoAnswer,
 	if onRelease.holds() {
 		return reach{state: found, branch: releaseBranch}, nil
 	}
-	if onDefault.state == failed {
-		return reach{state: failed, detail: "the comparison with " + def + " failed: " + onDefault.why()}, nil
-	}
-	if onRelease.state == failed {
-		return reach{state: failed, detail: "the comparison with " + releaseBranch + " failed: " + onRelease.why()}, nil
+	// No branch holds it as far as GitHub answered. An answer that could
+	// not be read comes before one that did not arrive: waiting mends
+	// only the second.
+	for _, state := range []lookup{failed, unreachable} {
+		if onDefault.state == state {
+			return reach{state: state, detail: "the comparison with " + def + " failed: " + onDefault.why()}, nil
+		}
+		if onRelease.state == state {
+			return reach{state: state, detail: "the comparison with " + releaseBranch + " failed: " + onRelease.why()}, nil
+		}
 	}
 	return reach{state: missing, detail: "the commit is not reachable from " + def + " or " + releaseBranch}, nil
 }

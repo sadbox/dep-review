@@ -9,9 +9,16 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/artifact"
 )
 
-// specDefaults is section 5 of the spec, value by value.
+// modelKeys are the settings of spec section 11, amendment 10. The spec
+// names them and gives no values; the values are internal/veto's, and a
+// test there keeps the two equal.
+var modelKeys = []string{"model", "effort", "context_tokens", "max_output_tokens", "chunk_bytes", "max_chunks", "request_timeout_seconds", "attempts"}
+
+// specDefaults is section 5 of the spec, value by value, and the model
+// settings as the embedded file has them.
 func specDefaults() Config {
 	return Config{
 		MinAgeHours:        72,
@@ -21,6 +28,15 @@ func specDefaults() Config {
 		WaitDeadlineDays:   7,
 		FastPath:           true,
 		FastPathCompanions: "ride-along",
+
+		Model:                 "claude-opus-5-5",
+		Effort:                "high",
+		ContextTokens:         1_000_000,
+		MaxOutputTokens:       16_000,
+		ChunkBytes:            400_000,
+		MaxChunks:             12,
+		RequestTimeoutSeconds: 600,
+		Attempts:              3,
 		Listed: Lists{
 			GoModules: []string{"golang.org/x/", "google.golang.org/", "cloud.google.com/go",
 				"github.com/aws/", "github.com/Azure/", "github.com/AzureAD/",
@@ -56,7 +72,8 @@ func TestDefaults(t *testing.T) {
 }
 
 // The embedded file is the spec's block: the same keys and the same
-// values, entry for entry, in the same order.
+// values, entry for entry, in the same order. On top of it the file has
+// the model settings of amendment 10, and nothing else.
 func TestDefaultsAreTheSpecs(t *testing.T) {
 	spec, err := os.ReadFile("../../docs/v0.2-spec.md")
 	if err != nil {
@@ -74,15 +91,130 @@ func TestDefaultsAreTheSpecs(t *testing.T) {
 	if !ok {
 		t.Fatal("section 5's json block does not end")
 	}
-	var want, got any
+	var want, got map[string]any
 	if err := json.Unmarshal([]byte(block), &want); err != nil {
 		t.Fatalf("the spec's block: %v", err)
 	}
 	if err := json.Unmarshal(defaultsJSON, &got); err != nil {
 		t.Fatalf("defaults.json: %v", err)
 	}
+	for _, key := range modelKeys {
+		if _, ok := got[key]; !ok {
+			t.Errorf("policy/defaults.json has no %q", key)
+		}
+		if !strings.Contains(string(spec), "`"+key+"`") {
+			t.Errorf("the spec's amendment 10 does not name %q", key)
+		}
+		delete(got, key)
+	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("policy/defaults.json is not the spec's section 5:\n got %v\nwant %v", got, want)
+		t.Errorf("policy/defaults.json without the model settings is not the spec's section 5:\n got %v\nwant %v", got, want)
+	}
+}
+
+// A repository may make a read smaller and may not touch anything else
+// about the model (spec section 11, amendment 10).
+func TestRepoFileAndTheModel(t *testing.T) {
+	c := mustLoad(t, `{"chunk_bytes": 100000, "max_chunks": 4}`)
+	want := specDefaults()
+	want.ChunkBytes, want.MaxChunks = 100_000, 4
+	if !reflect.DeepEqual(c, want) {
+		t.Fatalf("\n got %+v\nwant %+v", c, want)
+	}
+	// The built-in values themselves, and the floors.
+	for _, ok := range []string{
+		`{"chunk_bytes": 400000, "max_chunks": 12}`,
+		`{"chunk_bytes": 256}`,
+		`{"max_chunks": 1}`,
+		`{"chunk_bytes": null, "max_chunks": null, "model": null, "attempts": null}`,
+	} {
+		mustLoad(t, ok)
+	}
+	if minChunkBytes != artifact.MinChunkBytes {
+		t.Errorf("the floor for chunk_bytes is %d, internal/artifact's is %d", minChunkBytes, artifact.MinChunkBytes)
+	}
+
+	for _, tc := range []struct {
+		name, repoFile, wantErr string
+	}{
+		{"a larger chunk", `{"chunk_bytes": 400001}`, "chunk_bytes is 400001, above the built-in 400000"},
+		{"more chunks", `{"max_chunks": 13}`, "max_chunks is 13, above the built-in 12"},
+		{"a chunk no file header fits", `{"chunk_bytes": 255}`, "chunk_bytes is 255, want at least 256"},
+		{"no chunk at all", `{"max_chunks": 0}`, "max_chunks is 0, want at least 1"},
+		{"negative", `{"max_chunks": -1}`, "max_chunks is -1"},
+		{"another model", `{"model": "claude-haiku-4-5"}`, "model is built in"},
+		{"the built-in model, written out", `{"model": "claude-opus-5-5"}`, "model is built in"},
+		{"no model", `{"model": ""}`, "model is built in"},
+		{"less effort", `{"effort": "low"}`, "effort is built in"},
+		{"a larger window", `{"context_tokens": 2000000}`, "context_tokens is built in"},
+		{"a shorter answer", `{"max_output_tokens": 100}`, "max_output_tokens is built in"},
+		{"a shorter timeout", `{"request_timeout_seconds": 1}`, "request_timeout_seconds is built in"},
+		{"one attempt", `{"attempts": 1}`, "attempts is built in"},
+		{"a good key does not carry a bad one", `{"max_chunks": 4, "model": "x"}`, "model is built in"},
+		{"the endpoint is not a setting", `{"base_url": "https://example.com"}`, "unknown field"},
+		{"a string for a number", `{"max_chunks": "4"}`, "cannot unmarshal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load([]byte(tc.repoFile))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %v, want it to mention %q", err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(c, Config{}) {
+				t.Fatalf("an error came with settings: %+v", c)
+			}
+		})
+	}
+}
+
+// The fingerprint is the same for the same settings and differs with any
+// one of them.
+func TestFingerprint(t *testing.T) {
+	base := mustLoad(t, "").Fingerprint()
+	if len(base) != 64 || base != mustLoad(t, "{}").Fingerprint() {
+		t.Fatalf("fingerprint %q is not a stable SHA-256", base)
+	}
+	seen := map[string]string{base: "the defaults"}
+	for _, repoFile := range []string{
+		`{"min_age_hours": 73}`,
+		`{"unread_age_days": 15}`,
+		`{"major_age_days": 15}`,
+		`{"new_name_age_days": 366}`,
+		`{"wait_deadline_days": 8}`,
+		`{"fast_path": false}`,
+		`{"fast_path_companions": "wait"}`,
+		`{"chunk_bytes": 399999}`,
+		`{"max_chunks": 11}`,
+		`{"listed": {"npm": ["esbuild"]}}`,
+		`{"listed": {"go_modules": ["esbuild"]}}`,
+	} {
+		fp := mustLoad(t, repoFile).Fingerprint()
+		if other, dup := seen[fp]; dup {
+			t.Errorf("%s has the fingerprint of %s", repoFile, other)
+		}
+		seen[fp] = repoFile
+	}
+	// Every field is in it: a field added to Config is covered without
+	// anyone remembering to.
+	c := mustLoad(t, "")
+	v := reflect.ValueOf(&c).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		changed := c
+		f := reflect.ValueOf(&changed).Elem().Field(i)
+		switch f.Kind() {
+		case reflect.Int:
+			f.SetInt(f.Int() + 1)
+		case reflect.Bool:
+			f.SetBool(!f.Bool())
+		case reflect.String:
+			f.SetString(f.String() + "x")
+		case reflect.Struct:
+			changed.Listed.Docker = append([]string{"example.com/"}, changed.Listed.Docker...)
+		default:
+			t.Fatalf("Config.%s has a kind this test does not know", v.Type().Field(i).Name)
+		}
+		if changed.Fingerprint() == base {
+			t.Errorf("Config.%s is not in the fingerprint", v.Type().Field(i).Name)
+		}
 	}
 }
 

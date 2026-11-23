@@ -12,20 +12,7 @@ import (
 	"github.com/sadbox/dep-review/internal/allow"
 )
 
-// TextFormat describes Chunk.Text, in words the model can be given. It is
-// part of this package's contract with whoever writes the prompt: every
-// chunk follows it, whatever the artifact's publisher wrote.
-const TextFormat = `The text is a list of changed files. Each chunk stands alone.
-A line that starts with "==" was written by the gate. "== file: PATH (...)" starts a file and says whether it was added or changed, and whether only part of it is shown. A file that continues in another chunk is marked "[part N]" there and here. No other line starts with "==".
-A line that starts with "@@" starts a hunk, as in a unified diff.
-Every other line is the file's own text behind one marker character: "+" for a line added, "-" for a line removed, a space for an unchanged line of context, "\" for git's note about a missing final newline.
-A line that starts with "~" continues the line above it, which was too long to keep in one piece; the character after "~" repeats that line's marker.
-"<0xNN>" and "<U+XXXX>" stand for one control, invisible or direction-changing character that was in the file at that place. Carriage returns are shown that way unless they end a line.`
-
 const (
-	// minChunkBytes is the smallest chunk Prepare accepts. Below it a
-	// file header alone may not fit.
-	minChunkBytes = 256
 	// maxBudgetBytes is the most text Prepare accepts Limits for, chunk
 	// size times chunks: far more than any model reads, and about what
 	// one process should hold.
