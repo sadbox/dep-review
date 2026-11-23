@@ -334,6 +334,7 @@ func TestGatherShapeNo(t *testing.T) {
 		{"unreachable", nil, "entries npm ls does not show"},
 		{"rehash", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
 		{"flagflip", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
+		{"binflip", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
 		{"lockscripts", nil, "head: the lock entry node_modules/date-fns has a member npm does not write, scripts"},
 		{"casekeys", nil, "head: the lock entry node_modules/chart.js has a member npm does not write, Integrity"},
 		{"outofsync", nil, `head: npm ls failed: "{\"code\":\"ELSPROBLEMS\",`},

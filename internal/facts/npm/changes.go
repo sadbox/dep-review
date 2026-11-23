@@ -251,8 +251,8 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 		}
 	}
 
-	// A package that keeps its version must keep everything about it
-	// that decides what is installed or run.
+	// A package that keeps its version must keep what the lock says of
+	// it, apart from the few members entryKeys lets differ.
 	for _, p := range slices.Sorted(maps.Keys(head)) {
 		n := head[p]
 		if n.InBundle {
@@ -263,7 +263,7 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 			continue
 		}
 		if !slices.ContainsFunc(olds, func(b node) bool { return sameInstall(b, n) }) {
-			problems = append(problems, fmt.Sprintf("%s@%s at %s keeps its version, but its source, hash, flags, bundling or installed name is not what the base lock has", show(n.Name), show(n.Version), show(p)))
+			problems = append(problems, fmt.Sprintf("%s@%s at %s keeps its version, but its lock entry or installed name is not the base lock's (only dev, optional, devOptional, peer, deprecated, license, funding and engines may differ)", show(n.Name), show(n.Version), show(p)))
 		}
 	}
 
@@ -331,8 +331,8 @@ func sortedPkgs(copies map[pkg][]node) []pkg {
 
 // sameInstall reports whether two entries for one name and version
 // install the same thing the same way: the lock says the same in every
-// member that decides it (entryKeys), and installs it under the same
-// name.
+// member that must not differ (entryKeys), and installs it under the
+// same name.
 func sameInstall(a, b node) bool {
 	return a.Fixed == b.Fixed && installedName(a.Path) == installedName(b.Path)
 }

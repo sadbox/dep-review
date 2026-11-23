@@ -254,7 +254,8 @@ func TestReadLock(t *testing.T) {
 }
 
 // The lock's own set of members is closed, and one table says which of
-// them an entry that keeps its version must keep.
+// them an entry that keeps its version must keep: all but the eight that
+// have a reason outside the package to differ.
 func TestEntryKeys(t *testing.T) {
 	base := map[string]string{
 		"version":   `"1.0.0"`,
@@ -297,25 +298,31 @@ func TestEntryKeys(t *testing.T) {
 		{"hasShrinkwrap", `true`, isProblem},
 		{"bundleDependencies", `["b"]`, isProblem},
 		{"workspaces", `["packages/*"]`, isProblem},
-		// What the registry may say differently tomorrow about the same
-		// bytes, and what only says which other entries are needed.
-		{"dependencies", `{"b":"^1.0.0"}`, ignored},
-		{"optionalDependencies", `{"b":"^1.0.0"}`, ignored},
-		{"peerDependencies", `{"b":"^1.0.0"}`, ignored},
-		{"peerDependenciesMeta", `{"b":{"optional":true}}`, ignored},
-		{"acceptDependencies", `{"b":"^2.0.0"}`, ignored},
+		// What npm acts on at install without opening the tarball: the
+		// executables it links, and where the package is installed at all.
+		{"bin", `{"a":"cli.js"}`, isProblem},
+		{"os", `["linux"]`, isProblem},
+		{"cpu", `["x64"]`, isProblem},
+		{"libc", `["glibc"]`, isProblem},
+		// The version's own ranges, copied from its package.json like the
+		// four above: one published version has one of each.
+		{"dependencies", `{"b":"^1.0.0"}`, isProblem},
+		{"optionalDependencies", `{"b":"^1.0.0"}`, isProblem},
+		{"peerDependencies", `{"b":"^1.0.0"}`, isProblem},
+		{"peerDependenciesMeta", `{"b":{"optional":true}}`, isProblem},
+		{"acceptDependencies", `{"b":"^2.0.0"}`, isProblem},
+		// The whole allowlist. Roles, which move when the tree around the
+		// package changes.
 		{"dev", `true`, ignored},
 		{"optional", `true`, ignored},
 		{"devOptional", `true`, ignored},
 		{"peer", `true`, ignored},
-		{"os", `["linux"]`, ignored},
-		{"cpu", `["x64"]`, ignored},
-		{"libc", `["glibc"]`, ignored},
-		{"engines", `{"node":">=18"}`, ignored},
+		// A notice the registry adds to a version later.
 		{"deprecated", `"use b"`, ignored},
-		{"funding", `{"url":"https://example.com"}`, ignored},
+		// Metadata that changes nothing that is installed or run.
 		{"license", `"ISC"`, ignored},
-		{"bin", `{"a":"cli.js"}`, ignored},
+		{"funding", `{"url":"https://example.com"}`, ignored},
+		{"engines", `{"node":">=18"}`, ignored},
 		// What npm does not write into an entry, and acts on when it is
 		// there, or writes only into a lock that has no Shape.
 		{"scripts", `{"postinstall":"node steal.js"}`, refused},
@@ -345,10 +352,36 @@ func TestEntryKeys(t *testing.T) {
 			t.Errorf("an entry that keeps its version and changes %s: %s, want %s", tt.member, state, tt.want)
 		}
 	}
-	for member := range entryKeys {
+	allowed := 0
+	for member, decides := range entryKeys {
 		if !tested[member] {
 			t.Errorf("%s is in the table and has no row here", member)
 		}
+		if !decides {
+			allowed++
+		}
+	}
+	// The allowlist does not grow by an edit to the table alone.
+	if allowed != 8 {
+		t.Errorf("%d members may differ on an entry that keeps its version, want the 8 named above", allowed)
+	}
+
+	// A member that must be kept is compared by what it says: one that
+	// changes its value or goes away is a difference like one that is
+	// new, and one that is only written in another order is none.
+	cli, _ := fixed("bin", `{"a":"cli.js","b":"other.js"}`)
+	reordered, _ := fixed("bin", "{\n        \"b\": \"other.js\",\n        \"a\": \"cli.js\"\n      }")
+	repointed, _ := fixed("bin", `{"a":"build/steal.js","b":"other.js"}`)
+	if cli != reordered || cli == repointed || cli == unchanged {
+		t.Errorf("Fixed with a bin = %q, reordered %q, repointed %q; want the first two equal and the third different", cli, reordered, repointed)
+	}
+	// And it is this text that says whether two entries for one version
+	// install the same thing.
+	kept := node{Path: "node_modules/a", Name: "a", Version: "1.0.0", Fixed: cli}
+	moved, gone := kept, kept
+	moved.Fixed, gone.Fixed = repointed, unchanged
+	if !sameInstall(kept, kept) || sameInstall(kept, moved) || sameInstall(kept, gone) {
+		t.Errorf("sameInstall: same %v, repointed bin %v, bin gone %v; want true, false, false", sameInstall(kept, kept), sameInstall(kept, moved), sameInstall(kept, gone))
 	}
 
 	// How a value is laid out is not a change. What it says is.

@@ -48,9 +48,10 @@ type node struct {
 	// HasInstallScript is the lock's flag. npm ci only looks for install
 	// scripts in a package whose entry has it.
 	HasInstallScript bool
-	// Fixed is the lock's own text of the entry's members that decide
-	// what is installed or run (entryKeys). An entry that keeps its
-	// version must keep all of it.
+	// Fixed is the lock's own text of every member of the entry that may
+	// not differ between base and head on an entry that keeps its version
+	// (entryKeys): all but the few that move for a reason outside the
+	// package.
 	Fixed string
 }
 
@@ -143,9 +144,8 @@ func readTree(side string, out lsOutput, lock lockFile) (map[string]node, []stri
 }
 
 // entryKeys is the closed set of members a lock entry may have, and what
-// a change to each means on an entry that keeps its version: true, the
-// member decides what is installed or run and the change is a Shape
-// problem; false, the change is ignored.
+// a difference in each between base and head means on an entry that
+// keeps its version: true, it is a Shape problem; false, it is ignored.
 //
 // The set is what npm 9 to 11 write into a "packages" entry: the fields
 // npm's documentation of package-lock.json lists, and the rest of what
@@ -160,6 +160,18 @@ func readTree(side string, out lsOutput, lock lockFile) (map[string]node, []stri
 // Two members npm does write are left out: "extraneous" (a package
 // nothing depends on) and "devDependencies" (a workspace member). A lock
 // that has either has no Shape.
+//
+// The ignored members are an allowlist of eight, each with a reason that
+// lies outside the package: everything else in an entry is copied from
+// the package.json of the one published version, so on an entry that
+// keeps its version it has no cause to differ, and a difference is a
+// lock that says something about the package which its publisher did
+// not. npm acts on several of them without looking in the tarball: it
+// links the executables "bin" names, and decides from "os", "cpu" and
+// "libc" whether the package is installed at all. Dependabot's own pull
+// requests do not trip over this: in the lock pairs of the owner's
+// recorded ones, none of these members differs on an entry that keeps
+// its version (spec section 11, amendment 43).
 var entryKeys = map[string]bool{
 	"version":   true,
 	"resolved":  true,
@@ -176,28 +188,36 @@ var entryKeys = map[string]bool{
 	"bundleDependencies": true,
 	// Not known to be inert for a dependency, so it must not change.
 	"workspaces": true,
+	// The executables npm links into node_modules/.bin at install, by
+	// name and by the file each runs.
+	"bin": true,
+	// Where npm installs the package and where it leaves it out.
+	"os":   true,
+	"cpu":  true,
+	"libc": true,
+	// The version's own ranges. What they select is in the entries
+	// themselves, so a change here installs nothing by itself; but they
+	// are the published package.json's, and npm takes the tree's edges
+	// from the lock's copy.
+	"dependencies":         true,
+	"optionalDependencies": true,
+	"peerDependencies":     true,
+	"peerDependenciesMeta": true,
+	"acceptDependencies":   true,
 
-	// Ranges: what they select is in the entries themselves.
-	"dependencies":         false,
-	"optionalDependencies": false,
-	"peerDependencies":     false,
-	"peerDependenciesMeta": false,
-	"acceptDependencies":   false,
-	// Why the package is in the tree, and where it can be installed.
+	// Roles: why the package is in this tree. They move when another
+	// package starts or stops depending on it.
 	"dev":         false,
 	"optional":    false,
 	"devOptional": false,
 	"peer":        false,
-	"os":          false,
-	"cpu":         false,
-	"libc":        false,
-	"engines":     false,
-	// Facts about the version that the registry can change after it was
-	// published, and names for files that are in the pinned tarball.
+	// A notice the registry adds to a version after it was published.
 	"deprecated": false,
-	"funding":    false,
-	"license":    false,
-	"bin":        false,
+	// Metadata that changes nothing that is installed or run. "engines"
+	// selects nothing: npm warns about it or, with engine-strict, stops.
+	"license": false,
+	"funding": false,
+	"engines": false,
 }
 
 // lockFile is what the gatherer reads of package-lock.json itself. npm

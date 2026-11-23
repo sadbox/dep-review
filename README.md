@@ -164,6 +164,10 @@ Limits that send real pull requests to a person:
 - An npm update whose tarball adds, changes or drops an install script, a
   `gypfile` or a `binding.gyp`, or whose lock has an entry with a member
   npm 9 to 11 do not write.
+- An npm update whose lock changes what it says of a package that keeps
+  its version (its `bin`, `os`, `cpu`, `libc` or dependency ranges, like
+  its source and hash). Only `dev`, `optional`, `devOptional`, `peer`,
+  `deprecated`, `license`, `funding` and `engines` may differ there.
 - An npm update whose lock at the base commit npm itself reports a
   problem for (a missing or invalid entry, as two lock edits merged
   without a rebase leave behind). The pull request that repairs the lock
