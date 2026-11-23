@@ -57,10 +57,10 @@ var upstreamHosts = map[string]bool{
 
 // Budgets: the history the gate fetches and attaches.
 var (
-	upstreamDepth      = 1000      // commits fetched behind each version
-	maxUpstreamCommits = 150       // commits between the versions, at most
-	maxCommitMessage   = 1500      // bytes of one message shown
-	maxUpstreamRender  = 300 << 10 // bytes of upstream.md
+	upstreamDepth      = 1000    // commits fetched behind each version
+	maxUpstreamCommits = 400     // commits between the versions, at most
+	maxCommitMessage   = 1500    // bytes of one message shown
+	maxUpstreamRender  = 1 << 20 // bytes of upstream.md (read in pieces, like flagged.md)
 	upstreamTimeout    = 4 * time.Minute
 	// upstreamProtocols is GIT_ALLOW_PROTOCOL (tests add file).
 	upstreamProtocols = "https"
