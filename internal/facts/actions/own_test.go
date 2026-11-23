@@ -248,6 +248,11 @@ func TestOwnWorkflowPinRefuses(t *testing.T) {
 		// records: one update cannot be both read and accepted unread.
 		{"also pinned as an action", append(lockedBump(ownRepo, "v1.2.3", "v1.3.0", ownV123, ownV130, ownOwnerID, ownRepoID), lintBumpOwn()...),
 			"pinned both as an action and as an own reusable workflow"},
+		// GitHub takes owner/repo in any case, so the action's line spelled
+		// in another one names the same repository (spec section 11,
+		// amendment 76).
+		{"also pinned as an action, in another case", append(lockedBump("Acme-Infra/CI", "v1.2.3", "v1.3.0", ownV123, ownV130, ownOwnerID, ownRepoID), lintBumpOwn()...),
+			"pinned both as an action and as an own reusable workflow"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pins, problem := readChangeSet(tc.files, ownPolicy())

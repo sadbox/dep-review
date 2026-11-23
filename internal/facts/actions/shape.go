@@ -540,12 +540,17 @@ func (ch *changes) pins() ([]pin, string) {
 	record := func(p pin) string {
 		for i := range pins {
 			q := &pins[i]
-			if q.name != p.name || q.from != p.from || q.to != p.to {
+			if !strings.EqualFold(q.name, p.name) || q.from != p.from || q.to != p.to {
 				continue
 			}
 			if q.own != p.own {
-				// One update would be both read and accepted unread.
+				// One update would be both read and accepted unread. GitHub
+				// takes owner/repo in any case, so the two spellings of a name
+				// are one repository here (spec section 11, amendment 76).
 				return p.where + ": the same repository and versions are pinned both as an action and as an own reusable workflow in this pull request"
+			}
+			if q.name != p.name {
+				continue
 			}
 			if q.oldCommit != p.oldCommit || q.newCommit != p.newCommit {
 				return p.where + ": the same action and versions are pinned to other commits elsewhere in this pull request"
