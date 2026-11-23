@@ -14,39 +14,21 @@
 // npm ls prints only the lock entries it can reach from the root, so the
 // gatherer also requires the lock's "packages" keys to be exactly the
 // paths npm printed. Without that an entry nothing depends on would be
-// installed by npm ci and never seen here.
+// installed by npm ci and never seen here. Reading the keys, it also
+// refuses an entry with a member npm does not write (entryKeys).
 //
-// Everything else comes from registry.npmjs.org: the hash the lock pins
-// (Bound), when the version and the name appeared (FirstSeen,
-// NameCreated), whether the version is still published and not deprecated
-// (Clean), and its install scripts and provenance (NoRegress).
-//
-// Which fact says no for what:
-//
-//   - Shape: any file other than one directory's package.json and
-//     package-lock.json, a lock that is not lockfileVersion 2 or 3, npm
-//     reporting a problem, a lock entry npm did not print, a lock entry
-//     that carries scripts, a package that keeps its version while its
-//     hash, source or flags change, or a package.json change other than
-//     the version range of a package that moved.
-//   - Bound: a source that is not the registry's own tarball for that name
-//     and version (git, file, link, another host, an alias), a hash that
-//     is not one sha512, or a hash the registry does not report.
-//   - NoRegress: a new or changed install script, or a provenance identity
-//     that changed or was lost. The registry and the lock are two of the
-//     three sources for install scripts and are read here. The third is
-//     the tarball's own files, which InspectTarballs reads once the
-//     artifact reader has verified and extracted the tarballs. So the
-//     gatherer never returns a NoRegress: what the registry and the lock
-//     say goes into facts.Result.NoRegressSoFar, and the fetch command
-//     makes the fact from that and the inspection.
+// Everything else comes from registry.npmjs.org, except NoRegress, which
+// the gatherer never returns. The registry and the lock are two of the
+// three sources for install scripts and are read here; the third is the
+// files in the verified tarballs (InspectTarballs), which the gatherer
+// does not have. What the registry and the lock say goes into
+// facts.Result.NoRegressSoFar, and the fetch command makes the fact from
+// that and the inspection.
 //
 // Bundled dependencies are part of their parent's artifact, not updates
 // of their own (spec section 11, amendment 5). They have no source and no
 // hash in the lock: their bytes are the parent's tarball, so the model
-// reads them with it and InspectTarballs looks at their package.json and
-// binding.gyp files like the parent's. Shape still requires that a
-// bundled entry changes only together with the package that carries it.
+// reads them with it and InspectTarballs looks at them like the parent's.
 //
 // Every JSON document is read with encoding/json/v2: names match case
 // sensitively and a duplicate name is an error. npm copies unknown lock
@@ -58,7 +40,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/sadbox/dep-review/internal/advisory"
@@ -67,30 +48,21 @@ import (
 	"github.com/sadbox/dep-review/internal/facts"
 )
 
-// Gatherer is the npm fact gatherer. The zero value runs the npm found on
-// PATH.
+// Gatherer is the npm fact gatherer. It runs the npm found on PATH.
 type Gatherer struct {
-	// NPM is the npm executable to run. Empty means the one on PATH.
-	NPM string
-
 	// tool stands in for the real npm in tests that replay recorded
-	// output. Nil means run NPM.
+	// output.
 	tool tool
 }
 
 var _ facts.Gatherer = Gatherer{}
 
-// Gather reads the change set with npm and gathers the facts.
-//
-// It returns an error only when the run itself failed: the context ended,
-// npm or node is not installed, npm is a version this package was not
-// tested with, or the scratch directory could not be written. A registry
-// or an advisory database that does not answer is not an error: the facts
-// it feeds are unavailable, with what failed in their Value, and the next
-// evaluation asks again.
+// Gather reads the change set with npm and gathers the facts. Besides the
+// errors of every gatherer, it fails when npm or node is not installed or
+// npm is a version this package was not tested with.
 func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
-	if in.HTTP == nil {
-		return facts.Result{}, errors.New("npm: no HTTP client for the registry")
+	if in.HTTP == nil || in.Advisories == nil {
+		return facts.Result{}, errors.New("npm: Input.HTTP and Input.Advisories must be set")
 	}
 	cs, res, err := g.changes(ctx, in.Files, in.Policy)
 	if err != nil {
@@ -113,11 +85,9 @@ func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, err
 // Changes is the half of Gather that asks no registry: the Shape fact,
 // and every update with the facts npm's reading of the two locks and the
 // policy list establish (Known, Listed, NewName, Increase, Major and
-// Indirect).
-// Every other fact is left unset. It runs npm, which reads the lock
-// offline, and returns an error when Gather would for the same reason.
-// Gather starts from the same reading; the replay command runs this half
-// alone.
+// Indirect). Every other fact is left unset. It runs npm, and returns an
+// error when Gather would for the same reason. The replay command runs
+// this half alone.
 func (g Gatherer) Changes(ctx context.Context, files []facts.File, policy allow.Policy) (facts.Result, error) {
 	_, res, err := g.changes(ctx, files, policy)
 	return res, err
@@ -129,7 +99,7 @@ func (g Gatherer) Changes(ctx context.Context, files []facts.File, policy allow.
 func (g Gatherer) changes(ctx context.Context, files []facts.File, policy allow.Policy) (changeSet, facts.Result, error) {
 	t := g.tool
 	if t == nil {
-		real, err := findNPM(g.NPM)
+		real, err := findNPM()
 		if err != nil {
 			return changeSet{}, facts.Result{}, err
 		}
@@ -203,11 +173,9 @@ func lockFacts(u update, policy allow.Policy, lockSource string) allow.UpdateFac
 // facts.Result.NoRegressSoFar). The pair is nil when Bound does not hold:
 // there is then no verified hash to read an artifact against.
 func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, uf *allow.UpdateFacts) (*artifact.Pair, allow.Fact, error) {
-	// One packument answers Bound, FirstSeen, NameCreated, half of Clean
-	// and most of NoRegress. A name the gate will not put in a URL gets no
-	// request at all.
+	// A name the gate will not put in a URL gets no request at all.
 	var doc packumentAnswer
-	if !validName(u.Name) || !validVersion(u.To) || (u.From != "" && !validVersion(u.From)) {
+	if !artifact.ValidNPMName(u.Name) || !artifact.ValidNPMVersion(u.To) || (u.From != "" && !artifact.ValidNPMVersion(u.From)) {
 		doc = packumentAnswer{failed: "the name or a version is not a shape the gate asks the registry about"}
 	} else {
 		var err error
@@ -226,30 +194,14 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 		return nil, allow.Fact{}, err
 	}
 
-	// The advisory database is the other half of Clean and all of
-	// SecurityFix. The checker puts whatever it learned, or failed to
-	// learn, into its facts: unavailable when the database did not
-	// answer, without a source when it could not tell. Its error is the
-	// context's. A fact it left blank, and all three when there is no
-	// checker or it failed some other way, is given a reason here and
-	// stays never gathered, which is person.
-	var adv advisory.Result
-	blank := "no advisory checker was configured"
-	if in.Advisories != nil {
-		res, err := in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To})
-		switch {
-		case ctx.Err() != nil:
-			return nil, allow.Fact{}, ctx.Err()
-		case err != nil:
-			blank = "the advisory checker failed: " + quote(err.Error())
-		default:
-			adv, blank = res, "the advisory database gave no answer"
-		}
+	// The checker's error is the context's. From any other checker it
+	// leaves the facts blank, which is person.
+	adv, err := in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To})
+	if ctx.Err() != nil {
+		return nil, allow.Fact{}, ctx.Err()
 	}
-	for _, f := range []*allow.Fact{&adv.SecurityFix, &adv.NoMalware, &adv.NoNewAdvisory} {
-		if *f == (allow.Fact{}) {
-			*f = allow.Fact{Value: blank}
-		}
+	if err != nil {
+		adv = advisory.Result{}
 	}
 	uf.SecurityFix = adv.SecurityFix
 	uf.Clean = cleanFact(u, doc, source, adv)
@@ -288,7 +240,7 @@ func oneIntegrity(copies []node) (string, bool) {
 		return "", false
 	}
 	first := copies[0].Integrity
-	if _, ok := sha512Of(first); !ok {
+	if _, ok := artifact.NPMIntegrity(first); !ok {
 		return "", false
 	}
 	for _, c := range copies[1:] {
@@ -306,17 +258,6 @@ func summarise(problems []string) string {
 		return problems[0]
 	}
 	return fmt.Sprintf("%s (and %d more)", problems[0], len(problems)-1)
-}
-
-// sortedKeys returns m's keys in order, so everything the gatherer reports
-// is the same from run to run.
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // list renders up to max items for a Value.

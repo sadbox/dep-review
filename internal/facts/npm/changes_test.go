@@ -7,15 +7,18 @@ import (
 	json "encoding/json/v2"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/artifact"
 )
 
 // reg builds a registry entry at a lock path, with a hash that stands for
-// "the bytes of this name and version".
+// "the bytes of this name and version", and a Fixed that stands for what
+// the lock says of them.
 func reg(lockPath, name, version string) node {
 	return node{
 		Path: lockPath, Name: name, Version: version,
-		Resolved:  tarballURL(name, version),
+		Resolved:  artifact.NPMTarballURL(name, version),
 		Integrity: "sha512-" + name + "@" + version,
+		Fixed:     "integrity=sha512-" + name + "@" + version + "\n",
 	}
 }
 
@@ -71,10 +74,12 @@ func TestDiffTrees(t *testing.T) {
 			want: "a 1.0.0->1.0.1",
 		},
 		{
-			name: "two paths with different old versions move to one new version",
-			base: tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "1.1.0")),
-			head: tree(reg("node_modules/a", "a", "1.2.0"), reg("node_modules/x/node_modules/a", "a", "1.2.0")),
-			want: "a 1.0.0->1.2.0, a 1.1.0->1.2.0",
+			// One update has one From. Which of the two this is an update
+			// of is not the gate's to choose.
+			name:    "two paths with different old versions move to one new version",
+			base:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "1.1.0")),
+			head:    tree(reg("node_modules/a", "a", "1.2.0"), reg("node_modules/x/node_modules/a", "a", "1.2.0")),
+			problem: "a@1.2.0 does not replace one version of a at the same lock paths",
 		},
 		{
 			// By name: 1.1.0 was already in the base lock, so moving it
@@ -91,24 +96,36 @@ func TestDiffTrees(t *testing.T) {
 			want: "a 3.0.0->2.0.0",
 		},
 		{
-			name: "a new nested copy is measured against the one version the base had",
-			base: tree(reg("node_modules/a", "a", "1.0.0")),
-			head: tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "2.0.0")),
-			want: "a 1.0.0->2.0.0",
+			// A version at a path the base lock did not have replaced
+			// nothing there, whatever else the base had of the name.
+			name:    "a new nested copy at a new version",
+			base:    tree(reg("node_modules/a", "a", "1.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "2.0.0")),
+			problem: "a@2.0.0 does not replace one version of a at the same lock paths",
 		},
 		{
-			name: "a copy at a new path replaces the one base version that is gone",
-			base: tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "3.0.0")),
-			head: tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/y/node_modules/a", "a", "2.0.0")),
-			want: "a 3.0.0->2.0.0",
+			name:    "a copy at a new path where one base version is gone",
+			base:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "3.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/y/node_modules/a", "a", "2.0.0")),
+			problem: "a@2.0.0 does not replace one version of a at the same lock paths",
 		},
 		{
-			// Nothing says which of 1.0.0 and 3.0.0 the new 2.0.0 stands
-			// in for, so it is measured against the highest.
-			name: "a copy at a new path with nothing gone is measured against the highest base version",
-			base: tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "3.0.0")),
-			head: tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/x/node_modules/a", "a", "3.0.0"), reg("node_modules/y/node_modules/a", "a", "2.0.0")),
-			want: "a 3.0.0->2.0.0",
+			name:    "one copy replaces a version at its path and a second copy is at a new path",
+			base:    tree(reg("node_modules/a", "a", "1.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.1"), reg("node_modules/x/node_modules/a", "a", "1.0.1")),
+			problem: "a@1.0.1 does not replace one version of a at the same lock paths",
+		},
+		{
+			name:    "a version takes the path of another package",
+			base:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/b", "b", "1.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/b", "a", "2.0.0")),
+			problem: "a@2.0.0 does not replace one version of a at the same lock paths",
+		},
+		{
+			name:    "a version takes the path of a bundled entry",
+			base:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/w", "w", "1.0.0"), bundledIn("node_modules/w/node_modules/a", "a", "1.0.0")),
+			head:    tree(reg("node_modules/a", "a", "1.0.0"), reg("node_modules/w", "w", "1.0.1"), reg("node_modules/w/node_modules/a", "a", "2.0.0")),
+			problem: "a@2.0.0 does not replace one version of a at the same lock paths",
 		},
 		{
 			name: "a second copy of an established version at a new path is no update",
@@ -121,7 +138,7 @@ func TestDiffTrees(t *testing.T) {
 			base: tree(reg("node_modules/a", "a", "1.0.0")),
 			head: tree(reg("node_modules/a", "a", "1.0.0"), func() node {
 				n := reg("node_modules/x/node_modules/a", "a", "1.0.0")
-				n.Integrity = "sha512-other"
+				n.Integrity, n.Fixed = "sha512-other", "integrity=sha512-other\n"
 				return n
 			}()),
 			problem: "a@1.0.0 at node_modules/x/node_modules/a keeps its version",
@@ -142,6 +159,7 @@ func TestDiffTrees(t *testing.T) {
 			head: tree(func() node {
 				n := reg("node_modules/a", "a", "1.0.0")
 				n.HasInstallScript = true
+				n.Fixed = "hasInstallScript=true\n" + n.Fixed
 				return n
 			}()),
 			problem: "a@1.0.0 at node_modules/a keeps its version",
@@ -150,17 +168,44 @@ func TestDiffTrees(t *testing.T) {
 			name: "a bundler moves with what it bundles",
 			base: tree(reg("node_modules/w", "w", "1.0.0"), bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")),
 			head: tree(reg("node_modules/w", "w", "1.0.1"), bundledIn("node_modules/w/node_modules/t", "t", "2.1.0"), bundledIn("node_modules/w/node_modules/@s/u", "@s/u", "1.0.0")),
-			want: "w 1.0.0->1.0.1 bundles @s/u,t",
+			want: "w 1.0.0->1.0.1",
 		},
 		{
-			name: "a bundler only declares that it bundles",
-			base: tree(reg("node_modules/w", "w", "1.0.0")),
-			head: tree(func() node {
-				n := reg("node_modules/w", "w", "1.0.1")
-				n.Bundles = true
+			// A bundled entry is its bundler's bytes. One that names a
+			// source or a hash of its own is not, whether or not its
+			// bundler moves.
+			name: "a bundled entry with a source of its own, under a bundler that moves",
+			base: tree(reg("node_modules/w", "w", "1.0.0"), bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")),
+			head: tree(reg("node_modules/w", "w", "1.0.1"), func() node {
+				n := bundledIn("node_modules/w/node_modules/t", "t", "2.1.0")
+				n.Resolved = artifact.NPMTarballURL("t", "2.1.0")
 				return n
 			}()),
-			want: "w 1.0.0->1.0.1 bundles (declared)",
+			problem: "node_modules/w/node_modules/t is marked as bundled and has a source or a hash of its own",
+		},
+		{
+			name: "a bundled entry with a hash of its own, under a bundler that moves",
+			base: tree(reg("node_modules/w", "w", "1.0.0"), bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")),
+			head: tree(reg("node_modules/w", "w", "1.0.1"), func() node {
+				n := bundledIn("node_modules/w/node_modules/t", "t", "2.1.0")
+				n.Integrity = "sha512-t@2.1.0"
+				return n
+			}()),
+			problem: "node_modules/w/node_modules/t is marked as bundled and has a source or a hash of its own",
+		},
+		{
+			name: "a bundled entry with a source of its own, the same at base",
+			base: tree(reg("node_modules/w", "w", "1.0.0"), func() node {
+				n := bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")
+				n.Resolved, n.Integrity = artifact.NPMTarballURL("t", "2.0.0"), "sha512-t@2.0.0"
+				return n
+			}()),
+			head: tree(reg("node_modules/w", "w", "1.0.0"), func() node {
+				n := bundledIn("node_modules/w/node_modules/t", "t", "2.0.0")
+				n.Resolved, n.Integrity = artifact.NPMTarballURL("t", "2.0.0"), "sha512-t@2.0.0"
+				return n
+			}()),
+			problem: "node_modules/w/node_modules/t is marked as bundled and has a source or a hash of its own",
 		},
 		{
 			name:    "a bundled entry changes inside a package that does not",
@@ -204,9 +249,6 @@ func TestDiffTrees(t *testing.T) {
 			var got []string
 			for _, u := range updates {
 				s := u.Name + " " + orNew(u.From) + "->" + u.To
-				if len(u.Bundled) > 0 {
-					s += " bundles " + strings.Join(u.Bundled, ",")
-				}
 				if u.NewName != (u.From == "") {
 					t.Errorf("%s: NewName = %v with From %q", u.Name, u.NewName, u.From)
 				}
@@ -219,25 +261,6 @@ func TestDiffTrees(t *testing.T) {
 				t.Errorf("updates:\n got %s\nwant %s", g, tt.want)
 			}
 		})
-	}
-}
-
-func TestUnpairedFrom(t *testing.T) {
-	tests := []struct {
-		base, head []string
-		want       string
-	}{
-		{[]string{"1.0.0"}, []string{"1.0.0", "2.0.0"}, "1.0.0"},
-		{[]string{"1.0.0", "3.0.0"}, []string{"1.0.0", "2.0.0"}, "3.0.0"},
-		{[]string{"1.0.0", "3.0.0"}, []string{"1.0.0", "2.0.0", "3.0.0"}, "3.0.0"},
-		{[]string{"1.2.0", "1.10.0", "1.9.0"}, []string{"2.0.0"}, "1.10.0"},
-		// A version that cannot be ranked is chosen, so Increase fails.
-		{[]string{"1.0.0", "not-a-version"}, []string{"2.0.0"}, "not-a-version"},
-	}
-	for _, tt := range tests {
-		if got := unpairedFrom(tt.base, tt.head); got != tt.want {
-			t.Errorf("unpairedFrom(%v, %v) = %q, want %q", tt.base, tt.head, got, tt.want)
-		}
 	}
 }
 

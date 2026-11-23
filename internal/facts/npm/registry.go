@@ -3,20 +3,19 @@ package npm
 import (
 	"bytes"
 	"context"
-	"crypto/sha512"
-	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/advisory"
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/artifact"
+	"github.com/sadbox/dep-review/internal/facts"
 )
 
 const (
@@ -75,22 +74,40 @@ type packumentAnswer struct {
 	unreachable bool
 }
 
-// unanswered is the fact for a question a failed answer leaves open:
-// unavailable, which is a wait, when the registry did not answer, and
-// otherwise never gathered, which is person.
-func (a packumentAnswer) unanswered(source string) allow.Fact {
-	if a.unreachable {
+// noDoc is the fact for a question an answer without a document leaves
+// open: a "no" when the registry has no such package, unavailable, which
+// is a wait, when it did not answer, and otherwise never gathered, which
+// is person.
+func (a packumentAnswer) noDoc(source string) allow.Fact {
+	switch {
+	case a.gone:
+		return allow.No("the registry has no package of this name", source)
+	case a.unreachable:
 		return allow.Unavailable(a.failed, source)
 	}
 	return allow.Fact{Value: a.failed}
 }
 
-// unansweredTime is unanswered for a time.
-func (a packumentAnswer) unansweredTime(source string) allow.TimeFact {
-	if a.unreachable {
-		return allow.UnavailableTime(a.failed, source)
+// version returns the registry's document for one version. When there is
+// none to use it reports false, and the fact says why: noDoc's, a "no"
+// for a version that is not published, or never gathered for a document
+// that cannot be read or names something else.
+func (a packumentAnswer) version(version, source string) (versionDoc, allow.Fact, bool) {
+	if a.doc == nil {
+		return versionDoc{}, a.noDoc(source), false
 	}
-	return allow.TimeFact{Value: a.failed}
+	raw, ok := a.doc.Versions[version]
+	if !ok {
+		return versionDoc{}, allow.No(show(version)+" is not on the registry (unpublished)", source), false
+	}
+	var doc versionDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return versionDoc{}, allow.Fact{Value: "the registry's document for " + show(version) + " could not be read: " + quote(err.Error())}, false
+	}
+	if doc.Name != a.doc.Name || doc.Version != version {
+		return versionDoc{}, allow.Fact{Value: "the registry's document for " + show(version) + " names " + show(doc.Name) + "@" + show(doc.Version)}, false
+	}
+	return doc, allow.Fact{}, true
 }
 
 // registry asks registry.npmjs.org, once per name.
@@ -100,7 +117,7 @@ type registry struct {
 }
 
 // packumentURL is where the registry serves name's document. The caller
-// has checked name with validName.
+// has checked name with artifact.ValidNPMName.
 func packumentURL(name string) string {
 	return registryURL + "/" + strings.Replace(name, "/", "%2f", 1)
 }
@@ -110,13 +127,6 @@ func packumentURL(name string) string {
 // not used.
 func attestationURL(name, version string) string {
 	return registryURL + "/-/npm/v1/attestations/" + strings.Replace(name, "/", "%2f", 1) + "@" + version
-}
-
-// tarballURL is where the registry serves name@version's tarball, and so
-// the only "resolved" a lock entry for it may have.
-func tarballURL(name, version string) string {
-	base := name[strings.LastIndex(name, "/")+1:]
-	return registryURL + "/" + name + "/-/" + base + "-" + version + ".tgz"
 }
 
 // errGone is the registry's 404.
@@ -181,47 +191,27 @@ func (r *registry) packument(ctx context.Context, name string) (packumentAnswer,
 	if a, ok := r.packuments[name]; ok {
 		return a, nil
 	}
-	a := r.fetchPackument(ctx, name)
-	if ctx.Err() != nil {
+	var a packumentAnswer
+	var doc packument
+	body, err := r.get(ctx, packumentURL(name), maxPackument)
+	switch {
+	case ctx.Err() != nil:
 		return packumentAnswer{}, ctx.Err()
+	case errors.Is(err, errGone):
+		a.gone = true
+	case err != nil:
+		a.failed, a.unreachable = why(err), errors.Is(err, errUnreachable)
+	default:
+		if err := json.Unmarshal(body, &doc); err != nil {
+			a.failed = "the registry's document could not be read: " + quote(err.Error())
+		} else if doc.Name != name {
+			a.failed = "the registry answered for " + show(doc.Name)
+		} else {
+			a.doc = &doc
+		}
 	}
 	r.packuments[name] = a
 	return a, nil
-}
-
-func (r *registry) fetchPackument(ctx context.Context, name string) packumentAnswer {
-	body, err := r.get(ctx, packumentURL(name), maxPackument)
-	if errors.Is(err, errGone) {
-		return packumentAnswer{gone: true}
-	}
-	if err != nil {
-		return packumentAnswer{failed: why(err), unreachable: errors.Is(err, errUnreachable)}
-	}
-	var doc packument
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return packumentAnswer{failed: "the registry's document could not be read: " + quote(err.Error())}
-	}
-	if doc.Name != name {
-		return packumentAnswer{failed: "the registry answered for " + show(doc.Name)}
-	}
-	return packumentAnswer{doc: &doc}
-}
-
-// version returns the registry's document for one version, and whether
-// the version is published. The string says why a published version's
-// document could not be used.
-func (p *packument) version(version string) (doc versionDoc, published bool, problem string) {
-	raw, ok := p.Versions[version]
-	if !ok {
-		return versionDoc{}, false, ""
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return versionDoc{}, true, "the registry's document for " + show(version) + " could not be read: " + quote(err.Error())
-	}
-	if doc.Name != p.Name || doc.Version != version {
-		return versionDoc{}, true, "the registry's document for " + show(version) + " names " + show(doc.Name) + "@" + show(doc.Version)
-	}
-	return doc, true, ""
 }
 
 // when reads one entry of the packument's "time".
@@ -241,34 +231,16 @@ func (p *packument) when(key string) (time.Time, bool) {
 	return t, true
 }
 
-// sriRE is an integrity that is exactly one sha512 hash. npm accepts a
-// download that matches any hash of a multi-hash string, so a second
-// token would let through bytes other than the ones the gate checked.
-var sriRE = regexp.MustCompile(`^sha512-[A-Za-z0-9+/]{86}==$`)
-
-// sha512Of returns the digest of an integrity string that is exactly one
-// sha512 hash.
-func sha512Of(integrity string) ([]byte, bool) {
-	if !sriRE.MatchString(integrity) {
-		return nil, false
-	}
-	sum, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(integrity, "sha512-"))
-	if err != nil || len(sum) != sha512.Size {
-		return nil, false
-	}
-	return sum, true
-}
-
 // boundFact is the Bound fact: every head lock entry for the update is
 // the registry's own tarball for that name and version, pinned by one
 // sha512, and that hash is the one the registry reports now.
 func boundFact(u update, a packumentAnswer, source string) allow.Fact {
 	// What the lock says, first: this needs no registry.
 	const lockSource = "package-lock.json at head"
-	if !validName(u.Name) || !validVersion(u.To) {
+	if !artifact.ValidNPMName(u.Name) || !artifact.ValidNPMVersion(u.To) {
 		return allow.No("the name or version is not a shape the registry serves", lockSource)
 	}
-	want := tarballURL(u.Name, u.To)
+	want := artifact.NPMTarballURL(u.Name, u.To)
 	integrity := u.New[0].Integrity
 	for _, c := range u.New {
 		switch {
@@ -280,25 +252,16 @@ func boundFact(u update, a packumentAnswer, source string) allow.Fact {
 			return allow.No(fmt.Sprintf("the lock has two different hashes for %s@%s", show(u.Name), show(u.To)), lockSource)
 		}
 	}
-	pinned, ok := sha512Of(integrity)
+	pinned, ok := artifact.NPMIntegrity(integrity)
 	if !ok {
 		return allow.No("the lock's integrity is not exactly one sha512 hash: "+quote(integrity), lockSource)
 	}
 
-	switch {
-	case a.failed != "":
-		return a.unanswered(source)
-	case a.gone:
-		return allow.No("the registry has no package of this name", source)
+	doc, missing, ok := a.version(u.To, source)
+	if !ok {
+		return missing
 	}
-	doc, published, problem := a.doc.version(u.To)
-	switch {
-	case !published:
-		return allow.No(show(u.To)+" is not on the registry (unpublished)", source)
-	case problem != "":
-		return allow.Fact{Value: problem}
-	}
-	reported, ok := sha512Of(doc.Dist.Integrity)
+	reported, ok := artifact.NPMIntegrity(doc.Dist.Integrity)
 	if !ok {
 		return allow.No("the registry's dist.integrity is not one sha512 hash: "+quote(doc.Dist.Integrity), source)
 	}
@@ -314,12 +277,14 @@ func boundFact(u update, a packumentAnswer, source string) allow.Fact {
 // timeFacts are FirstSeen (the registry's own clock for when the version
 // was published) and NameCreated (when the name was first published).
 func timeFacts(u update, a packumentAnswer, source string) (firstSeen, nameCreated allow.TimeFact) {
-	switch {
-	case a.failed != "":
-		return a.unansweredTime(source), a.unansweredTime(source)
-	case a.gone:
-		const gone = "the registry has no package of this name"
-		return allow.TimeFact{Value: gone}, allow.TimeFact{Value: gone}
+	if a.doc == nil {
+		// A package the registry does not have has no time: nothing was
+		// established, as when its answer cannot be used.
+		none := allow.TimeFact{Value: a.noDoc(source).Value}
+		if a.unreachable {
+			none = allow.UnavailableTime(a.failed, source)
+		}
+		return none, none
 	}
 	firstSeen = allow.TimeFact{Value: "the registry has no publication time for " + show(u.To)}
 	if t, ok := a.doc.when(u.To); ok {
@@ -332,31 +297,18 @@ func timeFacts(u update, a packumentAnswer, source string) (firstSeen, nameCreat
 	return firstSeen, nameCreated
 }
 
-// cleanFact is the Clean fact. The registry knows whether the version is
-// still published and whether it is deprecated; the advisory database
-// knows the rest. The three answers are combined with allow.Fact.And: a
-// "no" from any of them is the answer whatever else went unanswered, and
-// the fact is unavailable only when nothing said no, every answer that
-// arrived could be read, and a source did not answer.
+// cleanFact is the Clean fact: the registry's part, and the advisory
+// database's two.
 func cleanFact(u update, a packumentAnswer, source string, adv advisory.Result) allow.Fact {
-	return publishedFact(u, a, source).And(adv.NoMalware).And(adv.NoNewAdvisory)
+	return publishedFact(u, a, source).And(facts.AdvisoryClean(adv))
 }
 
 // publishedFact is the registry's part of Clean: the version is still
 // published and not deprecated.
 func publishedFact(u update, a packumentAnswer, source string) allow.Fact {
-	switch {
-	case a.failed != "":
-		return a.unanswered(source)
-	case a.gone:
-		return allow.No("the registry has no package of this name", source)
-	}
-	doc, published, problem := a.doc.version(u.To)
-	switch {
-	case !published:
-		return allow.No(show(u.To)+" is not on the registry (unpublished)", source)
-	case problem != "":
-		return allow.Fact{Value: problem}
+	doc, missing, ok := a.version(u.To, source)
+	if !ok {
+		return missing
 	}
 	// The registry sets "deprecated" to the publisher's message. An
 	// empty message is how a deprecation is withdrawn.

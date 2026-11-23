@@ -8,6 +8,7 @@ import (
 
 	"github.com/sadbox/dep-review/internal/advisory"
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/artifact"
 )
 
 // fixturePackument reads a recorded registry answer through the client
@@ -30,9 +31,9 @@ func fixturePackument(t *testing.T, name string) packumentAnswer {
 func fromRegistry(t *testing.T, a packumentAnswer, name, from, to string) update {
 	t.Helper()
 	entry := func(version string) []node {
-		doc, published, problem := a.doc.version(version)
-		if !published || problem != "" {
-			return []node{{Path: "node_modules/" + name, Name: name, Version: version, Resolved: tarballURL(name, version), Integrity: otherHash}}
+		doc, _, ok := a.version(version, "registry")
+		if !ok {
+			return []node{{Path: "node_modules/" + name, Name: name, Version: version, Resolved: artifact.NPMTarballURL(name, version), Integrity: otherHash}}
 		}
 		return []node{{Path: "node_modules/" + name, Name: name, Version: version, Resolved: doc.Dist.Tarball, Integrity: doc.Dist.Integrity}}
 	}
@@ -64,8 +65,8 @@ func TestURLs(t *testing.T) {
 		if got := packumentURL(tt.name); got != tt.packument {
 			t.Errorf("packumentURL(%s) = %s, want %s", tt.name, got, tt.packument)
 		}
-		if got := tarballURL(tt.name, tt.version); got != tt.tarball {
-			t.Errorf("tarballURL(%s) = %s, want %s", tt.name, got, tt.tarball)
+		if got := artifact.NPMTarballURL(tt.name, tt.version); got != tt.tarball {
+			t.Errorf("artifact.NPMTarballURL(%s) = %s, want %s", tt.name, got, tt.tarball)
 		}
 		if got := attestationURL(tt.name, tt.version); got != tt.attestation {
 			t.Errorf("attestationURL(%s) = %s, want %s", tt.name, got, tt.attestation)
@@ -76,7 +77,7 @@ func TestURLs(t *testing.T) {
 	}
 	// The recorded registry answers agree with the URLs the gate builds.
 	a := fixturePackument(t, "@tailwindcss/oxide-wasm32-wasi")
-	doc, _, _ := a.doc.version("4.3.5")
+	doc, _, _ := a.version("4.3.5", "registry")
 	if doc.Dist.Tarball != tests[1].tarball {
 		t.Errorf("the registry's dist.tarball is %s, the gate builds %s", doc.Dist.Tarball, tests[1].tarball)
 	}
@@ -100,8 +101,8 @@ func TestSha512Of(t *testing.T) {
 		strings.Replace(chartNew, "sha512", "sha256", 1): false,
 		strings.Replace(chartNew, "sha512", "SHA512", 1): false,
 	} {
-		if _, got := sha512Of(integrity); got != want {
-			t.Errorf("sha512Of(%q) = %v, want %v", integrity, got, want)
+		if _, got := artifact.NPMIntegrity(integrity); got != want {
+			t.Errorf("artifact.NPMIntegrity(%q) = %v, want %v", integrity, got, want)
 		}
 	}
 }
@@ -158,7 +159,7 @@ func TestBoundFact(t *testing.T) {
 		{"a version the registry does not have", with(func(u *update) {
 			u.To = "4.4.99"
 			u.New[0].Version = "4.4.99"
-			u.New[0].Resolved = tarballURL("chart.js", "4.4.99")
+			u.New[0].Resolved = artifact.NPMTarballURL("chart.js", "4.4.99")
 		}), a, "4.4.99 is not on the registry (unpublished)"},
 		{"a name that is not a package name", with(func(u *update) { u.Name = "../x" }), a, "not a shape the registry serves"},
 		{"a version that is not a version", with(func(u *update) { u.To = "4.4.7/../../x" }), a, "not a shape the registry serves"},
@@ -242,7 +243,7 @@ func TestTimeFacts(t *testing.T) {
 func TestCleanFact(t *testing.T) {
 	ok := nothingKnown()
 	// What the advisory checker returns when the database did not answer,
-	// and what gatherUpdate makes of a fact the checker left blank.
+	// and when it could not tell.
 	down := allow.Unavailable("GitHub's Advisory Database did not answer (HTTP 503, after retries)", "GET api.github.com/advisories")
 	blank := allow.Fact{Value: "the advisory database gave no answer"}
 	const (
@@ -352,7 +353,7 @@ func TestNoRegressRealPackages(t *testing.T) {
 		{"the lock flagged both", "chart.js", "4.4.6", "4.4.7", true, true, "install scripts unchanged (none)", true},
 		{"a new name with an install script", "core-js", "", "3.38.1", false, true, "a new dependency with an install script", false},
 		{"a new name without one", "@kurkle/color", "", "0.3.4", false, false, "no install script", true},
-		{"the old version is gone from the registry", "event-stream", "3.3.6", "3.3.5", false, false, "3.3.6 is no longer on the registry", false},
+		{"the old version is gone from the registry", "event-stream", "3.3.6", "3.3.5", false, false, "3.3.6 is not on the registry (unpublished)", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -386,18 +387,18 @@ func TestProvenanceRecorded(t *testing.T) {
 		OwnerID:      "67109815",
 	}
 	for version, integrity := range map[string]string{"4.3.4": tailwindOld, "4.3.5": tailwindNew} {
-		id, problem, state, err := reg.provenance(context.Background(), "tailwindcss", version, integrity)
-		if err != nil || problem != "" || state != holds {
-			t.Fatalf("%s: %q, %v", version, problem, err)
+		id, why, ok := reg.provenance(context.Background(), "tailwindcss", version, integrity, "registry")
+		if !ok {
+			t.Fatalf("%s: %+v", version, why)
 		}
 		if id != want {
 			t.Errorf("%s:\n got %+v\nwant %+v", version, id, want)
 		}
 	}
 	// The statement of one version says nothing about another's bytes.
-	_, problem, _, err := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindOld)
-	if err != nil || !strings.Contains(problem, "not about the tarball the lock pins") {
-		t.Errorf("a statement checked against another hash: %q, %v", problem, err)
+	_, why, ok := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindOld, "registry")
+	if ok || why.OK || !why.Gathered() || !strings.Contains(why.Value, "provenance of 4.3.5: the provenance statement is not about the tarball the lock pins") {
+		t.Errorf("a statement checked against another hash: %+v, want a gathered no", why)
 	}
 }
 
@@ -426,18 +427,17 @@ func TestProvenanceShapes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &registry{client: newFakeRegistry(t, map[string]string{url: tt.body}), packuments: map[string]packumentAnswer{}}
-			id, problem, state, err := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew)
-			if err != nil || state != holds {
-				t.Fatal(err)
-			}
+			id, why, ok := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew, "registry")
 			if tt.want == "" {
-				if problem != "" || id.Repository != "https://github.com/o/r" {
-					t.Errorf("identity = %+v, problem = %q", id, problem)
+				if !ok || why != (allow.Fact{}) || id.Repository != "https://github.com/o/r" {
+					t.Errorf("identity = %+v, %+v", id, why)
 				}
 				return
 			}
-			if !strings.Contains(problem, tt.want) || id != (identity{}) {
-				t.Errorf("identity = %+v, problem = %q; want no identity and %q", id, problem, tt.want)
+			// The registry answered, and what it answered is no identity:
+			// a gathered no.
+			if ok || why.OK || !why.Gathered() || !strings.Contains(why.Value, tt.want) || id != (identity{}) {
+				t.Errorf("identity = %+v, %+v; want no identity and a gathered no saying %q", id, why, tt.want)
 			}
 		})
 	}
@@ -445,18 +445,18 @@ func TestProvenanceShapes(t *testing.T) {
 	// nothing was learned, and asking again may. A 403 is an answer that
 	// cannot be used: nothing was learned, and asking again will not.
 	for _, tt := range []struct {
-		status, want string
-		state        verdict
+		status, want          string
+		gathered, unavailable bool
 	}{
-		{"404", "the registry has no attestations for it", holds},
-		{"500", `the registry did not answer: "HTTP status 500"`, unreachable},
-		{"429", `the registry did not answer: "HTTP status 429"`, unreachable},
-		{"403", "the registry's answer could not be used", unknown},
+		{"404", "the registry has no attestations for it", true, false},
+		{"500", `the registry did not answer: "HTTP status 500"`, false, true},
+		{"429", `the registry did not answer: "HTTP status 429"`, false, true},
+		{"403", "the registry's answer could not be used", false, false},
 	} {
 		reg := &registry{client: newFakeRegistry(t, map[string]string{url: tt.status}), packuments: map[string]packumentAnswer{}}
-		_, problem, state, err := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew)
-		if err != nil || state != tt.state || !strings.Contains(problem, tt.want) {
-			t.Errorf("status %s: problem = %q, state %v, %v; want %q, state %v", tt.status, problem, state, err, tt.want, tt.state)
+		_, why, ok := reg.provenance(context.Background(), "tailwindcss", "4.3.5", tailwindNew, "registry")
+		if ok || why.OK || why.Gathered() != tt.gathered || why.Unavailable != tt.unavailable || !strings.Contains(why.Value, tt.want) {
+			t.Errorf("status %s: %+v; want %q, gathered %v, unavailable %v", tt.status, why, tt.want, tt.gathered, tt.unavailable)
 		}
 	}
 }

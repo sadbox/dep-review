@@ -185,7 +185,7 @@ func realTool(t *testing.T) (realNPM, string) {
 	if _, err := exec.LookPath("npm"); err != nil {
 		t.Skip("npm is not installed")
 	}
-	n, err := findNPM("")
+	n, err := findNPM()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,8 @@ var registryRecords = []struct {
 }
 
 // keptVersionKeys are the fields of a version document kept in a fixture:
-// the ones the gatherer reads, and "license" as one it does not.
+// the ones the gatherer reads, and some it does not ("license", and the
+// two spellings of bundleDependencies).
 var keptVersionKeys = []string{"name", "version", "scripts", "deprecated", "gypfile", "hasInstallScript", "bundleDependencies", "bundledDependencies", "license"}
 
 // TestRecordRegistry writes testdata/registry from the real registry.

@@ -60,48 +60,6 @@ func TestIncreaseAndMajor(t *testing.T) {
 	}
 }
 
-func TestValidNameAndVersion(t *testing.T) {
-	for name, want := range map[string]bool{
-		"chart.js":                        true,
-		"@tailwindcss/oxide-wasm32-wasi":  true,
-		"JSONStream":                      true,
-		"left_pad":                        true,
-		"":                                false,
-		"@scope":                          false,
-		"@scope/":                         false,
-		"@scope/a/b":                      false,
-		"a/b":                             false,
-		"../etc/passwd":                   false,
-		".hidden":                         false,
-		"a b":                             false,
-		"a?x=1":                           false,
-		"a#frag":                          false,
-		"a%2fb":                           false,
-		"-/npm/v1/attestations/x":         false,
-		strings.Repeat("a", maxNameLen):   true,
-		strings.Repeat("a", maxNameLen+1): false,
-	} {
-		if got := validName(name); got != want {
-			t.Errorf("validName(%q) = %v, want %v", name, got, want)
-		}
-	}
-	for version, want := range map[string]bool{
-		"1.2.3":                  true,
-		"1.2.3-beta.1":           true,
-		"0.0.0-insiders.00ef99d": true,
-		"1.2.3+build":            true,
-		"1.2":                    false,
-		"":                       false,
-		"1.2.3/../x":             false,
-		"1.2.3 ":                 false,
-		"latest":                 false,
-	} {
-		if got := validVersion(version); got != want {
-			t.Errorf("validVersion(%q) = %v, want %v", version, got, want)
-		}
-	}
-}
-
 // escaped is the escape quote writes for r. It is built here, and the
 // characters under test are built from their code points, so that this
 // file itself holds nothing but ASCII.

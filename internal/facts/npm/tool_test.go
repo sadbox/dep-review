@@ -58,7 +58,8 @@ func TestRealNPM(t *testing.T) {
 					t.Fatalf("%s: %v", side, err)
 				}
 				out.Stdout = rewriteScratch(out.Stdout)
-				gotNodes, gotProblems := readTree(side, out)
+				lock, _ := readLock(f[1])
+				gotNodes, gotProblems := readTree(side, out, lock)
 				wantNodes, wantProblems := recordedTree(t, name, side)
 				if !maps.Equal(gotNodes, wantNodes) {
 					t.Errorf("%s: npm %s reads %d nodes, the recording has %d, or their contents differ", side, version, len(gotNodes), len(wantNodes))
@@ -100,7 +101,7 @@ func TestRealNPMReadsOnlyTheScratchProject(t *testing.T) {
 	if out.Exit != 0 {
 		t.Fatalf("npm ls exited with %d: %s", out.Exit, out.Stdout)
 	}
-	nodes, problems := readTree("head", out)
+	nodes, problems := readTree("head", out, lockFile{})
 	if len(problems) != 0 || len(nodes) != 5 {
 		t.Fatalf("%d nodes, problems %q; want the 5 packages of the lock", len(nodes), problems)
 	}
@@ -142,6 +143,28 @@ func TestRealNPMWorkspaceHasNoShape(t *testing.T) {
 	// to it is something nothing asks for.
 	if !res.Shape.Gathered() || res.Shape.OK || !strings.Contains(res.Shape.Value, "extraneous: a@1.0.0") || len(res.Updates) != 0 {
 		t.Errorf("Shape = %+v with %d updates, want a gathered no that calls the member extraneous, and no update", res.Shape, len(res.Updates))
+	}
+}
+
+// A bundled entry is no update and is compared with nothing while its
+// bundler moves. npm reads one that names a source without a word (it
+// prints the source and exits 0), so the gate refuses it.
+func TestRealNPMBundledEntryWithASource(t *testing.T) {
+	realTool(t)
+	c := loadCase(t, "bundled")
+	const key = `"node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {`
+	const source = `"resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz", "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",`
+	if !strings.Contains(string(c.headLock), key) {
+		t.Fatal("the bundled case no longer has the entry this test edits")
+	}
+	c.headLock = []byte(strings.Replace(string(c.headLock), key, key+source, 1))
+	res, err := Gatherer{}.Changes(context.Background(), c.files(""), testPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib is marked as bundled and has a source or a hash of its own"
+	if !res.Shape.Gathered() || res.Shape.OK || !strings.Contains(res.Shape.Value, want) || len(res.Updates) != 0 {
+		t.Errorf("Shape = %+v with %d updates, want a gathered no saying %q", res.Shape, len(res.Updates), want)
 	}
 }
 

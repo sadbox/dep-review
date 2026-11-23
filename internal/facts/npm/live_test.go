@@ -60,8 +60,11 @@ func TestLive(t *testing.T) {
 			t.Fatal(err)
 		}
 		res = fetched(t, res)
-		if len(res.Updates) != 1 || !res.Updates[0].Bound.Holds() || res.Updates[0].NoRegress.OK {
-			t.Errorf("updates = %+v, want one that is bound and does not pass NoRegress", res.Updates)
+		// As TestGatherBundled has it from the recorded answers: bundled
+		// dependencies are part of their parent's artifact, not a
+		// regression.
+		if len(res.Updates) != 1 || !res.Updates[0].Bound.Holds() || !res.Updates[0].NoRegress.Holds() {
+			t.Errorf("updates = %+v, want one that is bound and keeps NoRegress", res.Updates)
 		}
 	})
 }

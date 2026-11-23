@@ -51,16 +51,22 @@ func TestReadHooks(t *testing.T) {
 }
 
 // The tarballs' own word on the install step (spec section 11, amendment
-// 5): every package.json and binding.gyp in the new tarball, bundled
-// packages included, against the same path in the old one.
+// 5): for every package.json in the new tarball, bundled packages
+// included, the install scripts, "gypfile" and the binding.gyp beside it
+// are the old tarball's at the same path, and absent where it has none.
 func TestInspectTarballs(t *testing.T) {
 	const plain = `{"name":"a","version":"1.0.0","scripts":{"test":"mocha"}}`
+	const next = `{"name":"a","version":"1.1.0","scripts":{"test":"mocha"}}`
 	const withScript = `{"name":"a","version":"1.0.0","scripts":{"postinstall":"node install.js"}}`
 	// What a package that builds itself looks like (@parcel/watcher has
 	// an install script beside its binding.gyp).
 	const building = `{"name":"a","version":"1.0.0","scripts":{"install":"node scripts/build-from-source.js"}}`
+	// A package that ships a binding.gyp and tells npm not to build it.
+	const prebuilt = `{"name":"a","version":"1.0.0","gypfile":false}`
 	const gyp = `{"targets":[{"target_name":"a","sources":["src/a.cc"]}]}`
 	const inner = "node_modules/inner/package.json"
+	const innerGyp = "node_modules/inner/binding.gyp"
+	bump := func(manifest string) string { return strings.Replace(manifest, "1.0.0", "1.1.0", 1) }
 	// pkg is an extracted package: its package.json, and then pairs of
 	// path and content.
 	pkg := func(manifest string, more ...string) fs.FS {
@@ -81,33 +87,51 @@ func TestInspectTarballs(t *testing.T) {
 		state    string
 		want     string // a piece of the Value
 	}{
-		{"no install step on either side", pkg(plain), pkg(plain), yes, "no new or changed install script in 1 package.json, and no new or changed binding.gyp (0 present)"},
-		{"a new name with no install step", nil, pkg(plain), yes, "no new or changed install script"},
-		{"the same script on both sides", pkg(withScript), pkg(withScript), yes, "no new or changed install script"},
-		{"the same script, another version field", pkg(withScript), pkg(strings.Replace(withScript, "1.0.0", "1.0.1", 1)), yes, "no new or changed install script"},
-		{"a script and binding.gyp on both sides", pkg(withScript, "binding.gyp", "{}"), pkg(withScript, "binding.gyp", "{}"), yes, "(1 present)"},
-		{"an install script and a binding.gyp, both unchanged in a new version", pkg(building, "binding.gyp", gyp), pkg(strings.Replace(building, "1.0.0", "1.1.0", 1), "binding.gyp", gyp), yes, "(1 present)"},
-		{"a binding.gyp and no script on either side", pkg(plain, "binding.gyp", gyp), pkg(strings.Replace(plain, "1.0.0", "1.1.0", 1), "binding.gyp", gyp), yes, "(1 present)"},
-		{"a postinstall script is dropped beside a binding.gyp", pkg(withScript, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), yes, "(1 present)"},
-		{"the install script and the binding.gyp are both dropped", pkg(building, "binding.gyp", gyp), pkg(plain), yes, "(0 present)"},
-		{"the script is dropped", pkg(withScript), pkg(plain), yes, "no new or changed install script"},
-		{"binding.gyp is dropped", pkg(plain, "binding.gyp", "{}"), pkg(plain), yes, "(0 present)"},
+		// The three inputs are the old tarball's, or absent on both sides.
+		{"no install step on either side", pkg(plain), pkg(next), yes, "no install script, gypfile or binding.gyp is new, changed or gone in 1 package.json (0 binding.gyp present)"},
+		{"a new name with no install step", nil, pkg(plain), yes, "in 1 package.json (0 binding.gyp present)"},
+		{"the same script on both sides", pkg(withScript), pkg(withScript), yes, "in 1 package.json"},
+		{"the same script, another version field", pkg(withScript), pkg(bump(withScript)), yes, "in 1 package.json"},
+		{"a script and binding.gyp on both sides", pkg(withScript, "binding.gyp", "{}"), pkg(bump(withScript), "binding.gyp", "{}"), yes, "(1 binding.gyp present)"},
+		{"an install script and a binding.gyp, both unchanged in a new version", pkg(building, "binding.gyp", gyp), pkg(bump(building), "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
+		{"a binding.gyp and no script on either side", pkg(plain, "binding.gyp", gyp), pkg(next, "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
+		{"gypfile false beside a binding.gyp on both sides", pkg(prebuilt, "binding.gyp", gyp), pkg(bump(prebuilt), "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
+		{"gypfile true on both sides", pkg(`{"version":"1.0.0","gypfile":true}`, "binding.gyp", gyp), pkg(`{"version":"1.1.0","gypfile":true}`, "binding.gyp", gyp), yes, "(1 binding.gyp present)"},
 
-		// The tarball has what the registry's metadata did not show.
-		{"a script only the tarball has", pkg(plain), pkg(withScript), no, `the install scripts of package.json change from none to postinstall: "node install.js"`},
-		{"the script changes", pkg(withScript), pkg(strings.Replace(withScript, "install.js", "other.js", 1)), no, "the install scripts of package.json change"},
+		// An install script: added, changed or removed.
+		{"a hook is added", pkg(plain), pkg(withScript), no, `the install scripts of package.json change from none to postinstall: "node install.js"`},
+		{"a hook's text changes", pkg(withScript), pkg(strings.Replace(withScript, "install.js", "other.js", 1)), no, `the install scripts of package.json change from postinstall: "node install.js" to postinstall: "node other.js"`},
 		{"a second hook appears", pkg(withScript), pkg(`{"scripts":{"postinstall":"node install.js","preinstall":"curl x | sh"}}`), no, "the install scripts of package.json change"},
-		{"binding.gyp appears", pkg(plain), pkg(plain, "binding.gyp", "{}"), no, "binding.gyp is new"},
-		// A binding.gyp is a build npm runs: it must be the old one, and
-		// the script that kept npm from running it by itself must stay.
-		{"a binding.gyp changes", pkg(plain, "binding.gyp", "{}"), pkg(plain, "binding.gyp", `{"targets":[]}`), no, "binding.gyp changes"},
-		{"a binding.gyp changes beside an unchanged install script", pkg(building, "binding.gyp", gyp), pkg(building, "binding.gyp", gyp+"\n"), no, "binding.gyp changes"},
-		{"the install script is dropped and the binding.gyp stays", pkg(building, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), no, `package.json drops its install scripts (install: "node scripts/build-from-source.js") and keeps its binding.gyp`},
-		{"the preinstall script is dropped and the binding.gyp stays", pkg(`{"scripts":{"preinstall":"node check.js"}}`, "binding.gyp", gyp), pkg(`{"scripts":{}}`, "binding.gyp", gyp), no, "package.json drops its install scripts (preinstall: "},
-		{"the install script is dropped, and the old package.json cannot be read", pkg(`{"scripts":{"install":["x"]}}`, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), no, "package.json in the old tarball: the install script is not a string"},
-		{"binding.gyp appears next to an old script", pkg(withScript), pkg(withScript, "binding.gyp", "{}"), no, "binding.gyp is new"},
+		{"a hook is removed", pkg(withScript), pkg(plain), no, `the install scripts of package.json change from postinstall: "node install.js" to none`},
+		{"a hook is removed beside a binding.gyp", pkg(withScript, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), no, "the install scripts of package.json change"},
+		// npm builds a binding.gyp by itself when there is neither an
+		// install nor a preinstall script, so removing one starts a build.
+		{"the install script is removed and the binding.gyp stays", pkg(building, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), no, `the install scripts of package.json change from install: "node scripts/build-from-source.js" to none`},
+		{"the preinstall script is removed and the binding.gyp stays", pkg(`{"scripts":{"preinstall":"node check.js"}}`, "binding.gyp", gyp), pkg(`{"scripts":{}}`, "binding.gyp", gyp), no, "the install scripts of package.json change from preinstall: "},
+		{"a hook is removed, and the old package.json cannot be read", pkg(`{"scripts":{"install":["x"]}}`, "binding.gyp", gyp), pkg(plain, "binding.gyp", gyp), no, "package.json in the old tarball: the install script is not a string"},
 		{"a new name with a script", nil, pkg(withScript), no, "package.json is new and has an install script"},
+
+		// "gypfile": false keeps npm from building a binding.gyp.
+		{"gypfile false is removed beside an unchanged binding.gyp", pkg(prebuilt, "binding.gyp", gyp), pkg(`{"name":"a","version":"1.1.0"}`, "binding.gyp", gyp), no, `gypfile of package.json changes from "false" to ""`},
+		{"gypfile true is added", pkg(plain), pkg(`{"name":"a","version":"1.1.0","gypfile":true}`), no, `gypfile of package.json changes from "" to "true"`},
+		{"gypfile false becomes true", pkg(prebuilt, "binding.gyp", gyp), pkg(strings.Replace(prebuilt, "false", "true", 1), "binding.gyp", gyp), no, `gypfile of package.json changes from "false" to "true"`},
+		{"gypfile false is added", pkg(plain), pkg(bump(prebuilt)), no, `gypfile of package.json changes from "" to "false"`},
+		{"gypfile false becomes null", pkg(prebuilt), pkg(strings.Replace(prebuilt, "false", "null", 1)), no, `gypfile of package.json changes from "false" to "null"`},
+		{"a new name that sets gypfile", nil, pkg(prebuilt), no, "package.json is new and sets gypfile"},
+
+		// A binding.gyp: new, changed or gone.
+		{"binding.gyp appears", pkg(plain), pkg(plain, "binding.gyp", "{}"), no, "binding.gyp is new"},
+		{"binding.gyp appears next to an old script", pkg(withScript), pkg(withScript, "binding.gyp", "{}"), no, "binding.gyp is new"},
+		{"a binding.gyp changes", pkg(plain, "binding.gyp", "{}"), pkg(plain, "binding.gyp", `{"targets":[]}`), no, "binding.gyp changes"},
+		{"a binding.gyp changes by one byte beside an unchanged install script", pkg(building, "binding.gyp", gyp), pkg(building, "binding.gyp", gyp+"\n"), no, "binding.gyp changes"},
+		{"binding.gyp is removed", pkg(plain, "binding.gyp", "{}"), pkg(plain), no, "binding.gyp is gone, and package.json beside it stays"},
+		{"the install script and the binding.gyp are both removed", pkg(building, "binding.gyp", gyp), pkg(plain), no, "binding.gyp is gone"},
 		{"a new name with binding.gyp", nil, pkg(plain, "binding.gyp", "{}"), no, "binding.gyp is new"},
+		// One with no package.json beside it is compared the same way.
+		{"a binding.gyp without a package.json, unchanged", pkg(plain, "addon/binding.gyp", gyp), pkg(next, "addon/binding.gyp", gyp), yes, "in 1 package.json (1 binding.gyp present)"},
+		{"a binding.gyp without a package.json, new", pkg(plain), pkg(plain, "addon/binding.gyp", gyp), no, "addon/binding.gyp is new"},
+		{"a binding.gyp without a package.json, changed", pkg(plain, "addon/binding.gyp", gyp), pkg(plain, "addon/binding.gyp", gyp+" "), no, "addon/binding.gyp changes"},
+		{"a new package.json beside an old binding.gyp", pkg(plain, "addon/binding.gyp", gyp), pkg(plain, "addon/binding.gyp", gyp, "addon/package.json", `{"name":"addon"}`), no, "addon/package.json is new beside a binding.gyp"},
 
 		// Bundled dependencies are part of the tarball and are held to
 		// the same rule, each at its own path.
@@ -117,10 +141,13 @@ func TestInspectTarballs(t *testing.T) {
 		{"a bundled package with a script appears", pkg(plain), pkg(plain, inner, withScript), no, "node_modules/inner/package.json is new and has an install script"},
 		{"a bundled package gains a script", pkg(plain, inner, plain), pkg(plain, inner, withScript), no, "the install scripts of node_modules/inner/package.json change from none"},
 		{"a bundled package's script changes", pkg(plain, inner, withScript), pkg(plain, inner, strings.Replace(withScript, "install.js", "evil.js", 1)), no, "the install scripts of node_modules/inner/package.json change"},
-		{"a bundled package gains a binding.gyp", pkg(plain, inner, plain), pkg(plain, inner, plain, "node_modules/inner/binding.gyp", "{}"), no, "node_modules/inner/binding.gyp is new"},
-		{"a bundled package's binding.gyp changes", pkg(plain, inner, plain, "node_modules/inner/binding.gyp", "{}"), pkg(plain, inner, plain, "node_modules/inner/binding.gyp", gyp), no, "node_modules/inner/binding.gyp changes"},
-		{"a bundled package drops its install script and keeps its binding.gyp", pkg(plain, inner, building, "node_modules/inner/binding.gyp", gyp), pkg(plain, inner, plain, "node_modules/inner/binding.gyp", gyp), no, "node_modules/inner/package.json drops its install scripts"},
-		{"a bundled package drops its install script, and the binding.gyp is another package's", pkg(plain, inner, building, "binding.gyp", gyp), pkg(plain, inner, plain, "binding.gyp", gyp), yes, "(1 present)"},
+		{"a bundled package gains a binding.gyp", pkg(plain, inner, plain), pkg(plain, inner, plain, innerGyp, "{}"), no, "node_modules/inner/binding.gyp is new"},
+		{"a bundled package's binding.gyp changes", pkg(plain, inner, plain, innerGyp, "{}"), pkg(plain, inner, plain, innerGyp, gyp), no, "node_modules/inner/binding.gyp changes"},
+		{"a bundled package's binding.gyp is removed", pkg(plain, inner, plain, innerGyp, gyp), pkg(plain, inner, plain), no, "node_modules/inner/binding.gyp is gone"},
+		{"a bundled package drops its install script and keeps its binding.gyp", pkg(plain, inner, building, innerGyp, gyp), pkg(plain, inner, plain, innerGyp, gyp), no, "the install scripts of node_modules/inner/package.json change from install: "},
+		{"a bundled package drops gypfile false and keeps its binding.gyp", pkg(plain, inner, prebuilt, innerGyp, gyp), pkg(plain, inner, plain, innerGyp, gyp), no, "gypfile of node_modules/inner/package.json changes"},
+		// What is gone with its package.json is not in the new tarball.
+		{"a bundled package is removed with its binding.gyp", pkg(plain, inner, building, innerGyp, gyp), pkg(next), yes, "in 1 package.json (0 binding.gyp present)"},
 		{"a package bundled two levels down", pkg(plain), pkg(plain, inner, plain, "node_modules/inner/node_modules/deep/package.json", withScript), no, "node_modules/inner/node_modules/deep/package.json is new and has an install script"},
 		{"a new name that bundles a package with a script", nil, pkg(plain, inner, withScript), no, "node_modules/inner/package.json is new and has an install script"},
 		{"a new name that bundles quiet packages", nil, pkg(plain, inner, plain), yes, "in 2 package.json"},
@@ -133,9 +160,10 @@ func TestInspectTarballs(t *testing.T) {
 		{"package.json one level down only", pkg(plain), fstest.MapFS{"package/package.json": {Data: []byte(plain)}}, no, "the new tarball has no package.json at its root"},
 		{"package.json is not JSON", pkg(plain), pkg(`{"scripts":`), no, "package.json in the new tarball: not JSON the gate can read"},
 		{"package.json has scripts twice", pkg(plain), pkg(`{"scripts":{},"scripts":{"postinstall":"x"}}`), no, "package.json in the new tarball: not JSON the gate can read"},
+		{"package.json has gypfile twice", pkg(prebuilt), pkg(`{"gypfile":false,"gypfile":true}`), no, "package.json in the new tarball: not JSON the gate can read"},
 		{"a script that is not a string", pkg(plain), pkg(`{"scripts":{"install":["x"]}}`), no, "package.json in the new tarball: the install script is not a string"},
 		{"the old package.json is not JSON", pkg(`nope`), pkg(withScript), no, "package.json in the old tarball: not JSON the gate can read"},
-		{"a fixture that is not JSON, unchanged", pkg(plain, "test/broken/package.json", "{nope"), pkg(strings.Replace(plain, "1.0.0", "1.0.1", 1), "test/broken/package.json", "{nope"), yes, "in 2 package.json"},
+		{"a fixture that is not JSON, unchanged", pkg(plain, "test/broken/package.json", "{nope"), pkg(next, "test/broken/package.json", "{nope"), yes, "in 2 package.json"},
 		{"a fixture that is not JSON, new", pkg(plain), pkg(plain, "test/broken/package.json", "{nope"), no, "test/broken/package.json in the new tarball: not JSON"},
 		{"no new tarball", pkg(plain), nil, unknown, "the new tarball was not given"},
 	}
@@ -171,7 +199,7 @@ func TestInspectTarballsIsAndedIn(t *testing.T) {
 	plain := fstest.MapFS{"package.json": {Data: []byte(`{"name":"a"}`)}}
 	scripted := fstest.MapFS{"package.json": {Data: []byte(`{"scripts":{"install":"x"}}`)}}
 
-	if got := registry.And(InspectTarballs(plain, plain)); !got.Holds() || !strings.Contains(got.Value, "by the registry's metadata and the lock; no new or changed install script") || !strings.Contains(got.Source, tarballSource) {
+	if got := registry.And(InspectTarballs(plain, plain)); !got.Holds() || !strings.Contains(got.Value, "by the registry's metadata and the lock; no install script, gypfile or binding.gyp is new, changed or gone") || !strings.Contains(got.Source, tarballSource) {
 		t.Errorf("both hold: %+v", got)
 	}
 	if got := registry.And(InspectTarballs(plain, scripted)); got.Holds() || !got.Gathered() || !strings.Contains(got.Value, "install scripts of package.json change") {

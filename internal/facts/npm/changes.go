@@ -1,16 +1,16 @@
 package npm
 
 import (
+	"cmp"
 	"context"
 	json "encoding/json/v2"
 	"fmt"
+	"maps"
 	"path"
 	"reflect"
 	"regexp"
 	"slices"
 	"strings"
-
-	"golang.org/x/mod/semver"
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/facts"
@@ -29,10 +29,6 @@ type update struct {
 	// lock entry for Name at To. New is never empty.
 	Old []node
 	New []node
-	// Bundled names the dependencies a head entry for Name at To carries
-	// inside its own tarball, or "(declared)" when the entry only says it
-	// bundles some.
-	Bundled []string
 	// Indirect is the Indirect fact: the root package does not name this
 	// package among its own dependencies. readChangeSet sets it from the
 	// two root entries. An update made any other way has none, which is a
@@ -86,8 +82,8 @@ func readChangeSet(ctx context.Context, t tool, files []facts.File) (changeSet, 
 	if err != nil {
 		return changeSet{}, fmt.Errorf("npm ls at head: %w", err)
 	}
-	base, problems := readTree("base", baseOut)
-	head, more := readTree("head", headOut)
+	base, problems := readTree("base", baseOut, baseLock)
+	head, more := readTree("head", headOut, headLock)
 	problems = append(problems, more...)
 	if len(problems) > 0 {
 		return changeSet{problems: problems}, nil
@@ -185,7 +181,7 @@ func splitFiles(files []facts.File) (manifest, lock *facts.File, problem string)
 		return nil, nil, "the pull request changes files other than package.json and package-lock.json: " + list(other, 5)
 	}
 	if len(dirs) > 1 || len(files) > 2 {
-		return nil, nil, "the pull request changes npm files in more than one directory: " + list(sortedKeys(dirs), 5)
+		return nil, nil, "the pull request changes npm files in more than one directory: " + list(slices.Sorted(maps.Keys(dirs)), 5)
 	}
 	if lock == nil {
 		return nil, nil, "package-lock.json did not change, so nothing pins what this pull request installs"
@@ -194,11 +190,10 @@ func splitFiles(files []facts.File) (manifest, lock *facts.File, problem string)
 		if f == nil {
 			continue
 		}
-		// Present and a regular file at both commits. An added or removed
-		// lock, a symlink and a mode change are not version tokens.
-		regular := f.BaseMode == "100644" || f.BaseMode == "100755"
-		if !regular || f.BaseMode != f.HeadMode {
-			return nil, nil, fmt.Sprintf("%s is not the same regular file at both commits (mode %s at base, %s at head)", show(f.Path), quote(f.BaseMode), quote(f.HeadMode))
+		// An added or removed lock, a symlink, an executable bit and a
+		// mode change are not version tokens.
+		if problem := facts.NotRegular(*f); problem != "" {
+			return nil, nil, problem
 		}
 	}
 	return manifest, lock, ""
@@ -218,25 +213,29 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 	baseCopies := copiesByPkg(base)
 	headCopies := copiesByPkg(head)
 
-	// Bundled entries have no source or hash of their own: their bytes
-	// are their bundler's. They may change only together with it.
-	bundled := map[string][]string{} // head path of a bundler -> names it carries
-	for _, p := range sortedKeys(head) {
+	// A bundled entry is never an update: its bytes are its bundler's, so
+	// it gets no Bound, no age and no read of its own. It may change only
+	// together with its bundler, and it names no source: npm writes none
+	// for it, and what npm would install for one that has a source is
+	// not something the gate guesses.
+	for _, p := range slices.Sorted(maps.Keys(head)) {
 		n := head[p]
 		if !n.InBundle {
 			continue
 		}
 		owner, ok := bundler(head, p)
-		if !ok {
+		switch {
+		case !ok:
 			problems = append(problems, fmt.Sprintf("%s is marked as bundled but is inside no package", show(p)))
-			continue
-		}
-		bundled[owner.Path] = append(bundled[owner.Path], show(n.Name))
-		if _, established := baseCopies[pkg{owner.Name, owner.Version}]; established && base[p] != n {
-			problems = append(problems, fmt.Sprintf("the bundled %s changes inside %s@%s, whose version does not", show(p), show(owner.Name), show(owner.Version)))
+		case n.Resolved != "" || n.Integrity != "":
+			problems = append(problems, fmt.Sprintf("%s is marked as bundled and has a source or a hash of its own", show(p)))
+		default:
+			if _, established := baseCopies[pkg{owner.Name, owner.Version}]; established && base[p] != n {
+				problems = append(problems, fmt.Sprintf("the bundled %s changes inside %s@%s, whose version does not", show(p), show(owner.Name), show(owner.Version)))
+			}
 		}
 	}
-	for _, p := range sortedKeys(base) {
+	for _, p := range slices.Sorted(maps.Keys(base)) {
 		n := base[p]
 		if !n.InBundle {
 			continue
@@ -252,9 +251,9 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 		}
 	}
 
-	// A package that keeps its version must keep everything else the
-	// gate reads of it.
-	for _, p := range sortedKeys(head) {
+	// A package that keeps its version must keep everything about it
+	// that decides what is installed or run.
+	for _, p := range slices.Sorted(maps.Keys(head)) {
 		n := head[p]
 		if n.InBundle {
 			continue
@@ -264,79 +263,47 @@ func diffTrees(base, head map[string]node) ([]update, []string) {
 			continue
 		}
 		if !slices.ContainsFunc(olds, func(b node) bool { return sameInstall(b, n) }) {
-			problems = append(problems, fmt.Sprintf("%s@%s at %s keeps its version, but its source, hash, install-script flag, bundling or installed name is not what the base lock has", show(n.Name), show(n.Version), show(p)))
+			problems = append(problems, fmt.Sprintf("%s@%s at %s keeps its version, but its source, hash, flags, bundling or installed name is not what the base lock has", show(n.Name), show(n.Version), show(p)))
 		}
 	}
 
+	baseNames := map[string]bool{}
+	for k := range baseCopies {
+		baseNames[k.name] = true
+	}
 	var updates []update
 	for _, k := range sortedPkgs(headCopies) {
 		if _, established := baseCopies[k]; established {
 			continue
 		}
-		copies := headCopies[k]
-		u := update{Name: k.name, To: k.version, New: copies}
-		for _, c := range copies {
-			if c.Bundles && len(bundled[c.Path]) == 0 {
-				u.Bundled = append(u.Bundled, "(declared)")
-			}
-			u.Bundled = append(u.Bundled, bundled[c.Path]...)
-		}
-		slices.Sort(u.Bundled)
-		u.Bundled = slices.Compact(u.Bundled)
-
-		baseVersions := versionsOf(baseCopies, k.name)
-		if len(baseVersions) == 0 {
+		u := update{Name: k.name, To: k.version, New: headCopies[k]}
+		if !baseNames[k.name] {
 			u.NewName = true
 			updates = append(updates, u)
 			continue
 		}
-		// From is what the same lock path held at base. That is exact,
-		// and it shows a downgrade for what it is.
-		var froms []string
-		for _, c := range copies {
+		// From is what the same lock path held at base: that is exact, and
+		// it shows a downgrade for what it is. Every copy must have
+		// replaced the same version there. For a copy at a path the base
+		// lock did not have (hoisted, nested anew) the gate would have to
+		// choose what it stands in for, and From decides Increase, Major
+		// and what the model reads.
+		for _, c := range u.New {
 			b, ok := base[c.Path]
-			if ok && !b.InBundle && b.Name == k.name && !slices.Contains(froms, b.Version) {
-				froms = append(froms, b.Version)
+			if !ok || b.InBundle || b.Name != k.name || (u.From != "" && u.From != b.Version) {
+				u.From = ""
+				break
 			}
+			u.From = b.Version
 		}
-		if len(froms) == 0 {
-			froms = []string{unpairedFrom(baseVersions, versionsOf(headCopies, k.name))}
+		if u.From == "" {
+			problems = append(problems, fmt.Sprintf("%s@%s does not replace one version of %s at the same lock paths, so the gate cannot say what it is an update of", show(k.name), show(k.version), show(k.name)))
+			continue
 		}
-		slices.Sort(froms)
-		for _, from := range froms {
-			u.From = from
-			u.Old = baseCopies[pkg{k.name, from}]
-			updates = append(updates, u)
-		}
+		u.Old = baseCopies[pkg{k.name, u.From}]
+		updates = append(updates, u)
 	}
 	return updates, problems
-}
-
-// unpairedFrom chooses From for a version that appears at a lock path the
-// base did not have (a new nested copy, or a copy that moved). When
-// exactly one base version of the name is gone, the new one replaced it.
-// Otherwise it is measured against the highest version the base had, so
-// that not knowing what it replaced can only cost a merge: an update that
-// is not above everything the base had fails Increase.
-func unpairedFrom(baseVersions, headVersions []string) string {
-	var gone []string
-	for _, v := range baseVersions {
-		if !slices.Contains(headVersions, v) {
-			gone = append(gone, v)
-		}
-	}
-	if len(gone) == 1 {
-		return gone[0]
-	}
-	sorted := slices.Clone(baseVersions)
-	slices.Sort(sorted)
-	for _, v := range sorted {
-		if !semver.IsValid("v" + v) {
-			// It cannot be ranked. Increase says no to it.
-			return v
-		}
-	}
-	return slices.MaxFunc(sorted, func(a, b string) int { return semver.Compare("v"+a, "v"+b) })
 }
 
 // copiesByPkg indexes the entries that have a source of their own (the
@@ -344,7 +311,7 @@ func unpairedFrom(baseVersions, headVersions []string) string {
 // order.
 func copiesByPkg(nodes map[string]node) map[pkg][]node {
 	out := map[pkg][]node{}
-	for _, p := range sortedKeys(nodes) {
+	for _, p := range slices.Sorted(maps.Keys(nodes)) {
 		n := nodes[p]
 		if n.InBundle {
 			continue
@@ -355,39 +322,19 @@ func copiesByPkg(nodes map[string]node) map[pkg][]node {
 	return out
 }
 
-// versionsOf lists the versions of name in copies, in order.
-func versionsOf(copies map[pkg][]node, name string) []string {
-	var versions []string
-	for k := range copies {
-		if k.name == name {
-			versions = append(versions, k.version)
-		}
-	}
-	slices.Sort(versions)
-	return versions
-}
-
 // sortedPkgs returns the keys of copies by name, then version.
 func sortedPkgs(copies map[pkg][]node) []pkg {
-	keys := make([]pkg, 0, len(copies))
-	for k := range copies {
-		keys = append(keys, k)
-	}
-	slices.SortFunc(keys, func(a, b pkg) int {
-		if c := strings.Compare(a.name, b.name); c != 0 {
-			return c
-		}
-		return strings.Compare(a.version, b.version)
+	return slices.SortedFunc(maps.Keys(copies), func(a, b pkg) int {
+		return cmp.Or(strings.Compare(a.name, b.name), strings.Compare(a.version, b.version))
 	})
-	return keys
 }
 
 // sameInstall reports whether two entries for one name and version
-// install the same thing the same way.
+// install the same thing the same way: the lock says the same in every
+// member that decides it (entryKeys), and installs it under the same
+// name.
 func sameInstall(a, b node) bool {
-	return a.Resolved == b.Resolved && a.Integrity == b.Integrity &&
-		a.HasInstallScript == b.HasInstallScript && a.Bundles == b.Bundles &&
-		installedName(a.Path) == installedName(b.Path)
+	return a.Fixed == b.Fixed && installedName(a.Path) == installedName(b.Path)
 }
 
 // installedName is the name a lock path installs its package under: what
@@ -432,12 +379,12 @@ var rangeRE = regexp.MustCompile(`^(|\^|~|>=|=)([0-9]+(?:\.[0-9]+){0,2})$`)
 // version range of a package in moved, which may change its version and
 // nothing else. The string says what else differs; empty means nothing.
 func sameButRanges(base, head map[string]any, moved map[string]bool) string {
-	for _, key := range sortedKeys(head) {
+	for _, key := range slices.Sorted(maps.Keys(head)) {
 		if _, ok := base[key]; !ok {
 			return "adds " + show(key)
 		}
 	}
-	for _, key := range sortedKeys(base) {
+	for _, key := range slices.Sorted(maps.Keys(base)) {
 		h, ok := head[key]
 		if !ok {
 			return "removes " + show(key)
@@ -454,12 +401,12 @@ func sameButRanges(base, head map[string]any, moved map[string]bool) string {
 		if !bok || !hok {
 			return "changes " + show(key)
 		}
-		for _, name := range sortedKeys(hs) {
+		for _, name := range slices.Sorted(maps.Keys(hs)) {
 			if _, ok := bs[name]; !ok {
 				return fmt.Sprintf("adds %s to %s", show(name), key)
 			}
 		}
-		for _, name := range sortedKeys(bs) {
+		for _, name := range slices.Sorted(maps.Keys(bs)) {
 			hv, ok := hs[name]
 			if !ok {
 				return fmt.Sprintf("removes %s from %s", show(name), key)

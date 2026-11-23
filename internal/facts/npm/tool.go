@@ -21,7 +21,7 @@ import (
 var lsArgs = []string{"ls", "--all", "--json", "--long", "--package-lock-only", "--ignore-scripts", "--offline"}
 
 // lsCommand is lsArgs as shown in a fact's Source.
-const lsCommand = "npm ls --all --json --long --package-lock-only --ignore-scripts --offline"
+var lsCommand = "npm " + strings.Join(lsArgs, " ")
 
 const (
 	// The npm majors whose reading of this package's fixtures is the
@@ -72,13 +72,9 @@ type realNPM struct {
 	searchPath string
 }
 
-// findNPM locates npm (name, or "npm" on PATH when name is empty) and
-// node.
-func findNPM(name string) (realNPM, error) {
-	if name == "" {
-		name = "npm"
-	}
-	path, err := exec.LookPath(name)
+// findNPM locates npm and node on PATH.
+func findNPM() (realNPM, error) {
+	path, err := exec.LookPath("npm")
 	if err != nil {
 		return realNPM{}, fmt.Errorf("npm is not installed: %w", err)
 	}
