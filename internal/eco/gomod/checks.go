@@ -92,6 +92,10 @@ const (
 	codeBlob       = "gomod.encoded-blob"
 	codeBinary     = "gomod.binary-file"
 	codeAsm        = "gomod.assembly-changed"
+	// codeIncludable is a changed text file of a module whose assembly,
+	// C or cgo can include it by name (#include, .incbin), whatever its
+	// extension: it can become compiled code.
+	codeIncludable = "gomod.includable-changed"
 	codeParse      = "gomod.unparseable"
 	// codeNewlyBuilt is an old file that a build newly includes: its whole
 	// text, which no other item may show (its diff can be a constraint
@@ -110,14 +114,14 @@ var checkRoute = map[string]model.Route{
 	// cgo, C and assembly go to a person as on main: what they compile,
 	// include or link is beyond what the gate shows. The reviewer still
 	// assesses them, as triage for that person.
-	codeCgo: model.RouteHuman, codeCSource: model.RouteHuman, codeAsm: model.RouteHuman,
+	codeCgo: model.RouteHuman, codeCSource: model.RouteHuman, codeAsm: model.RouteHuman, codeIncludable: model.RouteHuman,
 }
 
 // triageCodes are the person-routed codes the review may still assess as
 // triage (policy.Triage): their items are in the flagged list and their
 // findings are marked Triage. codeIncomplete covers binaries and decoded
 // bytes that are not text.
-var triageCodes = map[string]bool{codeCgo: true, codeCSource: true, codeAsm: true, codeIncomplete: true}
+var triageCodes = map[string]bool{codeCgo: true, codeCSource: true, codeAsm: true, codeIncludable: true, codeIncomplete: true}
 
 func routeOf(code string) model.Route {
 	if r, ok := checkRoute[code]; ok {
@@ -163,6 +167,12 @@ type report struct {
 	lenient bool
 	// unbuilt are the files declared builds do not compile (declaredUnbuilt).
 	unbuilt map[string]bool
+	// typedDirs counts the files whose walk references the type checker
+	// resolved (typed.go); 0: the walk was by name.
+	typedDirs int
+	// typedTotal and typedFailed: the package directories the walk sent
+	// the type checker, and those it could not check (by name instead).
+	typedTotal, typedFailed int
 	// nb and cur are the new tree and its build analysis (testOnly).
 	nb       *builtSet
 	cur      *ecoutil.Tree
@@ -453,7 +463,7 @@ func excerpt(src []byte, line, around int) string {
 var checkText = map[string]string{
 	codeInit:       "new or changed func init() (runs on import)",
 	codeVarInit:    "new or changed package-level var initializer that calls a function (runs on import)",
-	codeInitCallee: "package-local declaration reached from a func init or a calling var initializer changed (runs on import)",
+	codeInitCallee: "declaration of the module reached from a func init or a calling var initializer changed (runs on import)",
 	codeNewlyBuilt: "file of the old version that a build newly includes (a constraint, file name or package clause changed, or a sibling's did): its whole text enters the build",
 	codeBlank:      `new blank import (import _ "...", imported only for its init side effects)`,
 	codeCSource:    "C/C++/Objective-C/Fortran/SWIG source added or changed (compiled by cgo); a person decides (the review is triage)",
@@ -465,6 +475,7 @@ var checkText = map[string]string{
 	codeBlob:       fmt.Sprintf("new base64/hex-looking string literal longer than %d characters", blobMin),
 	codeBinary:     "binary file added or changed, or newly reachable (testdata/ fixtures excepted unless the module can reach them); it goes to a person, and renderings are " + ecoutil.ForThePerson,
 	codeAsm:        "assembly (.s) file added or changed; a person decides (the review is triage)",
+	codeIncludable: "text file added or changed in a module whose assembly, C or cgo can include any file by name; a person decides (the review is triage)",
 	codeParse:      "Go file the gate could not parse (checked as text only)",
 	codeIncomplete: "flagged item the gate did not show in full as text (every binary, decoded bytes that are not text, anything past a cap or limit)",
 }
@@ -488,11 +499,15 @@ var cgoSourceExts = map[string]bool{
 // Dispatch is on the extension first: a file the toolchain would compile
 // or link gets its check whatever its content looks like (a .go file that
 // looks binary is still parsed, and fails as unparseable).
-func CheckTrees(old, cur *ecoutil.Tree) *report { return checkTrees(old, cur, nil, defaultLister()) }
+func CheckTrees(old, cur *ecoutil.Tree) *report {
+	return checkTrees(old, cur, nil, defaultLister(), "")
+}
 
 // checkTrees is CheckTrees with the fetch's rendering clock (nil: one of
 // its own) and go command.
-func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *report {
+// name is the module path the update names, for a module without a
+// go.mod (the go command requires the two to agree when it has one).
+func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister, name string) *report {
 	h := newReport()
 	if clock != nil {
 		h = newReportWith(clock)
@@ -529,10 +544,23 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 	var bins []string           // flagged binaries; their context is built last
 	var tdBins []string         // testdata binaries, flagged only if reachable
 	unbuilt := declaredUnbuilt(cur, nb)
+	links := moduleLinks(cur) // what in the module can include a file by name
+	var inc includes
+	if links != "" {
+		inc = moduleIncludes(cur)
+	}
 	h.unbuilt, h.nb, h.cur = unbuilt, nb, cur
 	for _, rel := range cur.Files {
 		if unbuilt[rel] {
-			// Declared builds (go_platforms) compile none of it.
+			// Declared builds (go_platforms) compile none of it, but C or
+			// assembly may include it by name.
+			if links != "" && inc.may(rel) && (old == nil || !bytes.Equal(old.ReadFile(rel), cur.ReadFile(rel)) || !old.Has(rel)) {
+				var prev []byte
+				if old != nil && old.Has(rel) {
+					prev = old.ReadFile(rel)
+				}
+				h.sourceFacts(codeIncludable, rel, prev, cur.ReadFile(rel), old != nil && old.Has(rel))
+			}
 			continue
 		}
 		data := cur.ReadFile(rel)
@@ -581,6 +609,10 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 				// flagged, inside it goes through the testdata logic (a
 				// non-test //go:embed can reach it).
 				switch {
+				case !evidence.IsBinary(data) && links != "" && inc.may(rel):
+					// Never compiled as Go for a consumer, but assembly,
+					// C or cgo can include it by name.
+					h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
 				case !evidence.IsBinary(data):
 				case testdata:
 					tdBins = append(tdBins, rel)
@@ -593,6 +625,10 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			scopes(dir)
 			goDirs[dir] = true
 			checkGoFile(h, rel, prev, data, oldShadow[dir], shadow[dir])
+			if links != "" && inc.may(rel) {
+				// A Go file that C can include is C too (a polyglot).
+				h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
+			}
 		case ext == ".s" || ext == ".S" || ext == ".sx":
 			h.sourceFacts(codeAsm, rel, prev, data, hadOld)
 		case cgoSourceExts[ext]:
@@ -613,6 +649,14 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			// (binaries decides: cgo, C, assembly or a .syso in the module,
 			// or a non-test //go:embed pattern that matches it).
 			tdBins = append(tdBins, rel)
+		case links != "" && rel == "go.sum" && !strictGoSum(data):
+			// cmd/go never reads a dependency's go.sum: only hash lines
+			// are plainly not includable code.
+			h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
+		case links != "" && rel != "go.mod" && rel != "go.sum":
+			// Any other text: assembly, C or cgo can #include (or .incbin)
+			// it under any name, so it can be compiled code.
+			h.sourceFacts(codeIncludable, rel, prev, data, hadOld)
 		}
 	}
 	// Deleted .go files change a package too.
@@ -621,14 +665,39 @@ func checkTrees(old, cur *ecoutil.Tree, clock *ecoutil.Clock, lister goLister) *
 			if path.Ext(rel) == ".go" && !strings.HasSuffix(rel, "_test.go") && !cur.Has(rel) {
 				goDirs[path.Dir(rel)] = true
 			}
+			// A deleted header (or any file an include may name) lets the
+			// same include find another file of that name.
+			if links != "" && !cur.Has(rel) && path.Ext(rel) != ".go" && rel != "go.mod" && rel != "go.sum" {
+				if item := safeFile(rel); !h.full(codeIncludable, item) {
+					h.add(codeIncludable, item, true, fmt.Sprintf("deleted (%d bytes): an include of its name may now find another file\n", len(old.ReadFile(rel))))
+				} else {
+					h.skip(codeIncludable, item)
+				}
+			}
 		}
 	}
-	for _, dir := range slices.Sorted(maps.Keys(goDirs)) {
+	// The walk runs from every package's init code over the whole module:
+	// an unchanged init can reach a changed declaration of another package
+	// of the module. Its references are the type checker's (typed.go).
+	modPath := modulePath(cur)
+	if modPath == "" {
+		modPath = name
+	}
+	m := newModInfo(cur, modPath)
+	// Only a package that is, or imports within the module (any file,
+	// any build tags; a //go:linkname pull counts), a changed package can
+	// reach a change from its init code: those are the walk's roots, and
+	// the type checker's packages, a chunk per child.
+	roots := m.reaching(slices.Sorted(maps.Keys(goDirs)))
+	typed, failed := typedWalkChunks(cur, nb, lister, roots, modPath)
+	h.typedDirs, h.typedTotal, h.typedFailed = len(typed), len(roots), failed
+	scope := func(dir string) (*pkgScope, *pkgScope) {
 		scopes(dir)
-		for _, c := range initCalleesChanged(old, cur, dir, oldShadow[dir], shadow[dir], ob, nb) {
-			// The declarations' texts, old and new, are shown whole.
-			h.add(codeInitCallee, path.Join(safeFile(dir), safeIdent(c.name)), true, c.context())
-		}
+		return oldShadow[dir], shadow[dir]
+	}
+	for _, c := range initCalleesModule(old, cur, roots, scope, ob, nb, typed, m) {
+		// The declarations' texts, old and new, are shown whole.
+		h.add(codeInitCallee, path.Join(safeFile(c.dir), safeRef(c.name)), true, c.context())
 	}
 	h.binaries(old, cur, bins, tdBins, h.embeds(old, cur, ob, nb))
 	return h
@@ -810,6 +879,7 @@ type declInfo struct {
 	refs  []string
 	root  bool   // a var spec that is also an init root (compared by codeVarInit instead)
 	file  string // the file it is declared in (sanitized)
+	rel   string // the same, raw
 	line  int
 	label string // for a root: "func init" or "var x, y"
 }
@@ -860,11 +930,19 @@ func identsIn(n ast.Node) []string {
 	return out
 }
 
-func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(string) bool) pkgIndex {
+func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(string) bool, typed typedRefs, m *modInfo) pkgIndex {
+	if m == nil {
+		m = &modInfo{}
+	}
 	ix := pkgIndex{decls: map[string][]declInfo{}}
 	if t == nil {
 		return ix
 	}
+	type filePull struct {
+		rel string
+		l   linkPull
+	}
+	var pulls []filePull
 	for _, rel := range t.Files {
 		if path.Dir(rel) != dir || path.Ext(rel) != ".go" || strings.HasSuffix(rel, "_test.go") || (keep != nil && !keep(rel)) {
 			continue
@@ -876,21 +954,72 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 			continue // checkGoFile reports it as unparseable if it changed
 		}
 		pkgs := map[string]string{}
+		// By name, a qualified pkg.Name whose package is the module's is
+		// that package's ("dir:Name"): the import spec says which, and
+		// the package clause there what it is called. A dot import of
+		// one of the module's packages makes every name possibly its.
+		modDirs := map[string][]string{} // a name may be several directories' package
+		var dotDirs []string
 		for _, imp := range file.Imports {
-			if p, err := strconv.Unquote(imp.Path.Value); err == nil {
-				name := path.Base(p)
-				if imp.Name != nil {
-					name = imp.Name.Name
+			p, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				continue
+			}
+			name := path.Base(p)
+			d, inMod := m.dirOf(p)
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			pkgs[name] = p
+			switch {
+			case !inMod || name == "_":
+			case name == ".":
+				dotDirs = append(dotDirs, d)
+			case imp.Name != nil:
+				modDirs[name] = append(modDirs[name], d)
+			default:
+				// Unnamed: whichever name the package goes by.
+				for _, n := range m.names[d] {
+					modDirs[n] = append(modDirs[n], d)
 				}
-				pkgs[name] = p
 			}
 		}
 		fs := newFileScope(shadow, file, pkgs)
+		for _, l := range linkPulls(src) {
+			pulls = append(pulls, filePull{rel, l})
+		}
+		// withTyped replaces a declaration's by-name references with the
+		// type checker's, when it checked the declaration (typed.go).
+		withTyped := func(n ast.Node, di declInfo) declInfo {
+			if refs, ok := typed[rel][fset.Position(n.Pos()).Offset]; ok {
+				di.refs = refs
+				return di
+			}
+			if len(modDirs) > 0 || len(dotDirs) > 0 {
+				ast.Inspect(n, func(n ast.Node) bool {
+					switch n := n.(type) {
+					case *ast.SelectorExpr:
+						if id, ok := n.X.(*ast.Ident); ok {
+							for _, d := range modDirs[id.Name] {
+								di.refs = append(di.refs, d+":"+n.Sel.Name)
+							}
+						}
+					case *ast.Ident:
+						for _, d := range dotDirs {
+							di.refs = append(di.refs, d+":"+n.Name)
+						}
+					}
+					return true
+				})
+			}
+			return di
+		}
 		info := func(n ast.Node) declInfo {
 			return declInfo{
 				text: string(src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]),
 				refs: identsIn(n),
 				file: safeFile(rel),
+				rel:  rel,
 				line: fset.Position(n.Pos()).Line,
 			}
 		}
@@ -907,7 +1036,7 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 			if d.Body != nil {
 				di.refs = append(di.refs, identsIn(d.Body)...)
 			}
-			return di
+			return withTyped(d, di)
 		}
 		for _, decl := range file.Decls {
 			switch d := decl.(type) {
@@ -919,6 +1048,9 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 					if len(d.Recv.List) == 1 {
 						if typ := recvTypeName(d.Recv.List[0].Type); typ != "" {
 							ix.decls[typ] = append(ix.decls[typ], fi)
+							// The method exactly, for a selection the type
+							// checker resolved to it ("T.M").
+							ix.decls[typ+"."+d.Name.Name] = append(ix.decls[typ+"."+d.Name.Name], fi)
 						}
 					}
 				case d.Name.Name == "init":
@@ -932,7 +1064,7 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 				for _, s := range d.Specs {
 					switch s := s.(type) {
 					case *ast.ValueSpec:
-						di := info(s)
+						di := withTyped(s, info(s))
 						if d.Tok == token.VAR {
 							for _, v := range s.Values {
 								if mayCall(v, fs) {
@@ -960,10 +1092,28 @@ func indexPackage(t *ecoutil.Tree, dir string, shadow *pkgScope, keep func(strin
 						// called through it).
 						di := info(s)
 						di.refs = typeRefs(s)
+						di = withTyped(s, di)
 						ix.decls[s.Name.Name] = append(ix.decls[s.Name.Name], di)
 					}
 				}
 			}
+		}
+	}
+	// A //go:linkname makes a local name another package's symbol, or
+	// the reverse: following either follows it there (every declaration
+	// of the name, whichever file holds the directive).
+	for _, p := range pulls {
+		d, ok := m.dirOf(p.l.pkg)
+		if !ok {
+			continue
+		}
+		for i := range ix.decls[p.l.local] {
+			ix.decls[p.l.local][i].refs = append(ix.decls[p.l.local][i].refs, d+":"+p.l.name)
+		}
+	}
+	for name, refs := range m.pushes[dir] {
+		for i := range ix.decls[name] {
+			ix.decls[name][i].refs = append(ix.decls[name][i].refs, refs...)
 		}
 	}
 	return ix
@@ -998,7 +1148,7 @@ func recvTypeName(e ast.Expr) string {
 // Each result carries the first path the walk found from a root to it
 // (breadth first, so a shortest one) and the declarations under its name
 // on both sides, which is what the reviewer is shown.
-func initCalleesChanged(old, cur *ecoutil.Tree, dir string, oldShadow, shadow *pkgScope, ob, nb *builtSet) []calleeHit {
+func initCalleesModule(old, cur *ecoutil.Tree, dirs []string, scope func(string) (*pkgScope, *pkgScope), ob, nb *builtSet, typed typedRefs, m *modInfo) []calleeHit {
 	// The old side holds only files the new tree has and builds the same
 	// way: a renamed or newly unconstrained file's declarations are new.
 	// An old declaration is credited only from a file every configuration
@@ -1016,60 +1166,101 @@ func initCalleesChanged(old, cur *ecoutil.Tree, dir string, oldShadow, shadow *p
 		oldKeep := keep
 		keep = func(rel string) bool { return keepNew(rel) && oldKeep(rel) }
 	}
-	o, n := indexPackage(old, dir, oldShadow, keep), indexPackage(cur, dir, shadow, keepNew)
-	type step struct {
-		name string
-		from *step     // nil at a root's direct reference
-		root *declInfo // the root this walk started at
+	type index struct{ o, n pkgIndex }
+	idx := map[string]*index{}
+	get := func(dir string) *index {
+		if x := idx[dir]; x != nil {
+			return x
+		}
+		os, ns := scope(dir)
+		x := &index{indexPackage(old, dir, os, keep, nil, m), indexPackage(cur, dir, ns, keepNew, typed, m)}
+		idx[dir] = x
+		return x
 	}
-	seen := map[string]bool{}
+	type step struct {
+		dir, name string
+		from      *step     // nil at a root's direct reference
+		root      *declInfo // the root this walk started at
+	}
+	// at resolves a reference made in dir: "d:name" is package d's (when
+	// it is one of the module's), anything else dir's own.
+	at := func(dir, ref string) (string, string) {
+		if d, n, ok := strings.Cut(ref, ":"); ok {
+			if d, ok := m.dir(d); ok {
+				return d, n
+			}
+		}
+		return dir, ref
+	}
+	seen := map[[2]string]bool{}
 	var queue []*step
-	for i := range n.roots {
-		for _, ref := range n.roots[i].refs {
-			queue = append(queue, &step{name: ref, root: &n.roots[i]})
+	for _, dir := range dirs {
+		x := get(dir)
+		for i := range x.n.roots {
+			for _, ref := range x.n.roots[i].refs {
+				d, n := at(dir, ref)
+				queue = append(queue, &step{dir: d, name: n, root: &x.n.roots[i]})
+			}
 		}
 	}
 	var changed []calleeHit
 	for len(queue) > 0 {
 		s := queue[0]
 		queue = queue[1:]
-		if seen[s.name] {
+		if seen[[2]string{s.dir, s.name}] {
 			continue
 		}
-		seen[s.name] = true
+		seen[[2]string{s.dir, s.name}] = true
+		x := get(s.dir)
 		// A var root's own spec is compared by codeVarInit; every other
 		// declaration under the name (a method, a declaration in another
 		// file or under other build tags) is compared and followed here.
-		ds := nonRoots(n.decls[s.name])
-		if len(ds) == 0 && len(nonRoots(o.decls[s.name])) == 0 {
+		ds := nonRoots(x.n.decls[s.name])
+		if len(ds) == 0 && len(nonRoots(x.o.decls[s.name])) == 0 {
 			continue
 		}
-		if !sameDecls(nonRoots(o.decls[s.name]), ds) {
+		if !sameDecls(nonRoots(x.o.decls[s.name]), ds) {
 			var chain []string
 			for p := s; p != nil; p = p.from {
-				chain = append(chain, safeIdent(p.name))
+				name := safeRef(p.name)
+				prev := path.Dir(s.root.rel)
+				if p.from != nil {
+					prev = p.from.dir
+				}
+				if p.dir != prev {
+					name = safeFile(p.dir) + ":" + name
+				}
+				chain = append(chain, name)
 			}
 			slices.Reverse(chain)
 			r := s.root
 			changed = append(changed, calleeHit{
+				dir:  s.dir,
 				name: s.name,
 				path: fmt.Sprintf("%s (%s:%d) -> %s", r.label, r.file, r.line, strings.Join(chain, " -> ")),
-				old:  nonRoots(o.decls[s.name]),
+				old:  nonRoots(x.o.decls[s.name]),
 				cur:  ds,
 			})
 		}
 		for _, d := range ds {
 			for _, ref := range d.refs {
-				queue = append(queue, &step{name: ref, from: s, root: s.root})
+				dd, n := at(s.dir, ref)
+				queue = append(queue, &step{dir: dd, name: n, from: s, root: s.root})
 			}
 		}
 	}
-	slices.SortFunc(changed, func(a, b calleeHit) int { return strings.Compare(a.name, b.name) })
+	slices.SortFunc(changed, func(a, b calleeHit) int {
+		if c := strings.Compare(a.dir, b.dir); c != 0 {
+			return c
+		}
+		return strings.Compare(a.name, b.name)
+	})
 	return changed
 }
 
 // calleeHit is one changed declaration reached from init.
 type calleeHit struct {
+	dir      string // its package directory
 	name     string
 	path     string // root -> ... -> name
 	old, cur []declInfo
@@ -1079,7 +1270,7 @@ type calleeHit struct {
 // old and new. Identical texts on both sides are shown once.
 func (c calleeHit) context() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "reached at init (by name; the walk does not follow calls into other packages): %s\n", c.path)
+	fmt.Fprintf(&b, "reached at init (resolved by the type checker where it could, by name where not; across the module's packages): %s\n", c.path)
 	same := map[string]bool{}
 	for _, d := range c.old {
 		for _, e := range c.cur {

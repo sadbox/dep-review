@@ -288,13 +288,13 @@ func TestFetchScenarios(t *testing.T) {
 					t.Errorf("update %+v", u)
 				}
 				names := strings.Join(ev.names(), "\n")
-				for _, want := range []string{"summary.md", "source.diff", "dist.txt", "npm-packages.txt", "release-notes.md", "commits.txt"} {
+				for _, want := range []string{"summary.md", "source.diffs.md", "source.diff/D", "dist.txt", "npm-packages.txt", "release-notes.md", "commits.txt"} {
 					if !strings.Contains(names, want) {
 						t.Errorf("evidence lacks %s:\n%s", want, names)
 					}
 				}
 				for _, n := range ev.names() {
-					if strings.HasSuffix(n, "source.diff") && strings.Contains(string(ev.files[n].content), "dist/index.js") {
+					if strings.Contains(n, "source.diff/D") && strings.Contains(string(ev.files[n].content), "dist/index.js") {
 						t.Error("source diff includes dist/")
 					}
 					if strings.HasSuffix(n, "release-notes.md") && !ev.files[n].untrusted {

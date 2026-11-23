@@ -228,7 +228,7 @@ func renderComment(d commentData) string {
 // too long.
 func renderStuck(head string, m marker) string {
 	return m.String() + "\n### dep-review: no decision\n\n" +
-		"The gate has not decided on head " + code(head) + " within two hours. " +
+		"The gate has not decided on head " + code(head) + " within four hours. " +
 		"Check the dep-review workflow runs for this pull request, or re-run the trigger.\n"
 }
 

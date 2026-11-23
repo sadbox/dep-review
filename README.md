@@ -26,8 +26,8 @@ deterministic check. It cannot push, change workflows or reach other repos.
 
 ```
 PR opened/synchronized
-  └─ caller's dep-review-trigger (no-op, every PR)
-       └─ workflow_run → gate.yml
+  └─ caller's dep-review-trigger (no-op, every PR; its job runs for Dependabot's)
+       └─ workflow_run → gate.yml (nothing runs when the trigger's job was skipped)
             build    build the gate from its own pinned commit
             classify Dependabot's alone? head still current?        (read-only)
             fetch    real change set, downloads, diffs, findings,   (read-only)
@@ -61,7 +61,7 @@ a newer head can never be merged on an old verdict.
 
 The Go checks flag code that runs on import (a new or changed `func init`,
 a package-level initializer that calls code, any changed declaration that
-init code reaches by name within its package), code the compiler does not
+init code reaches within its package), code the compiler does not
 check (cgo and its preamble, C/C++/assembly sources, `//go:linkname`), new
 risky or blank imports, every `//go:linkname`, `//go:cgo_*` and
 `//go:generate` directive in a changed file, newly embedded files,
@@ -109,6 +109,16 @@ What is flagged:
 - a changed binary under `testdata/` (never built by itself) when the new
   tree embeds it, or when the module has cgo, C or assembly sources or a
   `.syso` (which can link or include any file without naming it);
+- in such a module, any other changed text file except `go.mod`
+  (`gomod.includable-changed`), whatever its extension. Assembly, C or
+  cgo can `#include` or `.incbin` it by name, so it can be compiled code.
+  A `.go` file (built, unbuilt or a test) counts only when an include
+  names it, or any include is computed (a macro, `-include`); a `go.sum`
+  counts unless every line is a hash line, since cmd/go never reads a
+  dependency's go.sum. A deleted file counts too, because the same
+  include may now find another file of that name. It routes like
+  assembly: to a person, with the review as triage, or reviewed for
+  well-known modules;
 - a file the new tree newly embeds, changed or not: what each package
   embeds is `go list`'s `EmbedFiles` in both trees (the union over every
   `go tool dist list` platform, cgo on and off), compared per package. An
@@ -141,10 +151,47 @@ Unparseable Go files, truncated evidence and a module with more flagged
 items than a review can take also go to a person. Module diffs do not
 detect renames.
 
+#### The init walk
+
+The walk from init code follows each reached declaration's references as
+`go/types` resolves them. It type-checks the package once per distinct
+set of files go/build builds, with the module's own imports from the tree
+and the standard library from GOROOT's source (cgo off). It runs in a
+memory-limited child with a timeout. The rules:
+- a package-level object of the package is followed;
+- a local, a parameter, a field, an import or a definition is not;
+- a method selected on a concrete type of the package reaches that
+  type's method only;
+- one on another package's concrete type (`sync.Pool.Put`) reaches no
+  code of this package;
+- one on an interface reaches every method of that name;
+- reaching a type still reaches all its methods, since a value handed to
+  another package can have any of them called;
+- anything the checker can't resolve is followed by name, as before:
+  imports outside the module and the standard library, type errors, and
+  files no configuration builds.
+
+The walk runs over the whole module from the init code of every package
+that is, or imports within the module, a changed package (any file, any
+build tags; a `//go:linkname` pull counts as an import). A qualified use
+of another of the module's packages (`b.F`, a method of `b.T`, a
+dot-imported name) is followed into that package, with or without the
+type checker: the import spec names the package, and its package clause
+says what it is called. A `//go:linkname` pull is followed to its
+target. An unchanged init can therefore reach a changed function of
+another package. Calls into other modules aren't followed. A module
+without a go.mod uses the update's module path.
+
+The type checker runs on those packages 24 directories per child, with a
+six-minute budget per module. A chunk that fails or runs past the budget
+is walked by name, and the summary says how many directories the type
+checker resolved. On aws-sdk-go with its core `aws` package changed, all
+724 directories type-check in 70 seconds.
+
 #### Navigable diffs
 
-A Go module's diff is split per file, and each file's diff is its own
-evidence file. The parts have caps of their own: 2 MB each, 50 MB
+A Go module's, npm package's or Python package's diff is split per file,
+and each file's diff is its own evidence file. The parts have caps of their own: 2 MB each, 50 MB
 together. A gate-written `diffs.md` index lists every changed file with an
 ID. Every file is required reading unless the go command's own rules say
 no consumer build reads it: a `_test.go` file that nothing embeds, in a
@@ -162,8 +209,47 @@ required ID, or a person decides. A person also decides when:
 Parts are named by ID. The fetch job ships the evidence's checksums as a
 `SHA256SUMS` manifest inside the artifact and outputs only that file's
 sum, which review and publish verify first.
-The flagged-items file uses the same caps. Other ecosystems keep the
-single-file limits (400 KB a file, 4 MB in all).
+The flagged-items file uses the same caps. For npm and Python packages every file is required, since whatever is
+installed can be loaded. A diff that is binary on either side goes to a person
+(`<eco>.binary-diff`), since git shows no content for it. Lines longer
+than 2,000 bytes are wrapped in the part after escaping, because the
+reviewer's reader cuts longer ones. A continuation starts with `~` and
+the line's own diff marker; git starts no diff line with `~`, so source
+text cannot pose as one. A lone CR, and U+2028, U+2029 and U+0085, are
+escaped like control characters, since JavaScript or Python end a line
+there and the reader does not. A GitHub Action's first-party source diff
+(everything but its bundle directories and lockfiles) is navigable too,
+one required part per file. Its other evidence (action.yml, lockfile
+changes, bundle attribution) and Docker's keep the single-file limits
+(400 KB a file, 4 MB in all).
+
+#### Split reviews
+
+When the required reading passes about 900 KB, one reviewer run doesn't
+finish it. homelab-configs#127 read 37 of about 90 required diffs in 80
+turns. Such a review is split into passes, each a full sandboxed run with
+its own budget:
+- pass 1 assesses every flagged item and reads as many required diffs as
+  fit;
+- each later pass reads the next share of required diffs;
+- a final pass, given every pass's report as data, decides on the whole.
+
+The merged verdict is the worst of them all, with every flag, pass 1's
+items, every reading pass's `examined` and the final pass's summary.
+Publish checks it like a single verdict, with two more rules:
+- an item any pass marks suspicious or unclear makes the review unsure;
+- so do items from a pass that wasn't asked to assess them.
+
+Diffs are packed largest first. Reading that doesn't fit six passes of
+900 KB is refused, and a person decides: it is never piled onto the last
+pass, because the attacker picks the sizes and the order. A pass with no
+verdict also leaves no verdict at all. The final pass sees which files
+each pass read, so it can look for something one share defines and
+another uses.
+
+Each pass has the per-run limits (`max_model_requests`, 80 turns, 20
+minutes), and all of them together get 140 minutes. A split review costs
+up to seven runs.
 
 #### Upstream commits
 
@@ -177,6 +263,8 @@ that commit, as the go command does, and `dirhash` must give the go.sum
 hash. A mismatch is `gomod.upstream-mismatch`, which goes to a person.
 When upstream history is verified, a benign item that has commits listed
 counts only if the verdict cites at least one of them and nothing else.
+The history is read in pieces like the flagged-items file, up to 1 MB,
+and counts toward the 4 MB of required reading.
 The reviewer is told to read each message against the diff, since the
 repository's owner wrote it. A message that doesn't fit makes the item
 unclear.
@@ -187,7 +275,7 @@ these hold:
 - the proxy recorded no origin, or the repository isn't git;
 - the host isn't github.com, go.googlesource.com or gitlab.com;
 - the two versions share no history within 1000 commits;
-- more than 150 commits lie between them;
+- more than 400 commits lie between them;
 - the attachment would pass its size budget;
 - the fetch fails.
 

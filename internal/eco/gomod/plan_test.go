@@ -59,7 +59,7 @@ func planCodes(t *testing.T, platforms, tags string, old, cur map[string]string)
 	if old != nil {
 		o = writeTree(t, old)
 	}
-	h := checkTrees(o, writeTree(t, cur), nil, goLister{goBin: defaultLister().goBin, plan: plan})
+	h := checkTrees(o, writeTree(t, cur), nil, goLister{goBin: defaultLister().goBin, plan: plan}, "")
 	var got []string
 	for _, f := range h.findings("m") {
 		got = append(got, f.Code)
@@ -113,6 +113,9 @@ func TestDeclaredBuilds(t *testing.T) {
 		{"C source, no cgo in the build", "linux/amd64", "", base(map[string]string{"csrc/x.c": "int f(void){return 0;}\n"}), base(map[string]string{"csrc/x.c": "int f(void){return 1;}\n"}), nil},
 		{"C in a package without cgo", "linux/amd64", "", base(map[string]string{"x.c": "int f(void){return 0;}\n"}), base(map[string]string{"x.c": "int f(void){return 1;}\n"}), nil},
 		{"C source, cgo in the build", "linux/amd64", "", base(map[string]string{"x.c": "int f(void){return 0;}\n", "c.go": "package m\n\nimport \"C\"\n"}), base(map[string]string{"x.c": "int f(void){return 1;}\n", "c.go": "package m\n\nimport \"C\"\n"}), []string{codeCSource}},
+		{"unbuilt Go file assembly includes", "linux/amd64", "", base(map[string]string{"f_linux_amd64.s": "#include \"x_windows.go\"\n" + asm, "x_windows.go": "package m\n"}), base(map[string]string{"f_linux_amd64.s": "#include \"x_windows.go\"\n" + asm, "x_windows.go": "package m\n\nvar X = 1\n"}), []string{codeAsm, codeIncludable}},
+		// (The unchanged assembly is checked again: its package's Go changed.)
+		{"unbuilt Go file nothing includes", "linux/amd64", "", base(map[string]string{"f_linux_amd64.s": asm, "x_windows.go": "package m\n"}), base(map[string]string{"f_linux_amd64.s": asm, "x_windows.go": "package m\n\nvar X = 1\n"}), []string{codeAsm}},
 		{"unbuilt assembly a built one includes", "linux/amd64", "", base(map[string]string{"f_linux_amd64.s": "#include \"g_plan9_amd64.s\"\n" + asm, "g_plan9_amd64.s": asm}), base(map[string]string{"f_linux_amd64.s": "#include \"g_plan9_amd64.s\"\n" + asm, "g_plan9_amd64.s": asm + "RET\n"}), []string{codeAsm}},
 		// ... and tags are exact.
 		{"race file, race declared", "linux/amd64", "race", base(nil), base(map[string]string{"r.go": "//go:build race\n\npackage m\n\nfunc init() { println(1) }\n"}), []string{codeInit}},

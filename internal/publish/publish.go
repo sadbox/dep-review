@@ -91,7 +91,7 @@ func (cfg *Config) defaults() {
 		cfg.PollMax = 2 * time.Minute
 	}
 	if cfg.StuckAfter == 0 {
-		cfg.StuckAfter = 2 * time.Hour
+		cfg.StuckAfter = 4 * time.Hour // past fetch (20m) and a split review (160m)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

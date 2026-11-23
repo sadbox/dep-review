@@ -43,6 +43,12 @@ var extraCommands = map[string]func([]string) error{
 		}
 		return ecoutil.GoChildMain(os.Stdin, os.Stdout)
 	},
+	typesChildCommand: func(args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("%s takes no arguments", typesChildCommand)
+		}
+		return gomod.TypesChildMain(os.Stdin, os.Stdout)
+	},
 	upstreamChildCommand: func(args []string) error {
 		if len(args) > 0 {
 			return fmt.Errorf("%s takes no arguments", upstreamChildCommand)
@@ -59,6 +65,9 @@ const (
 	// upstreamChildCommand fetches a Go module's upstream history and
 	// rebuilds its zips with git, under the same limit (gomod/upstream.go).
 	upstreamChildCommand = "upstream-child"
+	// typesChildCommand type-checks a Go module's packages for the init
+	// walk, under the same limit (gomod/typed.go).
+	typesChildCommand = "types-child"
 )
 
 func main() {

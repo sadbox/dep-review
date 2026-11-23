@@ -1,4 +1,4 @@
 <!-- dep-review:v1 notified= stuck=1111111111111111111111111111111111111111 -->
 ### dep-review: no decision
 
-The gate has not decided on head `1111111111111111111111111111111111111111` within two hours. Check the dep-review workflow runs for this pull request, or re-run the trigger.
+The gate has not decided on head `1111111111111111111111111111111111111111` within four hours. Check the dep-review workflow runs for this pull request, or re-run the trigger.
