@@ -80,14 +80,44 @@ type typesDir struct {
 }
 
 // typedWalk type-checks the walk's directories of cur (nil: not available).
-func typedWalk(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string) typedRefs {
+// typesChunk is how many package directories one types child checks: it
+// keeps every checked package in memory, and a large module's packages
+// together pass its memory limit.
+var typesChunk = 24
+
+// typesBudget bounds the time all types children of one module take;
+// the directories left after it are walked by name.
+var typesBudget = 6 * time.Minute
+
+// typedWalkChunks runs typedWalk over walk a chunk at a time and returns
+// the references it resolved and how many directories it could not check.
+func typedWalkChunks(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string, mod string) (typedRefs, int) {
+	refs := typedRefs{}
+	failed := 0
+	start := time.Now()
+	for i := 0; i < len(walk); i += typesChunk {
+		part := walk[i:min(i+typesChunk, len(walk))]
+		if time.Since(start) > typesBudget {
+			failed += len(part)
+			continue
+		}
+		r, err := typedWalk(cur, nb, l, part, mod)
+		if err != nil {
+			failed += len(part)
+			continue
+		}
+		maps.Copy(refs, r)
+	}
+	return refs, failed
+}
+
+func typedWalk(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string, mod string) (typedRefs, error) {
 	if cur == nil || nb == nil || nb.unresolved() || len(walk) == 0 {
-		return nil
+		return nil, errors.New("no build analysis")
 	}
 	goroot := l.goroot()
-	mod := modulePath(cur)
 	if goroot == "" || mod == "" {
-		return nil
+		return nil, errors.New("no GOROOT or module path")
 	}
 	req := typesRequest{Root: cur.Dir, Module: mod, GOROOT: goroot, Dirs: map[string]typesDir{}, Walk: walk}
 	for _, c := range nb.cfgs {
@@ -123,19 +153,19 @@ func typedWalk(cur *ecoutil.Tree, nb *builtSet, l goLister, walk []string) typed
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	out, err := ecoutil.RunChild(TypesChild, b, typesTimeout, func(stdin io.Reader, stdout io.Writer) error {
 		return typesChild(stdin, stdout, false)
 	})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var refs typedRefs
 	if err := json.Unmarshal(out, &refs); err != nil {
-		return nil
+		return nil, err
 	}
-	return refs
+	return refs, nil
 }
 
 // modulePath is the module path of cur's go.mod ("" if none).
@@ -200,7 +230,7 @@ func checkTyped(req typesRequest) (refs typedRefs, err error) {
 	os.Setenv("GO111MODULE", "off")
 	fset := token.NewFileSet()
 	c := &checker{req: req, fset: fset, pkgs: map[[2]int]*checked{},
-		dirIDs: map[string]int{}, parsed: map[string]*ast.File{}, sig: make([]int, len(req.Configs))}
+		dirIDs: map[string]int{}, parsed: map[string]*ast.File{}, sig: make([]int, len(req.Configs)), recv: map[*types.Func]string{}}
 	refs = typedRefs{}
 	// A package is checked once per configuration signature: the file
 	// set of every in-module package in that configuration. Configurations
@@ -238,7 +268,8 @@ func checkTyped(req typesRequest) (refs typedRefs, err error) {
 			}
 			for i, f := range p.files {
 				rel := td.Sets[td.Config[ci]][i]
-				for off, ts := range declRefs(f, fset, p.pkg, p.info, p.recv) {
+				res := resolver{pkg: p.pkg, module: req.Module, recv: c.recv}
+				for off, ts := range declRefs(f, fset, p.info, res) {
 					if refs[rel] == nil {
 						refs[rel] = map[int][]string{}
 					}
@@ -260,9 +291,10 @@ type checked struct {
 type checker struct {
 	req    typesRequest
 	fset   *token.FileSet
-	std    types.Importer      // the standard library from source (the host's)
-	sig    []int               // per configuration: its signature's index, -1 if another represents it
-	pkgs   map[[2]int]*checked // (dir ID, set) -> result; nil value: in progress or failed
+	std    types.Importer         // the standard library from source (the host's)
+	sig    []int                  // per configuration: its signature's index, -1 if another represents it
+	recv   map[*types.Func]string // every checked package\'s methods -> receiver as written
+	pkgs   map[[2]int]*checked    // (dir ID, set) -> result; nil value: in progress or failed
 	dirIDs map[string]int
 	parsed map[string]*ast.File
 }
@@ -326,6 +358,7 @@ func (c *checker) check(dir string, ci int) *checked {
 				if fn, ok := info.Defs[fd.Name].(*types.Func); ok {
 					if r := recvTypeName(fd.Recv.List[0].Type); r != "" {
 						p.recv[fn] = r
+						c.recv[fn] = r
 					}
 				}
 			}
@@ -375,7 +408,7 @@ func (f importerFunc) Import(p string) (*types.Package, error) { return f(p) }
 // declRefs are, per top-level declaration of f (a func or method, or one
 // spec of a var, const or type declaration), the references the walk
 // follows from it.
-func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.Info, recv map[*types.Func]string) map[int][]string {
+func declRefs(f *ast.File, fset *token.FileSet, info *types.Info, res resolver) map[int][]string {
 	out := map[int][]string{}
 	off := func(n ast.Node) int { return fset.Position(n.Pos()).Offset }
 	for _, d := range f.Decls {
@@ -389,7 +422,7 @@ func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.
 			if d.Body != nil {
 				nodes = append(nodes, d.Body)
 			}
-			out[off(d)] = refsIn(nodes, pkg, info, recv)
+			out[off(d)] = refsIn(nodes, info, res)
 		case *ast.GenDecl:
 			for _, s := range d.Specs {
 				switch s := s.(type) {
@@ -401,14 +434,14 @@ func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.
 					for _, v := range s.Values {
 						nodes = append(nodes, v)
 					}
-					out[off(s)] = refsIn(nodes, pkg, info, recv)
+					out[off(s)] = refsIn(nodes, info, res)
 				case *ast.TypeSpec:
 					var nodes []ast.Node
 					if s.TypeParams != nil {
 						nodes = append(nodes, s.TypeParams)
 					}
 					nodes = append(nodes, s.Type)
-					out[off(s)] = refsIn(nodes, pkg, info, recv)
+					out[off(s)] = refsIn(nodes, info, res)
 				}
 			}
 		}
@@ -417,7 +450,30 @@ func declRefs(f *ast.File, fset *token.FileSet, pkg *types.Package, info *types.
 }
 
 // refsIn resolves the references in nodes (see the package comment).
-func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info, recv map[*types.Func]string) []string {
+// resolver names what a reference reaches: in pkg, by name or "T.M"; in
+// another package of the module, the same qualified "dir:name".
+type resolver struct {
+	pkg    *types.Package
+	module string
+	recv   map[*types.Func]string // every checked method -> its receiver as written
+}
+
+// dirOf is the module directory of p, another package of the module.
+func (r resolver) dirOf(p *types.Package) (string, bool) {
+	if p == nil || p == r.pkg {
+		return "", false
+	}
+	if p.Path() == r.module {
+		return ".", true
+	}
+	if d, ok := strings.CutPrefix(p.Path(), r.module+"/"); ok {
+		return d, true
+	}
+	return "", false
+}
+
+func refsIn(nodes []ast.Node, info *types.Info, res resolver) []string {
+	pkg := res.pkg
 	set := map[string]bool{}
 	var visit func(n ast.Node) bool
 	visit = func(n ast.Node) bool {
@@ -425,7 +481,7 @@ func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info, recv map[*ty
 		case *ast.SelectorExpr:
 			if sel := info.Selections[n]; sel != nil {
 				if sel.Kind() != types.FieldVal {
-					if t := methodTarget(sel, pkg, recv); t != "" {
+					if t := methodTarget(sel, res); t != "" {
 						set[t] = true
 					}
 				}
@@ -433,8 +489,13 @@ func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info, recv map[*ty
 				return false
 			}
 			if id, ok := ast.Unparen(n.X).(*ast.Ident); ok {
-				if _, isPkg := info.Uses[id].(*types.PkgName); isPkg {
-					return false // pkg.Name: another package's object
+				if pn, isPkg := info.Uses[id].(*types.PkgName); isPkg {
+					// pkg.Name: another package's object, followed when
+					// that package is the module's.
+					if d, ok := res.dirOf(pn.Imported()); ok {
+						set[d+":"+n.Sel.Name] = true
+					}
+					return false
 				}
 			}
 			// Unresolved: by name.
@@ -462,8 +523,12 @@ func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info, recv map[*ty
 			case obj.Pkg() != nil && obj.Pkg() != pkg:
 				// Unqualified, yet another package's: a dot import, which
 				// another configuration or Go version may resolve to a
-				// local declaration instead. By name too.
+				// local declaration instead. By name too, and in that
+				// package when it is the module's.
 				set[n.Name] = true
+				if d, ok := res.dirOf(obj.Pkg()); ok && obj.Parent() == obj.Pkg().Scope() {
+					set[d+":"+n.Name] = true
+				}
 			}
 			return false
 		}
@@ -488,7 +553,8 @@ func refsIn(nodes []ast.Node, pkg *types.Package, info *types.Info, recv map[*ty
 // "T" is the receiver type as the method's declaration writes it (recv),
 // which is how the walk's index keys it: an alias receiver (type A = T;
 // func (A) M()) is "A.M".
-func methodTarget(sel *types.Selection, pkg *types.Package, recv map[*types.Func]string) string {
+func methodTarget(sel *types.Selection, res resolver) string {
+	pkg, recv := res.pkg, res.recv
 	f, ok := sel.Obj().(*types.Func)
 	if !ok {
 		return sel.Obj().Name()
@@ -512,6 +578,13 @@ func methodTarget(sel *types.Selection, pkg *types.Package, recv map[*types.Func
 	if obj.Pkg() != pkg {
 		if types.IsInterface(named) {
 			return f.Name()
+		}
+		// Another package of the module: that package's method.
+		if d, ok := res.dirOf(obj.Pkg()); ok {
+			if r, ok := recv[f.Origin()]; ok {
+				return d + ":" + r + "." + f.Name()
+			}
+			return d + ":" + f.Name()
 		}
 		return ""
 	}

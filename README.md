@@ -169,8 +169,22 @@ memory-limited child with a timeout. The rules:
   imports outside the module and the standard library, type errors, and
   files no configuration builds.
 
-If the child fails, the whole walk is by name. The walk still doesn't
-follow calls into other packages of the module.
+The walk runs over the whole module from the init code of every package
+that is, or imports within the module, a changed package (any file, any
+build tags; a `//go:linkname` pull counts as an import). A qualified use
+of another of the module's packages (`b.F`, a method of `b.T`, a
+dot-imported name) is followed into that package, with or without the
+type checker: the import spec names the package, and its package clause
+says what it is called. A `//go:linkname` pull is followed to its
+target. An unchanged init can therefore reach a changed function of
+another package. Calls into other modules aren't followed. A module
+without a go.mod uses the update's module path.
+
+The type checker runs on those packages 24 directories per child, with a
+six-minute budget per module. A chunk that fails or runs past the budget
+is walked by name, and the summary says how many directories the type
+checker resolved. On aws-sdk-go with its core `aws` package changed, all
+724 directories type-check in 70 seconds.
 
 #### Navigable diffs
 

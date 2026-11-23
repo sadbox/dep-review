@@ -59,7 +59,7 @@ func planCodes(t *testing.T, platforms, tags string, old, cur map[string]string)
 	if old != nil {
 		o = writeTree(t, old)
 	}
-	h := checkTrees(o, writeTree(t, cur), nil, goLister{goBin: defaultLister().goBin, plan: plan})
+	h := checkTrees(o, writeTree(t, cur), nil, goLister{goBin: defaultLister().goBin, plan: plan}, "")
 	var got []string
 	for _, f := range h.findings("m") {
 		got = append(got, f.Code)

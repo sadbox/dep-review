@@ -514,7 +514,7 @@ func TestGoListRunsNoCompiler(t *testing.T) {
 func TestEmbedWithoutGoCommand(t *testing.T) {
 	bin := "\x7fELF\x02\x01\x01 x"
 	src := "package p\n\nimport _ \"embed\"\n\n//go:embed tool.bin\nvar T []byte\n"
-	h := checkTrees(writeTree(t, map[string]string{"p.go": "package p\n", "tool.bin": bin}), writeTree(t, map[string]string{"p.go": src, "tool.bin": bin}), nil, goLister{})
+	h := checkTrees(writeTree(t, map[string]string{"p.go": "package p\n", "tool.bin": bin}), writeTree(t, map[string]string{"p.go": src, "tool.bin": bin}), nil, goLister{}, "")
 	wantPerson(t, h, "tool.bin")
 }
 

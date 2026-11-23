@@ -431,8 +431,11 @@ func (f Fetcher) verifyAndDiff(ctx context.Context, env fetch.Env, home string, 
 			fmt.Fprintf(summary, "- %s: same change as in another directory; its flagged items are listed once\n", key)
 		} else {
 			checked[key] = true
-			h := checkTrees(trees[0], trees[1], clock, lister)
+			h := checkTrees(trees[0], trees[1], clock, lister, u.Name)
 			reports[key] = h
+			if h.typedTotal > 0 {
+				fmt.Fprintf(summary, "- %s: the init walk's references: %d of %d package directories resolved by the type checker, the rest by name\n", key, h.typedTotal-h.typedFailed, h.typedTotal)
+			}
 			if h.listRuns > 0 {
 				fmt.Fprintf(summary, "- %s: go list ran %d times for //go:embed (%s)\n", key, h.listRuns, h.listTook.Round(time.Millisecond))
 			}

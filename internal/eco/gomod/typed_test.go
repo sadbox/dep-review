@@ -1,8 +1,11 @@
 package gomod
 
 import (
+	"maps"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 // typedItems runs the checks on a module (with a go.mod, so the type
@@ -91,7 +94,21 @@ func TestTypedWalk(t *testing.T) {
 		{"dot import resolved per configuration",
 			map[string]string{"a.go": "package m\n\nfunc init() { helper() }\n", "h.go": "package m\n\nfunc helper() { Foo() }\n", "f.go": "package m\n\nfunc Foo() {}\n", "b/b.go": "package b\n\nvar Bar = 1\n"},
 			map[string]string{"a.go": "package m\n\nfunc init() { helper() }\n", "h.go": "package m\n\nimport . \"example.com/m/b\"\n\nvar _ = Bar\n\nfunc helper() { Foo() }\n", "f.go": "package m\n\nfunc Foo() { println(1) }\n", "b/b.go": "package b\n\nvar Bar = 1\n", "b/b_aix.go": "//go:build aix\n\npackage b\n\nfunc Foo() {}\n"},
-			[]string{"Foo"}},
+			[]string{"Foo", "b/Foo"}},
+		// Across the module's packages: an unchanged init reaching a
+		// changed function of another package of the module.
+		{"another package of the module",
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() { g() }\n\nfunc g() {}\n"},
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() { g() }\n\nfunc g() { println(1) }\n"},
+			[]string{"b/g"}},
+		{"another package's method",
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { var t b.T; t.M() }\n", "b/b.go": "package b\n\ntype T struct{}\n\nfunc (T) M() {}\n\ntype U struct{}\n\nfunc (U) M() {}\n"},
+			map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { var t b.T; t.M() }\n", "b/b.go": "package b\n\ntype T struct{}\n\nfunc (T) M() { println(1) }\n\ntype U struct{}\n\nfunc (U) M() { println(1) }\n"},
+			[]string{"b/T", "b/T.M"}},
+		{"init in an unchanged package",
+			map[string]string{"c/c.go": "package c\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() {}\n"},
+			map[string]string{"c/c.go": "package c\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() { println(1) }\n"},
+			[]string{"b/F"}},
 		// A value of a local type handed to fmt: its methods (String).
 		{"implicit String",
 			map[string]string{"a.go": "package m\n\nimport \"fmt\"\n\ntype T struct{}\n\nfunc (T) String() string { return \"a\" }\n\nvar s = fmt.Sprint(T{})\n"},
@@ -115,5 +132,84 @@ func TestTypedImportPaths(t *testing.T) {
 		if _, err := c.importPath(p, 0); err == nil {
 			t.Errorf("%q imported", p)
 		}
+	}
+}
+
+// Without the type checker, a qualified pkg.Name of the module's own
+// package is still that package's.
+func TestByNameCrossPackage(t *testing.T) {
+	tr := writeTree(t, map[string]string{"go.mod": "module example.com/m\n", "a.go": "package m\n\nimport x \"example.com/m/b\"\n\nfunc init() { x.F() }\n", "b/b.go": "package b\n\nfunc F() {}\n"})
+	ix := indexPackage(tr, ".", &pkgScope{declared: map[string]bool{}, types: map[string]map[string]bool{}, valueNames: map[string]bool{}}, nil, nil, newModInfo(tr, "example.com/m"))
+	if len(ix.roots) != 1 || !slices.Contains(ix.roots[0].refs, "b:F") {
+		t.Errorf("roots %+v", ix.roots)
+	}
+}
+
+// The security review's cross-package cases, with the type checker and
+// without it (the by-name fallback after a child fails), and for a
+// module with no go.mod (its path is the update's name).
+func TestCrossPackageFallback(t *testing.T) {
+	const evil = " println(\"evil\") "
+	cases := []struct {
+		name    string
+		files   map[string]string // old; "~" in a value marks where the new one adds evil
+		want    []string
+		noTyped bool // the type checker cannot build this tree (by name only)
+	}{
+		{"dot import", map[string]string{"a.go": "package m\n\nimport . \"example.com/m/b\"\n\nfunc init() { F() }\n", "b/b.go": "package b\n\nfunc F() {~}\n"}, []string{"b/F"}, false},
+		{"package name differs from the directory", map[string]string{"a.go": "package m\n\nimport \"example.com/m/go-b\"\n\nfunc init() { b.F() }\n", "go-b/b.go": "package b\n\nfunc F() {~}\n"}, []string{"go-b/F"}, false},
+		{"major version directory", map[string]string{"a.go": "package m\n\nimport \"example.com/m/b/v2\"\n\nfunc init() { b.F() }\n", "b/v2/b.go": "package b\n\nfunc F() {~}\n"}, []string{"b/v2/F"}, false},
+		{"linkname pull", map[string]string{"a.go": "package m\n\nimport _ \"unsafe\"\n\n//go:linkname hidden example.com/m/c.hidden\nfunc hidden()\n\nfunc init() { hidden() }\n", "c/c.go": "package c\n\nfunc hidden() {~}\n"}, []string{"c/hidden"}, true},
+		{"case-folded import", map[string]string{"a.go": "package m\n\nimport B \"example.com/m/B\"\n\nfunc init() { B.F() }\n", "b/b.go": "package b\n\nfunc F() {~}\n"}, []string{"b/F"}, true},
+		{"linkname push", map[string]string{"a.go": "package m\n\nimport \"example.com/m/c\"\n\nfunc init() { c.Hook() }\n", "c/c.go": "package c\n\nfunc Hook()\n", "d/d.go": "package d\n\nimport _ \"unsafe\"\n\n//go:linkname impl example.com/m/c.Hook\nfunc impl() {~}\n"}, []string{"d/impl"}, true},
+		{"indented linkname to a method", map[string]string{"a.go": "package m\n\nimport _ \"unsafe\"\n\n\t//go:linkname hidden example.com/m/c.(*T).m\nfunc hidden()\n\nfunc init() { hidden() }\n", "c/c.go": "package c\n\ntype T struct{}\n\nfunc (*T) m() {~}\n"}, []string{"c/T", "c/T.m"}, true},
+		{"package clause in an ignored file", map[string]string{"a.go": "package m\n\nimport \"example.com/m/x\"\n\nfunc init() { real.F() }\n", "x/doc.go": "//go:build ignore\n\npackage decoy\n", "x/x.go": "package real\n\nfunc F() {~}\n"}, []string{"x/F"}, false},
+		{"linkname with a no-break space", map[string]string{"a.go": "package m\n\nimport _ \"unsafe\"\n\n//go:linkname hidden\u00a0example.com/m/c.hidden\nfunc hidden()\n\nfunc init() { hidden() }\n", "c/c.go": "package c\n\nfunc hidden() {~}\n"}, []string{"c/hidden"}, true},
+		{"linknamestd", map[string]string{"a.go": "package m\n\nimport _ \"unsafe\"\n\n//go:linknamestd hidden example.com/m/c.hidden\nfunc hidden()\n\nfunc init() { hidden() }\n", "c/c.go": "package c\n\nfunc hidden() {~}\n"}, []string{"c/hidden"}, true},
+		{"linkname to an escaped dotted directory", map[string]string{"a.go": "package m\n\nimport _ \"unsafe\"\n\n//go:linkname hidden example.com/m/go%2ex.hidden\nfunc hidden()\n\nfunc init() { hidden() }\n", "go.x/c.go": "package x\n\nfunc hidden() {~}\n"}, []string{"go.x/hidden"}, true},
+		{"linkname within the package", map[string]string{"a.go": "package m\n\nimport _ \"unsafe\"\n\n//go:linkname local example.com/m.other\nfunc local()\n\nfunc init() { local() }\n", "b.go": "package m\n\nfunc other() {~}\n"}, []string{"other"}, true},
+		{"two directories one package name", map[string]string{"a.go": "package m\n\nimport (\n\t\"example.com/m/x\"\n\t\"example.com/m/bar\"\n)\n\nfunc init() { bar.F(); foo.G() }\n", "x/x.go": "package bar\n\nfunc F() {~}\n", "bar/b.go": "package foo\n\nfunc G() {}\n"}, []string{"x/F"}, true},
+		{"a package that cannot reach the change", map[string]string{"a.go": "package m\n\nfunc init() { F() }\n\nfunc F() {}\n", "b/b.go": "package b\n\nfunc F() {~}\n"}, nil, false},
+	}
+	defer func(b time.Duration) { typesBudget = b }(typesBudget)
+	for _, c := range cases {
+		old, cur := map[string]string{}, map[string]string{}
+		for k, v := range c.files {
+			old[k] = strings.ReplaceAll(v, "~", "")
+			cur[k] = strings.ReplaceAll(v, "~", evil)
+		}
+		for _, mode := range []string{"typed", "by name", "no go.mod"} {
+			if mode == "typed" && c.noTyped {
+				continue
+			}
+			o, n := maps.Clone(old), maps.Clone(cur)
+			typesBudget = 6 * time.Minute
+			switch mode {
+			case "by name":
+				typesBudget = -1
+				fallthrough
+			case "typed":
+				o["go.mod"], n["go.mod"] = "module example.com/m\n\ngo 1.24\n", "module example.com/m\n\ngo 1.24\n"
+			}
+			h := checkTrees(writeTree(t, o), writeTree(t, n), nil, defaultLister(), "example.com/m")
+			if mode == "typed" && h.typedDirs == 0 && c.want != nil {
+				t.Errorf("%s: the type checker did not run", c.name)
+			}
+			if got := h.items(codeInitCallee); !slices.Equal(got, c.want) {
+				t.Errorf("%s (%s): init-callee items %q, want %q", c.name, mode, got, c.want)
+			}
+		}
+	}
+}
+
+// One types child per chunk: a chunk of one directory still resolves a
+// call into another package.
+func TestTypedChunks(t *testing.T) {
+	defer func(n int) { typesChunk = n }(typesChunk)
+	typesChunk = 1
+	old := map[string]string{"a.go": "package m\n\nimport \"example.com/m/b\"\n\nfunc init() { b.F() }\n", "b/b.go": "package b\n\nfunc F() {}\n"}
+	cur := map[string]string{"a.go": old["a.go"], "b/b.go": "package b\n\nfunc F() { println(1) }\n"}
+	if got := typedItems(t, old, cur); !slices.Equal(got, []string{"b/F"}) {
+		t.Errorf("items %q", got)
 	}
 }
