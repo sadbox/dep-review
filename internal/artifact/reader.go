@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 
 	"golang.org/x/mod/module"
@@ -27,62 +26,50 @@ type Options struct {
 	// directory under it and removes it again. Empty means the system's
 	// temporary directory.
 	Scratch string
-	// HTTP is used for the npm registry and for GitHub's tarballs. Only
-	// its Transport and Timeout are used: the redirect policy is this
-	// package's own. Nil means http.DefaultTransport and no timeout
-	// beyond the one each download has.
+	// HTTP is used for every download. Only its Transport and Timeout are
+	// used: the redirect policy is this package's own. Nil means
+	// http.DefaultTransport and no timeout beyond each download's.
 	HTTP *http.Client
-	// GitHub supplies the API root and the job's read-only token for
-	// action tarballs; none of its methods is called. Nil means
-	// api.github.com without a token, which is enough for public
-	// actions at the unauthenticated rate limit.
+	// GitHub supplies the job's read-only token for action tarballs; none
+	// of its methods is called, and its API root must be github.com's.
+	// Nil means no token, which is enough for public actions at the
+	// unauthenticated rate limit.
 	GitHub *gh.Client
-	// Inspect holds, by Kind, the function that looks at the extracted
-	// artifacts of every pair of that kind; its answer is
-	// Prepared.Inspected. A kind without an entry is not inspected.
+	// Inspect holds, by Kind, the function whose answer about the
+	// extracted artifacts is Prepared.Inspected.
 	Inspect map[Kind]Inspect
 }
 
 // New returns the Preparer that downloads from the module proxy, the npm
-// registry and GitHub. It needs git on PATH, and the go command for Go
-// modules; a missing git is an error here, a missing go command is an
-// error when the first module is prepared. The Preparer keeps no state
+// registry and GitHub. It needs git on PATH. The Preparer keeps no state
 // between calls and may be used from several goroutines.
 func New(o Options) (Preparer, error) {
 	git, err := exec.LookPath("git")
 	if err != nil {
 		return nil, fmt.Errorf("artifact: git is not installed: %w", err)
 	}
-	goBin, _ := exec.LookPath("go")
-
-	f := &netFetcher{
-		githubAPI: gh.DefaultBaseURL,
-		goBin:     goBin,
-		goProxy:   goProxy,
-		goSumDB:   goSumDB,
-	}
-	f.retryDelay = time.Second
-	apiHost := "api.github.com"
+	f := &netFetcher{retryDelay: time.Second}
 	if o.GitHub != nil {
-		if !strings.HasPrefix(o.GitHub.BaseURL, "https://") || !strings.HasSuffix(o.GitHub.BaseURL, "/") {
-			return nil, fmt.Errorf("artifact: GitHub API root %q is not an https URL ending in /", o.GitHub.BaseURL)
+		// The token is sent to the API root, and tarballs are followed to
+		// github.com's download host only.
+		if o.GitHub.BaseURL != gh.DefaultBaseURL {
+			return nil, fmt.Errorf("artifact: GitHub API root %q: action tarballs are read from %s only", o.GitHub.BaseURL, gh.DefaultBaseURL)
 		}
-		f.githubAPI = o.GitHub.BaseURL
 		f.githubToken = o.GitHub.Token
-		apiHost = strings.SplitN(strings.TrimPrefix(o.GitHub.BaseURL, "https://"), "/", 2)[0]
 	}
 	var base http.Client
 	if o.HTTP != nil {
 		base.Transport, base.Timeout = o.HTTP.Transport, o.HTTP.Timeout
 	}
-	registry, github := base, base
+	registry, proxy, github := base, base, base
 	registry.CheckRedirect = redirects()
-	// GitHub redirects a tarball request to its download host; a GitHub
-	// Enterprise server serves it from the API host itself.
-	github.CheckRedirect = redirects(codeloadHost, apiHost)
-	f.registry, f.github = &registry, &github
+	proxy.CheckRedirect = redirects(goProxyStorageHost)
+	// GitHub redirects a tarball request to its download host, and the
+	// request for a renamed repository to another path of the API first.
+	github.CheckRedirect = redirects(codeloadHost, githubAPIHost)
+	f.registry, f.proxy, f.github = &registry, &proxy, &github
 
-	return &reader{scratch: o.Scratch, git: git, fetch: f, limits: defaultExtractLimits, read: defaultReadLimits, inspect: o.Inspect}, nil
+	return &reader{scratch: o.Scratch, git: git, fetch: f, limits: defaultExtractLimits, maxFile: maxFileBytes, maxText: maxBudgetBytes, inspect: o.Inspect}, nil
 }
 
 // reader is the Preparer.
@@ -91,17 +78,33 @@ type reader struct {
 	git     string
 	fetch   fetcher
 	limits  extractLimits
-	read    readLimits
+	// maxFile is the largest file read in to be diffed; a larger changed
+	// file is listed as unread. maxText is the most diff text held; once
+	// there is more, the changed files left are listed as unread without
+	// being diffed. Both are constants outside tests.
+	maxFile int64
+	maxText int
 	inspect map[Kind]Inspect
 }
 
 // Shapes of npm names and versions. The registry URL is built from them,
 // so they are matched exactly; a name the pattern does not cover is not
-// fetched.
+// fetched. The npm gatherer asks the registry about these shapes and no
+// others, so a name the facts were gathered for is one the reader fetches.
 var (
 	npmNameRE    = regexp.MustCompile(`^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	npmVersionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
 )
+
+// ValidNPMName reports whether name is a package name the gate puts in a
+// registry URL. 214 bytes is npm's own limit.
+func ValidNPMName(name string) bool { return len(name) <= 214 && npmNameRE.MatchString(name) }
+
+// ValidNPMVersion reports whether version is a version the gate puts in a
+// registry URL.
+func ValidNPMVersion(version string) bool {
+	return len(version) <= 256 && npmVersionRE.MatchString(version)
+}
 
 // actionTagRE is the shape of an action's tag: what version tags and
 // release branches look like ("v4", "v4.1.0", "v3.1.0-node20",
@@ -130,13 +133,13 @@ func checkRef(ref Ref) error {
 			return badRef("%s@%s: %q is not an h1: hash", ref.Name, ref.Version, ref.Hash)
 		}
 	case NPMTarball:
-		if len(ref.Name) > 214 || !npmNameRE.MatchString(ref.Name) {
+		if !ValidNPMName(ref.Name) {
 			return badRef("%q is not an npm package name the gate fetches", ref.Name)
 		}
-		if !npmVersionRE.MatchString(ref.Version) {
+		if !ValidNPMVersion(ref.Version) {
 			return badRef("%s: %q is not a version", ref.Name, ref.Version)
 		}
-		if !integrityRE.MatchString(ref.Hash) {
+		if _, ok := NPMIntegrity(ref.Hash); !ok {
 			return badRef("%s@%s: %q is not exactly one sha512 integrity", ref.Name, ref.Version, ref.Hash)
 		}
 	case ActionTarball:
@@ -148,7 +151,7 @@ func checkRef(ref Ref) error {
 		if !actionTagRE.MatchString(ref.Version) {
 			return badRef("%s: %q is not a tag the gate takes", ref.Name, ref.Version)
 		}
-		if !commitRE.MatchString(ref.Hash) {
+		if len(ref.Hash) != 40 || !gh.ValidSHA(ref.Hash) {
 			return badRef("%s@%s: %q is not a full commit ID", ref.Name, ref.Version, ref.Hash)
 		}
 	default:
@@ -157,9 +160,7 @@ func checkRef(ref Ref) error {
 	return nil
 }
 
-// checkPair refuses a Pair whose parts do not describe one update. The
-// model is told the pair's name and versions, so they have to be the ones
-// of the artifacts it is shown.
+// checkPair refuses a Pair whose parts do not describe one update.
 func checkPair(p Pair) error {
 	if err := checkRef(p.New); err != nil {
 		return err
@@ -229,7 +230,7 @@ func (r *reader) Prepare(ctx context.Context, p Pair, lim Limits) (Prepared, err
 		return Prepared{}, err
 	}
 	changed, removed := compare(oldTree, newTree)
-	sections, unread, err := readChanged(ctx, p.New.Kind, oldTree, newTree, changed, d, r.read)
+	sections, unread, err := readChanged(ctx, p.New.Kind, oldTree, newTree, changed, d, r.maxFile, r.maxText)
 	if err != nil {
 		return Prepared{}, err
 	}

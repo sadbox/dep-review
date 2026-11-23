@@ -118,8 +118,13 @@ func TestReview(t *testing.T) {
 		// objection must not become a wait.
 		{name: "example.com/nocategory", answer: vetoed("", allow.ReadFull, "+ x"),
 			read: allow.ReadRefused, outcome: allow.Person, reason: allow.ReasonReadRefused},
-		{name: "example.com/toomuch", answer: vetoed(veto.Obfuscation, allow.ReadFull, manyQuotes...),
-			read: allow.ReadRefused, outcome: allow.Person, reason: allow.ReasonReadRefused},
+		// A long list of quotes is the reviewer's to cut (internal/veto).
+		// internal/wire carries what it is given, so the objection stands
+		// as it was made.
+		{name: "example.com/manyquotes", answer: vetoed(veto.Obfuscation, allow.ReadFull, manyQuotes...),
+			read:    allow.ReadFull,
+			veto:    &allow.Veto{Category: "obfuscation", Quotes: manyQuotes, Notes: "the model's remark"},
+			outcome: allow.Person, reason: allow.ReasonVeto},
 		{name: "example.com/noread", answer: func(req veto.Request) (veto.Verdict, error) {
 			return veto.Verdict{Answer: veto.NoVeto, Key: req.Read.Key}, nil
 		}, read: allow.ReadRefused, outcome: allow.Person, reason: allow.ReasonReadRefused},
@@ -484,8 +489,8 @@ func TestReadChunk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, err := readChunk(dir, good); err != nil || got != text {
-		t.Fatalf("readChunk: %q, %v", got, err)
+	if got, err := wire.ReadChunk(dir, good); err != nil || string(got) != text {
+		t.Fatalf("ReadChunk: %q, %v", got, err)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -501,7 +506,7 @@ func TestReadChunk(t *testing.T) {
 	} {
 		c := good
 		tc.change(&c)
-		if got, err := readChunk(dir, c); err == nil {
+		if got, err := wire.ReadChunk(dir, c); err == nil {
 			t.Errorf("%s: read %q", tc.name, got)
 		}
 	}

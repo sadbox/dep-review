@@ -17,14 +17,6 @@
 // written. A chunk file is named by its position and nothing else, and is
 // believed only after its bytes hashed to what the facts file lists
 // (VerifyChunks).
-//
-// One rule shapes the types. The facts file cannot say that an update was
-// read: it has no member for a read state or a veto, for Docker's "not
-// applicable" either. Whether code was read comes from the verdicts file
-// alone, matched by content key and reviewer fingerprint, and Join never
-// lets the result be better than what was prepared. A fetch job that was
-// talked into writing "read": "full" produces a file that does not
-// decode.
 package wire
 
 import (
@@ -44,14 +36,13 @@ import (
 
 	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/artifact"
+	"github.com/sadbox/dep-review/internal/gh"
 )
 
 // The names the jobs agree on, inside the directory one job uploads and
 // the next downloads.
 const (
-	// FactsFile is the facts file.
-	FactsFile = "facts.json"
-	// VerdictsFile is the verdicts file.
+	FactsFile    = "facts.json"
 	VerdictsFile = "verdicts.json"
 	// ChunksDir is the directory that holds the chunk files and nothing
 	// else. It may be absent when no update has a chunk (an artifact
@@ -85,21 +76,14 @@ const (
 	// maxDetailBytes bounds the gate's own sentence about a read that was
 	// not prepared.
 	maxDetailBytes = 500
-	// maxQuotes, maxQuoteBytes and maxNotesBytes bound a veto's text. They
-	// are above internal/veto's own caps, which are what really limits
-	// it; these only keep a verdicts file from carrying a book.
-	maxQuotes     = 64
-	maxQuoteBytes = 4096
-	maxNotesBytes = 16384
 )
 
 // PullRequest names the pull request, and the one head commit, that a
 // facts file is about. Publish merges with exactly this head.
 type PullRequest struct {
 	// Repo is the repository, owner/name.
-	Repo string `json:"repo"`
-	// Number is the pull request's number.
-	Number int `json:"number"`
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
 	// Head is the full hex ID of the head commit the facts were gathered
 	// for.
 	Head string `json:"head"`
@@ -107,9 +91,7 @@ type PullRequest struct {
 
 // Facts is the facts file.
 type Facts struct {
-	// Version is Version.
-	Version int `json:"version"`
-	// PullRequest is what the file is about.
+	Version     int         `json:"version"`
 	PullRequest PullRequest `json:"pull_request"`
 	// Config is the fingerprint of the configuration the facts were
 	// gathered under (config.Config.Fingerprint). A job that resolves the
@@ -119,8 +101,7 @@ type Facts struct {
 	// GatheredAt is when fetch gathered the facts. Publish decides with
 	// its own clock; this says how old the facts are.
 	GatheredAt time.Time `json:"gathered_at"`
-	// Facts is the pull request's facts.
-	Facts PRFacts `json:"facts"`
+	Facts      PRFacts   `json:"facts"`
 }
 
 // PRFacts is allow.PRFacts as fetch can know it: every member of it, with
@@ -136,7 +117,9 @@ type PRFacts struct {
 }
 
 // Update is allow.UpdateFacts without Read and Veto, which fetch cannot
-// know and must not be able to write, and with Prepared in their place.
+// know and must not be able to write, and with Prepared in their place:
+// a facts file that says "read": "full" does not decode. Whether code
+// was read comes from the verdicts file alone (Join).
 type Update struct {
 	Name string `json:"name"`
 	From string `json:"from"`
@@ -188,7 +171,6 @@ const (
 
 // Read is the read fetch prepared for one update, or why there is none.
 type Read struct {
-	// Status is which of the four it is.
 	Status ReadStatus `json:"status"`
 	// Detail is the gate's own sentence about a read that was not
 	// prepared, for the comment: which class of error, never the error's
@@ -219,8 +201,7 @@ type ChunkFile struct {
 	// SHA256 of the file's bytes, lower-case hex. The file holds the
 	// chunk's text and nothing more.
 	SHA256 string `json:"sha256"`
-	// Size of the file in bytes.
-	Size int64 `json:"size"`
+	Size   int64  `json:"size"`
 }
 
 // ChunkName is the file name of chunk number chunk of update number
@@ -252,7 +233,6 @@ func NewUpdate(u allow.UpdateFacts, prepared Read) Update {
 
 // Verdicts is the verdicts file.
 type Verdicts struct {
-	// Version is Version.
 	Version int `json:"version"`
 	// Verdicts has at most one entry for each pair of Key and
 	// Fingerprint, in any order. An update whose read was not prepared,
@@ -267,20 +247,18 @@ type Verdicts struct {
 type Verdict struct {
 	// Key is the content key of the read that was reviewed.
 	Key string `json:"key"`
-	// Fingerprint is the reviewer's (veto.Config.Fingerprint): the
-	// prompt, the answer schema, the model and the effort it asked with.
-	// A verdict counts only for a reader that computes the same one.
+	// Fingerprint is the reviewer's (veto.Config.Fingerprint). A verdict
+	// counts only for a reader that computes the same one.
 	Fingerprint string `json:"fingerprint"`
-	// Read is the resulting read state:
-	//
-	//   - full or partial: the model answered (veto.Verdict.Read);
-	//   - none: there was no complete answer (the review failed), which
-	//     is the same as no entry;
-	//   - refused: the reviewer called the read unusable
-	//     (veto.ErrUnusable).
+	// Read is the resulting read state: full or partial when the model
+	// answered, none when there was no complete answer (the same as no
+	// entry), refused when the reviewer called the read unusable.
 	Read allow.ReadState `json:"read"`
 	// Veto is the model's objection, or its refusal, and nil for no
-	// veto. It is only ever set with Read full or partial.
+	// veto. It is only ever set with Read full or partial. Its quotes and
+	// notes are cut to size where the model's answer is read
+	// (internal/veto), not here: a file that refused a long quote would
+	// lose the veto.
 	Veto *allow.Veto `json:"veto"`
 }
 
@@ -434,9 +412,6 @@ func decode(b []byte, v any) error {
 }
 
 var (
-	repoRE = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
-	// A commit ID: SHA-1, or SHA-256 for a repository that uses it.
-	commitRE = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 	sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	// A veto category is one of internal/veto's fixed words, or
 	// allow.VetoModelRefused. This package does not know the list; it
@@ -449,11 +424,11 @@ func (f Facts) check() error {
 	switch {
 	case f.Version != Version:
 		return fmt.Errorf("version %d, want %d", f.Version, Version)
-	case !repoRE.MatchString(f.PullRequest.Repo):
+	case !gh.ValidRepo(f.PullRequest.Repo):
 		return errors.New("pull_request.repo is not owner/name")
 	case f.PullRequest.Number < 1:
 		return fmt.Errorf("pull_request.number is %d", f.PullRequest.Number)
-	case !commitRE.MatchString(f.PullRequest.Head):
+	case !gh.ValidSHA(f.PullRequest.Head):
 		return errors.New("pull_request.head is not a full commit ID")
 	case !sha256RE.MatchString(f.Config):
 		return errors.New("config is not a fingerprint")
@@ -565,21 +540,8 @@ func (v Verdict) check() error {
 	default:
 		return fmt.Errorf("read %q", v.Read)
 	}
-	if v.Veto == nil {
-		return nil
-	}
-	switch {
-	case !categoryRE.MatchString(v.Veto.Category):
+	if v.Veto != nil && !categoryRE.MatchString(v.Veto.Category) {
 		return errors.New("veto category is not a category")
-	case len(v.Veto.Quotes) > maxQuotes:
-		return fmt.Errorf("%d quotes, more than %d", len(v.Veto.Quotes), maxQuotes)
-	case len(v.Veto.Notes) > maxNotesBytes:
-		return fmt.Errorf("notes are %d bytes, more than %d", len(v.Veto.Notes), maxNotesBytes)
-	}
-	for i, q := range v.Veto.Quotes {
-		if len(q) > maxQuoteBytes {
-			return fmt.Errorf("quote %d is %d bytes, more than %d", i, len(q), maxQuoteBytes)
-		}
 	}
 	return nil
 }
@@ -634,12 +596,8 @@ func VerifyChunks(dir string, f Facts) error {
 			// Before hashing: a file of another size is not read at all.
 			return fmt.Errorf("wire: chunks: %s is %d bytes, the facts file lists %d", c.Name, info.Size(), c.Size)
 		}
-		sum, n, err := hashFile(root, c.Name, c.Size)
-		switch {
-		case err != nil:
-			return fmt.Errorf("wire: chunks: %s: %w", c.Name, err)
-		case n != c.Size || sum != c.SHA256:
-			return fmt.Errorf("wire: chunks: %s does not hash to what the facts file lists", c.Name)
+		if _, err := readChunk(root, c); err != nil {
+			return fmt.Errorf("wire: chunks: %w", err)
 		}
 		found[c.Name] = true
 	}
@@ -653,18 +611,35 @@ func VerifyChunks(dir string, f Facts) error {
 	return nil
 }
 
-// hashFile hashes a file of the expected size, reading no more than one
-// byte past it.
-func hashFile(root *os.Root, name string, size int64) (sum string, n int64, err error) {
-	file, err := root.Open(name)
+// ReadChunk returns the bytes of the chunk file c in dir, checked against
+// the size and hash the facts file lists. VerifyChunks has checked the
+// directory as a whole; this ties the bytes a job goes on to use, not the
+// bytes that were there a moment ago, to the listed hash.
+func ReadChunk(dir string, c ChunkFile) ([]byte, error) {
+	// os.Root: the name is the facts file's, and although its shape was
+	// checked, it opens nothing outside the directory.
+	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return "", 0, err
+		return nil, err
+	}
+	defer root.Close()
+	return readChunk(root, c)
+}
+
+// readChunk reads a chunk file of the listed size, and no more than one
+// byte past it.
+func readChunk(root *os.Root, c ChunkFile) ([]byte, error) {
+	file, err := root.Open(c.Name)
+	if err != nil {
+		return nil, err
 	}
 	defer file.Close()
-	h := sha256.New()
-	n, err = io.Copy(h, io.LimitReader(file, size+1))
+	b, err := io.ReadAll(io.LimitReader(file, c.Size+1))
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
+	if sum := sha256.Sum256(b); int64(len(b)) != c.Size || hex.EncodeToString(sum[:]) != c.SHA256 {
+		return nil, fmt.Errorf("%s does not hash to what the facts file lists", c.Name)
+	}
+	return b, nil
 }

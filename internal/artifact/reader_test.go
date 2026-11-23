@@ -15,6 +15,50 @@ import (
 	"github.com/sadbox/dep-review/internal/allow"
 )
 
+// The shapes of npm names and versions the gate puts in a registry URL,
+// here and in the npm gatherer.
+func TestValidNPMNameAndVersion(t *testing.T) {
+	for name, want := range map[string]bool{
+		"chart.js":                       true,
+		"@tailwindcss/oxide-wasm32-wasi": true,
+		"JSONStream":                     true,
+		"left_pad":                       true,
+		"":                               false,
+		"@scope":                         false,
+		"@scope/":                        false,
+		"@scope/a/b":                     false,
+		"a/b":                            false,
+		"../etc/passwd":                  false,
+		".hidden":                        false,
+		"a b":                            false,
+		"a?x=1":                          false,
+		"a#frag":                         false,
+		"a%2fb":                          false,
+		"-/npm/v1/attestations/x":        false,
+		strings.Repeat("a", 214):         true,
+		strings.Repeat("a", 215):         false,
+	} {
+		if got := ValidNPMName(name); got != want {
+			t.Errorf("ValidNPMName(%q) = %v, want %v", name, got, want)
+		}
+	}
+	for version, want := range map[string]bool{
+		"1.2.3":                  true,
+		"1.2.3-beta.1":           true,
+		"0.0.0-insiders.00ef99d": true,
+		"1.2.3+build":            true,
+		"1.2":                    false,
+		"":                       false,
+		"1.2.3/../x":             false,
+		"1.2.3 ":                 false,
+		"latest":                 false,
+	} {
+		if got := ValidNPMVersion(version); got != want {
+			t.Errorf("ValidNPMVersion(%q) = %v, want %v", version, got, want)
+		}
+	}
+}
+
 // The whole format, on one small update: a changed file, an added file, a
 // removed file, a file that is not text.
 func TestPrepareText(t *testing.T) {
@@ -335,7 +379,7 @@ func TestPrepareEscapes(t *testing.T) {
 	for _, want := range []string{
 		"+if (admin<U+202E>) {<0x0D>hidden()<U+2028><0x1B>[2K\n",
 		"== file: evil<U+202E>gpj.js (added)\n",
-		"+one\r\n+two\r\n",
+		"+one<0x0D>\n+two<0x0D>\n",
 		// A line of the file that imitates the gate's header is still a
 		// line of the file: it has its "+".
 		"\n+== file: forged.js (changed)\n",
@@ -728,7 +772,7 @@ func TestHeldTextIsBounded(t *testing.T) {
 
 	t.Run("one file too large to diff", func(t *testing.T) {
 		r := newReader(t, f)
-		r.read.file = 1000
+		r.maxFile = 1000
 		got, err := r.Prepare(context.Background(), p, roomy)
 		if err != nil {
 			t.Fatal(err)
@@ -746,7 +790,7 @@ func TestHeldTextIsBounded(t *testing.T) {
 	t.Run("an old version too large to diff against", func(t *testing.T) {
 		big, f := npmPair(t, map[string]string{"x.js": strings.Repeat("old\n", 500)}, map[string]string{"x.js": "new\n"})
 		r := newReader(t, f)
-		r.read.file = 1000
+		r.maxFile = 1000
 		got, err := r.Prepare(context.Background(), big, roomy)
 		if err != nil {
 			t.Fatal(err)
@@ -758,7 +802,7 @@ func TestHeldTextIsBounded(t *testing.T) {
 
 	t.Run("more text than is held", func(t *testing.T) {
 		r := newReader(t, f)
-		r.read.text = 400 // a.js is 317 bytes of diff; with b.js it is past
+		r.maxText = 400 // a.js is 317 bytes of diff; with b.js it is past
 		got, err := r.Prepare(context.Background(), p, roomy)
 		if err != nil {
 			t.Fatal(err)

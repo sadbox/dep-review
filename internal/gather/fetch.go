@@ -23,10 +23,8 @@ import (
 // Fetch is the fetch job for one pull request: everything it is given.
 // It holds no secret beyond the job's read-only GitHub token.
 type Fetch struct {
-	// Class is classify's answer for the pull request. Run takes the
-	// repository, the number, the head commit and the first half of the
-	// Identity fact from it, and nothing Dependabot declared: the updates
-	// come from the manifests.
+	// Class is classify's answer for the pull request. Nothing Dependabot
+	// declared is taken from it: the updates come from the manifests.
 	Class model.Classification
 	// Changes is the change set, from ReadChanges.
 	Changes Changes
@@ -36,9 +34,7 @@ type Fetch struct {
 	Config config.Config
 	// HTTP is the client the gatherer asks registries and indexes with.
 	HTTP *http.Client
-	// GitHub is the REST client with the job's read-only token. Run asks
-	// it about the pull request and the default branch's rules, and hands
-	// it to the gatherer.
+	// GitHub is the REST client with the job's read-only token.
 	GitHub *gh.Client
 	// Advisories answers the gatherer's questions about advisories.
 	Advisories advisory.Checker
@@ -69,29 +65,13 @@ const (
 // creates. out must not hold a chunk directory already. The facts are
 // returned as they were written.
 //
-// What does not make Run fail, because it is a property of the pull
-// request or of the moment and has a place in the file:
-//
-//   - A pull request classify could not show to be Dependabot's alone:
-//     Identity does not hold, and nothing else is asked or fetched.
-//   - A pull request classify could not finish its proof for, because
-//     GitHub's record of the branch lags (model.KindPending): Identity is
-//     unavailable and everything else is gathered as usual.
-//   - An ecosystem without a rule (uv, submodules): the file names it,
-//     and nothing is asked or fetched, the base branch included, so no
-//     fact in it holds. allow.Decide answers no_rule.
-//   - GitHub not answering about the pull request or the branch rules:
-//     those facts are unavailable, and gathering goes on, so that the
-//     pull request waits instead of going to a person for facts nobody
-//     tried to gather.
-//   - A change set too large to read: Shape does not hold.
-//   - A read that could not be prepared, for whatever reason, a panic of
-//     the reader included: it is recorded for its update (spec section
-//     11, amendment 9) and the other updates are prepared as usual.
-//
-// An error means there is no result: the classification or the change
-// set is not usable, the gatherer failed (facts.Gatherer says when it
-// may), the context ended, or out could not be written.
+// What is a property of the pull request or of the moment has a place in
+// the file and does not make Run fail: a pull request that is not shown
+// to be Dependabot's alone, an ecosystem without a rule, GitHub not
+// answering, a change set too large to read, a read that could not be
+// prepared. An error means there is no result: the classification or the
+// change set is not usable, the gatherer failed (facts.Gatherer says when
+// it may), the context ended, or out could not be written.
 func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 	if f.Now == nil {
 		f.Now = time.Now
@@ -110,8 +90,8 @@ func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 	}
 	// classified is classify's half of Identity. The other half, that the
 	// base is the default branch, is GitHub's to say, and the fact is made
-	// from the two together and nowhere else (gather). So a pull request
-	// nothing is gathered for never carries an Identity that holds.
+	// from the two together in gather alone: a pull request nothing is
+	// gathered for never carries an Identity that holds.
 	var classified allow.Fact
 	switch c.Kind {
 	case model.KindDependabot:
@@ -119,11 +99,10 @@ func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 	case model.KindDependabotUnverified:
 		classified = allow.No(c.Reason, classifySource)
 	case model.KindPending:
-		// Everything classify could check is Dependabot's, and GitHub's
-		// record of who pushed the branch has not reached the head yet.
-		// That is a source that did not answer, not an answer (spec
-		// section 11, amendment 1): gathering goes on, the pull request
-		// waits, and the scheduled job runs the proof again.
+		// GitHub's record of who pushed the branch has not reached the
+		// head yet. That is a source that did not answer, not an answer
+		// (spec section 11, amendment 1): gathering goes on and the pull
+		// request waits.
 		classified = allow.Unavailable(c.Reason, classifySource)
 	default:
 		// The gate does nothing at all for the other kinds; a workflow
@@ -278,12 +257,10 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 			}
 		}
 		if pr.Ecosystem == allow.NPM {
-			// npm's install scripts have three sources and the tarball is
-			// the one a publisher cannot keep out of sight (spec section
-			// 6). This is the only place an npm NoRegress is made: from
-			// what the registry and the lock say and what was found in the
-			// tarballs, so it holds only when they were looked at. Whatever
-			// the gatherer left in the update's own NoRegress is not read.
+			// This is the only place an npm NoRegress is made (spec section
+			// 11, amendment 21): from what the registry and the lock say
+			// and what was found in the tarballs, so it holds only when
+			// they were looked at.
 			if inspected == (allow.Fact{}) {
 				inspected = allow.Fact{Value: "the package.json and binding.gyp files in the tarballs were not looked at"}
 			}
@@ -320,9 +297,9 @@ func firstSeen(got, opened allow.TimeFact) allow.TimeFact {
 // read prepares the read of update number i and writes its chunk files.
 // A read that could not be prepared is not an error: it comes back in the
 // status that says what becomes of the update. inspected is the reader's
-// answer about the artifacts themselves, the zero Fact when there is
-// none, and unavailable when the artifacts could not be downloaded. The
-// error is the context's, or a chunk file that could not be written.
+// answer about the artifacts themselves, and unavailable when they could
+// not be downloaded. The error is the context's, or a chunk file that
+// could not be written.
 func (f Fetch) read(ctx context.Context, chunks string, i int, pair artifact.Pair, lim artifact.Limits) (read wire.Read, inspected allow.Fact, err error) {
 	prepared, err := f.prepare(ctx, pair, lim)
 	switch {

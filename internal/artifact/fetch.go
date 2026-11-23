@@ -1,19 +1,18 @@
 package artifact
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/mod/module"
+
+	"github.com/sadbox/dep-review/internal/gh"
 )
 
 // Where artifacts come from. A Ref carries no URL: these constants and
@@ -21,15 +20,17 @@ import (
 // that decide what is downloaded.
 const (
 	npmRegistry = "https://registry.npmjs.org/"
-	// The module proxy only: "direct" would run git or hg against
-	// whatever host a module path names.
-	goProxy = "https://proxy.golang.org"
-	goSumDB = "sum.golang.org"
+	// The module proxy only: a module path never names the host that is
+	// asked.
+	goProxy = "https://proxy.golang.org/"
+	// The module proxy answers the request for a large zip with a redirect
+	// to this host (seen 2026-11-23 for zips of some tens of megabytes).
+	goProxyStorageHost = "storage.googleapis.com"
 	// GitHub answers a tarball request with a redirect to this host.
-	codeloadHost = "codeload.github.com"
+	codeloadHost  = "codeload.github.com"
+	githubAPIHost = "api.github.com"
 
-	// maxDownloadBytes bounds one tarball download. The go command has
-	// its own limit for a module zip (500 MiB).
+	// maxDownloadBytes bounds one download.
 	maxDownloadBytes = 512 << 20
 	downloadTimeout  = 5 * time.Minute
 	downloadAttempts = 3
@@ -38,10 +39,9 @@ const (
 // fetcher downloads an artifact's archive. It is the package's only use
 // of the network; tests replace it or the transport under it.
 type fetcher interface {
-	// fetch downloads the archive ref names and returns the path of the
-	// file. dir exists and belongs to one Prepare call; the fetcher may
-	// keep whatever it likes in it. The caller verifies the archive, so a
-	// fetcher is not trusted to have fetched the right thing.
+	// fetch downloads the archive ref names into dir, which belongs to
+	// one Prepare call, and returns the file's path. The caller verifies
+	// the archive: a fetcher is not trusted to have fetched the right one.
 	fetch(ctx context.Context, ref Ref, dir string) (string, error)
 }
 
@@ -49,29 +49,22 @@ type fetcher interface {
 type netFetcher struct {
 	// registry downloads npm tarballs and follows no redirect.
 	registry *http.Client
-	// github downloads repository tarballs and follows a redirect only
-	// to GitHub's download host.
+	// proxy downloads module zips and follows a redirect only to the
+	// module proxy's storage host.
+	proxy *http.Client
+	// github downloads repository tarballs from github.com's API and
+	// follows a redirect only within it or to its download host.
 	github *http.Client
-	// githubAPI is the API root, with a trailing slash.
-	githubAPI string
-	// githubToken is sent to githubAPI only. Empty is fine for public
-	// repositories, at the unauthenticated rate limit.
+	// githubToken is sent to the API only, and may be empty.
 	githubToken string
-	// goBin is the go command; empty when there is none installed.
-	goBin string
-	// goProxy and goSumDB are the constants above, except in the test
-	// that runs the go command against a directory.
-	goProxy string
-	goSumDB string
 	// retryDelay is the wait before the first retry; it doubles.
 	retryDelay time.Duration
 }
 
 // fetch implements fetcher. Of its errors only those that mean "the
 // registry was asked and did not deliver" are ErrUnavailable: a failure
-// that was retried to the last attempt, the download's own time running
-// out, and the one go command error that is recognisably the module
-// proxy's outage. The caller's context ending is the caller's error.
+// that was retried to the last attempt, and the download's own time
+// running out. The caller's context ending is the caller's error.
 func (f *netFetcher) fetch(ctx context.Context, ref Ref, dir string) (string, error) {
 	caller := ctx
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
@@ -80,9 +73,12 @@ func (f *netFetcher) fetch(ctx context.Context, ref Ref, dir string) (string, er
 	var err error
 	switch ref.Kind {
 	case GoModuleZip:
-		archive, err = f.moduleZip(ctx, ref, dir)
+		var rawURL string
+		if rawURL, err = moduleZipURL(ref.Name, ref.Version); err == nil {
+			archive, err = f.download(ctx, f.proxy, rawURL, nil, dir)
+		}
 	case NPMTarball:
-		archive, err = f.download(ctx, f.registry, npmTarballURL(ref.Name, ref.Version), nil, dir)
+		archive, err = f.download(ctx, f.registry, NPMTarballURL(ref.Name, ref.Version), nil, dir)
 	case ActionTarball:
 		header := http.Header{}
 		header.Set("Accept", "application/vnd.github+json")
@@ -92,7 +88,7 @@ func (f *netFetcher) fetch(ctx context.Context, ref Ref, dir string) (string, er
 			// to another host, so the token stays with the API.
 			header.Set("Authorization", "Bearer "+f.githubToken)
 		}
-		archive, err = f.download(ctx, f.github, f.githubAPI+actionTarballPath(ref.Name, ref.Hash), header, dir)
+		archive, err = f.download(ctx, f.github, gh.DefaultBaseURL+actionTarballPath(ref.Name, ref.Hash), header, dir)
 	default:
 		return "", fmt.Errorf("%w: kind %q", ErrBadRef, ref.Kind)
 	}
@@ -108,8 +104,7 @@ func (f *netFetcher) fetch(ctx context.Context, ref Ref, dir string) (string, er
 func fetchError(err, callerErr error, timedOut bool) error {
 	switch {
 	case callerErr != nil:
-		// Whatever the download made of it, this is the caller giving up,
-		// which says nothing about the registry.
+		// The caller giving up says nothing about the registry.
 		return callerErr
 	case errors.Is(err, ErrHashMismatch), errors.Is(err, ErrUnsafeArchive), errors.Is(err, ErrBadRef), errors.Is(err, ErrUnavailable):
 		// Already in a class. A refusal in particular is never turned
@@ -121,11 +116,27 @@ func fetchError(err, callerErr error, timedOut bool) error {
 	return err
 }
 
-// npmTarballURL is where registry.npmjs.org serves name@version: the
-// "dist.tarball" of every package on the public registry has this form.
-func npmTarballURL(name, version string) string {
+// NPMTarballURL is where registry.npmjs.org serves name@version: the
+// "dist.tarball" of every package on the public registry has this form,
+// and it is the only "resolved" a lock entry for it may have.
+func NPMTarballURL(name, version string) string {
 	base := name[strings.LastIndex(name, "/")+1:]
 	return npmRegistry + name + "/-/" + base + "-" + version + ".tgz"
+}
+
+// moduleZipURL is where the module proxy serves a module's zip: the URL
+// the go command downloads (go help goproxy), with x/mod's own escaping
+// of upper-case letters.
+func moduleZipURL(path, version string) (string, error) {
+	escapedPath, err := module.EscapePath(path)
+	if err != nil {
+		return "", badRef("%v", err)
+	}
+	escapedVersion, err := module.EscapeVersion(version)
+	if err != nil {
+		return "", badRef("%v", err)
+	}
+	return goProxy + escapedPath + "/@v/" + escapedVersion + ".zip", nil
 }
 
 // actionTarballPath is the API path of a repository's tarball at one
@@ -157,8 +168,8 @@ func redirects(hosts ...string) func(*http.Request, []*http.Request) error {
 
 // download GETs rawURL into a new file under dir. Network errors, 429 and
 // 5xx are retried, and when the last attempt ends in one of them the
-// error is ErrUnavailable. Any other answer is final, and is not: a 404
-// or a 403 arrived, and says something.
+// error is ErrUnavailable. Any other answer is final and is not: a 404 or
+// a 403 arrived, and says something.
 func (f *netFetcher) download(ctx context.Context, client *http.Client, rawURL string, header http.Header, dir string) (string, error) {
 	out, err := os.CreateTemp(dir, "download-*")
 	if err != nil {
@@ -227,133 +238,7 @@ func downloadOnce(ctx context.Context, client *http.Client, rawURL string, heade
 	return false, nil
 }
 
-// moduleZip has the go command download a module and returns the zip in
-// its module cache. The go command checks the module against the
-// checksum database itself; the hash it reports must be the one the pull
-// request is bound to, and the caller hashes the zip once more.
-func (f *netFetcher) moduleZip(ctx context.Context, ref Ref, dir string) (string, error) {
-	if f.goBin == "" {
-		return "", errors.New("artifact: the go command is not installed")
-	}
-	// One module cache per Prepare, shared by the old and the new
-	// module, in a directory nothing else uses.
-	scratch := filepath.Join(dir, "go")
-	work := filepath.Join(scratch, "work")
-	home := filepath.Join(scratch, "home")
-	if err := os.MkdirAll(work, 0o700); err != nil {
-		return "", err
-	}
-	if err := goTelemetryOff(home); err != nil {
-		return "", err
-	}
-
-	cmd := exec.CommandContext(ctx, f.goBin, "mod", "download", "-json", "--", ref.Name+"@"+ref.Version)
-	// An empty directory: no go.mod, go.work or vendor directory of the
-	// pull request's repository, or of anything else, is in reach.
-	cmd.Dir = work
-	cmd.Env = f.goEnv(scratch, home)
-	cmd.WaitDelay = 10 * time.Second
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	runErr := cmd.Run()
-
-	// On failure the go command still prints the JSON, with Error set.
-	var m struct {
-		Path    string
-		Version string
-		Error   string
-		Zip     string
-		Sum     string
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &m); err != nil {
-		if runErr == nil {
-			runErr = err
-		}
-		return "", fmt.Errorf("go mod download %s@%s: %v: %s", ref.Name, ref.Version, runErr, clip(stderr.String()))
-	}
-	switch {
-	case goProxyOutageRE.MatchString(m.Error):
-		return "", fmt.Errorf("%w: go mod download %s@%s: %s", ErrUnavailable, ref.Name, ref.Version, clip(m.Error))
-	case m.Error != "":
-		// Everything else the go command says stays unclassified, a
-		// checksum mismatch it found itself included: its text is not
-		// taken apart any further than the one shape above.
-		return "", fmt.Errorf("go mod download %s@%s: %s", ref.Name, ref.Version, clip(m.Error))
-	case runErr != nil:
-		return "", fmt.Errorf("go mod download %s@%s: %v: %s", ref.Name, ref.Version, runErr, clip(stderr.String()))
-	case m.Path != ref.Name || m.Version != ref.Version || m.Zip == "":
-		return "", fmt.Errorf("go mod download %s@%s: answered for %s@%s", ref.Name, ref.Version, clip(m.Path), clip(m.Version))
-	case m.Sum != ref.Hash:
-		return "", hashMismatch(ref, "the go command reports %s, the pull request is bound to %s", clip(m.Sum), ref.Hash)
-	}
-	return m.Zip, nil
-}
-
-// goProxyOutageRE is the one shape of go command error that is read as
-// "the module proxy was asked and did not answer": the error for the
-// module itself (not one nested in another), about a URL of the proxy,
-// and either a 429 or 5xx status or no response at all. The two forms are
-// cmd/go/internal/web's: an HTTPError is "reading URL: STATUS" (for some
-// answers with the server's text after it), and a request that got no
-// response is net/http's own error, `Get "URL": ...`, passed on as it is.
-// Both stand behind the module the go command was asked for; a 404 in the
-// first form is in internal/facts/gomod's recorded output. Nothing else
-// in the go command's text is interpreted: an error that does not start
-// exactly like this is not an outage. internal/facts/gomod has the same
-// shape for the same reason.
-var goProxyOutageRE = regexp.MustCompile(`^[^ \n]+@[^ \n]+: (?:` +
-	`reading ` + regexp.QuoteMeta(goProxy) + `/[^ \n]+: (?:429|5[0-9][0-9]) ` +
-	`|Get "` + regexp.QuoteMeta(goProxy) + `/[^" \n]+": )`)
-
-// goEnv is the whole environment of the go command. Nothing is inherited
-// but PATH, so no GOFLAGS, GOPROXY or GONOSUMDB of the job can redirect
-// the download or switch the checksum database off.
-func (f *netFetcher) goEnv(scratch, home string) []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + home,
-		"GOPATH=" + filepath.Join(scratch, "gopath"),
-		"GOMODCACHE=" + filepath.Join(scratch, "gopath", "pkg", "mod"),
-		"GOCACHE=" + filepath.Join(scratch, "gocache"),
-		"GOENV=off",
-		"GOTOOLCHAIN=local",
-		"GOWORK=off",
-		// -modcacherw: the cache can be removed again afterwards.
-		"GOFLAGS=-mod=mod -modcacherw",
-		"GOPROXY=" + f.goProxy,
-		"GOSUMDB=" + f.goSumDB,
-		"GONOSUMDB=",
-		"GONOSUMCHECK=",
-		"GONOPROXY=",
-		"GOPRIVATE=",
-		"GOINSECURE=",
-		"GOVCS=*:off",
-		"CGO_ENABLED=0",
-		"GIT_TERMINAL_PROMPT=0",
-	}
-}
-
-// goTelemetryOff prepares home as the HOME of a go command with Go
-// telemetry off. Without the mode file the mode is "local", and the go
-// command starts a sidecar process that writes counters under home after
-// the command has returned, into a directory this package is about to
-// remove. The file is where os.UserConfigDir puts it on Linux and on
-// macOS; "off" is what "go telemetry off" writes.
-func goTelemetryOff(home string) error {
-	for _, config := range []string{".config", filepath.Join("Library", "Application Support")} {
-		dir := filepath.Join(home, config, "go", "telemetry")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(dir, "mode"), []byte("off"), 0o600); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// clip shortens tool output for an error message and escapes it: a
-// registry or a module proxy can put anything there.
+// clip shortens tool output for an error message and escapes it.
 func clip(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) > 400 {

@@ -31,8 +31,7 @@ type extractLimits struct {
 }
 
 // defaultExtractLimits is far above any artifact the gate reads: the go
-// command's own limit for a module is 500 MiB, and of fourteen widely
-// used actions the largest tarball extracts to 16 MB in 133 entries.
+// command's own limit for a module is 500 MiB.
 var defaultExtractLimits = extractLimits{entries: 100_000, bytes: 1 << 30}
 
 // maxTrailing bounds how much is read after a tar's end marker while
@@ -46,8 +45,8 @@ type file struct {
 }
 
 // tree is one extracted artifact: a directory that holds regular files
-// and directories only, and what the files are. The zero tree is "no
-// artifact" (the old side of a new name) and has no files.
+// and directories only. The zero tree is "no artifact" (the old side of
+// a new name).
 type tree struct {
 	// root is the directory. Every later read goes through it, so even
 	// a bug in this package cannot read outside the artifact.
@@ -108,7 +107,6 @@ func extractTarGz(archive, dir string, lim extractLimits) (*tree, error) {
 	return &tree{root: root, files: x.files}, nil
 }
 
-// all extracts every entry of the tar in r and checks what follows it.
 func (x *extraction) all(r io.Reader) error {
 	tr := tar.NewReader(r)
 	for n := 0; ; n++ {
@@ -142,7 +140,6 @@ type extraction struct {
 	total int64
 }
 
-// entry handles the n-th tar entry.
 func (x *extraction) entry(n int, h *tar.Header, content io.Reader) error {
 	if h.Typeflag == tar.TypeXGlobalHeader {
 		// git archive writes exactly one, first, holding the commit ID
@@ -164,7 +161,7 @@ func (x *extraction) entry(n int, h *tar.Header, content io.Reader) error {
 			return unsafeArchive("%q: a sparse file", h.Name)
 		}
 	}
-	rel, err := entryPath(h.Name)
+	rel, err := entryPath(h.Name, h.Typeflag == tar.TypeDir)
 	if err != nil {
 		return unsafeArchive("%q: %v", h.Name, err)
 	}
@@ -189,10 +186,18 @@ func (x *extraction) entry(n int, h *tar.Header, content io.Reader) error {
 
 // entryPath checks an entry's name and returns its path below the
 // top-level directory, or "" for the top-level directory itself.
-func entryPath(name string) (string, error) {
+//
+// The name must be in clean form already, and is never rewritten: npm
+// drops the top-level directory by splitting the name as it is at "/", so
+// "./package/x" is "package/x" to npm where a cleaned name would make it
+// "x" here, and the two would not agree on which file is the root
+// package.json. Only a directory may end in a slash; npm reads a file
+// entry that does as a directory.
+func entryPath(name string, dir bool) (string, error) {
+	if dir {
+		name = strings.TrimSuffix(name, "/")
+	}
 	switch {
-	case name == "":
-		return "", errors.New("empty name")
 	case strings.ContainsRune(name, 0):
 		return "", errors.New("NUL in the name")
 	case strings.Contains(name, `\`):
@@ -202,17 +207,16 @@ func entryPath(name string) (string, error) {
 		return "", errors.New("absolute path")
 	case len(name) >= 2 && name[1] == ':':
 		return "", errors.New("drive-letter path")
+	case name == ".." || strings.HasPrefix(name, "../"):
+		return "", errors.New(`".." in the path`)
+	case name == "." || name != path.Clean(name):
+		// Empty, "./x", "x//y", "x/./y", "x/../y", "x/".
+		return "", errors.New("the name is not a clean path")
 	}
-	for _, element := range strings.Split(name, "/") {
-		if element == ".." {
-			return "", errors.New(`".." in the path`)
-		}
-	}
-	_, rest, _ := strings.Cut(path.Clean(name), "/")
+	_, rest, _ := strings.Cut(name, "/")
 	return rest, nil
 }
 
-// file writes one regular file.
 func (x *extraction) file(name, rel string, size int64, content io.Reader) error {
 	if rel == "" {
 		return unsafeArchive("%q: a file where the top-level directory should be", name)
@@ -278,14 +282,11 @@ func onlyPadding(r io.Reader) error {
 }
 
 // unzipModule extracts a Go module zip into dir, which must not exist.
-//
 // The go command's own code does it (golang.org/x/mod/zip), so the tree
-// is the one a build would see and the rules are the go command's: every
-// name under "module@version/", valid and clean; no two names equal
-// under case folding; nothing but regular files written, whatever mode an
-// entry claims.
+// is the one a build would see and the rules are the go command's.
 func unzipModule(archive, dir string, m module.Version, lim extractLimits) (*tree, error) {
-	// Counted first, so a zip over the limits is not written out at all.
+	// Counted first, directory entries and their declared sizes included
+	// (Unzip skips those), so a zip over the limits is not written out.
 	zr, err := zip.OpenReader(archive)
 	if err != nil {
 		return nil, unsafeArchive("not a zip file: %v", err)

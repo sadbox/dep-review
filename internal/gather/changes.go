@@ -57,13 +57,10 @@ var defaultChangeLimits = changeLimits{files: 1000, blob: 32 << 20, total: 128 <
 //
 // Only git objects are read: the merge base, the two trees and the blobs
 // that differ. The working tree is never looked at and nothing from it is
-// run. git is given the repository's own directory, so it searches for
-// none, and an environment without system or user configuration.
+// run.
 //
-// An error means the checkout could not be read (no git, a commit or an
-// object that is not there, the context ended): there is nothing to
-// gather from and the job fails. A change set that is too large is not an
-// error; see Changes.Refused.
+// An error means the checkout could not be read, and the job fails. A
+// change set that is too large is not an error; see Changes.Refused.
 func ReadChanges(ctx context.Context, repoDir, base, head string) (Changes, error) {
 	return readChanges(ctx, repoDir, base, head, defaultChangeLimits)
 }

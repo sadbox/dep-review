@@ -19,7 +19,7 @@ type pull struct {
 	// Fetch makes Identity from the two.
 	base allow.Fact
 	// checks is the ChecksConfigured fact: an active rule on the default
-	// branch requires at least one status check.
+	// branch requires at least one status check that is not the gate's own.
 	checks allow.Fact
 	// opened is when GitHub created the pull request.
 	opened allow.TimeFact
@@ -31,17 +31,15 @@ type pull struct {
 var branchRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 
 // askPull reads the pull request and the default branch's rules. repo and
-// number are classify's and were checked by the caller.
-//
-// Each fact comes back in the state that says what happened (see package
-// facts): gathered, unavailable when GitHub was asked and did not answer,
-// or without a Source and with the reason in Value when the answer was
-// not one to build on. The error is the context's.
+// number are classify's and were checked by the caller. Each fact comes
+// back gathered, unavailable when GitHub was asked and did not answer, or
+// without a Source and with the reason in Value when the answer was not
+// one to build on. The error is the context's.
 //
 // Whether the pull request is still open at the classified head is not
-// asked again. A head that moved while this job ran is another run's to
-// answer for, not a fault of the pull request's identity, and it cannot
-// merge here: publish merges the one commit the facts file names.
+// asked again: a head that moved while this job ran is another run's to
+// answer for, and it cannot merge here, because publish merges the one
+// commit the facts file names.
 func askPull(ctx context.Context, c *gh.Client, repo string, number int) (pull, error) {
 	source := fmt.Sprintf("GitHub: repos/%s/pulls/%d", repo, number)
 	var answer struct {
@@ -99,25 +97,13 @@ func askPull(ctx context.Context, c *gh.Client, repo string, number int) (pull, 
 	return p, err
 }
 
-// askChecks is the ChecksConfigured fact. GitHub's rules/branches answer
-// lists every active rule that applies to the branch, whichever ruleset
-// it comes from, and leaves out rulesets that are disabled or only
-// evaluated. Classic branch protection is not a rule and does not count:
-// the spec names this source.
+// askChecks is the ChecksConfigured fact (gh.RequiredChecks).
 func askChecks(ctx context.Context, c *gh.Client, repo, branch string) (allow.Fact, error) {
 	if !branchRE.MatchString(branch) || strings.Contains(branch, "..") {
 		return allow.Fact{Value: "not asked: the default branch's name is not one the gate puts in a request"}, nil
 	}
 	source := fmt.Sprintf("GitHub: repos/%s/rules/branches/%s", repo, branch)
-	type rule struct {
-		Type       string `json:"type"`
-		Parameters struct {
-			RequiredStatusChecks []struct {
-				Context string `json:"context"`
-			} `json:"required_status_checks"`
-		} `json:"parameters"`
-	}
-	rules, err := gh.List[rule](ctx, c, fmt.Sprintf("repos/%s/rules/branches/%s", repo, branch))
+	required, err := gh.RequiredChecks(ctx, c, repo, branch)
 	switch {
 	case ctx.Err() != nil:
 		return allow.Fact{}, ctx.Err()
@@ -125,17 +111,10 @@ func askChecks(ctx context.Context, c *gh.Client, repo, branch string) (allow.Fa
 		return allow.Unavailable("the default branch's rules could not be read: GitHub did not answer", source), nil
 	case err != nil:
 		return allow.Fact{Value: notRead("the default branch's rules", err)}, nil
+	case len(required) == 0:
+		return allow.No("no active rule on the default branch requires a status check besides the gate's own", source), nil
 	}
-	required := 0
-	for _, r := range rules {
-		if r.Type == "required_status_checks" {
-			required += len(r.Parameters.RequiredStatusChecks)
-		}
-	}
-	if required == 0 {
-		return allow.No("no active rule on the default branch requires a status check", source), nil
-	}
-	return allow.Yes(fmt.Sprintf("%d required status checks", required), source), nil
+	return allow.Yes(fmt.Sprintf("%d required status checks besides the gate's own", len(required)), source), nil
 }
 
 // notRead words an answer from GitHub that is not one to build on: an

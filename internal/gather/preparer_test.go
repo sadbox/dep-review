@@ -125,8 +125,8 @@ func TestNewPreparerInspectsNPM(t *testing.T) {
 			if got.Prepared.Status != wire.Prepared || got.Prepared.State != allow.ReadFull || len(got.Prepared.Chunks) != 1 {
 				t.Fatalf("read %+v", got.Prepared)
 			}
-			text, err := readChunk(filepath.Join(dir, wire.ChunksDir), got.Prepared.Chunks[0])
-			if err != nil || !strings.Contains(text, "+module.exports = 2") {
+			text, err := wire.ReadChunk(filepath.Join(dir, wire.ChunksDir), got.Prepared.Chunks[0])
+			if err != nil || !strings.Contains(string(text), "+module.exports = 2") {
 				t.Errorf("chunk %q, %v", text, err)
 			}
 			if got.NoRegress.Holds() != tc.holds || !got.NoRegress.Gathered() {

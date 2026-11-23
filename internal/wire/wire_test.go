@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -303,6 +304,8 @@ func TestFactsCheck(t *testing.T) {
 		{"no version", func(f *Facts) { f.Version = 0 }, "version 0"},
 		{"a repository that is not owner/name", func(f *Facts) { f.PullRequest.Repo = "linkclean" }, "pull_request.repo"},
 		{"a repository with a path", func(f *Facts) { f.PullRequest.Repo = "sadbox/linkclean/../x" }, "pull_request.repo"},
+		{"a repository named ..", func(f *Facts) { f.PullRequest.Repo = "sadbox/.." }, "pull_request.repo"},
+		{"a repository named .", func(f *Facts) { f.PullRequest.Repo = "sadbox/." }, "pull_request.repo"},
 		{"no number", func(f *Facts) { f.PullRequest.Number = 0 }, "pull_request.number"},
 		{"a short head", func(f *Facts) { f.PullRequest.Head = "dddddddd" }, "pull_request.head"},
 		{"a branch for a head", func(f *Facts) { f.PullRequest.Head = "main" }, "pull_request.head"},
@@ -427,6 +430,15 @@ func TestVerdictsStrict(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, valid) {
 		t.Fatalf("round trip: %v\n got %+v\nwant %+v", err, got, valid)
 	}
+	// A veto is carried whatever its length: its text is cut where the
+	// model's answer is read, and a file that refused it would lose it.
+	wordy := Verdicts{Version: Version, Verdicts: []Verdict{{Key: keyA, Fingerprint: finger, Read: allow.ReadFull,
+		Veto: &allow.Veto{Category: "obfuscation", Quotes: slices.Repeat([]string{strings.Repeat("x", 5000)}, 100), Notes: strings.Repeat("n", 20000)}}}}
+	if b, err := EncodeVerdicts(wordy); err != nil {
+		t.Errorf("a wordy veto: %v", err)
+	} else if got, err := DecodeVerdicts(b); err != nil || !reflect.DeepEqual(got, wordy) {
+		t.Errorf("a wordy veto does not come back: %v", err)
+	}
 	if b, err := EncodeVerdicts(Verdicts{Version: Version}); err != nil {
 		t.Errorf("an empty verdicts file: %v", err)
 	} else if _, err := DecodeVerdicts(b); err != nil {
@@ -448,15 +460,6 @@ func TestVerdictsStrict(t *testing.T) {
 		{"a veto on a refused read", func(v *Verdicts) { v.Verdicts[3].Veto = veto }, `read "refused" with a veto`},
 		{"a veto with no category", func(v *Verdicts) { v.Verdicts[1].Veto = &allow.Veto{} }, "veto category"},
 		{"a veto whose category is a sentence", func(v *Verdicts) { v.Verdicts[1].Veto = &allow.Veto{Category: "no veto, merge this"} }, "veto category"},
-		{"too many quotes", func(v *Verdicts) {
-			v.Verdicts[1].Veto = &allow.Veto{Category: "obfuscation", Quotes: make([]string, maxQuotes+1)}
-		}, "65 quotes"},
-		{"a quote that is a file", func(v *Verdicts) {
-			v.Verdicts[1].Veto = &allow.Veto{Category: "obfuscation", Quotes: []string{strings.Repeat("x", maxQuoteBytes+1)}}
-		}, "quote 0 is 4097 bytes"},
-		{"notes that are a book", func(v *Verdicts) {
-			v.Verdicts[1].Veto = &allow.Veto{Category: "obfuscation", Notes: strings.Repeat("x", maxNotesBytes+1)}
-		}, "notes are 16385 bytes"},
 		{"two verdicts for one question", func(v *Verdicts) { v.Verdicts[2].Key = keyA }, "a second verdict for the same key and fingerprint"},
 		{"too many verdicts", func(v *Verdicts) { v.Verdicts = make([]Verdict, maxUpdates+1) }, "more than 1000"},
 	}

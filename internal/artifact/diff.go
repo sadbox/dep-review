@@ -21,22 +21,11 @@ const (
 	bundleBytes = 256 << 10
 	// contextLines is how many unchanged lines are shown around a change.
 	contextLines = 3
+	// maxFileBytes is reader.maxFile: no file the gate has met comes near
+	// it. reader.maxText is maxBudgetBytes, the largest budget Prepare
+	// accepts, so a read that could still be full is never cut short.
+	maxFileBytes = 64 << 20
 )
-
-// readLimits bound what is held in memory while a read is prepared.
-type readLimits struct {
-	// file is the largest file read in to be diffed. A larger changed
-	// file is listed as unread.
-	file int64
-	// text is the most diff text held. Once there is more, the changed
-	// files that are left are listed as unread without being diffed.
-	text int
-}
-
-// defaultReadLimits: no file the gate has met comes near the first, and
-// the second is the largest budget Prepare accepts, so a read that could
-// still be full is never cut short by it.
-var defaultReadLimits = readLimits{file: 64 << 20, text: maxBudgetBytes}
 
 // section is one changed or added text file, ready to be shown.
 type section struct {
@@ -48,28 +37,26 @@ type section struct {
 	// header is the gate's line that introduces the file, without its
 	// newline.
 	header string
-	// hunks is the text, escaped. Each hunk is whole lines, starts with
-	// an "@@" line and ends with a newline. A file with nothing to show
-	// (it is now empty) has none.
+	// hunks is the text, escaped: whole lines, each hunk starting with
+	// an "@@" line. A file that is now empty has none.
 	hunks []string
-	// generated: the file carries a generated-code marker or is a
-	// bundle. It only matters to the targeted read.
-	generated bool
+	// bundle: the file is shown in the bundle view. It only matters to
+	// the targeted read, which sends such a file's marked hunks only.
+	bundle bool
 }
 
 // isText is the gate's whole definition of text: valid UTF-8 with no NUL
-// byte. There is no "mostly text": one NUL makes a file something the
-// model is not shown, and it is then listed as unread, never left out
-// silently.
+// byte. There is no "mostly text": a file that is not text is listed as
+// unread.
 func isText(b []byte) bool {
 	return utf8.Valid(b) && bytes.IndexByte(b, 0) < 0
 }
 
 // compare lists the paths whose bytes differ between two trees or exist
 // only in the new one, and the paths that exist only in the old one, both
-// sorted. The gate decides what changed here, from the extracted bytes;
-// git is only asked to format one file's change at a time, so nothing git
-// decides not to print can drop a file from the list.
+// sorted. What changed is decided here, from the extracted bytes; git only
+// formats one file's change at a time, so nothing git decides not to
+// print can drop a file from the list.
 func compare(oldTree, newTree *tree) (changed, removed []string) {
 	for p, nf := range newTree.files {
 		if of, ok := oldTree.files[p]; !ok || of != nf {
@@ -87,8 +74,8 @@ func compare(oldTree, newTree *tree) (changed, removed []string) {
 }
 
 // readChanged turns every changed or added file into a section, or into
-// an unread entry when it is not text or is past what lim lets be held.
-func readChanged(ctx context.Context, kind Kind, oldTree, newTree *tree, changed []string, d *differ, lim readLimits) ([]section, []unreadFile, error) {
+// an unread entry when it is not text or is past maxFile or maxText.
+func readChanged(ctx context.Context, kind Kind, oldTree, newTree *tree, changed []string, d *differ, maxFile int64, maxText int) ([]section, []unreadFile, error) {
 	var sections []section
 	var unread []unreadFile
 	held := 0 // bytes of text in sections
@@ -97,7 +84,7 @@ func readChanged(ctx context.Context, kind Kind, oldTree, newTree *tree, changed
 			return nil, nil, err
 		}
 		nf := newTree.files[p]
-		if nf.size > lim.file || held > lim.text {
+		if nf.size > maxFile || held > maxText {
 			unread = append(unread, unreadFile{p, nf})
 			continue
 		}
@@ -116,7 +103,7 @@ func readChanged(ctx context.Context, kind Kind, oldTree, newTree *tree, changed
 			// When there is nothing readable to compare with, the
 			// model is shown all of the new file.
 			status = "changed"
-			if of.size > lim.file {
+			if of.size > maxFile {
 				status = "changed; the old version is too large to compare with, so the whole file is shown as added"
 			} else if before, err = oldTree.root.ReadFile(p); err != nil {
 				return nil, nil, err
@@ -126,7 +113,7 @@ func readChanged(ctx context.Context, kind Kind, oldTree, newTree *tree, changed
 			}
 		}
 
-		s := section{path: p, file: nf, generated: generated(content)}
+		s := section{path: p, file: nf}
 		var hunks []string
 		switch {
 		case (kind == NPMTarball || kind == ActionTarball) && len(content) > bundleBytes:
@@ -136,7 +123,7 @@ func readChanged(ctx context.Context, kind Kind, oldTree, newTree *tree, changed
 			if len(hunks) == 0 {
 				status += "; there are none: lines were only removed or moved"
 			}
-			s.generated = true
+			s.bundle = true
 		case len(content) == 0 && len(before) == 0:
 			status += "; empty"
 		default:
@@ -225,16 +212,12 @@ type differ struct {
 // be an absolute path with its symbolic links resolved.
 //
 // What makes the diff safe is where and how git runs, not only "--text":
-//
-//   - The two files are copies under fixed names in a directory of their
-//     own. No .gitattributes of the artifact is beside them or above
-//     them, so none can mark a file binary, re-encode it or filter it.
-//   - The working directory is empty and GIT_CEILING_DIRECTORIES stops
-//     the search for a repository right above it. Inside a repository
-//     git would read that repository's configuration and attributes,
-//     and those do apply to "diff --no-index".
-//   - The environment is written out here in full: no system or global
-//     configuration, no system or global attributes, an empty HOME.
+// the two files are copies under fixed names in a directory of their own,
+// so no .gitattributes of the artifact can mark one binary, re-encode it
+// or filter it; the working directory is empty and
+// GIT_CEILING_DIRECTORIES stops the search for a repository right above
+// it, whose configuration and attributes would apply to "diff
+// --no-index"; and the environment is written out in full.
 func newDiffer(git, work string) (*differ, error) {
 	d := &differ{git: git, cwd: filepath.Join(work, "cwd"), pair: filepath.Join(work, "pair")}
 	home := filepath.Join(work, "home")
@@ -260,8 +243,7 @@ func newDiffer(git, work string) (*differ, error) {
 }
 
 // diff returns the hunks of "git diff --no-index --text" between two
-// texts that differ, not yet escaped. git's own header lines, which name
-// the temporary files, are dropped; the caller writes the file's header.
+// texts that differ, not yet escaped and without git's own header lines.
 func (d *differ) diff(ctx context.Context, before, after []byte) ([]string, error) {
 	a, b := filepath.Join(d.pair, "old"), filepath.Join(d.pair, "new")
 	if err := os.WriteFile(a, before, 0o600); err != nil {

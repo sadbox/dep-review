@@ -30,13 +30,10 @@ var (
 	// token of a multi-hash integrity string, so a second token would let
 	// other bytes through than the ones checked here.
 	integrityRE = regexp.MustCompile(`^sha512-[A-Za-z0-9+/]{86}==$`)
-	// A full SHA-1 commit ID.
-	commitRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
-// verify checks a downloaded archive against ref.Hash. It runs before the
-// archive is extracted, and for the two kinds that have a content hash,
-// before anything in the archive is interpreted at all.
+// verify checks a downloaded archive against ref.Hash, before it is
+// extracted.
 func verify(archive string, ref Ref) error {
 	switch ref.Kind {
 	case GoModuleZip:
@@ -49,8 +46,8 @@ func verify(archive string, ref Ref) error {
 	return fmt.Errorf("%w: kind %q", ErrBadRef, ref.Kind)
 }
 
-// verifyModuleZip recomputes the module's "h1:" hash, the one go.sum and
-// the checksum database hold, with the go command's own code.
+// verifyModuleZip recomputes the "h1:" hash go.sum holds, with the go
+// command's own code.
 func verifyModuleZip(archive string, ref Ref) error {
 	got, err := dirhash.HashZip(archive, dirhash.Hash1)
 	if err != nil {
@@ -62,11 +59,19 @@ func verifyModuleZip(archive string, ref Ref) error {
 	return nil
 }
 
-// verifyIntegrity compares the SHA-512 of the tarball's bytes with the
-// lockfile's integrity.
+// NPMIntegrity returns the digest of an integrity string that is exactly
+// one sha512 hash (integrityRE).
+func NPMIntegrity(integrity string) ([]byte, bool) {
+	if !integrityRE.MatchString(integrity) {
+		return nil, false
+	}
+	sum, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(integrity, "sha512-"))
+	return sum, err == nil && len(sum) == sha512.Size
+}
+
 func verifyIntegrity(archive string, ref Ref) error {
-	want, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ref.Hash, "sha512-"))
-	if err != nil || len(want) != sha512.Size {
+	want, ok := NPMIntegrity(ref.Hash)
+	if !ok {
 		return fmt.Errorf("%w: integrity %q", ErrBadRef, ref.Hash)
 	}
 	f, err := os.Open(archive)
@@ -86,15 +91,12 @@ func verifyIntegrity(archive string, ref Ref) error {
 }
 
 // verifyCommit checks that a repository tarball says it is the commit the
-// pull request pins.
-//
-// This is weaker than the other two and cannot be made stronger: a git
-// archive has no content hash. What binds the bytes to the commit is that
-// GitHub was asked, over TLS, for that commit by its full ID, which is
-// exactly what the Actions runner does and all it has. The commit ID
-// that git archive writes into the tarball's global header (the one "git
-// get-tar-commit-id" prints) is checked on top, so a tarball of some
-// other commit, served or stored under the wrong name, is not read.
+// pull request pins. This is weaker than the other two: a git archive has
+// no content hash. What binds the bytes to the commit is that GitHub was
+// asked, over TLS, for that commit by its full ID, which is what the
+// Actions runner does and all it has. The commit ID git archive writes
+// into the global header is checked on top, so a tarball of another
+// commit served under the wrong name is not read.
 func verifyCommit(archive string, ref Ref) error {
 	got, err := tarballCommit(archive)
 	if err != nil {

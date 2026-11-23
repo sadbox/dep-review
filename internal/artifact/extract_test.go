@@ -86,13 +86,13 @@ func TestExtractTarGzRefusesUnsafeArchives(t *testing.T) {
 		}, `".." in the path`},
 		{"dot-dot inside", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/a/../../../outside", body: "x"}}))
-		}, `".." in the path`},
+		}, "not a clean path"},
 		{"dot-dot that stays inside is refused too", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/a/../b.js", body: "x"}}))
-		}, `".." in the path`},
+		}, "not a clean path"},
 		{"dot-dot directory", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/../..", typ: tar.TypeDir}}))
-		}, `".." in the path`},
+		}, "not a clean path"},
 		{"symbolic link", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/link", typ: tar.TypeSymlink, link: outside}}))
 		}, "a symbolic link"},
@@ -134,9 +134,36 @@ func TestExtractTarGzRefusesUnsafeArchives(t *testing.T) {
 		{"names that differ only in case", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/INDEX.js", body: "second\n"}}))
 		}, "occurs twice"},
-		{"same name twice once cleaned", func(t *testing.T) []byte {
+		// A name that is not in clean form is never rewritten: npm drops
+		// the first element of the name as it stands, so "./package/x" is
+		// "package/x" to npm and would be "x" here.
+		{"a second name for a file, once cleaned", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/./index.js", body: "second\n"}}))
-		}, "occurs twice"},
+		}, "not a clean path"},
+		{"a leading ./ that would hide a second package.json", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{
+				{name: "package/package.json", body: "{}\n"},
+				{name: "./package/package.json", body: "{\"scripts\":{\"install\":\"evil\"}}\n"},
+			}))
+		}, "not a clean path"},
+		{"a leading ./ on every name", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{{name: "./package/index.js", body: "ok\n"}}))
+		}, "not a clean path"},
+		{"a doubled slash", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{{name: "package//index.js", body: "ok\n"}}))
+		}, "not a clean path"},
+		{"a doubled slash at the start", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{{name: "//package/index.js", body: "ok\n"}}))
+		}, "absolute path"},
+		{"a directory named .", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{{name: "./", typ: tar.TypeDir}, ok}))
+		}, "not a clean path"},
+		{"a directory with two trailing slashes", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/lib//", typ: tar.TypeDir}}))
+		}, "not a clean path"},
+		{"a file whose name ends in a slash", func(t *testing.T) []byte {
+			return gzipped(t, append(buildTarOpen(t, []tarEntry{ok}), append(rawEntry("package/lib.js/", tar.TypeReg, "x\n"), endMarker...)...))
+		}, "not a clean path"},
 		{"same name under two top-level directories", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "other/index.js", body: "second\n"}}))
 		}, "occurs twice"},
@@ -307,7 +334,7 @@ func TestExtractTarGzAcceptsWhatRegistriesServe(t *testing.T) {
 		{name: "owner-repo-abababa/dist/", typ: tar.TypeDir},
 		{name: "owner-repo-abababa/dist/index.js", body: "run()\n"},
 		{name: "owner-repo-abababa/dist/", typ: tar.TypeDir}, // a directory may come twice
-		{name: "./owner-repo-abababa/./action.yml", body: "name: x\n"},
+		{name: "owner-repo-abababa/action.yml", body: "name: x\n"},
 		{name: "owner-repo-abababa/no/dir/entry/first.txt", body: ""},
 		{name: "owner-repo-abababa/with space/" + u(0xE9) + ".txt", body: "accent\n"},
 		{name: "owner-repo-abababa/" + strings.Repeat("long/", 30) + "name.txt", body: "pax path\n"},
@@ -353,34 +380,44 @@ func TestExtractTarGzAcceptsWhatRegistriesServe(t *testing.T) {
 func TestEntryPath(t *testing.T) {
 	tests := []struct {
 		name    string
+		dir     bool
 		want    string
 		wantErr bool
 	}{
-		{"package/index.js", "index.js", false},
-		{"package/lib/a.js", "lib/a.js", false},
-		{"./package/lib/a.js", "lib/a.js", false},
-		{"package//lib/./a.js", "lib/a.js", false},
-		{"package/", "", false},
-		{"package", "", false},
-		{".", "", false},
-		{"package/...", "...", false},
-		{"package/..a", "..a", false},
-		{"", "", true},
-		{"/etc/passwd", "", true},
-		{"..", "", true},
-		{"../x", "", true},
-		{"package/..", "", true},
-		{"package/../x", "", true},
-		{"package/a/../../..", "", true},
-		{`package\x`, "", true},
-		{"package/a\x00b", "", true},
-		{"C:/x", "", true},
-		{"C:x", "", true},
+		{"package/index.js", false, "index.js", false},
+		{"package/lib/a.js", false, "lib/a.js", false},
+		{"package/", true, "", false},
+		{"package", true, "", false},
+		{"package", false, "", false},
+		{"package/lib/", true, "lib", false},
+		{"package/...", false, "...", false},
+		{"package/..a", false, "..a", false},
+		// Not in clean form: refused, not rewritten.
+		{"./package/lib/a.js", false, "", true},
+		{"package//lib/a.js", false, "", true},
+		{"package/./a.js", false, "", true},
+		{"package/lib/", false, "", true},
+		{"package/lib//", true, "", true},
+		{".", true, "", true},
+		{"./", true, "", true},
+		{"", false, "", true},
+		{"/", true, "", true},
+		{"/etc/passwd", false, "", true},
+		{"//package/a.js", false, "", true},
+		{"..", true, "", true},
+		{"../x", false, "", true},
+		{"package/..", true, "", true},
+		{"package/../x", false, "", true},
+		{"package/a/../../..", false, "", true},
+		{`package\x`, false, "", true},
+		{"package/a\x00b", false, "", true},
+		{"C:/x", false, "", true},
+		{"C:x", false, "", true},
 	}
 	for _, tt := range tests {
-		got, err := entryPath(tt.name)
+		got, err := entryPath(tt.name, tt.dir)
 		if got != tt.want || (err != nil) != tt.wantErr {
-			t.Errorf("entryPath(%q) = %q, %v; want %q, error %v", tt.name, got, err, tt.want, tt.wantErr)
+			t.Errorf("entryPath(%q, dir %v) = %q, %v; want %q, error %v", tt.name, tt.dir, got, err, tt.want, tt.wantErr)
 		}
 	}
 }

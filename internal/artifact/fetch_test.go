@@ -1,7 +1,6 @@
 package artifact
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"errors"
@@ -148,6 +147,8 @@ func replayReader(t *testing.T, routes map[string]*route, github *gh.Client) (*r
 const (
 	npmOldURL      = "https://registry.npmjs.org/isarray/-/isarray-2.0.4.tgz"
 	npmNewURL      = "https://registry.npmjs.org/isarray/-/isarray-2.0.5.tgz"
+	moduleOldURL   = "https://proxy.golang.org/rsc.io/quote/@v/v1.5.1.zip"
+	moduleNewURL   = "https://proxy.golang.org/rsc.io/quote/@v/v1.5.2.zip"
 	actionOldURL   = "https://api.github.com/repos/dtolnay/rust-toolchain/tarball/683b588c487a69d01f6c6ddf40f036ff682cc2c8"
 	actionNewURL   = "https://api.github.com/repos/dtolnay/rust-toolchain/tarball/245fd7ab067fa10d00f4c3c5fb238e6ec0874e77"
 	codeloadOldURL = "https://codeload.github.com/dtolnay/rust-toolchain/legacy.tar.gz/683b588c487a69d01f6c6ddf40f036ff682cc2c8"
@@ -158,6 +159,13 @@ func npmRoutes() map[string]*route {
 	return map[string]*route{
 		npmOldURL: {file: recordedFile(recordedNPM.Old)},
 		npmNewURL: {file: recordedFile(recordedNPM.New)},
+	}
+}
+
+func moduleRoutes() map[string]*route {
+	return map[string]*route{
+		moduleOldURL: {file: recordedFile(recordedModule.Old)},
+		moduleNewURL: {file: recordedFile(recordedModule.New)},
 	}
 }
 
@@ -176,12 +184,26 @@ func TestURLs(t *testing.T) {
 		{"@tailwindcss/oxide", "4.1.0", "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.1.0.tgz"},
 		{"JSONStream", "1.3.5-rc.1", "https://registry.npmjs.org/JSONStream/-/JSONStream-1.3.5-rc.1.tgz"},
 	} {
-		if got := npmTarballURL(tt.name, tt.version); got != tt.want {
-			t.Errorf("npmTarballURL(%q, %q) = %q, want %q", tt.name, tt.version, got, tt.want)
+		if got := NPMTarballURL(tt.name, tt.version); got != tt.want {
+			t.Errorf("NPMTarballURL(%q, %q) = %q, want %q", tt.name, tt.version, got, tt.want)
 		}
 	}
 	if got := gh.DefaultBaseURL + actionTarballPath("dtolnay/rust-toolchain", recordedAction.Old.Hash); got != actionOldURL {
 		t.Errorf("action tarball URL %q, want %q", got, actionOldURL)
+	}
+	// The module proxy's paths, as the go command asks for them: an
+	// upper-case letter is "!" and its lower-case form.
+	for _, tt := range []struct{ path, version, want string }{
+		{"rsc.io/quote", "v1.5.2", moduleNewURL},
+		{"github.com/Azure/azure-sdk-for-go", "v68.0.0+incompatible", "https://proxy.golang.org/github.com/!azure/azure-sdk-for-go/@v/v68.0.0+incompatible.zip"},
+		{"github.com/BurntSushi/toml", "v1.4.1-0.20240526193622-a339e1f7089c", "https://proxy.golang.org/github.com/!burnt!sushi/toml/@v/v1.4.1-0.20240526193622-a339e1f7089c.zip"},
+	} {
+		if got, err := moduleZipURL(tt.path, tt.version); err != nil || got != tt.want {
+			t.Errorf("moduleZipURL(%q, %q) = %q, %v; want %q", tt.path, tt.version, got, err, tt.want)
+		}
+	}
+	if _, err := moduleZipURL("example.com/../m", "v1.0.0"); !errors.Is(err, ErrBadRef) {
+		t.Errorf("a path that is no module path: error %v, want ErrBadRef", err)
 	}
 }
 
@@ -278,7 +300,7 @@ func TestActionWithoutAToken(t *testing.T) {
 }
 
 // checkRecordedModule is what the rsc.io/quote v1.5.1 to v1.5.2 update
-// must read as, from a directory or live.
+// must read as, replayed or live.
 func checkRecordedModule(t *testing.T, got Prepared) {
 	t.Helper()
 	// v1.5.2 adds one file to v1.5.1 and changes nothing else.
@@ -304,140 +326,46 @@ func checkRecordedModule(t *testing.T, got Prepared) {
 	}
 }
 
-// The go command itself downloads the recorded module, from a directory
-// laid out as a module proxy. Only the proxy and the checksum database
-// differ from production: GOPROXY is the directory, and the checksum
-// database, which cannot be recorded, is off. The hashes are the real
-// ones, so the zip the go command hands over is checked against what
+// The recorded module is downloaded from the module proxy's URLs. The
+// hashes are the real ones, so the zip is checked against what
 // sum.golang.org says.
 func TestRecordedGoModule(t *testing.T) {
-	zips := map[Ref][]byte{}
-	for _, ref := range []Ref{recordedModule.Old, recordedModule.New} {
-		zipped, err := os.ReadFile(recordedFile(ref))
-		if err != nil {
-			t.Fatal(err)
-		}
-		zips[ref] = zipped
-	}
-	r := newReader(t, directoryProxy(t, zips))
+	r, rp := replayReader(t, moduleRoutes(), nil)
 	got, err := r.Prepare(context.Background(), recordedModule, roomy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkRecordedModule(t, got)
+	if want := []string{moduleOldURL, moduleNewURL}; !reflect.DeepEqual(rp.urls(), want) {
+		t.Errorf("requests %v, want %v", rp.urls(), want)
+	}
 	if ents, _ := os.ReadDir(r.scratch); len(ents) != 0 {
-		t.Errorf("the module cache was left behind: %v", ents)
+		t.Errorf("the scratch directory was left behind: %v", ents)
 	}
 
-	// The same module under a hash it does not have: the go command's
-	// own report is compared first.
+	// The same module under a hash it does not have.
 	wrong := recordedModule
 	wrong.New.Hash = recordedModule.Old.Hash
 	if _, err := r.Prepare(context.Background(), wrong, roomy); !errors.Is(err, ErrHashMismatch) {
 		t.Errorf("error %v, want ErrHashMismatch", err)
 	}
-	// A version the proxy does not have.
-	missing := recordedModule
-	missing.To, missing.New.Version = "v1.5.3", "v1.5.3"
-	if _, err := r.Prepare(context.Background(), missing, roomy); err == nil || errors.Is(err, ErrHashMismatch) {
-		t.Errorf("error %v, want a download error", err)
-	}
 }
 
-// directoryProxy is a fetcher that runs the real go command against a
-// directory laid out as a module proxy and holding the given module
-// zips, with the checksum database off.
-func directoryProxy(t *testing.T, zips map[Ref][]byte) *netFetcher {
-	t.Helper()
-	goBin, err := exec.LookPath("go")
+// A large zip is answered with a redirect to the proxy's storage host,
+// and to nowhere else.
+func TestGoModuleRedirect(t *testing.T) {
+	const stored = "https://storage.googleapis.com/proxy-golang-org-prod/rsc.io:quote-v1.5.2.zip?Signature=x"
+	routes := moduleRoutes()
+	routes[moduleNewURL] = &route{status: http.StatusFound, location: stored}
+	routes[stored] = &route{file: recordedFile(recordedModule.New)}
+	r, rp := replayReader(t, routes, nil)
+	got, err := r.Prepare(context.Background(), recordedModule, roomy)
 	if err != nil {
-		t.Skip("the go command is not installed")
+		t.Fatal(err)
 	}
-	proxy := t.TempDir()
-	for ref, zipped := range zips {
-		dir := filepath.Join(proxy, ref.Name, "@v")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		zr, err := zip.NewReader(bytes.NewReader(zipped), int64(len(zipped)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		gomod, err := zr.Open(ref.Name + "@" + ref.Version + "/go.mod")
-		if err != nil {
-			t.Fatal(err)
-		}
-		mod, _ := io.ReadAll(gomod)
-		gomod.Close()
-		for name, content := range map[string][]byte{
-			ref.Version + ".zip":  zipped,
-			ref.Version + ".mod":  mod,
-			ref.Version + ".info": []byte(`{"Version":"` + ref.Version + `","Time":"2018-02-14T00:00:00Z"}`),
-		} {
-			if err := os.WriteFile(filepath.Join(dir, name), content, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	return &netFetcher{goBin: goBin, goProxy: "file://" + filepath.ToSlash(proxy), goSumDB: "off"}
-}
-
-// What the go command does with a module whose go.mod asks for a newer
-// Go than the one installed. With GOTOOLCHAIN=local, which keeps it from
-// downloading and running another toolchain, go 1.27 refuses to download
-// the module at all. For the gate that is an error from Prepare, so the
-// update goes to a person until the gate's own Go is as new as the
-// dependency asks for. The test pins that reading and tells whoever
-// upgrades Go if it changes.
-func TestGoModuleNewerThanTheToolchain(t *testing.T) {
-	oldZip := moduleZip(t, "example.com/future", "v1.0.0", map[string]string{
-		"go.mod": "module example.com/future\n\ngo 1.21\n", "a.go": "package future\n"})
-	newZip := moduleZip(t, "example.com/future", "v1.1.0", map[string]string{
-		"go.mod": "module example.com/future\n\ngo 1.999\n", "a.go": "package future\n\nvar X = 1\n"})
-	p := Pair{Ecosystem: allow.GoModules, Name: "example.com/future", From: "v1.0.0", To: "v1.1.0",
-		Old: Ref{Kind: GoModuleZip, Name: "example.com/future", Version: "v1.0.0", Hash: h1(t, oldZip)},
-		New: Ref{Kind: GoModuleZip, Name: "example.com/future", Version: "v1.1.0", Hash: h1(t, newZip)}}
-	r := newReader(t, directoryProxy(t, map[Ref][]byte{p.Old: oldZip, p.New: newZip}))
-	got, err := r.Prepare(context.Background(), p, roomy)
-	switch {
-	case err == nil:
-		// A go command that downloads it anyway: then it must read.
-		t.Logf("this go command downloads a module that asks for go 1.999")
-		if got.State != allow.ReadFull || !strings.Contains(text(got), "+var X = 1\n") {
-			t.Errorf("state %q, text:\n%s", got.State, text(got))
-		}
-	case errors.Is(err, ErrHashMismatch) || errors.Is(err, ErrUnsafeArchive) || errors.Is(err, ErrBadRef):
-		t.Errorf("error %v: want the go command's own refusal", err)
-	case !strings.Contains(err.Error(), "requires go"):
-		t.Errorf("error %v: want the go command's \"requires go >= 1.999\"", err)
-	}
-}
-
-func TestGoEnvInheritsNothing(t *testing.T) {
-	t.Setenv("GOFLAGS", "-insecure")
-	t.Setenv("GOPROXY", "https://proxy.example")
-	t.Setenv("GONOSUMDB", "*")
-	t.Setenv("GONOSUMCHECK", "1")
-	t.Setenv("GOPRIVATE", "*")
-	t.Setenv("GOINSECURE", "*")
-	f := &netFetcher{goProxy: goProxy, goSumDB: goSumDB}
-	env := f.goEnv("/scratch", "/scratch/home")
-	got := map[string]string{}
-	for _, kv := range env {
-		k, v, _ := strings.Cut(kv, "=")
-		if _, dup := got[k]; dup {
-			t.Errorf("%s is set twice", k)
-		}
-		got[k] = v
-	}
-	for k, want := range map[string]string{
-		"GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org", "GOFLAGS": "-mod=mod -modcacherw",
-		"GONOSUMDB": "", "GONOSUMCHECK": "", "GOPRIVATE": "", "GOINSECURE": "", "GONOPROXY": "",
-		"GOENV": "off", "GOWORK": "off", "GOTOOLCHAIN": "local", "GOVCS": "*:off",
-	} {
-		if v, ok := got[k]; !ok || v != want {
-			t.Errorf("%s = %q (set: %v), want %q", k, v, ok, want)
-		}
+	checkRecordedModule(t, got)
+	if want := []string{moduleOldURL, moduleNewURL, stored}; !reflect.DeepEqual(rp.urls(), want) {
+		t.Errorf("requests %v, want %v", rp.urls(), want)
 	}
 }
 
@@ -509,6 +437,46 @@ func TestDownloadFailures(t *testing.T) {
 			r[actionOldURL] = &route{status: http.StatusForbidden}
 			return r
 		}, nil, nil, 1},
+		{"module: a version the proxy does not have is final", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleNewURL] = &route{status: http.StatusNotFound}
+			return r
+		}, nil, nil, 2},
+		{"module: gone is final", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleOldURL] = &route{status: http.StatusGone}
+			return r
+		}, nil, nil, 1},
+		{"module: 503 three times is unavailable", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleOldURL].failures = 3
+			return r
+		}, nil, ErrUnavailable, 3},
+		{"module: 429 three times is unavailable", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleNewURL] = &route{status: http.StatusTooManyRequests}
+			return r
+		}, nil, ErrUnavailable, 4},
+		{"module: a redirect to another host is refused", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleOldURL] = &route{status: http.StatusFound, location: "https://storage.googleapis.com.example/x.zip"}
+			return r
+		}, nil, errRedirect, 1},
+		{"module: a redirect to http is refused", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleOldURL] = &route{status: http.StatusFound, location: "http://storage.googleapis.com/x.zip"}
+			return r
+		}, nil, errRedirect, 1},
+		{"module: the zip of another version", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleNewURL].file = recordedFile(recordedModule.Old)
+			return r
+		}, nil, ErrHashMismatch, 2},
+		{"module: bytes that are no zip", recordedModule, func() map[string]*route {
+			r := moduleRoutes()
+			r[moduleOldURL] = &route{body: other}
+			return r
+		}, nil, ErrUnsafeArchive, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -561,7 +529,7 @@ func TestCallerContextIsNoClass(t *testing.T) {
 // a refusal when it is one however late it arrived, a wait when the
 // download's time ran out, and otherwise nothing this package names.
 func TestFetchError(t *testing.T) {
-	plain := errors.New("go mod download: exit status 1")
+	plain := errors.New("GET https://registry.example/x: HTTP 404")
 	mismatch := hashMismatch(recordedNPM.New, "the tarball is other bytes")
 	for _, tc := range []struct {
 		name      string
@@ -576,8 +544,8 @@ func TestFetchError(t *testing.T) {
 		{"a bad reference after the time ran out", badRef("kind %q", "x"), nil, true, ErrBadRef},
 		{"retries used up", fmt.Errorf("%w: HTTP 503", ErrUnavailable), nil, false, ErrUnavailable},
 		{"retries used up as the time ran out", fmt.Errorf("%w: HTTP 503", ErrUnavailable), nil, true, ErrUnavailable},
-		{"the go command killed when the time ran out", plain, nil, true, ErrUnavailable},
-		{"the go command failed", plain, nil, false, nil},
+		{"cut off when the time ran out", plain, nil, true, ErrUnavailable},
+		{"an answer that is final", plain, nil, false, nil},
 		{"the caller gave up", plain, context.Canceled, true, context.Canceled},
 		{"the caller gave up on a download that was failing", fmt.Errorf("%w: HTTP 503", ErrUnavailable), context.DeadlineExceeded, true, context.DeadlineExceeded},
 	} {
@@ -586,37 +554,6 @@ func TestFetchError(t *testing.T) {
 			if errors.Is(got, class) != (class == tc.want) {
 				t.Errorf("%s: %v: errors.Is(%v) is %v", tc.name, got, class, errors.Is(got, class))
 			}
-		}
-	}
-}
-
-// The go command's errors are text. One exact shape of it is read as the
-// module proxy not answering; everything else is left alone.
-func TestGoProxyOutage(t *testing.T) {
-	for _, tc := range []struct {
-		name, text string
-		want       bool
-	}{
-		{"503", "github.com/fsnotify/fsnotify@v1.5.4: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.4.zip: 503 Service Unavailable", true},
-		{"500 with the server's text", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 500 Internal Server Error\n\tserver response: oops", true},
-		{"429", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 429 Too Many Requests", true},
-		{"no response", `golang.org/x/text@v0.3.3: Get "https://proxy.golang.org/golang.org/x/text/@v/v0.3.3.info": dial tcp: i/o timeout`, true},
-		{"no response from another host", `example.com/m@v1.0.0: Get "https://example.com/m?go-get=1": dial tcp: i/o timeout`, false},
-		{"a quoted URL that only starts like the proxy's", `example.com/m@v1.0.0: Get "https://proxy.golang.org.evil.example/m": EOF`, false},
-		// The recorded answer for a version that does not exist.
-		{"404", "github.com/fsnotify/fsnotify@v1.5.99: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.99.info: 404 Not Found\n\tserver response: not found: github.com/fsnotify/fsnotify@v1.5.99: invalid version: unknown revision v1.5.99", false},
-		{"410", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 410 Gone", false},
-		// The recorded answer for a module that fails the checksum database.
-		{"checksum mismatch", "github.com/fsnotify/fsnotify@v1.5.4: verifying go.mod: checksum mismatch\n\tdownloaded: h1:KOil/w6cxr3ALagyF6SIPYeoV9XN+Pjkp5hICIRMzgM=\n\tsum.golang.org: h1:OVB6XrOHzAwXMpEM7uPOzcehqUV2UqJxmVXmkdnm1bU=\n\nSECURITY ERROR\n", false},
-		{"a 503 quoted in a 404's text", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.info: 404 Not Found\n\tserver response: example.com/m@v1.0.0: reading https://proxy.golang.org/x: 503 Service Unavailable", false},
-		{"another host", "example.com/m@v1.0.0: reading https://proxy.golang.org.evil.example/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
-		{"plain http", "example.com/m@v1.0.0: reading http://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
-		{"not at the start", "go: example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 503 Service Unavailable", false},
-		{"a status that only starts with 5", "example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 5030 Odd", false},
-		{"empty", "", false},
-	} {
-		if got := goProxyOutageRE.MatchString(tc.text); got != tc.want {
-			t.Errorf("%s: outage is %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
@@ -635,14 +572,16 @@ func TestDownloadRetries(t *testing.T) {
 	}
 }
 
+// The job's token goes to github.com's API and nowhere else: a client for
+// any other root is refused, a GitHub Enterprise server's included.
 func TestNewChecksTheGitHubRoot(t *testing.T) {
-	for _, base := range []string{"http://api.github.com/", "https://ghe.example.com/api/v3", "ftp://x/", ""} {
+	for _, base := range []string{"http://api.github.com/", "https://api.github.com", "https://ghe.example.com/api/v3/", "https://api.github.com.example/", "ftp://x/", ""} {
 		if _, err := New(Options{GitHub: &gh.Client{BaseURL: base}}); err == nil {
 			t.Errorf("New took the GitHub API root %q", base)
 		}
 	}
-	if _, err := New(Options{GitHub: &gh.Client{BaseURL: "https://ghe.example.com/api/v3/"}}); err != nil {
-		t.Errorf("New refused a GitHub Enterprise API root: %v", err)
+	if _, err := New(Options{GitHub: gh.New("token")}); err != nil {
+		t.Errorf("New refused github.com's API root: %v", err)
 	}
 }
 
@@ -682,6 +621,19 @@ func TestLive(t *testing.T) {
 		}
 		checkRecordedModule(t, got)
 		t.Logf("key %s\n%s", got.Key, text(got))
+	})
+	// A zip of 27 MB, which the proxy answers with a redirect to its
+	// storage host. Fetched and hashed only; the hash is sum.golang.org's.
+	t.Run("gomod, a zip the proxy redirects for", func(t *testing.T) {
+		ref := Ref{Kind: GoModuleZip, Name: "github.com/microsoftgraph/msgraph-sdk-go", Version: "v1.50.0",
+			Hash: "h1:0sOk4L4zVdVwX3MuwItISD83TRde/dQxGahzNz/MYTY="}
+		archive, err := p.(*reader).fetch.fetch(context.Background(), ref, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verify(archive, ref); err != nil {
+			t.Error(err)
+		}
 	})
 	t.Run("actions", func(t *testing.T) {
 		got, err := p.Prepare(context.Background(), recordedAction, roomy)

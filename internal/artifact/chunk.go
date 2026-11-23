@@ -3,8 +3,8 @@ package artifact
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -39,7 +39,6 @@ type packer struct {
 	cur  []byte   // the chunk being filled
 }
 
-// used is how many chunks there are, counting the one being filled.
 func (p *packer) used() int {
 	if len(p.cur) > 0 {
 		return len(p.done) + 1
@@ -54,12 +53,10 @@ func (p *packer) flush() {
 	}
 }
 
-// add appends one section: its header line and its body, whole lines.
-//
-// A section goes into the chunk being filled when it fits there. A small
+// add appends one section: its header line and its body, whole lines. A
+// section goes into the chunk being filled when it fits there. A small
 // one that does not starts the next chunk. Any other is cut where the
-// chunk ends and goes on in the next, under the same header: chunks are
-// filled to the end, and at most one file is cut at each chunk's end.
+// chunk ends and goes on in the next, under the same header.
 //
 // add reports false, and changes nothing, when the section does not fit
 // in the chunks that are left.
@@ -106,7 +103,6 @@ func (p *packer) add(header string, body []string) bool {
 	return true
 }
 
-// whole writes a section into the chunk being filled.
 func (p *packer) whole(header string, body []string) {
 	p.cur = append(p.cur, header...)
 	p.cur = append(p.cur, '\n')
@@ -184,7 +180,6 @@ func (p *packer) split(header string, body []string, longest int) {
 	}
 }
 
-// chunks returns what was packed.
 func (p *packer) chunks() []Chunk {
 	p.flush()
 	out := make([]Chunk, len(p.done))
@@ -200,9 +195,10 @@ func (p *packer) chunks() []Chunk {
 // When everything fits, everything is sent, in path order, and the read
 // is full unless some changed file was not text. When it does not fit,
 // the read is partial and what is sent is the targeted read of spec
-// section 7: first whole files that carry no generated-code marker, then,
+// section 7: first whole files in path order, bundles left out, then,
 // from every file not sent whole, the hunks with a marker on an added
-// line. Whatever is not sent whole is listed as unread.
+// line. Whatever is not sent whole is listed as unread. Nothing a
+// publisher writes into a file moves it between the two.
 func assemble(pair Pair, sections []section, unread []unreadFile, removed []string, lim Limits) Prepared {
 	p := &packer{size: lim.ChunkBytes, max: lim.MaxChunks}
 	fits := true
@@ -216,7 +212,7 @@ func assemble(pair Pair, sections []section, unread []unreadFile, removed []stri
 		p = &packer{size: lim.ChunkBytes, max: lim.MaxChunks}
 		whole := make([]bool, len(sections))
 		for i, s := range sections {
-			whole[i] = !s.generated && p.add(s.header, s.hunks)
+			whole[i] = !s.bundle && p.add(s.header, s.hunks)
 		}
 		for i, s := range sections {
 			if whole[i] {
@@ -242,12 +238,10 @@ func assemble(pair Pair, sections []section, unread []unreadFile, removed []stri
 			}
 		}
 	}
-	// Removed files are named when there is room. They are not changed
-	// or added files, so leaving the list out does not make the read
-	// partial.
-	if len(removed) > 0 {
-		p.add(removedNote(removed))
-	}
+	// Removed files are named, not shown. Without the note the model is
+	// not told that files went away, so a note that does not fit makes the
+	// read partial, with nothing in Unread to show for it.
+	untold := len(removed) > 0 && !p.add(removedNote(removed))
 
 	out := Prepared{
 		Pair:   pair,
@@ -263,7 +257,7 @@ func assemble(pair Pair, sections []section, unread []unreadFile, removed []stri
 			SHA256: hex.EncodeToString(u.file.sum[:]),
 		})
 	}
-	if len(out.Unread) > 0 {
+	if len(out.Unread) > 0 || untold {
 		out.State = allow.ReadPartial
 	}
 	out.Key = contentKey(out)
@@ -289,38 +283,25 @@ func removedNote(removed []string) (header string, body []string) {
 // means: which update it is, with the hashes it was bound to, what was
 // left unread, and the read state. Two updates whose chunks are equal but
 // where one also changed a binary file must not share a verdict, and
-// neither may two updates that both have no chunk at all.
-//
-// Nothing in it depends on the pull request, the repository or the
-// machine, so the same update prepared again gives the same key.
+// neither may two updates that both have no chunk at all. Nothing in it
+// depends on the pull request, the repository or the machine.
 func contentKey(p Prepared) string {
-	h := sha256.New()
-	field := func(s string) {
-		// Length first, so no two lists of fields hash alike.
-		fmt.Fprintf(h, "%d:", len(s))
-		io.WriteString(h, s)
+	// Named fields in a fixed order; JSON's quoting keeps two fields from
+	// running into each other. Every string here is escaped text or of a
+	// checked ASCII shape, so none is the invalid UTF-8 that JSON would
+	// fold into one replacement character.
+	b, err := json.Marshal(struct {
+		Format string
+		Pair   Pair
+		State  allow.ReadState
+		Unread []Unread
+		Chunks []Chunk
+	}{"dep-review artifact read v2", p.Pair, p.State, p.Unread, p.Chunks})
+	if err != nil {
+		// Strings and integers only. A key over nothing would be one key
+		// for every read, so this is never passed over.
+		panic(err)
 	}
-	field("dep-review artifact read v1")
-	field(p.Pair.Ecosystem)
-	field(p.Pair.Name)
-	field(p.Pair.From)
-	field(p.Pair.To)
-	for _, ref := range []Ref{p.Pair.Old, p.Pair.New} {
-		field(string(ref.Kind))
-		field(ref.Name)
-		field(ref.Version)
-		field(ref.Hash)
-	}
-	field(string(p.State))
-	field(fmt.Sprint(len(p.Unread)))
-	for _, u := range p.Unread {
-		field(u.Path)
-		field(fmt.Sprint(u.Size))
-		field(u.SHA256)
-	}
-	field(fmt.Sprint(len(p.Chunks)))
-	for _, c := range p.Chunks {
-		field(c.Text)
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

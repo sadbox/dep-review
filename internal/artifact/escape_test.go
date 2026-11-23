@@ -3,6 +3,7 @@ package artifact
 import (
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -18,12 +19,21 @@ func TestEscape(t *testing.T) {
 		line string // escapeLine
 	}{
 		{"plain", "let a = 1;", "let a = 1;", "let a = 1;"},
-		{"letters outside ASCII stay", "na" + u(0xEF) + "ve " + u(0x65E5) + u(0x1F642), "na" + u(0xEF) + "ve " + u(0x65E5) + u(0x1F642), "na" + u(0xEF) + "ve " + u(0x65E5) + u(0x1F642)},
+		{"letters and digits outside ASCII stay", "na" + u(0xEF) + "ve " + u(0x65E5) + u(0x0663), "na" + u(0xEF) + "ve " + u(0x65E5) + u(0x0663), "na" + u(0xEF) + "ve " + u(0x65E5) + u(0x0663)},
+		{"symbols and punctuation outside ASCII are shown", u(0x1F642) + " a" + u(0x2014) + "b", "<U+1F642> a<U+2014>b", "<U+1F642> a<U+2014>b"},
+		{"a combining mark is shown", "e" + u(0x0301), "e<U+0301>", "e<U+0301>"},
 		{"newline and tab", "a\tb\nc", "a\tb\nc", "a<0x09>b<0x0A>c"},
-		{"CRLF is a line end", "a\r\nb", "a\r\nb", "a<0x0D><0x0A>b"},
+		{"the CR of a CRLF is shown", "a\r\nb", "a<0x0D>\nb", "a<0x0D><0x0A>b"},
 		{"lone CR is shown", "a\rb", "a<0x0D>b", "a<0x0D>b"},
 		{"CR at the very end is shown", "a\r", "a<0x0D>", "a<0x0D>"},
-		{"two CRs before LF: only the last ends the line", "a\r\r\nb", "a<0x0D>\r\nb", "a<0x0D><0x0D><0x0A>b"},
+		{"two CRs before LF", "a\r\r\nb", "a<0x0D><0x0D>\nb", "a<0x0D><0x0D><0x0A>b"},
+		// What a list of characters to hide did not have (none of these is
+		// a control or a format character).
+		{"braille blank", "a" + u(0x2800) + "b", "a<U+2800>b", "a<U+2800>b"},
+		{"spaces outside ASCII", "a" + u(0xA0) + "b" + u(0x3000) + "c", "a<U+00A0>b<U+3000>c", "a<U+00A0>b<U+3000>c"},
+		{"grapheme joiner", "a" + u(0x034F) + "b", "a<U+034F>b", "a<U+034F>b"},
+		{"mongolian variation selector", "a" + u(0x180B) + "b", "a<U+180B>b", "a<U+180B>b"},
+		{"the replacement character itself", "a" + u(0xFFFD) + "b", "a<U+FFFD>b", "a<U+FFFD>b"},
 		{"C0 controls", "a\x01\x1b[31m\x7f", "a<0x01><0x1B>[31m<0x7F>", "a<0x01><0x1B>[31m<0x7F>"},
 		{"vertical tab and form feed end no line", "a\vb\fc", "a<0x0B>b<0x0C>c", "a<0x0B>b<0x0C>c"},
 		{"NEL", "a" + u(0x85) + "b", "a<U+0085>b", "a<U+0085>b"},
@@ -52,8 +62,8 @@ func TestEscape(t *testing.T) {
 }
 
 // Everything v0.1.9's evidence.Normalize made visible is made visible
-// here: the C0 controls but tab, LF and a line-ending CR; DEL; NEL; the
-// line and paragraph separators; the bidi controls.
+// here: the C0 controls but tab and LF; DEL; NEL; the line and paragraph
+// separators; the bidi controls.
 func TestEscapeCoversV019(t *testing.T) {
 	var runes []rune
 	for r := rune(0); r < 0x20; r++ {
@@ -80,17 +90,14 @@ func TestEscapeCoversV019(t *testing.T) {
 	}
 }
 
-// After escapeText the only thing that ends a line is "\n" (with the CR
-// of a CRLF before it), and after escapeLine nothing does. Checked for
-// every character that some language or terminal treats as a line end,
-// in every position.
+// After escapeText the only thing that ends a line is "\n", and after
+// escapeLine nothing does. Checked for every character that some language
+// or terminal treats as a line end, in every position.
 func TestEscapeLeavesNoOtherLineEnd(t *testing.T) {
 	for _, in := range []string{"\r", "a\r", "\rb", "a\rb", "a\r\rb", "a\r\r\nb", "a\n\rb", "\r\n", "a\r\n\rb\r"} {
 		got := escapeText(in)
-		for i := range len(got) {
-			if got[i] == '\r' && (i+1 == len(got) || got[i+1] != '\n') {
-				t.Errorf("escapeText(%q) = %q: a CR that does not end a line", in, got)
-			}
+		if strings.Contains(got, "\r") || strings.Count(got, "\n") != strings.Count(in, "\n") {
+			t.Errorf("escapeText(%q) = %q: a CR is left, or the number of lines changed", in, got)
 		}
 		if line := escapeLine(in); strings.ContainsAny(line, "\r\n") {
 			t.Errorf("escapeLine(%q) = %q: still more than one line", in, line)
@@ -117,6 +124,54 @@ func TestEscapeIsValidUTF8(t *testing.T) {
 	for _, in := range []string{"\xff\xfe\xfd", "ok\xc3", "\xe2\x80", "\xed\xa0\x80"} {
 		if got := escapeLine(in); !utf8.ValidString(got) {
 			t.Errorf("escapeLine(%q) = %q is not valid UTF-8", in, got)
+		}
+	}
+}
+
+// The escaper is an allowlist: of everything outside ASCII only letters
+// and decimal digits pass, and of those not the four that Unicode says
+// are drawn as nothing. Whatever else Unicode holds or comes to hold is
+// shown as an escape, with no list of bad characters to keep up.
+func TestEscapeIsAnAllowlist(t *testing.T) {
+	passed := 0
+	for r := rune(0x80); r <= unicode.MaxRune; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue // surrogates are not characters
+		}
+		in := string(r)
+		got := escapeText(in)
+		if got != escapeLine(in) {
+			t.Fatalf("U+%04X: escapeText %q, escapeLine %q", r, got, escapeLine(in))
+		}
+		if got == in {
+			passed++
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				t.Fatalf("U+%04X passes and is neither a letter nor a digit", r)
+			}
+			if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zs, unicode.Zl, unicode.Zp, unicode.M, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) {
+				t.Fatalf("U+%04X passes and is a control, a format character, a space, a mark or drawn as nothing", r)
+			}
+			continue
+		}
+		for i := 0; i < len(got); i++ {
+			if got[i] < 0x20 || got[i] >= 0x7f {
+				t.Fatalf("U+%04X: the escape %q is not printable ASCII", r, got)
+			}
+		}
+	}
+	if passed < 100_000 {
+		t.Errorf("only %d characters outside ASCII pass; letters of other scripts should", passed)
+	}
+	// In ASCII: the printable characters, and in text the line feed and
+	// the tab.
+	for c := 0; c < 0x80; c++ {
+		in := string(rune(c))
+		printable := c >= 0x20 && c < 0x7f
+		if got := escapeLine(in) == in; got != printable {
+			t.Errorf("escapeLine passes 0x%02X: %v", c, got)
+		}
+		if got := escapeText(in) == in; got != (printable || c == '\n' || c == '\t') {
+			t.Errorf("escapeText passes 0x%02X: %v", c, got)
 		}
 	}
 }

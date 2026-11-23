@@ -198,7 +198,7 @@ func newReader(t *testing.T, f fetcher) *reader {
 	if err != nil {
 		t.Skip("git is not installed")
 	}
-	return &reader{scratch: t.TempDir(), git: git, fetch: f, limits: defaultExtractLimits, read: defaultReadLimits}
+	return &reader{scratch: t.TempDir(), git: git, fetch: f, limits: defaultExtractLimits, maxFile: maxFileBytes, maxText: maxBudgetBytes}
 }
 
 // npmPair is an update of the npm package "demo" from 1.0.0 to 1.0.1 with

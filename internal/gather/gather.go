@@ -1,21 +1,11 @@
 // Package gather is the fetch job and the review job as library code
-// (docs/v0.2-spec.md, section 8). The commands around it only read flags
-// and files.
+// (docs/v0.2-spec.md, section 8). Fetch writes the facts file and the
+// chunk files; Review reads them back and writes the verdicts file.
+// Neither decides anything, and neither writes to GitHub.
 //
-//   - Fetch establishes everything deterministic code can know about one
-//     pull request: the pull request's own facts, the ecosystem's facts
-//     for every update, and the text the model is to read. It writes the
-//     facts file and the chunk files (internal/wire). It holds nothing
-//     but the job's read-only token, and it is the code that reads what a
-//     pull request and its dependencies wrote, so it never runs anything
-//     from the checkout: the changed files come from git objects
-//     (ReadChanges).
-//   - Review reads that directory back, believing it only as far as
-//     internal/wire verified it, puts each prepared read before the
-//     reviewer and writes the verdicts file. To it a chunk is bytes.
-//
-// Neither decides anything, and neither writes to GitHub. Publish joins
-// the two files (wire.Join) and calls allow.Decide.
+// Fetch is the code that reads what a pull request and its dependencies
+// wrote, so it never runs anything from the checkout: the changed files
+// come from git objects (ReadChanges).
 //
 // One rule runs through both: a failure that belongs to one update is
 // recorded for that update, in the state that says what becomes of it
@@ -58,16 +48,14 @@ func ecosystem(e model.Ecosystem) (string, bool) {
 
 // NeedsChanges reports whether Fetch.Run looks at the change set of the
 // pull request class describes. It does not for a pull request that is
-// not Dependabot's alone, nor in an ecosystem without a rule: nothing is
-// gathered for those, so the caller need not read a change set, and a
-// checkout it cannot read one from is no reason to fail.
+// not Dependabot's alone, nor in an ecosystem without a rule, so a
+// checkout no change set can be read from is no reason to fail there.
 func NeedsChanges(class model.Classification) bool {
 	_, hasRule := ecosystem(class.Ecosystem)
 	return hasRule && class.Kind != model.KindDependabotUnverified
 }
 
 // Gatherers returns the fact gatherer of every ecosystem that has a rule,
-
 // by the gate's name for it. It is Fetch.Gatherers outside tests.
 func Gatherers() map[string]facts.Gatherer {
 	return map[string]facts.Gatherer{
@@ -78,11 +66,9 @@ func Gatherers() map[string]facts.Gatherer {
 	}
 }
 
-// NewPreparer returns the artifact reader the fetch job uses. It is
+// NewPreparer returns the artifact reader the fetch job uses:
 // internal/artifact's, told to run npm's own look at the verified
-// tarballs (spec section 11, amendment 5): internal/artifact cannot
-// import the npm gatherer, so the function is handed over here, and
-// Fetch makes npm's NoRegress from its answer and the gatherer's.
+// tarballs (spec section 11, amendment 5), which it cannot import itself.
 // scratch, hc and github are artifact.Options' fields of those names.
 func NewPreparer(scratch string, hc *http.Client, github *gh.Client) (artifact.Preparer, error) {
 	return artifact.New(artifact.Options{

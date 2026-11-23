@@ -257,6 +257,16 @@ func TestFetchPullRequestFacts(t *testing.T) {
 		{name: "no rule requires a check", change: func(g *fakeGitHub) {
 			g.rules = `[{"type":"deletion","ruleset_id":1},{"type":"required_status_checks","parameters":{"required_status_checks":[]},"ruleset_id":1}]`
 		}, identity: yes, checks: no, opened: true, gathered: true, rulesAsked: true, outcome: allow.Person, reason: allow.ReasonChecksNotConfigured},
+		{name: "the only required check is the gate's own status", change: func(g *fakeGitHub) {
+			g.rules = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"dep-review"}]},"ruleset_id":1},` +
+				`{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"dep-review","integration_id":7},{"context":""}]},"ruleset_id":2}]`
+		}, identity: yes, checks: no, opened: true, gathered: true, rulesAsked: true, outcome: allow.Person, reason: allow.ReasonChecksNotConfigured},
+		{name: "the gate's own status and one other check", change: func(g *fakeGitHub) {
+			g.rules = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"dep-review"},{"context":"test"}]},"ruleset_id":1}]`
+		}, identity: yes, checks: yes, opened: true, gathered: true, rulesAsked: true, outcome: allow.Merge},
+		{name: "a check whose name only starts like the gate's", change: func(g *fakeGitHub) {
+			g.rules = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"dep-review / build"}]},"ruleset_id":1}]`
+		}, identity: yes, checks: yes, opened: true, gathered: true, rulesAsked: true, outcome: allow.Merge},
 		{name: "no rules at all", change: func(g *fakeGitHub) {
 			g.rules = `[]`
 		}, identity: yes, checks: no, opened: true, gathered: true, rulesAsked: true, outcome: allow.Person, reason: allow.ReasonChecksNotConfigured},
@@ -702,6 +712,25 @@ func TestFetchTooMuch(t *testing.T) {
 		}
 		wantOutcome(t, decide(t, f, nil), allow.Person, allow.ReasonFactMissing)
 	})
+}
+
+// A read can be partial with nothing unread: the note that names the
+// removed files did not fit (internal/artifact). The facts file carries
+// that, and the update waits like any other partial read.
+func TestFetchPartialWithNothingUnread(t *testing.T) {
+	j := newJob(t, model.GoModules, goodUpdate(t, allow.GoModules, "example.com/m"))
+	j.preparer.answers["example.com/m"] = func(p artifact.Pair) (artifact.Prepared, error) {
+		out := preparedRead(p, "== file: a.go (changed)\n+new\n")
+		out.State = allow.ReadPartial
+		return out, nil
+	}
+	_, f := j.run(t)
+	read := f.Facts.Updates[0].Prepared
+	if read.Status != wire.Prepared || read.State != allow.ReadPartial || len(read.Unread) != 0 {
+		t.Fatalf("read %+v", read)
+	}
+	// The reviewer read all it was sent; the prepared state is the ceiling.
+	wantOutcome(t, decide(t, f, cleanVerdicts(f)), allow.Wait, allow.ReasonAge)
 }
 
 // The output directory's chunks are this run's and nothing else.
