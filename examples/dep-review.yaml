@@ -10,8 +10,13 @@ on:
   workflow_run:
     workflows: [dep-review-trigger]
     types: [completed]
+  # The scheduled run looks again at the PRs the gate left waiting (a merge
+  # GitHub refused while required checks ran lands here), takes up the ones
+  # it has nothing for, and asks the model about what it has not read.
+  # GitHub starts scheduled runs late and may skip one; every four hours is
+  # the default, and any schedule works.
   schedule:
-    - cron: "17,47 * * * *" # looks again at the PRs the gate left waiting, and asks the model about what it has not read
+    - cron: "17 */4 * * *"
   workflow_dispatch:
 
 permissions: {}

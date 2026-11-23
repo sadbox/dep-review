@@ -198,9 +198,10 @@ func (v Vetoes) keep(mk *marker) {
 // is asked again about a read that still has no answer; every ask after
 // that waits twice as long as the one before: 30 minutes, 1 hour, 2
 // hours. That is nine asks in the first five and a half days, inside the
-// wait deadline of seven, where an ask at every half-hourly run would be
-// 336. A reviewer that is down for an hour costs a pull request little
-// time, and one that never answers costs little money.
+// wait deadline of seven, where an ask at every run of a half-hourly
+// schedule would be 336. On a slower schedule an ask is made at the first
+// run after it is due. A reviewer that is down for an hour costs a pull
+// request little time, and one that never answers costs little money.
 const askGap = 30 * time.Minute
 
 // askDue reports whether a scheduled run at now may ask the model about a

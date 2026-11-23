@@ -73,8 +73,9 @@ When the model leaves a prepared read without a verdict (it did not
 answer, the review job failed, the token exchange was denied), the pull
 request waits and the scheduled run asks again by itself: at its next
 run, then 30 minutes after that ask, then after 1 hour, 2 hours and so
-on, each gap twice the one before, until the wait deadline. One miss
-needs nobody. When the second scheduled ask also gets no answer the
+on, each gap twice the one before, until the wait deadline; on a
+schedule slower than a gap, at the first run after the ask is due. One
+miss needs nobody. When the second scheduled ask also gets no answer the
 owner is told once per head commit, and the gate goes on asking.
 
 To run the gate again, re-run all jobs of the workflow run, which is
@@ -471,7 +472,13 @@ remember at all needs a person for good (`vetoes_forgotten`).
    into `.github/workflows/`. Pin `gate.yml` by the commit of a release
    tag, with the version in the comment as the example has it
    (`@<40 hex> # vX.Y.Z`): that is the line the gate reads when
-   Dependabot moves it. Set `app_slug` and the Anthropic IDs.
+   Dependabot moves it. Set `app_slug` and the Anthropic IDs. The
+   example runs the schedule every four hours; choose another if you
+   like. Publish does not wait for checks: a merge the gate decides while
+   required checks are still running lands at the first scheduled run
+   after they pass, a security fix included. GitHub starts scheduled runs
+   late and may skip one, and a run with nothing to do costs about two
+   billed minutes.
 2. Create the environment `dep-review` (deployment branches: default
    branch only) with variable `DEP_REVIEW_APP_ID`, secret
    `DEP_REVIEW_APP_KEY` (the gate app's private key), and optionally

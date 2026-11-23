@@ -254,8 +254,8 @@ func securityFix(f allow.PRFacts) bool {
 
 // unreadNoticeAfter is how many scheduled runs must have asked the model
 // for a head, with a prepared read still unanswered, before the owner is
-// told. One miss is a blip that the next ask ends. Two, half an hour
-// apart, is a reviewer that is down or a rule that denies the token.
+// told. One miss is a blip that the next ask ends. Two, at least half an
+// hour apart, is a reviewer that is down or a rule that denies the token.
 const unreadNoticeAfter = 2
 
 // unreadNotice is that notification's sentence.
