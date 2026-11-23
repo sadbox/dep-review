@@ -68,7 +68,7 @@ func TestContainerActionIsNotRead(t *testing.T) {
 		{"a flow mapping", nil, with(map[string]string{"action.yml": "name: x\nruns: {using: docker, image: Dockerfile}\n"}), []string{"."}, "is not `runs:` alone"},
 		{"no line that says what runs", nil, with(map[string]string{"action.yml": "name: x\ndescription: y\n"}), []string{"."}, "has 0 top-level `runs` keys"},
 		{"two lines that both say node", nil, with(map[string]string{"action.yml": nodeAction + "  using: node20\n"}), []string{"."}, "has 2 `using` keys"},
-		{"a quoted key", nil, with(map[string]string{"action.yml": "name: x\nruns:\n  \"using\": docker\n  image: Dockerfile\n"}), []string{"."}, "is in the `runs` block"},
+		{"a quoted key", nil, with(map[string]string{"action.yml": "name: x\nruns:\n  \"using\": docker\n  image: Dockerfile\n"}), []string{"."}, "is at the indent of the `runs` block"},
 		{"two lines that say what runs", nil, with(map[string]string{"action.yml": nodeAction + "  using: docker\n"}), []string{"."}, "that is not `using: nodeNN`"},
 		{"an unknown runner", nil, with(map[string]string{"action.yml": "runs:\n  using: wasm\n"}), []string{"."}, "that is not `using: nodeNN`"},
 		{"a value that only starts like node", nil, with(map[string]string{"action.yml": "runs:\n  using: node20docker\n"}), []string{"."}, "that is not `using: nodeNN`"},
@@ -169,11 +169,23 @@ func TestMetadataForms(t *testing.T) {
 		// multi-line quoted scalar whose column-0 lines are a decoy.
 		{"an indented root mapping under the document marker", "---\n  description: \"a\nruns:\n  using: node20\n  b: c\"\n  runs:\n    using: docker\n", "line 2 is indented"},
 
+		// A multi-line quoted scalar in the runs block can hold a line in
+		// column 0, where a reader of lines would end the block. YAML
+		// reads on: the line at the block's indent after it is a key of
+		// runs. So every line at that indent counts, to the end of the
+		// file.
+		{"a decoy using inside a quoted scalar that leaves the block", "runs:\n  main: \"x\n  using: node20\nother: y\"\n  using: docker\n  image: Dockerfile\n", "that is not `using: nodeNN`"},
+		{"a quoted key after a line in column 0", "runs:\n  using: node20\n  main: \"x\nother: y\"\n  \"using\": docker\n", "line 5 is at the indent of the `runs` block"},
+		{"the same with the decoy using a second time", "runs:\n  using: node20\n  main: \"x\nother: y\"\n  using: docker\n", "that is not `using: nodeNN`"},
+		{"a block scalar after runs with a using line in it", "runs:\n  using: node20\ndescription: |\n  using: node20\n", "has 2 `using` keys"},
+		{"blocks after runs", "runs:\n  using: node20\n  main: x\nbranding:\n  icon: box\n  color: blue\ninputs:\n  token:\n    description: t\n    default: x\noutputs:\n  - id\n", ""},
+		{"a deeper block after runs", "runs:\n  using: node20\ninputs:\n    token: x\n  stray: y\n", ""},
+
 		// The runs block.
-		{"a runs block in flow style", "runs:\n  {using: docker, image: Dockerfile}\n", "line 2 is in the `runs` block"},
-		{"a quoted using key", "name: x\nruns:\n  main: x\n  \"using\": docker\n  using: node20\n", "line 4 is in the `runs` block"},
-		{"an explicit using key", "runs:\n  ? using\n  : docker\n  using: node20\n", "line 2 is in the `runs` block"},
-		{"a merge key in the runs block", "base: &b\n  using: docker\nruns:\n  <<: *b\n  main: x\n", "line 4 is in the `runs` block"},
+		{"a runs block in flow style", "runs:\n  {using: docker, image: Dockerfile}\n", "line 2 is at the indent of the `runs` block"},
+		{"a quoted using key", "name: x\nruns:\n  main: x\n  \"using\": docker\n  using: node20\n", "line 4 is at the indent of the `runs` block"},
+		{"an explicit using key", "runs:\n  ? using\n  : docker\n  using: node20\n", "line 2 is at the indent of the `runs` block"},
+		{"a merge key in the runs block", "base: &b\n  using: docker\nruns:\n  <<: *b\n  main: x\n", "line 4 is at the indent of the `runs` block"},
 		{"a line less indented than the block's first", "runs:\n    using: node20\n  using: docker\n", "line 3 is indented less"},
 		{"two using lines", "runs:\n  using: node20\n  using: node24\n", "has 2 `using` keys"},
 		{"a using key in capitals", "runs:\n  USING: docker\n  using: node20\n", "that is not `using: nodeNN`"},

@@ -109,11 +109,12 @@ func actionProblem(t *tree, dirs []string) string {
 //
 // The file counts only in the plain block form (spec section 11,
 // amendment 68). In a YAML block mapping every key starts a line at the
-// mapping's indent. So every line of the top level, and every line at the
-// indent of the runs block, must start with a plain key, and exactly one
-// of each says runs and using. The runner's own runs and using keys can
-// then only be lines the gate counted: a decoy inside a block scalar or a
-// flow collection makes a count two, or leaves the runner with no key.
+// mapping's indent. So every line of the top level, and every line after
+// runs at the indent of the runs block, must start with a plain key, and
+// exactly one of each says runs and using. The runner's own runs and using
+// keys can then only be lines the gate counted: a decoy inside a block
+// scalar, a quoted scalar or a flow collection makes a count two, or
+// leaves the runner with no key.
 func metadataProblem(content []byte) string {
 	if !isText(content) {
 		return "is not text"
@@ -183,30 +184,39 @@ func metadataProblem(content []byte) string {
 		return fmt.Sprintf("line %d is not `runs:` alone, with the block of what runs under it", runsAt+1)
 	}
 
-	// The runs block: the lines up to the next one in column 0, which is
-	// a key of the top level.
-	using, n := 0, 0
+	// The runs block is the lines up to the next one in column 0, and its
+	// indent n that of its first line. Every line at indent n is held to
+	// the rule to the end of the file, not only in the block: a quoted
+	// scalar that spans lines can hold a line in column 0, and YAML then
+	// reads the lines after it at indent n as keys of runs.
+	using, n, inBlock := 0, 0, true
 	for i := runsAt + 1; i < len(lines); i++ {
 		line := lines[i]
 		if skip(line) {
 			continue
 		}
 		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if indent == 0 {
-			break
-		}
 		switch {
+		case indent == 0:
+			inBlock = false
+			continue
+		case n == 0 && !inBlock:
+			// An empty runs block: nothing to count.
+			continue
 		case n == 0:
 			n = indent
-		case indent < n:
+		case indent < n && inBlock:
 			return fmt.Sprintf("line %d is indented less than the first line of the `runs` block", i+1)
 		}
+		if indent != n {
+			continue
+		}
 		body := line[n:]
-		if indent > n || body == "-" || strings.HasPrefix(body, "- ") {
+		if body == "-" || strings.HasPrefix(body, "- ") {
 			continue
 		}
 		if !plainKeyRE.MatchString(body) {
-			return fmt.Sprintf("line %d is in the `runs` block, at its indent, and is neither a plain key nor a sequence entry", i+1)
+			return fmt.Sprintf("line %d is at the indent of the `runs` block and is neither a plain key nor a sequence entry", i+1)
 		}
 		if strings.EqualFold(key(body), "using") {
 			if !usingCodeRE.MatchString(body) {
@@ -216,7 +226,7 @@ func metadataProblem(content []byte) string {
 		}
 	}
 	if using != 1 {
-		return fmt.Sprintf("has %d `using` keys in the `runs` block, and the gate takes exactly one", using)
+		return fmt.Sprintf("has %d `using` keys at the indent of the `runs` block, and the gate takes exactly one", using)
 	}
 	return ""
 }
