@@ -46,7 +46,7 @@ const (
 // from.
 func defaultPolicy(t *testing.T) allow.Policy {
 	t.Helper()
-	c, err := config.Load(nil)
+	c, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

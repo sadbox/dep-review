@@ -71,8 +71,7 @@ func readClassification(path string) (model.Classification, error) {
 }
 
 // gathering is what the fetch job and the scheduled job share: the
-// settings from the default branch and the clients facts are gathered
-// with.
+// gate's settings and the clients facts are gathered with.
 type gathering struct {
 	conf     config.Config
 	github   *gh.Client
@@ -81,24 +80,18 @@ type gathering struct {
 	scratch  string
 }
 
-// newGathering resolves the settings and makes the artifact reader a
-// scratch directory.
-func newGathering(ctx context.Context, cfg land.Config) (*gathering, error) {
-	conf, usable, err := land.LoadConfig(ctx, cfg)
+// newGathering loads the settings and makes the artifact reader a
+// scratch directory. github is the job's read-only client.
+func newGathering(github *gh.Client) (*gathering, error) {
+	conf, err := config.Load()
 	if err != nil {
 		return nil, err
-	}
-	if !usable {
-		// Publish reads the same file and sends the pull request to a
-		// person for it; the facts are gathered all the same, under the
-		// built-in settings.
-		log.Printf("%s on the default branch cannot be used; gathering with the built-in settings", config.RepoFile)
 	}
 	scratch, err := os.MkdirTemp(os.Getenv("RUNNER_TEMP"), "dep-review-scratch-")
 	if err != nil {
 		return nil, err
 	}
-	g := &gathering{conf: conf, github: cfg.GitHub, http: &http.Client{Timeout: 2 * time.Minute}, scratch: scratch}
+	g := &gathering{conf: conf, github: github, http: &http.Client{Timeout: 2 * time.Minute}, scratch: scratch}
 	if g.preparer, err = gather.NewPreparer(scratch, g.http, g.github); err != nil {
 		g.close()
 		return nil, err

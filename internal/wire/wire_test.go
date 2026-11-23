@@ -67,7 +67,6 @@ func goodFacts(reads ...Read) Facts {
 	f := Facts{
 		Version:     Version,
 		PullRequest: PullRequest{Repo: "sadbox/linkclean", Number: 9, Head: strings.Repeat("d", 40)},
-		Config:      strings.Repeat("e", 64),
 		GatheredAt:  now,
 		Facts: PRFacts{
 			Ecosystem:        allow.GoModules,
@@ -277,7 +276,11 @@ func TestDecodeFactsStrict(t *testing.T) {
 		{"not JSON", []byte(`{version: 1}`), "invalid character"},
 		{"a string for a number", edit(`"number": 9`, `"number": "9"`), "/pull_request/number"},
 		{"not UTF-8", edit(`"value": "h1:abc"`, "\"value\": \"h1:\xff\""), "invalid UTF-8"},
-		{"too large", []byte(`{"version": 1, "config": "` + strings.Repeat("a", maxFileBytes) + `"}`), "more than 33554432"},
+		{"too large", []byte(`{"version": 1, "pull_request": {"repo": "` + strings.Repeat("a", maxFileBytes) + `"}}`), "more than 33554432"},
+		// The file names no settings: there is one policy, the gate's own,
+		// and nothing for two jobs to agree on (spec section 11, amendment
+		// 56).
+		{"a fingerprint of the settings", edit(`"version": 1,`, `"version": 1, "config": "`+strings.Repeat("e", 64)+`",`), `unknown object member name "config"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -317,7 +320,6 @@ func TestFactsCheck(t *testing.T) {
 		{"a short head", func(f *Facts) { f.PullRequest.Head = "dddddddd" }, "pull_request.head"},
 		{"a branch for a head", func(f *Facts) { f.PullRequest.Head = "main" }, "pull_request.head"},
 		{"an upper-case head", func(f *Facts) { f.PullRequest.Head = strings.Repeat("D", 40) }, "pull_request.head"},
-		{"no config fingerprint", func(f *Facts) { f.Config = "" }, "config is not a fingerprint"},
 		{"no gathered-at", func(f *Facts) { f.GatheredAt = time.Time{} }, "gathered_at"},
 		{"too many updates", func(f *Facts) { f.Facts.Updates = make([]Update, maxUpdates+1) }, "more than 1000"},
 

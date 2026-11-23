@@ -12,8 +12,9 @@ import (
 	"github.com/sadbox/dep-review/internal/config"
 )
 
-// What a repository lowered reaches the artifact limits the fetch job
-// takes, and is still a budget the client and the artifact reader accept.
+// The configured budget reaches the artifact limits the fetch job takes,
+// and a smaller one is still a budget the client and the artifact reader
+// accept.
 func TestFromConfig(t *testing.T) {
 	builtIn := FromConfig(embedded(t))
 	if builtIn.BaseURL != "https://api.anthropic.com" {
@@ -23,10 +24,8 @@ func TestFromConfig(t *testing.T) {
 		t.Errorf("Limits = %+v, want %+v", got, want)
 	}
 
-	lowered, err := config.Load([]byte(`{"chunk_bytes": 1000, "max_chunks": 2}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	lowered := embedded(t)
+	lowered.ChunkBytes, lowered.MaxChunks = 1000, 2
 	c := FromConfig(lowered)
 	if got, want := c.Limits(), (artifact.Limits{ChunkBytes: 1000, MaxChunks: 2}); got != want {
 		t.Errorf("Limits = %+v, want %+v", got, want)
@@ -36,11 +35,9 @@ func TestFromConfig(t *testing.T) {
 	if c.Fingerprint() != builtIn.Fingerprint() {
 		t.Error("the chunk budget changed the fingerprint")
 	}
-	// The smallest read a repository may ask for.
-	floor, err := config.Load([]byte(`{"chunk_bytes": 256, "max_chunks": 1}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The smallest read the settings may ask for.
+	floor := embedded(t)
+	floor.ChunkBytes, floor.MaxChunks = 256, 1
 	if _, err := New(FromConfig(floor), APIKey("k"), nil); err != nil || FromConfig(floor).Limits().ChunkBytes != artifact.MinChunkBytes {
 		t.Errorf("the floor: %v, %+v", err, FromConfig(floor).Limits())
 	}

@@ -42,7 +42,7 @@ func runReplay(args []string) error {
 			return fmt.Errorf("replay: --name-created: %w", err)
 		}
 	}
-	cfg, err := config.Load(nil)
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}

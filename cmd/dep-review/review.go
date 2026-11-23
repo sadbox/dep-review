@@ -36,11 +36,10 @@ func runReview(args []string) error {
 	if *facts == "" || *out == "" || fl.NArg() > 0 {
 		return errors.New("review: --facts and --out are required")
 	}
-	// The built-in settings, not the repository's: this job has no access
-	// to the repository, and needs none. A repository can only lower the
-	// chunk budget, which a read prepared under it stays within, and
-	// nothing it may set is part of the fingerprint.
-	conf, err := config.Load(nil)
+	// The built-in settings, which are the ones the fetch job prepared
+	// the reads under. This job has no access to the repository, and
+	// needs none.
+	conf, err := config.Load()
 	if err != nil {
 		return err
 	}

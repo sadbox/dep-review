@@ -95,9 +95,9 @@ func TestFetchByEcosystem(t *testing.T) {
 			if !reflect.DeepEqual(in.Policy, defaults(t).Policy()) {
 				t.Errorf("the gatherer was given another policy: %+v", in.Policy)
 			}
-			if f.Config != defaults(t).Fingerprint() || !f.GatheredAt.Equal(now) || !f.Facts.Opened.Equal(created) ||
+			if !f.GatheredAt.Equal(now) || !f.Facts.Opened.Equal(created) ||
 				f.PullRequest != (wire.PullRequest{Repo: testRepo, Number: testNumber, Head: headSHA}) {
-				t.Errorf("header %+v, config %s, gathered %s, opened %s", f.PullRequest, f.Config, f.GatheredAt, f.Facts.Opened)
+				t.Errorf("header %+v, gathered %s, opened %s", f.PullRequest, f.GatheredAt, f.Facts.Opened)
 			}
 
 			read := f.Facts.Updates[0].Prepared

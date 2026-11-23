@@ -75,9 +75,11 @@ const (
 const (
 	// byHand is the way out when nothing cheaper exists.
 	byHand = "Look at the update and merge or close the pull request by hand."
-	// listIt names the owner-kept list. The path is internal/config's
-	// RepoFile; a test there keeps the two in step.
-	listIt = "Merge by hand, or add the name or its publisher's prefix to \"listed\" in .github/dep-review.json on the default branch."
+	// listIt names the owner-kept list. It is the gate's own: the path is
+	// internal/config's embedded file, and a test there keeps the two in
+	// step. An entry works in a repository once that repository's pin of
+	// the gate has moved to a release that has it, so by hand comes first.
+	listIt = "Merge by hand. If this publisher should always pass, add the name or its prefix to \"listed\" in internal/config/policy/defaults.json in the gate's repository, and move this repository's pin to the release that has it."
 	// settings is where repository settings are changed. Where rulesets
 	// and required checks are kept as code, a fix made by hand in the
 	// web UI or with gh is undone by the next apply.
@@ -111,7 +113,7 @@ type reasonText struct {
 var reasonTable = []reasonText{
 	{ReasonPolicyInvalid, Person,
 		"The gate's policy is not usable: an age is zero or negative, or the companion mode is unknown.",
-		"Fix .github/dep-review.json on the default branch, or remove it to get the defaults."},
+		"The policy is built into the gate, so this is a fault in the gate and not in the pull request. Look at the update and merge or close the pull request by hand."},
 	{ReasonNoRule, Person,
 		"This ecosystem has no rule, so nothing was read and nothing can be granted.",
 		byHand},
@@ -131,7 +133,7 @@ var reasonTable = []reasonText{
 		"A fact the decision needs was never established: nothing gathered it, or the answer that came back could not be read. Nothing was found wrong with the update.",
 		rerun},
 	{ReasonListMismatch, Person,
-		"The update was checked against a different list than the one the gate decides with (the list changed between the two steps).",
+		"The update was checked against a different list than the one the gate decides with.",
 		rerun},
 	{ReasonInconsistent, Person,
 		"The facts about this update contradict each other.",

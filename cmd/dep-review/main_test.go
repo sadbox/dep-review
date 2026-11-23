@@ -127,13 +127,13 @@ func TestReplayFlags(t *testing.T) {
 	}
 }
 
-// The gate's jobs resolve their policy with config.Load, which holds a
-// repository's file to the built-in floors. The one reader that holds a
-// file to no floor is internal/replay's, for measuring a policy, and no
-// job's path may reach it. Imports are per file, so that is: replay.go is
-// the only file of the module that imports internal/replay, replay is no
-// job's subcommand, and Load is the only function internal/config
-// exports.
+// The gate's jobs take their policy from config.Load, which reads the
+// file embedded in the binary and nothing else. The one reader of a
+// policy file anyone can hand it is internal/replay's, for measuring a
+// policy, and no job's path may reach it. Imports are per file, so that
+// is: replay.go is the only file of the module that imports
+// internal/replay, replay is no job's subcommand, and Load is the only
+// function internal/config exports.
 func TestOnlyReplayReadsAPolicyWithoutFloors(t *testing.T) {
 	const root, replayPackage = "../..", "github.com/sadbox/dep-review/internal/replay"
 	if _, ok := commands["replay"]; ok {
@@ -176,6 +176,6 @@ func TestOnlyReplayReadsAPolicyWithoutFloors(t *testing.T) {
 		t.Errorf("internal/replay is imported by %q, want cmd/dep-review/replay.go alone", got)
 	}
 	if got := strings.Join(exported, " "); got != "Load" {
-		t.Errorf("internal/config exports the functions %q, want Load alone: any other way to a Config has no floors", got)
+		t.Errorf("internal/config exports the functions %q, want Load alone: any other way to a Config is a way around the built-in policy", got)
 	}
 }

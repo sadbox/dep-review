@@ -28,9 +28,9 @@ type Fetch struct {
 	Class model.Classification
 	// Changes is the change set, from ReadChanges.
 	Changes Changes
-	// Config is the gate's configuration as config.Load resolved it from
-	// the default branch's file. It must never come from the pull
-	// request's head.
+	// Config is the gate's configuration: config.Load's, which is the
+	// built-in one and takes nothing from the repository or the pull
+	// request.
 	Config config.Config
 	// HTTP is the client the gatherer asks registries and indexes with.
 	HTTP *http.Client
@@ -81,7 +81,6 @@ func (f Fetch) Run(ctx context.Context, out string) (wire.Facts, error) {
 	file := wire.Facts{
 		Version:     wire.Version,
 		PullRequest: wire.PullRequest{Repo: c.Repo, Number: c.PR, Head: c.HeadSHA},
-		Config:      f.Config.Fingerprint(),
 		GatheredAt:  f.Now(),
 		Facts:       wire.PRFacts{Ecosystem: eco},
 	}

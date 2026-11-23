@@ -54,7 +54,7 @@ func runFetch(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
-	g, err := newGathering(ctx, cfg)
+	g, err := newGathering(cfg.GitHub)
 	if err != nil {
 		return err
 	}

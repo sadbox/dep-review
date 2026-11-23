@@ -11,11 +11,9 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
-	"github.com/sadbox/dep-review/internal/config"
 	"github.com/sadbox/dep-review/internal/gather"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
-	"github.com/sadbox/dep-review/internal/veto"
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
@@ -59,7 +57,7 @@ func TestLandConfig(t *testing.T) {
 	}
 	// The fetch job does not look at the gate's comment and is not told
 	// who the gate app is: the same configuration without a login, which
-	// internal/land takes for reading the settings and nothing else.
+	// internal/land decides nothing with.
 	t.Setenv("GITHUB_RUN_ID", "42")
 	cfg, err = repoConfig(c)
 	if err != nil || cfg.GitHub != c || cfg.Repo != "o/r" || cfg.BotLogin != "" || cfg.RunURL != "https://github.com/o/r/actions/runs/42" {
@@ -75,33 +73,6 @@ func TestLandConfig(t *testing.T) {
 	}
 }
 
-// The review job builds the reviewer from the built-in settings, and
-// publish, which also joins the verdicts the scheduled job hands it, from
-// the repository's. They must agree
-// on the fingerprint, or no verdict would ever be joined to a read: what
-// a repository may change is not part of it, and a read prepared under a
-// repository's lower budget fits the built-in one.
-func TestReviewerFingerprint(t *testing.T) {
-	builtIn, err := config.Load(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lowered, err := config.Load([]byte(`{"chunk_bytes": 1000, "max_chunks": 2, "min_age_hours": 200, "listed": {"npm": ["left-pad"]}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if builtIn.Fingerprint() == lowered.Fingerprint() {
-		t.Fatal("the two configurations are the same; the test proves nothing")
-	}
-	a, b := veto.FromConfig(builtIn), veto.FromConfig(lowered)
-	if a.Fingerprint() != b.Fingerprint() {
-		t.Error("a repository's file changes the reviewer's fingerprint")
-	}
-	if b.Limits().ChunkBytes > a.Limits().ChunkBytes || b.Limits().MaxChunks > a.Limits().MaxChunks {
-		t.Errorf("a repository raised the read budget: %+v over %+v", b.Limits(), a.Limits())
-	}
-}
-
 // goodFacts is a facts file about pull request 7 of o/r at testHead with
 // one prepared read.
 func goodFacts() wire.Facts {
@@ -111,7 +82,6 @@ func goodFacts() wire.Facts {
 	return wire.Facts{
 		Version:     wire.Version,
 		PullRequest: wire.PullRequest{Repo: "o/r", Number: 7, Head: testHead},
-		Config:      strings.Repeat("3", 64),
 		GatheredAt:  testGathered,
 		Facts: wire.PRFacts{
 			Ecosystem: allow.GoModules, Identity: yes, Shape: yes, ChecksConfigured: yes,
@@ -281,22 +251,25 @@ func TestReadClassification(t *testing.T) {
 	}
 }
 
-// The example settings file is one the gate accepts, and it shows what a
-// repository's file is for: stricter ages and more list entries.
-func TestExampleSettings(t *testing.T) {
-	b, err := os.ReadFile("../../examples/" + filepath.Base(config.RepoFile))
+// A repository has no settings file (spec section 11, amendment 56), so
+// nothing a caller copies may say that it has: no example of one, and no
+// mention of one in the examples or the README.
+func TestNoRepositorySettingsFile(t *testing.T) {
+	const name = "dep-review.json"
+	if _, err := os.Stat("../../examples/" + name); err == nil {
+		t.Errorf("examples/%s exists: the gate reads no such file", name)
+	}
+	paths, err := filepath.Glob("../../examples/*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	example, err := config.Load(b)
-	if err != nil {
-		t.Fatalf("the example is not a usable settings file: %v", err)
-	}
-	builtIn, err := config.Load(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if example.MinAgeHours <= builtIn.MinAgeHours || len(example.Listed.NPM) <= len(builtIn.Listed.NPM) {
-		t.Errorf("the example raises no age or adds no list entry: %+v", example)
+	for _, path := range append(paths, "../../README.md") {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), name) {
+			t.Errorf("%s names %s, which the gate does not read", path, name)
+		}
 	}
 }

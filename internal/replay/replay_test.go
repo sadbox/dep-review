@@ -29,7 +29,7 @@ var (
 // builtIn is the policy the gate ships.
 func builtIn(t *testing.T) allow.Policy {
 	t.Helper()
-	cfg, err := config.Load(nil)
+	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

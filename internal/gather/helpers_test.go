@@ -44,7 +44,7 @@ var (
 
 func defaults(t *testing.T) config.Config {
 	t.Helper()
-	c, err := config.Load(nil)
+	c, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

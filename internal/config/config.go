@@ -1,27 +1,17 @@
-// Package config resolves the gate's settings (docs/v0.2-spec.md, section
-// 5 and amendment 10): the defaults embedded in the binary, and on top of
-// them a repository's own file. It does no I/O beyond the embed: the
-// caller reads RepoFile from the repository's DEFAULT BRANCH and passes
-// the bytes in. A file from the pull request's head must never reach Load,
-// because the pull request would then be choosing its own rules.
-//
-// The embedded values are floors. A repository file can make the gate
-// stricter (raise an age, turn the fast path off, make companions wait,
-// make a read smaller, which at worst makes it partial) and can add list
-// entries. It cannot lower an age, remove a list entry or say which model
-// reads the code and how, and it has no key that switches a fact off: an
-// unknown key is an error, not something to ignore.
+// Package config holds the gate's settings (docs/v0.2-spec.md, section 5
+// and amendments 10 and 56): the one file embedded in the binary. It does
+// no I/O beyond the embed, and nothing a repository or a pull request
+// holds changes a setting: there is no repository file, so no job has a
+// policy to fetch, and no two jobs of a run can decide under different
+// ones.
 package config
 
 import (
-	"crypto/sha256"
 	_ "embed" // for defaults.json
-	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -31,25 +21,17 @@ import (
 //go:embed policy/defaults.json
 var defaultsJSON []byte
 
-// RepoFile is the path of a repository's own settings. Read it from the
-// default branch only.
-const RepoFile = ".github/dep-review.json"
-
 const (
-	// maxFileBytes bounds a repository file. The defaults are under 1 KB;
-	// a list of a few hundred entries fits many times over.
-	maxFileBytes = 64 << 10
 	// maxEntryBytes bounds one list entry.
 	maxEntryBytes = 200
 	// maxDays bounds every age, so no value can overflow a time.Duration
 	// (about 292 years) or park a pull request for longer than anyone
 	// will remember it.
 	maxDays = 3650
-	// minChunkBytes is the smallest chunk_bytes a repository may ask for.
-	// It is internal/artifact's own minimum (below it a file header may
-	// not fit in a chunk); a test keeps the two equal. A smaller value
-	// here would not be a stricter gate, only one whose every read is
-	// refused.
+	// minChunkBytes is the smallest chunk_bytes the file may set. It is
+	// internal/artifact's own minimum (below it a file header may not fit
+	// in a chunk); a test keeps the two equal. A smaller value would be a
+	// gate whose every read is refused.
 	minChunkBytes = 256
 )
 
@@ -62,8 +44,8 @@ type Lists struct {
 	NPM           []string `json:"npm"`
 }
 
-// Config is the resolved settings: every value present, in the units the
-// files use.
+// Config is the settings: every value present, in the units the file
+// uses.
 type Config struct {
 	MinAgeHours        int    `json:"min_age_hours"`
 	UnreadAgeDays      int    `json:"unread_age_days"`
@@ -97,8 +79,9 @@ type Config struct {
 	Attempts int `json:"attempts"`
 }
 
-// file is what either file may say. Pointers tell an absent key from a
-// zero, so "fast_path": false is a setting and a missing key is not.
+// file is what the embedded file may say. Pointers tell an absent key
+// from a zero, so "fast_path": false is a setting and a missing key is
+// not.
 type file struct {
 	MinAgeHours        *int    `json:"min_age_hours"`
 	UnreadAgeDays      *int    `json:"unread_age_days"`
@@ -119,31 +102,18 @@ type file struct {
 	Attempts              *int    `json:"attempts"`
 }
 
-// Load returns the embedded defaults with a repository's file applied on
-// top. repoFile is the content of RepoFile on the default branch; nil or
-// empty means the repository has none, and the result is the defaults.
+// Load returns the gate's settings: the embedded file's, and nothing
+// else. It takes no argument on purpose. Whatever a job is handed (a
+// repository's file, a pull request's, an environment variable) has no
+// way in.
 //
-// An error means the file is not usable as written. The caller must not
-// fall back to the defaults silently then: the owner asked for something
-// stricter or longer and did not get it, so the pull request goes to a
-// person.
-func Load(repoFile []byte) (Config, error) {
+// An error means the embedded file itself is broken. That is a fault of
+// the build, which a test finds before a run does; a job that meets it
+// fails, and nothing is decided.
+func Load() (Config, error) {
 	c, err := complete(defaultsJSON)
 	if err != nil {
 		return Config{}, fmt.Errorf("config: embedded defaults: %w", err)
-	}
-	if len(repoFile) == 0 {
-		return c, nil
-	}
-	if len(repoFile) > maxFileBytes {
-		return Config{}, fmt.Errorf("config: %s is %d bytes, more than %d", RepoFile, len(repoFile), maxFileBytes)
-	}
-	f, err := parse(repoFile)
-	if err != nil {
-		return Config{}, fmt.Errorf("config: %s: %w", RepoFile, err)
-	}
-	if err := apply(&c, f); err != nil {
-		return Config{}, fmt.Errorf("config: %s: %w", RepoFile, err)
 	}
 	return c, nil
 }
@@ -169,25 +139,9 @@ func (c Config) Policy() allow.Policy {
 	}
 }
 
-// Fingerprint is a hash of every resolved setting (lower-case hex
-// SHA-256). The fetch job writes it into the facts file, and a later job
-// that resolves the configuration itself compares: facts gathered under
-// other settings (another list, another chunk size) are not decided on.
-func (c Config) Fingerprint() string {
-	// Config holds only strings, numbers, a flag and lists of strings, so
-	// encoding it cannot fail, and a struct's fields are written in their
-	// declared order.
-	b, err := json.Marshal(c)
-	if err != nil {
-		panic("config: " + err.Error())
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
-// complete parses a file that must set everything, and is held to no
-// floor: the embedded one, which is the floor. Load is the package's only
-// way in for any other file, and a test in cmd/dep-review keeps it so.
+// complete parses the embedded file, which must set everything. Load is
+// the package's only way to a Config, and a test in cmd/dep-review keeps
+// it so.
 func complete(b []byte) (Config, error) {
 	f, err := parse(b)
 	if err != nil {
@@ -253,13 +207,13 @@ func complete(b []byte) (Config, error) {
 			return Config{}, fmt.Errorf("%s is %d, want 1 to %d", age.key, age.value, age.max)
 		}
 	}
-	if _, ok := companionStrictness(c.FastPathCompanions); !ok {
+	if m := allow.Companions(c.FastPathCompanions); m != allow.RideAlong && m != allow.CompanionsWait {
 		return Config{}, fmt.Errorf("fast_path_companions is %q", c.FastPathCompanions)
 	}
-	// The embedded list goes through the same checks as a repository's.
-	if err := extend(&c.Listed, f.Listed); err != nil {
+	if err := checkLists(f.Listed); err != nil {
 		return Config{}, err
 	}
+	c.Listed = f.Listed
 	return c, nil
 }
 
@@ -271,138 +225,20 @@ func parse(b []byte) (file, error) {
 	return f, err
 }
 
-// apply puts a repository's file on top of the defaults in c, refusing
-// anything that would make the gate more permissive than the defaults.
-func apply(c *Config, f file) error {
-	for _, age := range []struct {
-		key  string
-		have *int
-		want *int
-		max  int
-	}{
-		{"min_age_hours", &c.MinAgeHours, f.MinAgeHours, maxDays * 24},
-		{"unread_age_days", &c.UnreadAgeDays, f.UnreadAgeDays, maxDays},
-		{"major_age_days", &c.MajorAgeDays, f.MajorAgeDays, maxDays},
-		{"new_name_age_days", &c.NewNameAgeDays, f.NewNameAgeDays, maxDays},
-	} {
-		if age.want == nil {
-			continue
-		}
-		if *age.want < *age.have {
-			return fmt.Errorf("%s is %d, below the built-in %d: a repository can raise an age, not lower it", age.key, *age.want, *age.have)
-		}
-		if *age.want > age.max {
-			return fmt.Errorf("%s is %d, more than %d", age.key, *age.want, age.max)
-		}
-		*age.have = *age.want
-	}
-
-	// The wait deadline is not an age a merge depends on: it is how long
-	// a pull request may sit unmergeable before a person is told. Shorter
-	// tells the person sooner, longer keeps retrying; neither can merge
-	// anything, so both directions are allowed.
-	if f.WaitDeadlineDays != nil {
-		if *f.WaitDeadlineDays < 1 || *f.WaitDeadlineDays > maxDays {
-			return fmt.Errorf("wait_deadline_days is %d, want 1 to %d", *f.WaitDeadlineDays, maxDays)
-		}
-		c.WaitDeadlineDays = *f.WaitDeadlineDays
-	}
-
-	if f.FastPath != nil {
-		if *f.FastPath && !c.FastPath {
-			return errors.New("fast_path is true and the built-in is false: a repository can turn the fast path off, not on")
-		}
-		c.FastPath = *f.FastPath
-	}
-
-	if f.FastPathCompanions != nil {
-		want, ok := companionStrictness(*f.FastPathCompanions)
-		if !ok {
-			return fmt.Errorf("fast_path_companions is %q, want %q or %q", *f.FastPathCompanions, allow.RideAlong, allow.CompanionsWait)
-		}
-		have, _ := companionStrictness(c.FastPathCompanions)
-		if want < have {
-			return fmt.Errorf("fast_path_companions is %q and the built-in is %q: a repository can make companions wait, not ride along",
-				*f.FastPathCompanions, c.FastPathCompanions)
-		}
-		c.FastPathCompanions = *f.FastPathCompanions
-	}
-
-	// The model settings a repository may not touch at all. Writing the
-	// built-in value is refused too: the file would then break the day
-	// the built-in changes, and until then it says nothing.
-	for _, fixed := range []struct {
-		key string
-		set bool
-	}{
-		{"model", f.Model != nil},
-		{"effort", f.Effort != nil},
-		{"context_tokens", f.ContextTokens != nil},
-		{"max_output_tokens", f.MaxOutputTokens != nil},
-		{"request_timeout_seconds", f.RequestTimeoutSeconds != nil},
-		{"attempts", f.Attempts != nil},
-	} {
-		if fixed.set {
-			return fmt.Errorf("%s is built in: a repository can make a read smaller (chunk_bytes, max_chunks), and cannot change the model or how it is asked", fixed.key)
-		}
-	}
-	// The two it may lower. A smaller read is at worst a partial read,
-	// which waits longer; a larger one would be refused by the reviewer.
-	for _, size := range []struct {
-		key  string
-		have *int
-		want *int
-		min  int
-	}{
-		{"chunk_bytes", &c.ChunkBytes, f.ChunkBytes, minChunkBytes},
-		{"max_chunks", &c.MaxChunks, f.MaxChunks, 1},
-	} {
-		if size.want == nil {
-			continue
-		}
-		if *size.want > *size.have {
-			return fmt.Errorf("%s is %d, above the built-in %d: a repository can lower it, not raise it", size.key, *size.want, *size.have)
-		}
-		if *size.want < size.min {
-			return fmt.Errorf("%s is %d, want at least %d", size.key, *size.want, size.min)
-		}
-		*size.have = *size.want
-	}
-
-	return extend(&c.Listed, f.Listed)
-}
-
-// companionStrictness orders the two companion modes: the higher one
-// merges less.
-func companionStrictness(mode string) (int, bool) {
-	switch allow.Companions(mode) {
-	case allow.RideAlong:
-		return 0, true
-	case allow.CompanionsWait:
-		return 1, true
-	}
-	return 0, false
-}
-
-// extend adds more's entries to have. Entries are only ever added: there
-// is no way to write "remove".
-func extend(have *Lists, more Lists) error {
+// checkLists holds every entry of the list to checkEntry.
+func checkLists(l Lists) error {
 	for _, list := range []struct {
-		key  string
-		have *[]string
-		more []string
+		key     string
+		entries []string
 	}{
-		{"go_modules", &have.GoModules, more.GoModules},
-		{"github_actions", &have.GitHubActions, more.GitHubActions},
-		{"docker", &have.Docker, more.Docker},
-		{"npm", &have.NPM, more.NPM},
+		{"go_modules", l.GoModules},
+		{"github_actions", l.GitHubActions},
+		{"docker", l.Docker},
+		{"npm", l.NPM},
 	} {
-		for _, entry := range list.more {
+		for _, entry := range list.entries {
 			if err := checkEntry(entry); err != nil {
 				return fmt.Errorf("listed.%s: %q: %w", list.key, entry, err)
-			}
-			if !slices.Contains(*list.have, entry) {
-				*list.have = append(*list.have, entry)
 			}
 		}
 	}

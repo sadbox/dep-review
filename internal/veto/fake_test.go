@@ -113,7 +113,7 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 // builds its client from.
 func embedded(t *testing.T) config.Config {
 	t.Helper()
-	c, err := config.Load(nil)
+	c, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

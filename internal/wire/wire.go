@@ -96,11 +96,6 @@ type PullRequest struct {
 type Facts struct {
 	Version     int         `json:"version"`
 	PullRequest PullRequest `json:"pull_request"`
-	// Config is the fingerprint of the configuration the facts were
-	// gathered under (config.Config.Fingerprint). A job that resolves the
-	// configuration itself compares, and does not decide on facts that
-	// were gathered under another list or another chunk budget.
-	Config string `json:"config"`
 	// GatheredAt is when fetch or refresh gathered the facts, by that
 	// job's clock. Publish decides with its own clock, and not on facts
 	// that are older than land.MaxFactsAge by it.
@@ -459,8 +454,6 @@ func (f Facts) check() error {
 		return fmt.Errorf("pull_request.number is %d", f.PullRequest.Number)
 	case !gh.ValidSHA(f.PullRequest.Head):
 		return errors.New("pull_request.head is not a full commit ID")
-	case !sha256RE.MatchString(f.Config):
-		return errors.New("config is not a fingerprint")
 	case f.GatheredAt.IsZero():
 		return errors.New("gathered_at is not set")
 	case len(f.Facts.Updates) > maxUpdates:

@@ -217,7 +217,7 @@ func ReadPolicy(b []byte) (allow.Policy, error) {
 	// The file is decoded over the built-in settings and over nothing. A
 	// key it leaves out keeps what was there, so the two differ exactly
 	// when one is missing.
-	whole, err := config.Load(nil)
+	whole, err := config.Load()
 	if err != nil {
 		return allow.Policy{}, err
 	}

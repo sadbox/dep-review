@@ -96,9 +96,11 @@ func TestPublishRefreshed(t *testing.T) {
 		{name: "the facts claim an identity classify rejects", dir: "7", pull: pullJSON("open", "mallory", testHead),
 			want: "classify said", calls: "GET pulls/7"},
 		{name: "classify rejects it and the facts say so: decided", dir: "7", facts: no, pull: pullJSON("open", "mallory", testHead),
-			// The facts here were gathered under settings of their own,
-			// which is as far as a decision gets against this fake.
-			is: land.ErrConfigChanged, calls: "GET pulls/7, GET pulls/7, GET contents/.github/dep-review.json"},
+			// The decision is carried out: a person's. All it asks GitHub
+			// for is the pull request, the branch's rules and the gate's
+			// comment; there are no settings to fetch (spec section 11,
+			// amendment 56).
+			calls: "GET pulls/7, GET pulls/7, GET rules/branches/main, POST statuses/" + testHead + ", GET issues/7/comments, POST issues/7/comments"},
 		// A scheduled run's publish job run again by itself: nothing is
 		// written, the comment still says wait, and the next run decides.
 		{name: "facts of an earlier attempt: not decided", dir: "7", pull: pullJSON("open", "mallory", testHead),
@@ -191,7 +193,10 @@ func TestPublishEvent(t *testing.T) {
 		{name: "the fetch job left no facts", pull: open, want: "no facts file", reported: true},
 		{name: "facts about another pull request", facts: func(f *wire.Facts) { f.PullRequest.Number = 8 }, pull: open,
 			want: "classify looked at", reported: true},
-		{name: "deciding fails", facts: func(*wire.Facts) {}, pull: open, want: "another configuration", reported: true},
+		// A default branch whose name is not put into a request path: an
+		// error of deciding itself, before anything is written.
+		{name: "deciding fails", facts: func(*wire.Facts) {}, pull: strings.Replace(open, `"default_branch":"main"`, `"default_branch":"main?ref=x"`, 1),
+			want: "not a name the gate puts in a URL", reported: true},
 		// A job run again by itself gets the first attempt's facts. The
 		// report says so, and what to do instead (spec section 11,
 		// amendment 52).

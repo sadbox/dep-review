@@ -2,8 +2,8 @@
 // library code. Decide reads the two files the earlier jobs wrote, adds
 // what only this job can observe (the default branch's required checks,
 // whether the pull request is still what the facts describe, when it
-// first evaluated a pin no registry dates), loads the policy from the
-// default branch and asks allow.Decide. Act carries the answer out.
+// first evaluated a pin no registry dates) and asks allow.Decide with the
+// gate's built-in policy. Act carries the answer out.
 //
 // Nothing in this package decides. An outcome is allow.Decide's, or
 // allow.ChecksRefused's after GitHub refused a merge; what this package
@@ -18,12 +18,9 @@ package land
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"regexp"
 
@@ -44,15 +41,13 @@ const dependabotLogin = "dependabot[bot]"
 // Config is what the jobs need besides their files.
 type Config struct {
 	// GitHub is the REST client. Decide and Act need the gate app's token
-	// (it comments, sets a status and merges); Waiting and LoadConfig only
-	// read.
+	// (it comments, sets a status and merges); Waiting only reads.
 	GitHub *gh.Client
 	// Repo is the repository the job runs for, owner/name. A facts file
 	// about another repository is refused.
 	Repo string
 	// BotLogin is the gate app's login, "<app-slug>[bot]". The gate's
 	// comment, and the marker in it, is believed only from this author.
-	// Only LoadConfig, which reads no comment, runs without it.
 	BotLogin string
 	// Notifier is told when a pull request needs a person. Nil turns
 	// notifications off.
@@ -73,23 +68,13 @@ type Config struct {
 // that is not told who the gate app is believes nobody's comment, so it
 // does not start.
 func (cfg Config) check() error {
-	if err := cfg.checkRepo(); err != nil {
-		return err
-	}
-	if !strings.HasSuffix(cfg.BotLogin, "[bot]") || len(cfg.BotLogin) == len("[bot]") {
-		return fmt.Errorf("land: gate app login %.70q is not an app's login", cfg.BotLogin)
-	}
-	return nil
-}
-
-// checkRepo is the part of check that LoadConfig needs too: it reads the
-// repository's settings and no comment.
-func (cfg Config) checkRepo() error {
 	switch {
 	case cfg.GitHub == nil:
 		return errors.New("land: no GitHub client")
 	case !gh.ValidRepo(cfg.Repo):
 		return fmt.Errorf("land: repository %.100q is not owner/name", cfg.Repo)
+	case !strings.HasSuffix(cfg.BotLogin, "[bot]") || len(cfg.BotLogin) == len("[bot]"):
+		return fmt.Errorf("land: gate app login %.70q is not an app's login", cfg.BotLogin)
 	}
 	return nil
 }
@@ -100,12 +85,6 @@ func (cfg Config) now() time.Time {
 	}
 	return time.Now()
 }
-
-// ErrConfigChanged is Decide's error when the facts were gathered under
-// other settings than the default branch has now (another list, another
-// chunk budget). Nothing is decided on such facts; the gate has to run
-// again from fetch. Test with errors.Is.
-var ErrConfigChanged = errors.New("land: the facts were gathered under another configuration")
 
 // MaxFactsAge is how long after they were gathered facts are decided on:
 // four hours. A run that goes as it should never meets it. From fetch
@@ -147,7 +126,7 @@ type Evaluation struct {
 	Decision allow.Decision
 
 	file        wire.Facts // for the comment: the prepared reads, the time gathered
-	fingerprint string     // the reviewer's, under the current settings
+	fingerprint string     // the reviewer's
 	cache       []cached   // the verdicts worth remembering
 	firstSeen   []seen     // the first evaluations worth remembering
 	branch      string     // the default branch
@@ -165,10 +144,9 @@ type Evaluation struct {
 // gave a time, and otherwise this job's own (dateUnseen).
 //
 // An error means there is no decision: a file that does not decode, facts
-// for another repository, gathered under other settings (ErrConfigChanged)
-// or too long ago (ErrFactsStale), or GitHub not answering for something
-// that is not a fact (the pull request, the policy file, the gate's
-// comment).
+// for another repository or gathered too long ago (ErrFactsStale), or
+// GitHub not answering for something that is not a fact (the pull request,
+// the gate's comment).
 func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Evaluation, error) {
 	if err := cfg.check(); err != nil {
 		return Evaluation{}, err
@@ -200,22 +178,16 @@ func Decide(ctx context.Context, cfg Config, factsPath, verdictsPath string) (Ev
 		return Evaluation{}, err
 	}
 
-	// The policy comes from the default branch and nowhere else. A file
-	// that is there and cannot be used is not replaced by the defaults,
-	// which may be laxer than what the owner wrote: the zero Policy makes
-	// allow.Decide answer person (policy_invalid).
-	var policy allow.Policy
-	conf, usable, err := loadConfig(ctx, cfg, ev.branch)
+	// The policy is the one built into this binary, which is also the one
+	// the facts were gathered under: the jobs of a run are one build
+	// (gate.yml's checksum chain), and no repository has a file that could
+	// have changed in between (spec section 11, amendment 56).
+	conf, err := config.Load()
 	if err != nil {
 		return Evaluation{}, err
 	}
-	if usable {
-		if conf.Fingerprint() != facts.Config {
-			return Evaluation{}, fmt.Errorf("%w: run the gate again from fetch", ErrConfigChanged)
-		}
-		policy = conf.Policy()
-		ev.fingerprint = veto.FromConfig(conf).Fingerprint()
-	}
+	policy := conf.Policy()
+	ev.fingerprint = veto.FromConfig(conf).Fingerprint()
 
 	ev.Facts = wire.Join(facts, verdicts, ev.fingerprint)
 	// Whatever the facts file says about required checks, this job asks
@@ -330,70 +302,6 @@ func checkBranch(b string) (string, error) {
 		return "", fmt.Errorf("land: default branch %.100q is not a name the gate puts in a URL", b)
 	}
 	return b, nil
-}
-
-// LoadConfig resolves the gate's settings for a job that gathers facts:
-// config.RepoFile on the default branch of cfg.Repo, read exactly as
-// Decide reads it, so the fingerprint the facts are gathered under is the
-// one Decide compares with. It only reads.
-//
-// usable is false when the file is there and cannot be used. conf is then
-// the built-in settings: the facts can still be gathered, and Decide
-// answers policy_invalid for them whatever they say.
-func LoadConfig(ctx context.Context, cfg Config) (conf config.Config, usable bool, err error) {
-	if err := cfg.checkRepo(); err != nil {
-		return config.Config{}, false, err
-	}
-	var repo struct {
-		DefaultBranch string `json:"default_branch"`
-	}
-	if err := cfg.GitHub.Get(ctx, "repos/"+cfg.Repo, &repo); err != nil {
-		return config.Config{}, false, err
-	}
-	branch, err := checkBranch(repo.DefaultBranch)
-	if err != nil {
-		return config.Config{}, false, err
-	}
-	if conf, usable, err = loadConfig(ctx, cfg, branch); err != nil || usable {
-		return conf, usable, err
-	}
-	conf, err = config.Load(nil)
-	return conf, false, err
-}
-
-// loadConfig resolves the settings from config.RepoFile on the default
-// branch. usable is false when the file is there and cannot be used. Only
-// GitHub saying "not found" means the repository has no file; any other
-// failure to read it is an error, because deciding with the defaults then
-// could undercut an age the owner raised.
-func loadConfig(ctx context.Context, cfg Config, branch string) (conf config.Config, usable bool, err error) {
-	var raw json.RawMessage
-	err = cfg.GitHub.Get(ctx, fmt.Sprintf("repos/%s/contents/%s?ref=%s", cfg.Repo, config.RepoFile, url.QueryEscape(branch)), &raw)
-	switch {
-	case errors.Is(err, gh.ErrNotFound):
-		conf, err = config.Load(nil)
-		return conf, err == nil, err
-	case err != nil:
-		return config.Config{}, false, err
-	}
-	// A directory or a symbolic link at that path is an answer of another
-	// shape, and a file over the API's inline limit has no content here.
-	var file struct {
-		Type     string `json:"type"`
-		Encoding string `json:"encoding"`
-		Content  string `json:"content"`
-	}
-	if json.Unmarshal(raw, &file) != nil || file.Type != "file" || file.Encoding != "base64" {
-		return config.Config{}, false, nil
-	}
-	b, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
-	if err != nil {
-		return config.Config{}, false, nil
-	}
-	if conf, err = config.Load(b); err != nil {
-		return config.Config{}, false, nil
-	}
-	return conf, true, nil
 }
 
 // checksConfigured is the ChecksConfigured fact: the default branch has an

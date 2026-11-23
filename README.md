@@ -230,37 +230,42 @@ Limits that send real pull requests to a person:
 
 ## Configuration
 
-Built-in settings are in
-[internal/config/policy/defaults.json](internal/config/policy/defaults.json).
-A repository may add `.github/dep-review.json`
-([example](examples/dep-review.json)). It is read from the default branch
-only, never from the pull request. Unknown keys are errors, and a file
-that cannot be used sends every pull request to a person instead of
-falling back to the defaults.
+The settings are built into the gate, in
+[internal/config/policy/defaults.json](internal/config/policy/defaults.json),
+and they are the only ones. A repository has no settings file, and
+nothing in a repository or a pull request changes a value. What differs
+between repositories is in the caller's workflow (`app_slug`,
+`ignore_ecosystems`, the Anthropic IDs) and in `dependabot.yml`.
 
-| Key | Default | A repository may |
-|---|---|---|
-| `min_age_hours` | 72 | raise it |
-| `unread_age_days` | 14 | raise it |
-| `major_age_days` | 14 | raise it |
-| `new_name_age_days` | 365 | raise it |
-| `wait_deadline_days` | 7 | set it, 1 to 3650 |
-| `fast_path` | true | turn it off |
-| `fast_path_companions` | `ride-along` | set `wait` |
-| `listed` | see below | add entries |
-| `chunk_bytes`, `max_chunks` | 400000, 12 | lower them |
-| `model`, `effort`, `context_tokens`, `max_output_tokens`, `request_timeout_seconds`, `attempts` | `claude-opus-5-5`, `high`, ... | not set them |
+| Key | Value |
+|---|---|
+| `min_age_hours` | 72 |
+| `unread_age_days` | 14 |
+| `major_age_days` | 14 |
+| `new_name_age_days` | 365 |
+| `wait_deadline_days` | 7 |
+| `fast_path` | true |
+| `fast_path_companions` | `ride-along` |
+| `listed` | see below |
+| `chunk_bytes`, `max_chunks` | 400000, 12 |
+| `model`, `effort`, `context_tokens`, `max_output_tokens`, `request_timeout_seconds`, `attempts` | `claude-opus-5-5`, `high`, ... |
 
 The list names the publishers whose major updates and new packages may
 merge, and the only Docker images that may. A major update of a
 dependency the repository does not declare itself (one that a parent
 pulls in) needs no entry. An entry ending in `/` is a
 namespace; any other entry is a name and everything below it. Matching is
-exact and case-sensitive, with no wildcards. Entries can be added, never
-removed. A Docker entry is matched against `docker.io/library/<name>`
-for an official image and `gcr.io/<repository>` for a gcr.io image; no
-other image is read, so an entry for one (`docker.io/your-org/`) never
-matches.
+exact and case-sensitive, with no wildcards. A Docker entry is matched
+against `docker.io/library/<name>` for an official image and
+`gcr.io/<repository>` for a gcr.io image; no other image is read, so an
+entry for one (`docker.io/your-org/`) never matches.
+
+To list a publisher, add the entry to `defaults.json` and to the block in
+section 5 of [the spec](docs/v0.2-spec.md) (a test holds the two
+together), measure it with the replay below, release the gate and move
+the caller's pin of `gate.yml`. Until the pin has moved, the pull request
+is merged by hand. Every entry is public here, also one that only a
+private repository uses.
 
 ```json
 {
@@ -293,9 +298,9 @@ reading of those files and the real decision. Everything a registry,
 GitHub or the model would be asked is taken to be favourable, and a
 version is taken to be as old as its pull request. Run it with the
 built-in policy and with the changed one, and compare who goes to a
-person. `--policy` takes a complete file in the form of `defaults.json`,
-and unlike a repository's file it may also be narrower than the built-in
-one (only the replay reads a file that way: `replay.ReadPolicy`).
+person. `--policy` takes a complete file in the form of `defaults.json`.
+It may be wider or narrower than the built-in one, and the replay is the
+only thing that reads a policy from a file (`replay.ReadPolicy`).
 `--name-created` is the one stand-in with a choice: without it the
 age of a new name is unknown, which is person. With it, the pull requests
 that do not go to a person are an upper bound on those that would not in
@@ -361,7 +366,6 @@ model, whatever the comment remembers.
    admits the review job: the repository's immutable OIDC subject, event
    `workflow_run`, and a `job_workflow_ref` of this repository's
    `gate.yml`. The workflow uses no API key.
-8. Optionally add `.github/dep-review.json`.
 
 `ignore_ecosystems` (comma-separated, default empty) is for an ecosystem
 whose Dependabot pull requests another trusted process owns. Names are the
@@ -419,7 +423,8 @@ and it then gets no status, comment or notification.
   there is nothing to show a model and the facts file says so. publish
   believes the facts only about the pull request and head that classify
   proved: the classify job on an event, its own run of the proof on a
-  schedule. The policy file never comes from the pull request.
+  schedule. The policy is built into the gate: no file of a repository
+  or a pull request changes it.
 - **Third-party text.** Everything a registry, a dependency or the model
   wrote reaches the comment only through one sanitiser, in code spans,
   with a length cap; it reaches logs only through a logger that escapes
@@ -452,7 +457,7 @@ and it then gets no status, comment or notification.
 | `internal/veto` | the model request and its credentials |
 | `internal/wire` | the files the jobs hand each other |
 | `internal/allow` | the decision: a pure function of facts, policy and time |
-| `internal/config` | the built-in settings and a repository's file |
+| `internal/config` | the built-in settings |
 | `internal/land` | the publish job: comment, status, merge, notification |
 | `internal/replay` | the decision over recorded pull requests, offline |
 | `internal/gh` | the GitHub REST client |

@@ -72,7 +72,7 @@ func runRefresh(args []string) error {
 	}
 	wrote, failed := 0, len(unread)
 	if len(waiting) > 0 {
-		g, err := newGathering(ctx, cfg)
+		g, err := newGathering(cfg.GitHub)
 		if err != nil {
 			return err
 		}

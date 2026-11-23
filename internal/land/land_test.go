@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
-	"github.com/sadbox/dep-review/internal/config"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/wire"
 )
@@ -40,7 +39,6 @@ func TestPublish(t *testing.T) {
 			f.pulls = []string{open, open, pullJSON(testPR, "open", headA, "main", after, false)}
 		}
 	}
-	strict := `{"min_age_hours": 200}`
 
 	tests := []struct {
 		name     string
@@ -267,31 +265,6 @@ func TestPublish(t *testing.T) {
 			status: "failure: needs a person: veto", notified: 1, cached: 1,
 		},
 		{
-			name:   "a policy file that cannot be used is not replaced by the defaults",
-			github: func(f *fakeGitHub) { f.policyCode, f.policy = 200, `{"min_age_hours": 1}` },
-			action: ActionPerson, reason: allow.ReasonPolicyInvalid,
-			status: "failure: needs a person: policy_invalid", notified: 1,
-		},
-		{
-			name:   "a directory where the policy file should be",
-			github: func(f *fakeGitHub) { f.policyCode, f.policyBody = 200, `[{"type":"file","name":"x"}]` },
-			action: ActionPerson, reason: allow.ReasonPolicyInvalid,
-			status: "failure: needs a person: policy_invalid", notified: 1,
-		},
-		{
-			name: "the repository's raised age is the one that counts",
-			facts: func(f *wire.Facts) {
-				conf, err := config.Load([]byte(strict))
-				if err != nil {
-					panic(err)
-				}
-				f.Config = conf.Fingerprint()
-			},
-			github: func(f *fakeGitHub) { f.policyCode, f.policy = 200, strict },
-			action: ActionWait, reason: allow.ReasonAge, fact: "FirstSeen",
-			status: "pending: waiting until 2026-11-26 16:00 UTC", cached: 1,
-		},
-		{
 			name:   "GitHub refuses for a required check",
 			github: refusal(405, "Repository rule violations found\n\nRequired status check \"test\" is expected.\n\n", "clean"),
 			action: ActionWait, reason: allow.ReasonChecksPending,
@@ -507,10 +480,6 @@ func TestNoDecision(t *testing.T) {
 		is     error
 		writes int
 	}{
-		{name: "the settings changed since fetch", is: ErrConfigChanged,
-			github: func(f *fakeGitHub) { f.policyCode, f.policy = 200, `{"min_age_hours": 200}` }},
-		{name: "the policy file cannot be fetched",
-			github: func(f *fakeGitHub) { f.policyCode = 500 }},
 		{name: "facts for another repository",
 			facts: func(f *wire.Facts) { f.PullRequest.Repo = "o/other" }},
 		{name: "the pull request cannot be read",

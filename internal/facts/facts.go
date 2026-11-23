@@ -51,8 +51,8 @@ type Input struct {
 	// being no others. It comes from git, never from the pull request's
 	// metadata.
 	Files []File
-	// Policy is the resolved policy, from the default branch. A gatherer
-	// needs it for the Listed fact and nothing else.
+	// Policy is the gate's built-in policy. A gatherer needs it for the
+	// Listed fact and nothing else.
 	Policy allow.Policy
 	// HTTP is the client for registries and indexes that take no
 	// credentials.

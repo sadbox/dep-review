@@ -2,8 +2,8 @@
 # Anthropic IDs (identifiers, not secrets). Needs an environment `dep-review`
 # (default branch only) with variable DEP_REVIEW_APP_ID and secret
 # DEP_REVIEW_APP_KEY, and optionally secrets PUSHOVER_APP_TOKEN /
-# PUSHOVER_USER_KEY. The gate's own settings (ages, the list) are optional
-# and live in .github/dep-review.json; see examples/dep-review.json.
+# PUSHOVER_USER_KEY. The gate's own settings (ages, the list) are built
+# into the gate; a repository has no settings file.
 name: dep-review
 
 on:

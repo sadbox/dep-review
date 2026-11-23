@@ -1,10 +1,8 @@
 package land
 
 import (
-	"cmp"
 	"context"
 
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,11 +38,11 @@ var (
 	keyB  = strings.Repeat("2", 64)
 )
 
-// defaults is the configuration of a repository with no file of its own,
-// and reviewer its reviewer fingerprint.
+// defaults is the gate's configuration, and reviewer its reviewer
+// fingerprint.
 func defaults(t *testing.T) (conf config.Config, reviewer string) {
 	t.Helper()
-	conf, err := config.Load(nil)
+	conf, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +64,7 @@ type fakeComment struct {
 // fakeGitHub answers the handful of endpoints the package uses and records
 // every request. The zero value plus newFake's defaults is a repository
 // where everything is in order: an open Dependabot pull request at headA
-// on main, one required check, no policy file, and a merge that works.
+// on main, one required check, and a merge that works.
 type fakeGitHub struct {
 	t   *testing.T
 	mu  sync.Mutex
@@ -79,14 +77,6 @@ type fakeGitHub struct {
 	// rules is the answer to rules/branches/main, with its status.
 	rules     string
 	rulesCode int
-	// policy is the content of the repository's file; policyCode 404
-	// means there is none.
-	policy     string
-	policyCode int
-	policyBody string // when set, the raw answer in place of a file
-	// branch is the repository's default branch, as GET repos/o/r names
-	// it; "main" when empty.
-	branch string
 	// mergeCode and mergeBody answer the merge call. mergedAfter makes
 	// the pull request read as merged from then on.
 	mergeCode   int
@@ -122,16 +112,15 @@ const oneRequiredCheck = `[{"type":"deletion","ruleset_id":1},
 func newFake(t *testing.T) *fakeGitHub {
 	t.Helper()
 	f := &fakeGitHub{
-		t:          t,
-		pulls:      []string{pullJSON(testPR, "open", headA, "main", "clean", false)},
-		open:       "[]",
-		rules:      oneRequiredCheck,
-		rulesCode:  200,
-		policyCode: 404,
-		mergeCode:  200,
-		mergeBody:  `{"merged":true}`,
-		comments:   map[int][]*fakeComment{},
-		nextID:     100,
+		t:         t,
+		pulls:     []string{pullJSON(testPR, "open", headA, "main", "clean", false)},
+		open:      "[]",
+		rules:     oneRequiredCheck,
+		rulesCode: 200,
+		mergeCode: 200,
+		mergeBody: `{"merged":true}`,
+		comments:  map[int][]*fakeComment{},
+		nextID:    100,
 	}
 	f.srv = httptest.NewServer(f)
 	t.Cleanup(f.srv.Close)
@@ -167,11 +156,6 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		answer(404, `{"message":"Not Found"}`)
 	}
-	if r.Method == "GET" && r.URL.Path == "/repos/o/r" {
-		b, _ := json.Marshal(map[string]string{"full_name": "o/r", "default_branch": cmp.Or(f.branch, "main")})
-		answer(200, string(b))
-		return
-	}
 	rest, ok := strings.CutPrefix(r.URL.Path, "/repos/o/r/")
 	if !ok {
 		unknown()
@@ -191,24 +175,6 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		answer(200, f.open)
 	case route == "GET rules/branches/main":
 		answer(f.rulesCode, f.rules)
-	case route == "GET contents/.github/dep-review.json":
-		if r.URL.Query().Get("ref") != "main" {
-			f.t.Errorf("the policy was read with ref=%q, want the default branch", r.URL.Query().Get("ref"))
-		}
-		switch {
-		case f.policyBody != "":
-			answer(f.policyCode, f.policyBody)
-		case f.policyCode != 200:
-			answer(f.policyCode, `{"message":"Not Found"}`)
-		default:
-			// The API wraps base64 at 60 columns.
-			enc := base64.StdEncoding.EncodeToString([]byte(f.policy))
-			if len(enc) > 60 {
-				enc = enc[:60] + "\n" + enc[60:]
-			}
-			b, _ := json.Marshal(map[string]string{"type": "file", "encoding": "base64", "content": enc + "\n"})
-			answer(200, string(b))
-		}
 	case r.Method == "GET" && strings.HasPrefix(rest, "issues/") && strings.HasSuffix(rest, "/comments"):
 		if f.commentsCode != 0 {
 			answer(f.commentsCode, `{"message":"Server Error"}`)
@@ -389,14 +355,12 @@ func preparedRead(update int, key string) wire.Read {
 }
 
 // goodFacts is a facts file for a Go pull request with one update, read
-// under keyA, gathered under the default configuration.
+// under keyA.
 func goodFacts(t *testing.T) wire.Facts {
 	t.Helper()
-	conf, _ := defaults(t)
 	return wire.Facts{
 		Version:     wire.Version,
 		PullRequest: wire.PullRequest{Repo: testRepo, Number: testPR, Head: headA},
-		Config:      conf.Fingerprint(),
 		GatheredAt:  t0.Add(-time.Minute),
 		Facts: wire.PRFacts{
 			Ecosystem: allow.GoModules,
