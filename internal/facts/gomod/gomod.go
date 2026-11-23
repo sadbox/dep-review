@@ -80,12 +80,9 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 		return facts.Result{}, errors.New("gomod: Input.HTTP, Input.Advisories and Input.Now must be set")
 	}
 
-	cs, problem := readChange(in.Files)
-	if problem != "" {
-		return facts.Result{Shape: allow.No(problem, sourceManifests)}, nil
-	}
-	res := facts.Result{Shape: allow.Yes(shapeValue(cs), sourceManifests)}
+	cs, res := changes(in.Files, in.Policy)
 	if len(cs.updates) == 0 {
+		// Shape does not hold, or nothing moves.
 		return res, nil
 	}
 
@@ -143,8 +140,7 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 	now := in.Now()
 
 	for i, up := range cs.updates {
-		u := allow.UpdateFacts{Name: up.name, From: up.from, To: up.to}
-		setManifestFacts(&u, up, cs, in.Policy)
+		u := &res.Updates[i]
 
 		d, downloadedOK := downloads[targets[i]]
 		info, infoOK := infos[targets[i]]
@@ -179,7 +175,6 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 			}
 		}
 
-		res.Updates = append(res.Updates, u)
 		if pair, ok := artifactPair(up, cs, u.Bound); ok {
 			res.Artifacts = append(res.Artifacts, pair)
 		}
@@ -191,6 +186,33 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 		return facts.Result{}, fmt.Errorf("gomod: %w", err)
 	}
 	return res, nil
+}
+
+// Changes is the half of Gather that reads nothing but the pull request's
+// files: the Shape fact, and every update with the facts no registry is
+// ever asked for (Known, Listed, NewName, Increase, Major and NoRegress).
+// Every other fact is left unset. Gather starts from the same reading;
+// the replay command runs this half alone.
+func Changes(files []facts.File, policy allow.Policy) facts.Result {
+	_, res := changes(files, policy)
+	return res
+}
+
+// changes is Changes, with the change set its updates were made from: one
+// update for each of cs.updates, in the same order. When Shape does not
+// hold the change set is empty and there are no updates.
+func changes(files []facts.File, policy allow.Policy) (changeSet, facts.Result) {
+	cs, problem := readChange(files)
+	if problem != "" {
+		return changeSet{}, facts.Result{Shape: allow.No(problem, sourceManifests)}
+	}
+	res := facts.Result{Shape: allow.Yes(shapeValue(cs), sourceManifests)}
+	for _, up := range cs.updates {
+		u := allow.UpdateFacts{Name: up.name, From: up.from, To: up.to}
+		setManifestFacts(&u, up, cs, policy)
+		res.Updates = append(res.Updates, u)
+	}
+	return cs, res
 }
 
 // shapeValue describes a change set that has the Go shape.

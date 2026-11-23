@@ -1,0 +1,11 @@
+{
+  "ecosystem": "uv",
+  "created": "2026-01-10T12:00:00Z",
+  "files": [
+    {
+      "path": "uv.lock",
+      "base_mode": "100644",
+      "head_mode": "100644"
+    }
+  ]
+}

@@ -93,19 +93,12 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 	if in.Advisories == nil {
 		return facts.Result{}, errors.New("actions: no advisory checker")
 	}
-	pins, problem := readChangeSet(in.Files)
-	if problem != "" {
-		return facts.Result{Shape: allow.No(problem, shapeSource)}, nil
-	}
-	res := facts.Result{
-		Shape: allow.Yes(fmt.Sprintf("%d action pin(s) replaced in place across %d file(s)", len(pins), len(in.Files)), shapeSource),
-	}
-	for _, p := range pins {
-		u, err := gatherPin(ctx, in.GitHub, in.Advisories, in.Policy, p)
-		if err != nil {
+	pins, res := readFiles(in.Files, in.Policy)
+	for i, p := range pins {
+		u := &res.Updates[i]
+		if err := gatherPin(ctx, in.GitHub, in.Advisories, p, u); err != nil {
 			return facts.Result{}, err
 		}
-		res.Updates = append(res.Updates, u)
 		// The model reads an artifact only at a commit Bound was
 		// established for.
 		if u.Bound.Holds() {
@@ -122,12 +115,39 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 	return res, nil
 }
 
-// gatherPin gathers every fact of one pin. The error is the context's.
-func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, policy allow.Policy, p pin) (allow.UpdateFacts, error) {
-	u := allow.UpdateFacts{Name: p.name, From: p.from, To: p.to}
+// Changes is the half of Gather that reads nothing but the pull request's
+// files: the Shape fact, and every pin the pull request moves with the
+// facts the files and the policy list establish (Known, Listed, NewName,
+// Increase and Major). Every other fact is left unset, Bound included:
+// that a pin has no actions.lock entry is said by Gather, with what GitHub
+// reports. Gather starts from the same reading; the replay command runs
+// this half alone.
+func Changes(files []facts.File, policy allow.Policy) facts.Result {
+	_, res := readFiles(files, policy)
+	return res
+}
 
-	// What the files alone say. A pin is replaced in place, so its name
-	// is at the base commit by construction.
+// readFiles is Changes, with the pins its updates were made from: one
+// update for each pin, in the same order. When Shape does not hold there
+// are no pins.
+func readFiles(files []facts.File, policy allow.Policy) ([]pin, facts.Result) {
+	pins, problem := readChangeSet(files)
+	if problem != "" {
+		return nil, facts.Result{Shape: allow.No(problem, shapeSource)}
+	}
+	res := facts.Result{
+		Shape: allow.Yes(fmt.Sprintf("%d action pin(s) replaced in place across %d file(s)", len(pins), len(files)), shapeSource),
+	}
+	for _, p := range pins {
+		res.Updates = append(res.Updates, fileFacts(p, policy))
+	}
+	return pins, res
+}
+
+// fileFacts is one pin with what the files alone say. A pin is replaced
+// in place, so its name is at the base commit by construction.
+func fileFacts(p pin, policy allow.Policy) allow.UpdateFacts {
+	u := allow.UpdateFacts{Name: p.name, From: p.from, To: p.to}
 	u.Known = allow.Yes("replaced in place: the action is used at the base commit", p.where)
 	u.NewName = allow.No("replaced in place: not a new name", p.where)
 	if allow.Listed(policy, allow.GitHubActions, p.name) {
@@ -137,34 +157,38 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, policy a
 	}
 	u.Increase = increase(p)
 	u.Major = major(p)
+	return u
+}
 
-	// What GitHub says.
+// gatherPin fills in what GitHub and the advisory database say about one
+// pin: every fact fileFacts left unset. The error is the context's.
+func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u *allow.UpdateFacts) error {
 	repo, err := getRepo(ctx, c, p.name)
 	if err != nil {
-		return u, err
+		return err
 	}
 	tag, err := resolveTag(ctx, c, p.name, p.to)
 	if err != nil {
-		return u, err
+		return err
 	}
 	ahead, err := compare(ctx, c, p.name, p.oldCommit, p.newCommit)
 	if err != nil {
-		return u, err
+		return err
 	}
 	branch, err := findBranch(ctx, c, p.name, repo, "releases/"+semver.Major(p.to), p.newCommit)
 	if err != nil {
-		return u, err
+		return err
 	}
 	rel, err := getRelease(ctx, c, p.name, p.to)
 	if err != nil {
-		return u, err
+		return err
 	}
 	// The checker puts whatever it learned, or failed to learn, into its
 	// facts. Its error is the context's; from any other checker it leaves
 	// the facts blank, which is person.
 	advice, advErr := adv.Check(ctx, advisory.Query{Ecosystem: allow.GitHubActions, Name: p.name, From: p.from, To: p.to})
 	if ctx.Err() != nil {
-		return u, fmt.Errorf("actions: advisories for %s: %w", p.name, ctx.Err())
+		return fmt.Errorf("actions: advisories for %s: %w", p.name, ctx.Err())
 	}
 	if advErr != nil {
 		advice = advisory.Result{}
@@ -177,7 +201,7 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, policy a
 	// As the checker returned it: unavailable or never gathered when it
 	// could not tell.
 	u.SecurityFix = advice.SecurityFix
-	return u, nil
+	return nil
 }
 
 // increase is the Increase fact: both versions are plain releases and the

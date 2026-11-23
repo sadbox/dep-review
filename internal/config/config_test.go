@@ -468,3 +468,58 @@ func TestHintsNameTheRepoFile(t *testing.T) {
 		}
 	}
 }
+
+// Complete takes a whole file in place of the embedded one. It is for
+// measuring a policy, so unlike a repository's file it may go below the
+// built-in values and leave list entries out; like every file it must be
+// strict about what it says.
+func TestComplete(t *testing.T) {
+	edit := func(change func(m map[string]any)) []byte {
+		var m map[string]any
+		if err := json.Unmarshal(defaultsJSON, &m); err != nil {
+			t.Fatal(err)
+		}
+		change(m)
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	got, err := Complete(defaultsJSON)
+	if err != nil || !reflect.DeepEqual(got, specDefaults()) {
+		t.Errorf("the embedded file: %+v, %v; want the defaults", got, err)
+	}
+
+	got, err = Complete(edit(func(m map[string]any) {
+		m["min_age_hours"] = 24
+		m["listed"].(map[string]any)["docker"] = []string{"gcr.io/distroless/"}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MinAgeHours != 24 || !reflect.DeepEqual(got.Listed.Docker, []string{"gcr.io/distroless/"}) {
+		t.Errorf("min_age_hours %d, docker list %q; want what the file says", got.MinAgeHours, got.Listed.Docker)
+	}
+	if !reflect.DeepEqual(got.Listed.NPM, specDefaults().Listed.NPM) || got.MajorAgeDays != 14 {
+		t.Errorf("what the file left as it was changed: %+v", got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		file []byte
+		want string
+	}{
+		{"a missing key", edit(func(m map[string]any) { delete(m, "major_age_days") }), "a key is missing"},
+		{"an unknown key", edit(func(m map[string]any) { m["allow_everything"] = true }), "unknown field"},
+		{"an age of zero", edit(func(m map[string]any) { m["min_age_hours"] = 0 }), "min_age_hours"},
+		{"a bad list entry", edit(func(m map[string]any) { m["listed"].(map[string]any)["npm"] = []string{"/"} }), "listed.npm"},
+		{"too large", append(edit(func(map[string]any) {}), make([]byte, maxFileBytes)...), "bytes"},
+		{"empty", nil, "EOF"},
+	} {
+		if _, err := Complete(tc.file); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error that says %q", tc.name, err, tc.want)
+		}
+	}
+}

@@ -69,9 +69,8 @@ func New() *Gatherer { return &Gatherer{} }
 // unavailable. An error means there is no HTTP client to ask with, or the
 // context ended.
 func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, error) {
-	changes, shape := readShape(in.Files)
-	res := facts.Result{Shape: shape}
-	if !shape.OK {
+	moved, res := changes(in.Files, in.Policy)
+	if !res.Shape.OK {
 		return res, nil
 	}
 	if in.HTTP == nil {
@@ -93,18 +92,43 @@ func (g *Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, er
 		a.sleep = sleepCtx
 	}
 
-	for _, c := range distinct(changes) {
-		u, err := a.update(ctx, c, in.Policy)
+	for i, c := range moved {
+		f, err := a.ask(ctx, c)
 		if err != nil {
 			return facts.Result{}, fmt.Errorf("docker: %s: %w", c.image.Name(), err)
 		}
-		res.Updates = append(res.Updates, u)
+		u := &res.Updates[i]
+		u.Bound, u.Clean, u.FirstSeen, u.Superseded = f.bound, f.clean, f.firstSeen, f.superseded
 	}
 	return res, nil
 }
 
-// update gathers every fact of one change.
-func (a *asker) update(ctx context.Context, c change, policy allow.Policy) (allow.UpdateFacts, error) {
+// Changes is the half of Gather that reads nothing but the pull request's
+// files: the Shape fact, and every image the pull request moves with the
+// facts no registry is ever asked for (Known, Listed, NewName, Increase,
+// Major, NoRegress and SecurityFix). Bound, Clean, FirstSeen and
+// Superseded are left unset. Gather starts from the same reading; the
+// replay command runs this half alone.
+func Changes(files []facts.File, policy allow.Policy) facts.Result {
+	_, res := changes(files, policy)
+	return res
+}
+
+// changes is Changes, with the changes its updates were made from: one
+// update for each change, in the same order. When Shape does not hold
+// there are none.
+func changes(files []facts.File, policy allow.Policy) ([]change, facts.Result) {
+	lines, shape := readShape(files)
+	res := facts.Result{Shape: shape}
+	moved := distinct(lines)
+	for _, c := range moved {
+		res.Updates = append(res.Updates, fileFacts(c, policy))
+	}
+	return moved, res
+}
+
+// fileFacts is one change with the facts no registry is asked for.
+func fileFacts(c change, policy allow.Policy) allow.UpdateFacts {
 	name := c.image.Name()
 	u := allow.UpdateFacts{
 		Name: name,
@@ -133,11 +157,5 @@ func (a *asker) update(ctx context.Context, c change, policy allow.Policy) (allo
 	}
 
 	u.Increase, u.Major = compareTags(c.fromTag, c.toTag)
-
-	f, err := a.ask(ctx, c)
-	if err != nil {
-		return allow.UpdateFacts{}, err
-	}
-	u.Bound, u.Clean, u.FirstSeen, u.Superseded = f.bound, f.clean, f.firstSeen, f.superseded
-	return u, nil
+	return u
 }

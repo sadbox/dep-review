@@ -160,6 +160,31 @@ removed.
 }
 ```
 
+### Measuring a change before shipping it
+
+`dep-review replay` decides a directory of recorded pull requests offline
+and prints one line for each (outcome, reasons, and what it stopped on),
+then the totals for each ecosystem:
+
+```
+dep-review replay --dir records --now 2026-11-23T00:00:00Z \
+    [--policy changed-defaults.json] [--name-created 2020-01-01T00:00:00Z]
+```
+
+A record is one JSON file for one pull request: its ecosystem, when it was
+created, and every changed path with its mode and content at the merge
+base and at the head ([internal/replay](internal/replay/replay.go) has the
+form, `internal/replay/testdata` an example). The replay runs the real
+reading of those files and the real decision. Everything a registry,
+GitHub or the model would be asked is taken to be favourable, and a
+version is taken to be as old as its pull request, so the result is an
+upper bound on what would merge: run it with the built-in policy and with
+the changed one, and compare who goes to a person. `--policy` takes a
+complete file in the form of `defaults.json`, and unlike a repository's
+file it may also be narrower than the built-in one. Without
+`--name-created` the age of a new name is unknown, which is person. npm
+records need a local npm; nothing else is run and no network is used.
+
 ## Jobs
 
 ```
@@ -281,7 +306,7 @@ and it then gets no status, comment or notification.
 | Path | What |
 |---|---|
 | `.github/workflows/gate.yml` | the reusable workflow |
-| `cmd/dep-review` | one subcommand per job; flags, files, exit codes |
+| `cmd/dep-review` | one subcommand per job, and `replay`; flags, files, exit codes |
 | `internal/classify` | the identity proof |
 | `internal/gather` | the fetch and review jobs |
 | `internal/facts/{gomod,npm,actions,docker}` | each ecosystem's facts |
@@ -292,4 +317,5 @@ and it then gets no status, comment or notification.
 | `internal/allow` | the decision: a pure function of facts, policy and time |
 | `internal/config` | the built-in settings and a repository's file |
 | `internal/land` | the publish job: comment, status, merge, notification |
+| `internal/replay` | the decision over recorded pull requests, offline |
 | `internal/gh` | the GitHub REST client |

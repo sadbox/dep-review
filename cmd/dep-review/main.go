@@ -2,7 +2,9 @@
 // .github/workflows/gate.yml that runs it: classify, fetch, review,
 // publish and refresh. A subcommand reads its flags, its files and the
 // job's environment and calls the package that does the work
-// (internal/classify, internal/gather, internal/land). See README.md.
+// (internal/classify, internal/gather, internal/land). One more
+// subcommand, replay, is no job's: it measures a policy offline
+// (internal/replay). See README.md.
 package main
 
 import (
@@ -14,7 +16,8 @@ import (
 	"unicode/utf8"
 )
 
-// commands are the gate's subcommands.
+// commands are the gate's subcommands: each is run by the job of gate.yml
+// that has its name, and a test holds the two together.
 var commands = map[string]func([]string) error{
 	"classify": runClassify,
 	"fetch":    runFetch,
@@ -23,16 +26,24 @@ var commands = map[string]func([]string) error{
 	"refresh":  runRefresh,
 }
 
+// tools are the subcommands no job runs.
+var tools = map[string]func([]string) error{
+	"replay": runReplay,
+}
+
 func main() {
 	// Errors and log lines can carry text from a dependency, a registry or
 	// git's stderr. Everything that reaches the job log goes through
 	// logLine: one line, no control characters, no workflow commands.
 	log.SetOutput(lineWriter{os.Stderr})
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review|publish|refresh [flags]")
+		fmt.Fprintln(os.Stderr, "usage: dep-review classify|fetch|review|publish|refresh|replay [flags]")
 		os.Exit(2)
 	}
 	run, ok := commands[os.Args[1]]
+	if !ok {
+		run, ok = tools[os.Args[1]]
+	}
 	if !ok {
 		fmt.Fprintln(os.Stderr, logLine(fmt.Sprintf("dep-review: unknown command %q", os.Args[1])))
 		os.Exit(2)

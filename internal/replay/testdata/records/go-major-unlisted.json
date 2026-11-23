@@ -1,0 +1,20 @@
+{
+  "ecosystem": "go_modules",
+  "created": "2026-01-10T12:00:00Z",
+  "files": [
+    {
+      "path": "go.mod",
+      "base_mode": "100644",
+      "head_mode": "100644",
+      "base": "module example.com/app\n\ngo 1.24\n\nrequire (\n\texample.com/lib v0.9.0\n\tgolang.org/x/text v0.20.0\n)\n",
+      "head": "module example.com/app\n\ngo 1.24\n\nrequire (\n\texample.com/lib v1.0.0\n\tgolang.org/x/text v0.20.0\n)\n"
+    },
+    {
+      "path": "go.sum",
+      "base_mode": "100644",
+      "head_mode": "100644",
+      "base": "example.com/lib v0.9.0 h1:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=\nexample.com/lib v0.9.0/go.mod h1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee=\ngolang.org/x/text v0.20.0 h1:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\ngolang.org/x/text v0.20.0/go.mod h1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=\n",
+      "head": "example.com/lib v1.0.0 h1:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=\nexample.com/lib v1.0.0/go.mod h1:fffffffffffffffffffffffffffffffffffffffffff=\ngolang.org/x/text v0.20.0 h1:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\ngolang.org/x/text v0.20.0/go.mod h1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=\n"
+    }
+  ]
+}

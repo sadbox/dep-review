@@ -136,7 +136,7 @@ type file struct {
 // stricter or longer and did not get it, so the pull request goes to a
 // person.
 func Load(repoFile []byte) (Config, error) {
-	c, err := defaults()
+	c, err := complete(defaultsJSON)
 	if err != nil {
 		return Config{}, fmt.Errorf("config: embedded defaults: %w", err)
 	}
@@ -193,9 +193,26 @@ func (c Config) Fingerprint() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// defaults parses the embedded file, which must set everything.
-func defaults() (Config, error) {
-	f, err := parse(defaultsJSON)
+// Complete returns the settings of a file that sets everything, in the
+// form of the embedded defaults (policy/defaults.json), in their place.
+// It is for measuring a change to the defaults before shipping it, which
+// is the replay command's job. The gate itself only ever calls Load: a
+// file read this way is held to no floor.
+func Complete(b []byte) (Config, error) {
+	if len(b) > maxFileBytes {
+		return Config{}, fmt.Errorf("config: the file is %d bytes, more than %d", len(b), maxFileBytes)
+	}
+	c, err := complete(b)
+	if err != nil {
+		return Config{}, fmt.Errorf("config: %w", err)
+	}
+	return c, nil
+}
+
+// complete parses a file that must set everything: the embedded one, or
+// one given to Complete.
+func complete(b []byte) (Config, error) {
+	f, err := parse(b)
 	if err != nil {
 		return Config{}, err
 	}

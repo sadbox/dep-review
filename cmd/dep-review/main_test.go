@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -88,6 +90,34 @@ func TestIgnoreEcosystemsUnknownFails(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "--ignore-ecosystems: unknown ecosystem") {
 				t.Errorf("%s --ignore-ecosystems %q: %v", cmd, bad, err)
 			}
+		}
+	}
+}
+
+// replay is no job's subcommand, so the tests over commands do not see
+// it. It refuses to start without its flags, or with a clock or a policy
+// it cannot read, before it reads a record.
+func TestReplayFlags(t *testing.T) {
+	const records = "../../internal/replay/testdata/records"
+	notPolicy := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(notPolicy, []byte(`{"min_age_hours": 1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no directory", []string{"--now", "2026-03-02T00:00:00Z"}, "required"},
+		{"no clock", []string{"--dir", records}, "required"},
+		{"a stray argument", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "stray"}, "required"},
+		{"a clock that is not a time", []string{"--dir", records, "--now", "yesterday"}, "--now"},
+		{"a name time that is not a time", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "--name-created", "2020"}, "--name-created"},
+		{"a policy file that is not complete", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "--policy", notPolicy}, "a key is missing"},
+		{"a policy file that is not there", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "--policy", notPolicy + ".none"}, "no such file"},
+	} {
+		if err := tools["replay"](tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error that says %q", tc.name, err, tc.want)
 		}
 	}
 }

@@ -90,44 +90,16 @@ func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, err
 	if in.HTTP == nil {
 		return facts.Result{}, errors.New("npm: no HTTP client for the registry")
 	}
-	t := g.tool
-	if t == nil {
-		real, err := findNPM(g.NPM)
-		if err != nil {
-			return facts.Result{}, err
-		}
-		t = real
-	}
-	version, err := t.Version(ctx)
-	if err != nil {
-		return facts.Result{}, fmt.Errorf("npm --version: %w", err)
-	}
-	if err := supportedNPM(version); err != nil {
-		return facts.Result{}, err
-	}
-	// The npm version is part of the source: it is npm's reading the
-	// facts rest on, and the reading is only as good as that npm.
-	lockSource := "npm " + version + ": " + lsCommand + " at base and head"
-
-	cs, err := readChangeSet(ctx, t, in.Files)
+	cs, res, err := g.changes(ctx, in.Files, in.Policy)
 	if err != nil {
 		return facts.Result{}, err
 	}
-	if len(cs.problems) > 0 {
-		// The change set cannot be trusted, so no update is reported and
-		// the registry is not asked about names from a lock nobody
-		// understood.
-		return facts.Result{Shape: allow.No(summarise(cs.problems), lockSource)}, nil
-	}
-
-	res := facts.Result{Shape: allow.Yes(cs.summary, lockSource)}
 	reg := &registry{client: in.HTTP, packuments: map[string]packumentAnswer{}}
-	for _, u := range cs.updates {
-		uf, pair, err := gatherUpdate(ctx, in, reg, u, lockSource)
+	for i, u := range cs.updates {
+		pair, err := gatherUpdate(ctx, in, reg, u, &res.Updates[i])
 		if err != nil {
 			return facts.Result{}, err
 		}
-		res.Updates = append(res.Updates, uf)
 		if pair != nil {
 			res.Artifacts = append(res.Artifacts, *pair)
 		}
@@ -135,14 +107,66 @@ func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, err
 	return res, nil
 }
 
-// gatherUpdate fills in every fact of one update except Read and Veto. The
-// pair is nil when Bound does not hold: there is then no verified hash to
-// read an artifact against.
-func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, lockSource string) (allow.UpdateFacts, *artifact.Pair, error) {
+// Changes is the half of Gather that asks no registry: the Shape fact,
+// and every update with the facts npm's reading of the two locks and the
+// policy list establish (Known, Listed, NewName, Increase and Major).
+// Every other fact is left unset. It runs npm, which reads the lock
+// offline, and returns an error when Gather would for the same reason.
+// Gather starts from the same reading; the replay command runs this half
+// alone.
+func (g Gatherer) Changes(ctx context.Context, files []facts.File, policy allow.Policy) (facts.Result, error) {
+	_, res, err := g.changes(ctx, files, policy)
+	return res, err
+}
+
+// changes is Changes, with the change set its updates were made from: one
+// update for each of cs.updates, in the same order. When Shape does not
+// hold there are no updates.
+func (g Gatherer) changes(ctx context.Context, files []facts.File, policy allow.Policy) (changeSet, facts.Result, error) {
+	t := g.tool
+	if t == nil {
+		real, err := findNPM(g.NPM)
+		if err != nil {
+			return changeSet{}, facts.Result{}, err
+		}
+		t = real
+	}
+	version, err := t.Version(ctx)
+	if err != nil {
+		return changeSet{}, facts.Result{}, fmt.Errorf("npm --version: %w", err)
+	}
+	if err := supportedNPM(version); err != nil {
+		return changeSet{}, facts.Result{}, err
+	}
+	// The npm version is part of the source: it is npm's reading the
+	// facts rest on, and the reading is only as good as that npm.
+	lockSource := "npm " + version + ": " + lsCommand + " at base and head"
+
+	cs, err := readChangeSet(ctx, t, files)
+	if err != nil {
+		return changeSet{}, facts.Result{}, err
+	}
+	if len(cs.problems) > 0 {
+		// The change set cannot be trusted, so no update is reported and
+		// the registry is not asked about names from a lock nobody
+		// understood.
+		return changeSet{}, facts.Result{Shape: allow.No(summarise(cs.problems), lockSource)}, nil
+	}
+
+	res := facts.Result{Shape: allow.Yes(cs.summary, lockSource)}
+	for _, u := range cs.updates {
+		res.Updates = append(res.Updates, lockFacts(u, policy, lockSource))
+	}
+	return cs, res, nil
+}
+
+// lockFacts is one update with the facts the two locks and the policy
+// list establish.
+func lockFacts(u update, policy allow.Policy, lockSource string) allow.UpdateFacts {
 	uf := allow.UpdateFacts{Name: u.Name, From: u.From, To: u.To}
 
 	const listSource = "policy list (npm)"
-	listed := allow.Listed(in.Policy, allow.NPM, u.Name)
+	listed := allow.Listed(policy, allow.NPM, u.Name)
 	if listed {
 		uf.Listed = allow.Yes("on the list", listSource)
 	} else {
@@ -164,7 +188,14 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 	}
 	uf.Increase = increaseFact(u.From, u.To, lockSource)
 	uf.Major = majorFact(u.From, u.To, lockSource)
+	return uf
+}
 
+// gatherUpdate fills in the facts of one update that the registry and the
+// advisory database are the source of: every fact lockFacts left unset,
+// except Read and Veto. The pair is nil when Bound does not hold: there is
+// then no verified hash to read an artifact against.
+func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, uf *allow.UpdateFacts) (*artifact.Pair, error) {
 	// One packument answers Bound, FirstSeen, NameCreated, half of Clean
 	// and most of NoRegress. A name the gate will not put in a URL gets no
 	// request at all.
@@ -175,7 +206,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 		var err error
 		doc, err = reg.packument(ctx, u.Name)
 		if err != nil {
-			return uf, nil, err
+			return nil, err
 		}
 	}
 	source := packumentURL(u.Name)
@@ -185,7 +216,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 
 	nr, err := noRegressFact(ctx, reg, u, doc, source)
 	if err != nil {
-		return uf, nil, err
+		return nil, err
 	}
 	uf.NoRegress = nr
 
@@ -202,7 +233,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 		res, err := in.Advisories.Check(ctx, advisory.Query{Ecosystem: allow.NPM, Name: u.Name, From: u.From, To: u.To})
 		switch {
 		case ctx.Err() != nil:
-			return uf, nil, ctx.Err()
+			return nil, ctx.Err()
 		case err != nil:
 			blank = "the advisory checker failed: " + quote(err.Error())
 		default:
@@ -224,7 +255,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 			pair = &p
 		}
 	}
-	return uf, pair, nil
+	return pair, nil
 }
 
 // artifactPair names the two tarballs of an update whose Bound holds, each
