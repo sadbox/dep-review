@@ -274,6 +274,15 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 			// Accepted on where its commit comes from (spec section 11,
 			// amendment 60): nothing is fetched and no model is asked.
 			u.Prepared.Detail = ownUnread
+		case !named && u.Bound.Unavailable && u.Bound.Source != "":
+			// The pin's own source was asked and did not answer, so there is
+			// no verified hash to fetch anything against yet. That is an
+			// outage like the artifact's own: the read, and what the
+			// artifacts would show, are waited for (spec section 11,
+			// amendment 65). A later run that finds the pin bound reads it.
+			const why = "the pin's source did not answer, so nothing was fetched to read"
+			u.Prepared = wire.Read{Status: wire.Unavailable, Detail: why}
+			inspected = allow.Unavailable(why, "the update's artifacts")
 		case !named:
 			u.Prepared.Detail = "the gatherer named no artifact: the pin is not bound, or the old version has no hash to check it against"
 		default:

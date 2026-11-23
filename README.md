@@ -123,12 +123,12 @@ from the pull request's title, body, labels or Dependabot's metadata:
 A fact is in one of four states, and only the first contributes to a
 merge: it holds; it does not hold (person); its source was asked and did
 not answer (wait, then person at the deadline); it was never gathered
-(person). One outage does not wait: when the registry or GitHub does not
-answer for Bound of a Go, npm or Actions update, there is no verified
-hash to read the code against, nothing is read, and an update that was
-not read is a person's at once (`read_unknown`; re-run the gate after
-the outage). A Docker update waits, because nothing of an image is read,
-and so does an own workflow.
+(person). That goes for Bound too. When the registry or GitHub does not
+answer for the pin of a Go, npm or Actions update, there is no verified
+hash to read the code against yet, so nothing is fetched and the update
+waits (`source_unavailable`, `read_pending`); the scheduled run gathers
+again, and reads the code once the pin is bound. A pin the registry
+answered "no" for is a person's at once.
 Identity waits like any other fact: when the branch's activity log has
 not caught up with the push, or GitHub does not answer for the log, the
 timeline or the branch's rules, the proof is unfinished, the other facts

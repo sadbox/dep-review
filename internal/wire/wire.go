@@ -188,12 +188,16 @@ const (
 	// Nothing: nothing is read and nothing was fetched. That is every
 	// Docker update, every own workflow (spec section 11, amendment 60),
 	// and an update of another ecosystem whose gatherer named no artifact
-	// (its Bound does not hold, or the old version has no verifiable
-	// hash). For Docker and for an own workflow it is not-applicable;
-	// anywhere else the update is unread, which is person.
+	// because its Bound was answered "no" or was never gathered, or
+	// because the old version has no verifiable hash. For Docker and for
+	// an own workflow it is not-applicable; anywhere else the update is
+	// unread, which is person.
 	Nothing ReadStatus = "nothing"
 	// Unavailable: the artifact could not be downloaded this time
-	// (artifact.ErrUnavailable). Read is none: it waits and is retried.
+	// (artifact.ErrUnavailable), or there was nothing to download it
+	// against yet because the source of the update's Bound did not answer
+	// (spec section 11, amendment 65). Read is none: it waits and is
+	// retried.
 	Unavailable ReadStatus = "unavailable"
 	// Refused: the gate will not read this update, and asking again gives
 	// the same: a hash mismatch, an unsafe archive or a bad reference

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -497,6 +498,65 @@ func TestFetchPrepareFailures(t *testing.T) {
 	for i, u := range f.Facts.Updates {
 		if u.NoRegress != updates[i].NoRegress {
 			t.Errorf("%s: no regress %+v", u.Name, u.NoRegress)
+		}
+	}
+}
+
+// A Bound whose source did not answer is an outage, and the read that
+// could not be prepared for it is waited for like the artifact's own
+// download (spec section 11, amendment 65). It was a person's at once,
+// for a read that was "not recorded". A Bound that was answered "no", one
+// nobody gathered, and a bound pin with no artifact are a person's still.
+func TestFetchBoundDidNotAnswer(t *testing.T) {
+	down := allow.Unavailable("the registry did not answer", "registry")
+	for _, eco := range []model.Ecosystem{model.GoModules, model.NPM, model.GitHubActions} {
+		name, _ := ecosystem(eco)
+		for _, tc := range []struct {
+			what    string
+			bound   allow.Fact
+			status  wire.ReadStatus
+			outcome allow.Outcome
+			reasons []allow.Reason
+		}{
+			{"did not answer", down, wire.Unavailable, allow.Wait, []allow.Reason{allow.ReasonSourceUnavailable, allow.ReasonReadPending}},
+			{"was answered no", allow.No("the registry serves another hash", "registry"), wire.Nothing, allow.Person, []allow.Reason{allow.ReasonNotBound, allow.ReasonReadUnknown}},
+			{"was never gathered", allow.Fact{Value: "not asked"}, wire.Nothing, allow.Person, []allow.Reason{allow.ReasonFactMissing, allow.ReasonReadUnknown}},
+			{"holds, with no artifact named", allow.Yes("the pinned hash", "registry"), wire.Nothing, allow.Person, []allow.Reason{allow.ReasonReadUnknown}},
+		} {
+			t.Run(name+": Bound "+tc.what, func(t *testing.T) {
+				u := goodUpdate(t, name, map[string]string{
+					allow.GoModules: "example.com/m", allow.NPM: "left-pad", allow.GitHubActions: "example/action",
+				}[name])
+				u.Bound = tc.bound
+				j := newJob(t, eco, u)
+				// A gatherer names an artifact only for a pin that is bound.
+				j.gatherer.res.Artifacts = nil
+				_, f := j.run(t)
+				read := f.Facts.Updates[0].Prepared
+				if read.Status != tc.status || read.Detail == "" {
+					t.Fatalf("read %+v, want status %s with a detail", read, tc.status)
+				}
+				if len(j.preparer.pairs) != 0 {
+					t.Error("the reader was called with no artifact named")
+				}
+				d := decide(t, f, nil)
+				if d.Outcome != tc.outcome {
+					t.Fatalf("decided %s %v, want %s", d.Outcome, d.Reasons, tc.outcome)
+				}
+				for _, r := range tc.reasons {
+					if !slices.Contains(d.Reasons, r) {
+						t.Errorf("reasons %v lack %s", d.Reasons, r)
+					}
+				}
+				if name != allow.NPM {
+					return
+				}
+				// npm's NoRegress needs the tarballs. With nothing fetched
+				// during an outage it is unavailable too, not "not looked at".
+				if got := f.Facts.Updates[0].NoRegress; got.Unavailable != (tc.status == wire.Unavailable) || got.OK {
+					t.Errorf("NoRegress %+v", got)
+				}
+			})
 		}
 	}
 }
