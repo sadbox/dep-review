@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +30,11 @@ type fakeAPI struct {
 	mu sync.Mutex
 	// pull answers GET pulls/7; empty is 404.
 	pull string
+	// open answers the list of open pull requests; empty is none.
+	open string
+	// comment is the body of the gate's one comment on #7, with ID 1;
+	// empty is no comment. A comment the gate writes takes its place.
+	comment string
 	// calls are the requests, "METHOD path", and bodies what was written.
 	calls  []string
 	bodies []string
@@ -42,9 +49,23 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case call == "GET pulls/7" && f.pull != "":
 		io.WriteString(w, f.pull)
+	case call == "GET pulls":
+		io.WriteString(w, "["+f.open+"]")
+	case call == "GET issues/7/comments" && f.comment != "":
+		b, _ := json.Marshal([]map[string]any{{"id": 1, "body": f.comment, "user": map[string]string{"login": "gate[bot]"}}})
+		w.Write(b)
 	case call == "GET issues/7/comments":
 		io.WriteString(w, "[]")
-	case r.Method == "POST" && (call == "POST issues/7/comments" || strings.HasPrefix(call, "POST statuses/")):
+	case call == "POST issues/7/comments" || call == "PATCH issues/comments/1":
+		var in struct {
+			Body string `json:"body"`
+		}
+		json.Unmarshal(body, &in)
+		f.comment = in.Body
+		f.bodies = append(f.bodies, string(body))
+		w.WriteHeader(http.StatusCreated)
+		io.WriteString(w, "{}")
+	case strings.HasPrefix(call, "POST statuses/"):
 		f.bodies = append(f.bodies, string(body))
 		w.WriteHeader(http.StatusCreated)
 		io.WriteString(w, "{}")
@@ -150,8 +171,9 @@ func TestPublishRefreshed(t *testing.T) {
 		if err := publishRefreshed(context.Background(), api.config(t), in, nil); err != nil {
 			t.Errorf("err = %v", err)
 		}
-		if got := strings.Join(api.calls, ", "); got != "GET pulls/7" {
-			t.Errorf("requests %q, want #7 looked at", got)
+		// Then publish's own look at the open pull requests.
+		if got := strings.Join(api.calls, ", "); got != "GET pulls/7, GET pulls" {
+			t.Errorf("requests %q, want #7 looked at and then the open pull requests", got)
 		}
 	})
 	t.Run("one that is refused does not stop the others", func(t *testing.T) {
@@ -166,14 +188,220 @@ func TestPublishRefreshed(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "3 of 4") {
 			t.Errorf("err = %v, want three of four refused", err)
 		}
-		if got := strings.Join(api.calls, ", "); got != "GET pulls/7" {
-			t.Errorf("requests %q, want #7 looked at", got)
+		// #12 has a directory that could not be decided: publish looks
+		// whether there is something to report on it (there is no #12).
+		// The file and the stray manifest name no pull request.
+		if got := strings.Join(api.calls, ", "); got != "GET pulls/12, GET pulls/7, GET pulls" {
+			t.Errorf("requests %q, want #12 and #7 looked at and then the open pull requests", got)
 		}
 	})
-	t.Run("nothing", func(t *testing.T) {
+	// A scheduled run in which the refresh job wrote nothing: there is no
+	// artifact, and publish still looks at the open pull requests itself.
+	t.Run("nothing refreshed", func(t *testing.T) {
 		api := &fakeAPI{}
-		if err := publishRefreshed(context.Background(), api.config(t), t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "neither") {
+		if err := publishRefreshed(context.Background(), api.config(t), t.TempDir(), nil); err != nil {
 			t.Errorf("err = %v", err)
+		}
+		if got := strings.Join(api.calls, ", "); got != "GET pulls" {
+			t.Errorf("requests %q, want the open pull requests", got)
+		}
+	})
+}
+
+// handMarker is a marker line as internal/land writes it, for a comment
+// these tests put on the fake: the members given, in JSON.
+func handMarker(members string) string {
+	return "<!-- dep-review:v2 " + base64.RawURLEncoding.EncodeToString([]byte("{"+members+"}")) + " -->"
+}
+
+// A pull request the scheduled run tried to evaluate from scratch and
+// could not is reported on the pull request, once, by publish: the
+// refresh job has no token to write with, and left a directory with no
+// facts. One the gate left waiting keeps its wait comment (spec section
+// 11, amendment 66).
+func TestPublishReportsWhatCouldNotBeEvaluated(t *testing.T) {
+	// By Dependabot, and not on a dependabot/ branch: classify calls that
+	// unverified from the pull request alone, which the gate handles.
+	open := strings.Replace(pullJSON("open", "dependabot[bot]", testHead), `"ref":"dependabot/go_modules/example.com/m-1.0.1"`, `"ref":"renamed"`, 1)
+	tried := func(t *testing.T) string {
+		in := t.TempDir()
+		writeFile(t, filepath.Join(in, "refreshed", "7", unevaluatedFile), "tried\n")
+		return in
+	}
+	t.Run("no decision for the head", func(t *testing.T) {
+		api := &fakeAPI{pull: open}
+		err := publishRefreshed(context.Background(), api.config(t), tried(t), nil)
+		if err == nil || !strings.Contains(err.Error(), "1 of 1") {
+			t.Errorf("err = %v, want the run to fail for the one pull request", err)
+		}
+		written := strings.Join(api.bodies, "\n")
+		for _, want := range []string{`"state":"error"`, "the scheduled run could not evaluate this pull request; see the comment",
+			"### dep-review: the run failed", "because the gate had no decision for its head", "The scheduled run does not try this head again"} {
+			if !strings.Contains(written, want) {
+				t.Errorf("the report lacks %q: %s", want, written)
+			}
+		}
+	})
+	for name, comment := range map[string]string{
+		"a wait":                  handMarker(`"outcome":"wait","head":"`+testHead+`"`) + "\n### dep-review: waiting\n",
+		"a decision for the head": handMarker(`"outcome":"person","head":"`+testHead+`","notified":["`+testHead+`"]`) + "\n### dep-review: needs a person\n",
+	} {
+		t.Run(name+" is not replaced by a report", func(t *testing.T) {
+			api := &fakeAPI{pull: open, comment: comment}
+			if err := publishRefreshed(context.Background(), api.config(t), tried(t), nil); err == nil {
+				t.Error("the run did not fail for the pull request that could not be evaluated")
+			}
+			if len(api.bodies) != 0 || api.comment != comment {
+				t.Errorf("wrote %v", api.bodies)
+			}
+		})
+	}
+	// Facts this job came to too late are not the pull request's failure:
+	// nothing is reported, and the next run gathers again.
+	t.Run("facts gathered too long ago are not reported", func(t *testing.T) {
+		api := &fakeAPI{pull: open}
+		in := t.TempDir()
+		facts := goodFacts()
+		facts.Facts.Identity = allow.No("not on a dependabot/ branch", "classify")
+		facts.GatheredAt = testGathered.Add(-land.MaxFactsAge)
+		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), facts)
+		if err := publishRefreshed(context.Background(), api.config(t), in, nil); err == nil {
+			t.Error("the run did not fail for facts that are too old")
+		}
+		if len(api.bodies) != 0 {
+			t.Errorf("wrote %v", api.bodies)
+		}
+	})
+	t.Run("a closed pull request gets nothing", func(t *testing.T) {
+		api := &fakeAPI{pull: strings.Replace(open, `"state":"open"`, `"state":"closed"`, 1)}
+		publishRefreshed(context.Background(), api.config(t), tried(t), nil)
+		if len(api.bodies) != 0 {
+			t.Errorf("wrote %v", api.bodies)
+		}
+	})
+	t.Run("somebody else's pull request gets nothing", func(t *testing.T) {
+		api := &fakeAPI{pull: pullJSON("open", "mallory", testHead)}
+		publishRefreshed(context.Background(), api.config(t), tried(t), nil)
+		if len(api.bodies) != 0 {
+			t.Errorf("wrote %v", api.bodies)
+		}
+	})
+}
+
+// A scheduled run that asked the model about a pull request and then
+// could not decide it still counts the ask, so that the next one waits
+// its turn (spec section 11, amendment 64): the marker line is rewritten
+// and nothing else is.
+func TestPublishCountsAnAskItCouldNotDecideOn(t *testing.T) {
+	const rest = "\n### dep-review: waiting\n\nthe comment's text\n"
+	asked := handMarker(`"outcome":"wait","head":"`+testHead+`","asks":1,"asked_at":"2026-11-22T00:00:00Z"`) + rest
+	run := func(t *testing.T, withVerdicts bool) *fakeAPI {
+		t.Helper()
+		api := &fakeAPI{pull: pullJSON("open", "mallory", testHead), comment: asked}
+		in := t.TempDir()
+		facts := goodFacts()
+		facts.Facts.Identity = allow.No("pushed by a person", "classify")
+		// Too old to decide on: deciding fails before anything is written.
+		facts.GatheredAt = testGathered.Add(-land.MaxFactsAge)
+		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), facts)
+		if withVerdicts {
+			writeFile(t, filepath.Join(in, "reverdicts", "7", "verdicts.json"), `{"version":1,"verdicts":[]}`)
+		}
+		if err := publishRefreshed(context.Background(), api.config(t), in, nil); err == nil || !strings.Contains(err.Error(), "1 of 1") {
+			t.Fatalf("err = %v, want the run to fail for the one pull request", err)
+		}
+		return api
+	}
+	api := run(t, true)
+	if got := asksOf(t, api.comment); got != 2 || !strings.HasSuffix(api.comment, rest) || len(api.bodies) != 1 {
+		t.Errorf("after a run that asked and could not decide: %d asks, %d writes, comment %q", got, len(api.bodies), api.comment)
+	}
+	// A run that asked nobody counts nothing.
+	if api := run(t, false); api.comment != asked || len(api.bodies) != 0 {
+		t.Errorf("after a run that asked nobody: comment %q, writes %v", api.comment, api.bodies)
+	}
+}
+
+// sweepNotifier records what publish told the owner.
+type sweepNotifier struct{ got []land.Message }
+
+func (n *sweepNotifier) Notify(_ context.Context, m land.Message) error {
+	n.got = append(n.got, m)
+	return nil
+}
+
+// On a scheduled run publish looks at the open pull requests itself, with
+// its own token, whatever the refresh job wrote: a wait past its deadline
+// that this run did not decide is a person's, and a notification that
+// could not be delivered is sent (spec section 11, amendment 67).
+func TestSweep(t *testing.T) {
+	open := pullJSON("open", "dependabot[bot]", testHead)
+	past := testGathered.Add(-time.Hour).Format(time.RFC3339)
+	ahead := testGathered.Add(time.Hour).Format(time.RFC3339)
+	wait := func(deadline string) string {
+		return handMarker(`"outcome":"wait","head":"`+testHead+`","deadline":"`+deadline+`"`) + "\n### dep-review: waiting\n"
+	}
+	run := func(t *testing.T, api *fakeAPI) (*sweepNotifier, int, error) {
+		t.Helper()
+		n := &sweepNotifier{}
+		cfg := api.config(t)
+		cfg.Scheduled, cfg.Notifier = true, n
+		failed, err := sweep(context.Background(), cfg, nil)
+		return n, failed, err
+	}
+
+	// The identity proof cannot be finished here (the fake has no commit
+	// list): that is the refresh that keeps failing, and it does not keep
+	// the deadline from being enforced.
+	t.Run("an overdue wait is a person's, also when the proof fails", func(t *testing.T) {
+		api := &fakeAPI{pull: open, open: open, comment: wait(past)}
+		n, failed, err := run(t, api)
+		if err != nil || failed != 0 {
+			t.Fatalf("%d failures, %v", failed, err)
+		}
+		written := strings.Join(api.bodies, "\n")
+		for _, want := range []string{`"state":"failure"`, "the wait deadline passed", "### dep-review: needs a person"} {
+			if !strings.Contains(written, want) {
+				t.Errorf("what was written lacks %q: %s", want, written)
+			}
+		}
+		if len(n.got) != 1 || !strings.Contains(n.got[0].Body, "its wait deadline has passed") {
+			t.Errorf("notifications %+v", n.got)
+		}
+	})
+	t.Run("a wait whose deadline is ahead is left waiting", func(t *testing.T) {
+		api := &fakeAPI{pull: open, open: open, comment: wait(ahead)}
+		if n, failed, err := run(t, api); err != nil || failed != 0 || len(api.bodies) != 0 || len(n.got) != 0 {
+			t.Errorf("%d failures, %v, wrote %v, told %+v", failed, err, api.bodies, n.got)
+		}
+	})
+	// Only a proof that positively says the pull request is not the
+	// gate's any more leaves an overdue wait alone.
+	t.Run("an overdue wait on a pull request that was closed meanwhile", func(t *testing.T) {
+		api := &fakeAPI{pull: strings.Replace(open, `"state":"open"`, `"state":"closed"`, 1), open: open, comment: wait(past)}
+		if n, failed, err := run(t, api); err != nil || failed != 0 || len(api.bodies) != 0 || len(n.got) != 0 {
+			t.Errorf("%d failures, %v, wrote %v, told %+v", failed, err, api.bodies, n.got)
+		}
+	})
+	t.Run("a notification that was not delivered is sent", func(t *testing.T) {
+		owing := handMarker(`"outcome":"person","head":"`+testHead+`"`) + "\n### dep-review: needs a person\n\nwhy\n"
+		api := &fakeAPI{pull: open, open: open, comment: owing}
+		n, failed, err := run(t, api)
+		if err != nil || failed != 0 || len(n.got) != 1 || !strings.Contains(n.got[0].Body, "needs a person") {
+			t.Fatalf("%d failures, %v, told %+v", failed, err, n.got)
+		}
+		// The comment keeps its text and now remembers the notification.
+		if !strings.HasSuffix(api.comment, "\n### dep-review: needs a person\n\nwhy\n") || api.comment == owing {
+			t.Errorf("the comment after: %q", api.comment)
+		}
+		if n, failed, err := run(t, api); err != nil || failed != 0 || len(n.got) != 0 {
+			t.Errorf("a second look: %d failures, %v, told %+v", failed, err, n.got)
+		}
+	})
+	t.Run("nothing open", func(t *testing.T) {
+		api := &fakeAPI{}
+		if n, failed, err := run(t, api); err != nil || failed != 0 || len(api.bodies) != 0 || len(n.got) != 0 {
+			t.Errorf("%d failures, %v", failed, err)
 		}
 	})
 }

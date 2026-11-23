@@ -568,21 +568,35 @@ func TestPublishRunsOnBothPaths(t *testing.T) {
 }
 
 // The scheduled run fails when a pull request could not be refreshed, and
-// the ones that could are decided first. refresh itself fails only when it
-// uploaded nothing; otherwise it succeeds, so publish never reads the
-// outputs of a failed job, and publish's last step fails the run.
+// the ones that could are decided first. refresh itself does not fail for
+// one pull request: it leaves a directory that says the pull request was
+// tried, so publish always runs then, never reads the outputs of a failed
+// job, reports what only it can (a pull request with no decision that
+// could not be evaluated, a wait past its deadline), and fails the run in
+// its last step.
 func TestIncompleteRefreshFailsTheRunLast(t *testing.T) {
 	jobs := gateJobs(t)
 	refresh, publish := jobs["refresh"], jobs["publish"]
 	if !strings.Contains(refresh, "      incomplete: ${{ steps.refresh.outputs.incomplete }}\n") {
 		t.Error("refresh does not output incomplete")
 	}
-	if n := strings.Count(refresh, "exit 1"); n != 1 {
-		t.Errorf("refresh has %d steps that fail it, want 1", n)
+	if n := strings.Count(refresh, "exit 1"); n != 0 {
+		t.Errorf("refresh has %d steps that fail it, want none: publish reports and fails the run", n)
 	}
-	if !strings.Contains(stepOf(t, refresh, "Fail when no PR could be refreshed"),
-		"        if: steps.refresh.outputs.incomplete == 'true' && steps.refresh.outputs.publish != 'true'\n") {
-		t.Error("refresh fails although it uploaded something")
+	// What is uploaded and whether publish runs are two questions:
+	// publish has work in a run in which refresh wrote nothing (an overdue
+	// wait, a notification that was not delivered), and then there is no
+	// artifact to sum or upload.
+	for _, name := range []string{"Checksum the artifact"} {
+		if !strings.Contains(stepOf(t, refresh, name), "        if: steps.refresh.outputs.upload == 'true'\n") {
+			t.Errorf("refresh's step %q does not depend on something having been written", name)
+		}
+	}
+	if !strings.Contains(refresh, "      - uses: actions/upload-artifact@v7.0.2\n        if: steps.refresh.outputs.upload == 'true'\n") {
+		t.Error("refresh uploads although nothing was written")
+	}
+	if !strings.Contains(refresh, "      publish: ${{ steps.refresh.outputs.publish }}\n") {
+		t.Error("refresh does not say whether publish has something to do")
 	}
 	last := publish[strings.LastIndex(publish, "\n      - "):]
 	for _, want := range []string{"- name: Fail when a PR could not be refreshed\n", "        if: needs.refresh.outputs.incomplete == 'true'\n", "exit 1"} {

@@ -45,7 +45,7 @@ const dependabotLogin = "dependabot[bot]"
 // Config is what the jobs need besides their files.
 type Config struct {
 	// GitHub is the REST client. Decide and Act need the gate app's token
-	// (it comments, sets a status and merges); Waiting only reads.
+	// (it comments, sets a status and merges); Schedule only reads.
 	GitHub *gh.Client
 	// Repo is the repository the job runs for, owner/name. A facts file
 	// about another repository is refused.
@@ -362,7 +362,11 @@ type pull struct {
 	State          string `json:"state"`
 	Merged         bool   `json:"merged"`
 	MergeableState string `json:"mergeable_state"`
-	User           *struct {
+	// UpdatedAt is GitHub's time of the last change to the pull request:
+	// a push, a comment, a label. The scheduled job waits by it before it
+	// evaluates a pull request the gate has nothing for (Schedule).
+	UpdatedAt time.Time `json:"updated_at"`
+	User      *struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	Head struct {

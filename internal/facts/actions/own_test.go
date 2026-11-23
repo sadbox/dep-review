@@ -484,8 +484,8 @@ func TestOwnWorkflowGather(t *testing.T) {
 			[]check{func(t *testing.T, u allow.UpdateFacts) { mustBeUnknown(t, "Clean", u.Clean, "were not checked") }},
 			allow.Person, []allow.Reason{allow.ReasonFactMissing}},
 
-		// GitHub did not answer: a wait, like every fact but an action's
-		// Bound, which has no read to wait with (amendment 41).
+		// GitHub did not answer: a wait, like every fact (an action's Bound
+		// waits too since amendment 65; an own workflow's always did).
 		{"the tag lookup fails", with(map[string]canned{refPath: {500, `{"message":"boom"}`}}), nil,
 			[]check{func(t *testing.T, u allow.UpdateFacts) {
 				mustBeUnavailable(t, "Bound", u.Bound, "tag v1.3.0 could not be read: GitHub answered HTTP 500")

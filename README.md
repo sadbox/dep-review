@@ -88,6 +88,23 @@ ends `wait_deadline_days` after the latest time the update could have
 merged, or after the pull request was opened if that is later; then it is
 a person's. While neither time is known (GitHub and the registry's clock
 both went unanswered) there is no deadline, and the pull request waits.
+A wait the scheduled run cannot evaluate again (gathering its facts
+keeps failing) is a person's at the deadline of its last decision all
+the same: publish says so on the pull request and notifies.
+
+The scheduled run also takes up a Dependabot pull request the gate has
+nothing for at its head: the event's run died before it could write
+anything, or the comment is one this version cannot read, as on every
+pull request left open by v0.1. It waits until the pull request has not
+changed for 4 hours, so as not to race the event's run, evaluates at
+most five such pull requests in a run, from scratch and without the
+model, and asks the model at the run after. If it cannot evaluate one,
+publish reports that once (status `error`, the comment, a notification)
+and the schedule does not try that head again.
+
+A notification that could not be sent is sent by the next scheduled run.
+Without Pushover configured there is nobody to tell, and nothing is
+owed.
 
 ## Facts
 
@@ -397,15 +414,18 @@ PR opened or pushed to
             publish   decide, comment, status, merge               (gate app)
 schedule → gate.yml
             build
-            refresh   for every PR left waiting: the identity      (read-only token)
-                      proof and the facts again, and which reads
-                      the model need not be asked about now
+            refresh   for every PR left waiting, and every one     (read-only token)
+                      the gate has nothing for at its head: the
+                      identity proof and the facts again, and which
+                      reads the model need not be asked about now
             reread    one tool-less model request per chunk of     (OIDC token only)
                       a read that has no answer yet; not on a
                       manual dispatch
             publish   the identity proof once more, then decide    (gate app)
                       on the facts, reread's verdicts and what
-                      its own comment remembers
+                      its own comment remembers; then its own look
+                      at the open PRs for a wait past its deadline
+                      and a notification that was not sent
 ```
 
 Publish jobs run one at a time in a repository and wait for each other

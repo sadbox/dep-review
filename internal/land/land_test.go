@@ -703,11 +703,23 @@ func TestConfigCheck(t *testing.T) {
 		if _, err := Act(context.Background(), cfg, Evaluation{}); err == nil {
 			t.Errorf("%s: Act ran", name)
 		}
-		if _, _, err := Waiting(context.Background(), cfg); err == nil {
-			t.Errorf("%s: Waiting ran", name)
+		if _, err := Schedule(context.Background(), cfg); err == nil {
+			t.Errorf("%s: Schedule ran", name)
 		}
 		if err := Failed(context.Background(), cfg, testPR, headA, "test"); err == nil {
 			t.Errorf("%s: Failed ran", name)
+		}
+		if err := Expired(context.Background(), cfg, testPR, headA); err == nil {
+			t.Errorf("%s: Expired ran", name)
+		}
+		if err := Tell(context.Background(), cfg, testPR); err == nil {
+			t.Errorf("%s: Tell ran", name)
+		}
+		if err := Asked(context.Background(), cfg, testPR, headA); err == nil {
+			t.Errorf("%s: Asked ran", name)
+		}
+		if _, _, err := Undecided(context.Background(), cfg, testPR); err == nil {
+			t.Errorf("%s: Undecided ran", name)
 		}
 	}
 	// Act works on what Decide made of the files, not on a decision someone

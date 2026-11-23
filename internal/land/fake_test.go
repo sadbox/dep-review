@@ -71,7 +71,9 @@ type fakeGitHub struct {
 	srv *httptest.Server
 
 	// pulls are the successive answers to GET pulls/7; the last repeats.
-	pulls []string
+	// pullNumber, when set, is the pull request they are for instead.
+	pulls      []string
+	pullNumber int
 	// open is the answer to the list of open pull requests.
 	open string
 	// rules is the answer to rules/branches/main, with its status.
@@ -103,14 +105,18 @@ type fakeGitHub struct {
 	calls    []call
 }
 
-// pullJSON is a pull request as the API returns it.
+// pullJSON is a pull request as the API returns it, last changed two
+// days before t0.
 func pullJSON(number int, state, head, base, mergeable string, merged bool) string {
-	return fmt.Sprintf(`{"number":%d,"state":%q,"merged":%t,"mergeable_state":%q,
+	return fmt.Sprintf(`{"number":%d,"state":%q,"merged":%t,"mergeable_state":%q,"updated_at":%q,
 		"user":{"login":"dependabot[bot]"},
 		"head":{"sha":%q,"repo":{"full_name":"o/r"}},
 		"base":{"ref":%q,"repo":{"full_name":"o/r","default_branch":"main"}}}`,
-		number, state, merged, mergeable, head, base)
+		number, state, merged, mergeable, quietSince.Format(time.RFC3339), head, base)
 }
+
+// quietSince is when the pull requests of the fake last changed.
+var quietSince = t0.Add(-48 * time.Hour)
 
 const oneRequiredCheck = `[{"type":"deletion","ruleset_id":1},
 	{"type":"pull_request","parameters":{"required_approving_review_count":0,"allowed_merge_methods":["squash"]}},
@@ -175,8 +181,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		unknown()
 		return
 	}
+	number := testPR
+	if f.pullNumber != 0 {
+		number = f.pullNumber
+	}
 	switch route := r.Method + " " + rest; {
-	case route == fmt.Sprintf("GET pulls/%d", testPR):
+	case route == fmt.Sprintf("GET pulls/%d", number):
 		cur := f.pulls[0]
 		if len(f.pulls) > 1 {
 			f.pulls = f.pulls[1:]

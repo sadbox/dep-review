@@ -373,11 +373,13 @@ jobs:
           retention-days: 7
 
   # The scheduled path: for every Dependabot PR the gate left waiting,
-  # the identity proof and the facts again, and for reread the list of
-  # prepared reads the model is not to be asked about now: the ones the
-  # gate's comment remembers an answer for, and all of a PR whose next
-  # ask is not due. This job asks no model and has no credential to ask
-  # one with; publish decides, as for an event.
+  # and every one it has nothing for at its head (the event's run died,
+  # or the gate's comment is an earlier version's), the identity proof
+  # and the facts again, and for reread the list of prepared reads the
+  # model is not to be asked about now: the ones the gate's comment
+  # remembers an answer for, and all of a PR whose next ask is not due.
+  # This job asks no model and has no credential to ask one with; publish
+  # decides, as for an event.
   refresh:
     needs: build
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -387,13 +389,17 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      # true when there is a refreshed PR for publish to decide.
+      # true when publish has something to do: a refreshed PR to decide,
+      # a PR this job tried and could not evaluate, a wait that is past
+      # its deadline, or a notification that was not delivered. It is a
+      # hint from a job without the app's token; what publish then does it
+      # does on its own reading of the PRs.
       publish: ${{ steps.refresh.outputs.publish }}
       # true when a prepared read is left for the model.
       review: ${{ steps.refresh.outputs.review }}
-      # true when a waiting PR could not be refreshed. This job still
-      # succeeds once it has uploaded the others, so publish reads the
-      # outputs of a job that succeeded, and fails the run in its last step.
+      # true when a PR could not be evaluated. This job still succeeds
+      # and uploads, so publish reads the outputs of a job that succeeded,
+      # decides the others, and fails the run in its last step.
       incomplete: ${{ steps.refresh.outputs.incomplete }}
       refreshed_sums: ${{ steps.sums.outputs.sums }}
     steps:
@@ -444,9 +450,11 @@ jobs:
             --out "$RUNNER_TEMP/refreshed" \
             --app-slug "$APP_SLUG" \
             --ignore-ecosystems "$IGNORE_ECOSYSTEMS"
+      # Only when something was written: a run with nothing to evaluate
+      # has no artifact, and publish then finds none.
       - name: Checksum the artifact
         id: sums
-        if: steps.refresh.outputs.publish == 'true'
+        if: steps.refresh.outputs.upload == 'true'
         run: |
           # As for the facts artifact: the sums go into the artifact as
           # SHA256SUMS and the job outputs that file's own sum.
@@ -459,18 +467,11 @@ jobs:
             echo 'DEP_REVIEW_SUMS'
           } >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.2
-        if: steps.refresh.outputs.publish == 'true'
+        if: steps.refresh.outputs.upload == 'true'
         with:
           name: refreshed
           path: ${{ runner.temp }}/refreshed
           retention-days: 1
-      # Only when nothing was uploaded: then there is no publish job to fail
-      # the run, and failing here loses no decision.
-      - name: Fail when no PR could be refreshed
-        if: steps.refresh.outputs.incomplete == 'true' && steps.refresh.outputs.publish != 'true'
-        run: |
-          echo "no waiting PR could be refreshed; see the step above" >&2
-          exit 1
 
   # The scheduled run's review: the veto calls for the reads refresh
   # prepared and left for the model. It is review again, for a directory
@@ -567,9 +568,9 @@ jobs:
     # handles, also when fetch or review failed. A review that failed
     # leaves facts to decide on (its reads wait); a fetch that failed
     # leaves none, and then this job says so on the PR, which nothing else
-    # would. A scheduled run: when refresh uploaded something, whatever
-    # became of reread; without its verdicts the reads it was to ask about
-    # wait.
+    # would. A scheduled run: when refresh says there is something to do,
+    # whatever became of reread; without its verdicts the reads it was to
+    # ask about wait.
     if: >-
       !cancelled() && needs.build.result == 'success' &&
       ((needs.classify.result == 'success' &&
@@ -721,5 +722,5 @@ jobs:
       - name: Fail when a PR could not be refreshed
         if: needs.refresh.outputs.incomplete == 'true'
         run: |
-          echo "a waiting PR could not be refreshed; see the refresh job" >&2
+          echo "a PR could not be evaluated again; see the refresh job" >&2
           exit 1

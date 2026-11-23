@@ -79,8 +79,9 @@ func TestFailed(t *testing.T) {
 
 	// The owner was told how to run the gate again: the scheduled job
 	// does not take the pull request up.
-	if waiting, unread, err := Waiting(context.Background(), cfg); err != nil || len(waiting) != 0 || len(unread) != 0 {
-		t.Errorf("waiting: %+v, unread %v, %v", waiting, unread, err)
+	f.open = "[" + pullJSON(testPR, "open", headA, "main", "clean", false) + "]"
+	if agenda, err := Schedule(context.Background(), cfg); err != nil || len(agenda.Evaluate) != 0 || len(agenda.Untold) != 0 {
+		t.Errorf("the schedule after a failed run that was reported: %+v, %v", agenda, err)
 	}
 	// The run again decides, and what it decides is told although the
 	// head was told about before.

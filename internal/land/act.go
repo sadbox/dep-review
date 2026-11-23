@@ -88,8 +88,9 @@ type Result struct {
 // sends no such notice.
 //
 // A failed notification is returned as an error after everything else was
-// written, and is not remembered as sent: the next run sends it. It is
-// the one error that comes with a Result whose Action is set.
+// written, and is not remembered as sent: the next scheduled run finds
+// the comment owing it and sends it (Schedule, Tell). It is the one error
+// that comes with a Result whose Action is set.
 func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	if err := cfg.check(); err != nil {
 		return Result{}, err
@@ -239,22 +240,25 @@ func unanswered(ev Evaluation) bool {
 	return false
 }
 
-// Failed is for an event's run that ended without a decision: the fetch
-// job left no facts, or Decide or Act returned an error before anything
-// was written. Without it such a pull request has no comment and no
-// status, the scheduled job (which looks only at what the gate left
-// waiting) never comes to it, and nobody is told.
+// Failed is for a run that ended without a decision. On an event's run:
+// the fetch job left no facts, or Decide or Act returned an error before
+// anything was written. On a scheduled run (Config.Scheduled): a pull
+// request the gate had nothing for at its head, which the run tried to
+// evaluate from scratch and could not. Without it such a pull request has
+// no comment and no status, and nobody is told.
 //
 // It sets the dep-review status to error, replaces the gate's comment by
-// one that says the run failed and how to run it again, and notifies once
-// per head, remembered apart from a decision's notification. The marker's
+// one that says the run failed and what to do, and notifies once per
+// head, remembered apart from a decision's notification. The marker's
 // outcome is ActionFailed, which the scheduled job does not pick up: the
-// owner has been told how to run the gate again.
+// owner has been told, and the schedule tries a head once.
 //
-// The way out it names is always to run all jobs again, never the failed
-// ones: a job that is not run again keeps what it made in the first
-// attempt, and Decide refuses facts older than MaxFactsAge
-// (ErrFactsStale), which is one of the failures reported here.
+// The way out an event's run names is always to run all jobs again, never
+// the failed ones: a job that is not run again keeps what it made in the
+// first attempt, and Decide refuses facts older than MaxFactsAge
+// (ErrFactsStale), which is one of the failures reported here. A
+// scheduled run has nothing to run again for one pull request, and names
+// a new head or a person instead.
 //
 // A pull request that is closed or has a newer head is left alone: the
 // newer head has a run of its own, whose comment this must not replace.
@@ -270,7 +274,12 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 	if err != nil || cur.changed(head) != "" {
 		return err // nil for a pull request that changed
 	}
-	if err := setStatus(ctx, cfg, head, "error", "the gate's run failed before it could decide; re-run all jobs"); err != nil {
+	description, told := "the gate's run failed before it could decide; re-run all jobs", ": the gate's run failed before it could decide. Re-run all jobs"+runLink(cfg)
+	if cfg.Scheduled {
+		description = "the scheduled run could not evaluate this pull request; see the comment"
+		told = ": the scheduled run could not evaluate this pull request and does not try this head again. See the comment on the pull request." + runRef(cfg)
+	}
+	if err := setStatus(ctx, cfg, head, "error", description); err != nil {
 		return err
 	}
 	prev, err := findComment(ctx, cfg, number)
@@ -285,19 +294,81 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string) erro
 		old, _ = parseMarker(prev.Body)
 	}
 	mk := old.next(ActionFailed, head)
-	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number,
-		": the gate's run failed before it could decide. Re-run all jobs"+runLink(cfg)))
+	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number, told))
 
 	run := "this pull request's dep-review workflow run"
 	if cfg.RunURL != "" {
 		run = "the [workflow run](" + cfg.RunURL + ")"
 	}
+	wayOut := fmt.Sprintf("open %s and re-run all jobs, not only the failed ones: a job that is not run again keeps the facts of the first attempt, "+
+		"and the gate does not decide on facts gathered more than %d hours before. "+
+		"Until a run decides, the gate does not look at this pull request again by itself.", run, int(MaxFactsAge.Hours()))
+	if cfg.Scheduled {
+		wayOut = "look at the update and merge or close the pull request by hand, or have Dependabot rebase or recreate it: a new head gets a run of its own. " +
+			"The scheduled run does not try this head again. The log of " + run + " says what failed."
+	}
 	body := fmt.Sprintf("%s\n### dep-review: the run failed\n\n"+
 		"**The gate's run failed before it could decide.** Nothing was judged, merged or refused for head %s. %s\n\n"+
-		"**Way out:** open %s and re-run all jobs, not only the failed ones: a job that is not run again keeps the facts of the first attempt, "+
-		"and the gate does not decide on facts gathered more than %d hours before. "+
-		"Until a run decides, the gate does not look at this pull request again by itself.\n",
-		mk.String(), code(head), inline(what), run, int(MaxFactsAge.Hours()))
+		"**Way out:** %s\n",
+		mk.String(), code(head), inline(what), wayOut)
+	if err := upsertComment(ctx, cfg, number, prev, body); err != nil {
+		return err
+	}
+	return notifyErr
+}
+
+// Expired makes a waiting pull request a person's when its wait deadline
+// has passed and the scheduled run could not evaluate it again: its facts
+// could not be gathered, or publish could not decide on them. Decide
+// answers person at the deadline by itself, but only when it runs; a wait
+// whose every re-evaluation fails would otherwise stay a wait for good,
+// with nobody told (spec section 11, amendment 67).
+//
+// It decides nothing about the update: the comment says that the deadline
+// passed with nothing newer known, the status is failure, and the owner
+// is notified once per head. The marker's outcome becomes ActionPerson
+// for the head the pull request has now, so the scheduled job stops
+// evaluating it, and what the comment remembered stays.
+//
+// It writes only when the gate's own comment still says wait with a
+// deadline that has passed, and the pull request is open at head: a run
+// that did decide, a new head or a closed pull request is left alone.
+func Expired(ctx context.Context, cfg Config, number int, head string) error {
+	if err := cfg.check(); err != nil {
+		return err
+	}
+	if number < 1 || !gh.ValidSHA(head) {
+		return fmt.Errorf("land: #%d at %.80q is not a pull request and a commit ID", number, head)
+	}
+	cur, err := getPull(ctx, cfg, number)
+	if err != nil || cur.changed(head) != "" {
+		return err // nil for a pull request that changed
+	}
+	prev, err := findComment(ctx, cfg, number)
+	if err != nil || prev == nil {
+		return err
+	}
+	old, ok := parseMarker(prev.Body)
+	if !ok || old.Outcome != ActionWait || old.Deadline.IsZero() || cfg.now().Before(old.Deadline) {
+		return nil
+	}
+	if err := setStatus(ctx, cfg, head, "failure", "needs a person: the wait deadline passed and the gate could not evaluate the pull request again"); err != nil {
+		return err
+	}
+	mk := old.next(ActionPerson, head)
+	notifyErr := notifyOnce(ctx, cfg, &mk.Notified, head, message(cfg, number,
+		" needs a person: its wait deadline has passed and the scheduled run could not evaluate it again. See the comment on the pull request."+runRef(cfg)))
+
+	run := "the scheduled dep-review runs"
+	if cfg.RunURL != "" {
+		run = "the [workflow run](" + cfg.RunURL + ") and the scheduled runs before it"
+	}
+	body := fmt.Sprintf("%s\n### dep-review: %s\n\n"+
+		"**Needs a person.** The gate left this pull request waiting, at most until %s. That deadline has passed, and the scheduled run could not evaluate the pull request again: "+
+		"gathering its facts or deciding on them failed. So nothing newer is known about it than what the gate wrote before, and nothing was found against the update by this. "+
+		"The logs of %s say what failed.\n\n"+
+		"**Way out:** look at the update and merge or close the pull request by hand, or have Dependabot rebase or recreate it: a new head gets a run of its own.\n",
+		mk.String(), headlines[ActionPerson], stamp(old.Deadline), run)
 	if err := upsertComment(ctx, cfg, number, prev, body); err != nil {
 		return err
 	}

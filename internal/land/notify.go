@@ -77,18 +77,79 @@ func runRef(cfg Config) string {
 
 // notifyOnce sends m unless sent, a list the gate's comment keeps, has
 // head already, and adds head once m is delivered. A notification that
-// failed is an error and is not remembered: the next run sends it.
+// failed is an error and is not remembered: the next scheduled run sends
+// it (Schedule, Tell).
+//
+// With notifications turned off there is nobody to tell, and the head
+// counts as told. Left off the list, it would read as a notification
+// that failed, and every scheduled run would come back for it.
 func notifyOnce(ctx context.Context, cfg Config, sent *[]string, head string, m Message) error {
-	if cfg.Notifier == nil || slices.Contains(*sent, head) {
+	if slices.Contains(*sent, head) {
 		return nil
 	}
-	if err := cfg.Notifier.Notify(ctx, m); err != nil {
-		return fmt.Errorf("land: notify: %w", err)
+	if cfg.Notifier != nil {
+		if err := cfg.Notifier.Notify(ctx, m); err != nil {
+			return fmt.Errorf("land: notify: %w", err)
+		}
 	}
 	if *sent = append(*sent, head); len(*sent) > maxNotified {
 		*sent = (*sent)[len(*sent)-maxNotified:]
 	}
 	return nil
+}
+
+// untold returns the list of notified heads that should have the marker's
+// head for its outcome and does not: a decision the owner is told about
+// (a person's, a merge GitHub refused) or a run that failed. owed is
+// false for an outcome nobody is told about and for a head that was told.
+func (m *marker) untold() (sent *[]string, owed bool) {
+	switch m.Outcome {
+	case ActionPerson, ActionRefused:
+		sent = &m.Notified
+	case ActionFailed:
+		sent = &m.NotifiedFailed
+	default:
+		return nil, false
+	}
+	return sent, !slices.Contains(*sent, m.Head)
+}
+
+// Tell sends the notification the gate's comment on a pull request owes
+// for its head: the one a run could not deliver when it wrote the comment
+// (spec section 11, amendment 67). It decides nothing and changes no
+// status. The message is a fixed sentence that points at the comment,
+// because the marker keeps the outcome and not the reason. Once it is
+// delivered the marker line is rewritten to remember it, and the rest of
+// the comment stays as it is. A pull request that is closed, has a newer
+// head than the comment, or was told about meanwhile is left alone.
+func Tell(ctx context.Context, cfg Config, number int) error {
+	if err := cfg.check(); err != nil {
+		return err
+	}
+	pr, err := getPull(ctx, cfg, number)
+	if err != nil || pr.State != "open" {
+		return err
+	}
+	c, err := findComment(ctx, cfg, number)
+	if err != nil || c == nil {
+		return err
+	}
+	mk, ok := parseMarker(c.Body)
+	if !ok || mk.Head != pr.Head.SHA {
+		return nil
+	}
+	sent, owed := mk.untold()
+	if !owed {
+		return nil
+	}
+	what := " needs a person."
+	if mk.Outcome == ActionFailed {
+		what = ": the gate's run failed before it could decide."
+	}
+	if err := notifyOnce(ctx, cfg, sent, mk.Head, message(cfg, number, what+" See the gate's comment on the pull request. An earlier notification about this could not be sent.")); err != nil {
+		return err
+	}
+	return remark(ctx, cfg, c, mk)
 }
 
 // Pushover sends through https://pushover.net.

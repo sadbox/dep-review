@@ -23,20 +23,46 @@ import (
 // wrote. Pull requests it did not get to are evaluated by the next run.
 const refreshTimeout = 25 * time.Minute
 
+// maxUndecided is how many pull requests the gate has nothing for are
+// evaluated from scratch in one run, lowest number first. They come
+// before the waiting ones, which is why they are capped: a batch of them
+// must not use up the run. The rest are the next run's. What counts is a
+// pull request the job gathered facts for or failed on. One that classify
+// says is not the gate's (an ignored ecosystem, which never gets a
+// comment and so is listed at every run) costs its proof and no place.
+const maxUndecided = 5
+
+// unevaluatedFile is what the refresh job leaves in the directory of a
+// pull request it tried to evaluate and could not: the directory is then
+// in the artifact without a facts file, which is how publish learns that
+// the pull request was tried. Publish does not open the file.
+const unevaluatedFile = "unevaluated"
+
 // runRefresh: dep-review refresh --repo-dir <dir> --out <dir> --app-slug <slug>
 //
-// The scheduled job. For every open Dependabot pull request the gate left
-// waiting it runs classify's proof again, gathers the facts again and
-// writes them into --out/<number>, for publish to decide; publish runs
-// the proof once more itself and believes the facts only as far as it
-// goes. Beside the facts it writes the skip list for the second review
-// job (wire.AnsweredFile): which prepared reads the model is not to be
-// asked about in this run. This job asks no model and holds no credential
-// but its read-only token. It appends to $GITHUB_OUTPUT
-// publish=<true|false>, whether it wrote anything, review=<true|false>,
-// whether a read is left for the model, and incomplete=<true|false>,
-// whether a pull request could not be refreshed or has a gate comment
-// whose marker could not be read.
+// The scheduled job. It evaluates the open Dependabot pull requests the
+// gate left waiting and the ones the gate has nothing for at their head
+// (land.Schedule): for each it runs classify's proof again, gathers the
+// facts again and writes them into --out/<number>, for publish to decide;
+// publish runs the proof once more itself and believes the facts only as
+// far as it goes. Beside the facts it writes the skip list for the second
+// review job (wire.AnsweredFile): which prepared reads the model is not
+// to be asked about in this run. This job asks no model and holds no
+// credential but its read-only token.
+//
+// The work of one run is bounded. Everything shares refreshTimeout, and
+// what is not reached is the next run's. At most maxUndecided pull
+// requests are evaluated from scratch, and only ones that have not
+// changed for land.UndecidedAfter. No model is asked about a pull request
+// in the run that first evaluates its head. And a pull request the run
+// tried and could not evaluate gets a directory with no facts, by which
+// publish reports it once instead of every run trying again.
+//
+// It appends to $GITHUB_OUTPUT upload=<true|false>, whether it wrote
+// anything; publish=<true|false>, whether publish has something to do
+// (that, an overdue wait, or a notification that was not delivered);
+// review=<true|false>, whether a read is left for the model; and
+// incomplete=<true|false>, whether a pull request could not be evaluated.
 func runRefresh(args []string) error {
 	fl := newFlagSet("refresh")
 	repoDir := fl.String("repo-dir", "", "a clone with full history and every branch; only its git objects are read (required)")
@@ -64,59 +90,143 @@ func runRefresh(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 	defer cancel()
 
-	waiting, unread, err := land.Waiting(ctx, cfg)
+	agenda, err := land.Schedule(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	log.Printf("refresh: %d pull requests are waiting", len(waiting))
-	// A gate comment without a marker this version reads does not say
-	// whether its pull request waits. It counts as not refreshed, so the
-	// run ends red instead of the pull request leaving the schedule unseen.
-	for _, number := range unread {
-		log.Printf("refresh: #%d: the marker in the gate's comment could not be read, so the pull request is not evaluated again; re-run its gate workflow run", number)
-	}
-	wrote, failed, review := 0, len(unread), false
-	if len(waiting) > 0 {
+	todo, overdue := inOrder(agenda.Evaluate)
+	log.Printf("refresh: %d pull requests to evaluate, %d comments with a notification that was not sent", len(todo), len(agenda.Untold))
+	var done tally
+	if len(todo) > 0 {
 		g, err := newGathering(cfg.GitHub)
 		if err != nil {
 			return err
 		}
 		defer g.close()
-		for _, w := range waiting {
-			if w.PastDeadline {
-				log.Printf("refresh: #%d is still waiting after its deadline, %s", w.Number, w.Deadline.UTC().Format(time.RFC3339))
-			}
-			dir := filepath.Join(*out, strconv.Itoa(w.Number))
-			done, ask, err := g.refresh(ctx, cfg, w, ignore, *repoDir, dir)
-			review = review || ask
-			switch {
-			case err != nil:
-				// One pull request's failure is its own: the others are
-				// still refreshed, and a half-written directory is not
-				// handed on.
-				failed++
-				log.Printf("refresh: #%d: %v", w.Number, err)
-				if err := os.RemoveAll(dir); err != nil {
-					return err
-				}
-			case done:
-				wrote++
-			}
+		done, err = refreshAll(ctx, todo, *out, func(ctx context.Context, w land.Reevaluation, dir string) (bool, bool, error) {
+			return g.refresh(ctx, cfg, w, ignore, *repoDir, dir)
+		})
+		if err != nil {
+			return err
 		}
 	}
-	if err := stepOutput("publish", strconv.FormatBool(wrote > 0)); err != nil {
-		return err
+	for name, value := range done.outputs(overdue, len(agenda.Untold)) {
+		if err := stepOutput(name, strconv.FormatBool(value)); err != nil {
+			return err
+		}
 	}
-	if err := stepOutput("review", strconv.FormatBool(review)); err != nil {
-		return err
-	}
-	return stepOutput("incomplete", strconv.FormatBool(failed > 0))
+	return nil
 }
 
-// refresh evaluates one waiting pull request again, into dir. done is
-// false when there is nothing to hand on: the pull request is no longer
-// one the gate acts on at that head. ask says a prepared read is left
-// for the model.
+// outputs is the job's step outputs. Publish has something to do when a
+// directory was written (a pull request to decide, or one to report as
+// not evaluated), when a wait is past its deadline, and when a comment
+// owes a notification: the last two need no artifact, and do not depend
+// on this job having got to the pull request.
+func (t tally) outputs(overdue bool, untold int) map[string]bool {
+	return map[string]bool{
+		"upload":     t.tried > 0,
+		"publish":    t.tried > 0 || overdue || untold > 0,
+		"review":     t.review,
+		"incomplete": t.failed > 0,
+	}
+}
+
+// tally is what one run of the refresh job came to.
+type tally struct {
+	// tried is the pull requests that have a directory in out: the ones
+	// whose facts were written, and the ones that could not be evaluated.
+	// failed is the second kind alone.
+	tried, failed int
+	// review says a prepared read is left for the model.
+	review bool
+}
+
+// refreshAll evaluates the pull requests of todo in order, each into its
+// own directory of out, with one. It keeps to the run's bounds: when the
+// context ends the rest is the next run's, and of the pull requests the
+// gate has nothing for it evaluates maxUndecided. One pull request's
+// failure is its own. The error is out not being writable.
+func refreshAll(ctx context.Context, todo []land.Reevaluation, out string, one func(ctx context.Context, w land.Reevaluation, dir string) (done, ask bool, err error)) (tally, error) {
+	var t tally
+	fromScratch := 0 // of maxUndecided
+	for _, w := range todo {
+		if ctx.Err() != nil {
+			log.Printf("refresh: out of time; #%d is the next run's", w.Number)
+			continue
+		}
+		if w.Undecided && fromScratch == maxUndecided {
+			log.Printf("refresh: #%d has no decision for its head and is the next run's: this run evaluates %d such pull requests", w.Number, maxUndecided)
+			continue
+		}
+		dir := filepath.Join(out, strconv.Itoa(w.Number))
+		done, ask, err := one(ctx, w, dir)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			// The run ended under it. That is not this pull request's
+			// failure, and nothing says it could not be evaluated.
+			log.Printf("refresh: out of time in #%d; it is the next run's", w.Number)
+			if err := os.RemoveAll(dir); err != nil {
+				return t, err
+			}
+			continue
+		case err != nil:
+			// The others are still evaluated, and a half-written
+			// directory is not handed on. What is handed on says that the
+			// pull request was tried.
+			t.failed++
+			t.tried++
+			log.Printf("refresh: #%d: %v", w.Number, err)
+			if err := leaveUnevaluated(dir); err != nil {
+				return t, err
+			}
+		case done:
+			t.tried++
+			t.review = t.review || ask
+		default:
+			continue // not the gate's: it cost its proof and no place
+		}
+		if w.Undecided {
+			fromScratch++
+		}
+	}
+	return t, nil
+}
+
+// inOrder is the pull requests of one run in the order they are taken:
+// first the ones the gate has nothing for, of which the run evaluates
+// maxUndecided at most, then the waiting ones. overdue says a waiting one
+// is past its deadline, which publish acts on whether or not this job
+// gets to it.
+func inOrder(evaluate []land.Reevaluation) (todo []land.Reevaluation, overdue bool) {
+	var waiting []land.Reevaluation
+	for _, w := range evaluate {
+		if w.Undecided {
+			todo = append(todo, w)
+			continue
+		}
+		waiting = append(waiting, w)
+		overdue = overdue || w.PastDeadline
+	}
+	return append(todo, waiting...), overdue
+}
+
+// leaveUnevaluated empties dir and leaves the one file that says the pull
+// request was tried.
+func leaveUnevaluated(dir string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, unevaluatedFile), []byte("the refresh job could not evaluate this pull request; its log says why\n"), 0o644)
+}
+
+// refresh evaluates one pull request, into dir. done is false when there
+// is nothing to hand on: the pull request is not, or no longer, one the
+// gate acts on at that head. ask says a prepared read is left for the
+// model.
 func (g *gathering) refresh(ctx context.Context, cfg land.Config, w land.Reevaluation, ignore map[model.Ecosystem]bool, repoDir, dir string) (done, ask bool, err error) {
 	// The whole proof, as for an event: nothing here takes a pull request
 	// to be Dependabot's because it was so the last time.

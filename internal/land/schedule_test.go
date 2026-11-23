@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,36 +16,64 @@ import (
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
-// TestWaiting: which pull requests the scheduled job is told to evaluate
-// again.
-func TestWaiting(t *testing.T) {
+// TestSchedule: which pull requests the scheduled job is told to
+// evaluate, and which it leaves alone. Besides the ones the gate left
+// waiting, that is every one the gate has nothing for at its head once it
+// has been quiet for UndecidedAfter: never evaluated, a comment this
+// version cannot read, a decision for an older head (spec section 11,
+// amendment 66).
+func TestSchedule(t *testing.T) {
 	_, reviewer := defaults(t)
-	body := func(outcome Action, deadline time.Time) string {
+	marked := func(outcome Action, deadline time.Time, change func(*marker)) string {
 		m := marker{Outcome: outcome, Head: headA, NotBefore: t0.Add(-time.Hour), Deadline: deadline,
+			Notified: []string{headA}, NotifiedFailed: []string{headA},
 			Fingerprint: reviewer, Cache: []cached{{Key: keyA, Read: allow.ReadFull}}}
+		if change != nil {
+			change(&m)
+		}
 		return m.String() + "\n### dep-review\n"
 	}
+	body := func(outcome Action, deadline time.Time) string { return marked(outcome, deadline, nil) }
 	listed := func(number int, author, head, headRepo string) string {
 		p := pullJSON(number, "open", head, "main", "clean", false)
 		p = strings.Replace(p, `"login":"dependabot[bot]"`, `"login":"`+author+`"`, 1)
 		return strings.Replace(p, `"sha":"`+head+`","repo":{"full_name":"o/r"}`, `"sha":"`+head+`","repo":{"full_name":"`+headRepo+`"}`, 1)
 	}
+	// changed is a pull request that last changed at the given time.
+	changed := func(p string, at time.Time) string {
+		return strings.Replace(p, `"updated_at":"`+quietSince.Format(time.RFC3339)+`"`, `"updated_at":"`+at.Format(time.RFC3339)+`"`, 1)
+	}
+	untimed := func(p string) string {
+		return strings.Replace(p, `"updated_at":"`+quietSince.Format(time.RFC3339)+`",`, "", 1)
+	}
 
 	f := newFake(t)
 	f.open = "[" + strings.Join([]string{
-		listed(1, "dependabot[bot]", headB, "o/r"),   // waits; its deadline has passed; rebased since
-		listed(2, "dependabot[bot]", headA, "o/r"),   // waits; its deadline is ahead
-		listed(3, "dependabot[bot]", headA, "o/r"),   // a person's
-		listed(4, "dependabot[bot]", headA, "o/r"),   // merged, by its marker
-		listed(5, "dependabot[bot]", headA, "o/r"),   // never evaluated
-		listed(6, "dependabot[bot]", headA, "o/r"),   // "wait" in somebody else's comment
-		listed(8, "dependabot[bot]", headA, "o/r"),   // the gate's comment says wait in words only: reported
-		listed(12, "dependabot[bot]", headA, "o/r"),  // a marker with a member this version does not know: reported
-		listed(13, "dependabot[bot]", headA, "o/r"),  // a marker cut short: reported
-		listed(9, "mallory", headA, "o/r"),           // not Dependabot's
-		listed(10, "dependabot[bot]", headA, "x/r"),  // from a fork
-		listed(11, "dependabot[bot]", "main", "o/r"), // no commit ID
+		listed(2, "dependabot[bot]", headA, "o/r"),                                                // waits; its deadline is ahead
+		listed(1, "dependabot[bot]", headB, "o/r"),                                                // waits; its deadline has passed; rebased since
+		listed(3, "dependabot[bot]", headA, "o/r"),                                                // a person's, decided for this head
+		listed(4, "dependabot[bot]", headA, "o/r"),                                                // merged, by its marker
+		listed(5, "dependabot[bot]", headA, "o/r"),                                                // never evaluated
+		listed(6, "dependabot[bot]", headA, "o/r"),                                                // "wait" in somebody else's comment only
+		listed(8, "dependabot[bot]", headA, "o/r"),                                                // the first version's comment
+		listed(12, "dependabot[bot]", headA, "o/r"),                                               // a marker with a member this version does not know
+		listed(13, "dependabot[bot]", headA, "o/r"),                                               // a marker cut short
+		listed(9, "mallory", headA, "o/r"),                                                        // not Dependabot's
+		listed(10, "dependabot[bot]", headA, "x/r"),                                               // from a fork
+		listed(11, "dependabot[bot]", "main", "o/r"),                                              // no commit ID
+		listed(14, "dependabot[bot]", headB, "o/r"),                                               // a person's for an older head; this head has nothing
+		listed(15, "dependabot[bot]", headA, "o/r"),                                               // a failed run that was reported for this head
+		listed(16, "dependabot[bot]", headB, "o/r"),                                               // a failed run for an older head
+		changed(listed(17, "dependabot[bot]", headA, "o/r"), t0.Add(-UndecidedAfter+time.Second)), // never evaluated, pushed too recently
+		changed(listed(18, "dependabot[bot]", headA, "o/r"), t0.Add(-UndecidedAfter)),             // never evaluated, quiet just long enough
+		untimed(listed(19, "dependabot[bot]", headA, "o/r")),                                      // never evaluated, and GitHub gives no time
+		changed(listed(20, "dependabot[bot]", headA, "o/r"), t0),                                  // waits, and was pushed to this second
+		listed(21, "dependabot[bot]", headA, "o/r"),                                               // a person's, and nobody was told
+		listed(22, "dependabot[bot]", headA, "o/r"),                                               // a failed run, and nobody was told
+		listed(23, "dependabot[bot]", headB, "o/r"),                                               // a person's for an older head, nobody told: evaluated, not told
+		listed(24, "dependabot[bot]", headA, "o/r"),                                               // waits, and nobody was told about anything: nothing is owed
 	}, ",") + "]"
+	untold := func(m *marker) { m.Notified, m.NotifiedFailed = nil, nil }
 	f.comments = map[int][]*fakeComment{
 		1:  {{1, "someone", "nice"}, {2, testBot, body(ActionWait, t0.Add(-time.Minute))}},
 		2:  {{3, testBot, body(ActionWait, t0.Add(time.Minute))}},
@@ -57,28 +86,36 @@ func TestWaiting(t *testing.T) {
 		11: {{10, testBot, body(ActionWait, t0.Add(time.Minute))}},
 		12: {{11, testBot, "<!-- dep-review:v2 " + base64.RawURLEncoding.EncodeToString([]byte(`{"outcome":"wait","head":"`+headA+`","later":1}`)) + " -->\n"}},
 		13: {{12, testBot, body(ActionWait, t0.Add(time.Minute))[:60] + " -->\n"}},
+		14: {{13, testBot, body(ActionPerson, time.Time{})}},
+		15: {{14, testBot, body(ActionFailed, time.Time{})}},
+		16: {{15, testBot, body(ActionFailed, time.Time{})}},
+		20: {{16, testBot, body(ActionWait, time.Time{})}},
+		21: {{17, testBot, marked(ActionPerson, time.Time{}, untold)}},
+		22: {{18, testBot, marked(ActionFailed, time.Time{}, untold)}},
+		23: {{19, testBot, marked(ActionPerson, time.Time{}, untold)}},
+		24: {{20, testBot, marked(ActionWait, t0.Add(time.Minute), untold)}},
 	}
 
-	got, unread, err := Waiting(context.Background(), f.config(t0, nil))
+	agenda, err := Schedule(context.Background(), f.config(t0, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A gate comment whose marker does not parse is neither taken to wait
-	// nor silently off the schedule: it is named.
-	if !slices.Equal(unread, []int{8, 12, 13}) {
-		t.Errorf("gate comments reported as unread: %v, want #8, #12 and #13", unread)
+	type entry struct {
+		number    int
+		head      string
+		undecided bool
+		past      bool
 	}
-	if len(got) != 2 {
-		t.Fatalf("%d pull requests wait, want #1 and #2: %+v", len(got), got)
-	}
-	for i, want := range []struct {
-		number int
-		head   string
-		past   bool
-	}{{1, headB, true}, {2, headA, false}} {
-		r := got[i]
-		if r.Number != want.number || r.Head != want.head || r.PastDeadline != want.past {
-			t.Errorf("entry %d: #%d at %s, past its deadline %t; want #%d at %s, %t", i, r.Number, r.Head, r.PastDeadline, want.number, want.head, want.past)
+	var got []entry
+	for _, r := range agenda.Evaluate {
+		got = append(got, entry{r.Number, r.Head, r.Undecided, r.PastDeadline})
+		if r.Undecided {
+			// Nothing is believed from a comment that is not a wait for
+			// this version to read, and no model is asked at first.
+			if r.Ask || len(r.Answered) != 0 || !r.Deadline.IsZero() {
+				t.Errorf("#%d has no decision and: %+v", r.Number, r)
+			}
+			continue
 		}
 		if !slices.Equal(r.Answered, []string{keyA}) {
 			t.Errorf("#%d: answered reads %v, want the one the comment remembers", r.Number, r.Answered)
@@ -89,8 +126,37 @@ func TestWaiting(t *testing.T) {
 			t.Errorf("#%d at %s: an ask is due: %t", r.Number, r.Head, r.Ask)
 		}
 	}
+	want := []entry{
+		{1, headB, false, true}, {2, headA, false, false},
+		{5, headA, true, false}, {6, headA, true, false}, {8, headA, true, false}, {12, headA, true, false}, {13, headA, true, false},
+		{14, headB, true, false}, {16, headB, true, false}, {18, headA, true, false}, {19, headA, true, false},
+		{20, headA, false, false}, {23, headB, true, false}, {24, headA, false, false},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("to evaluate, lowest number first:\n got %+v\nwant %+v", got, want)
+	}
+	if !slices.Equal(agenda.Untold, []int{21, 22}) {
+		t.Errorf("comments that owe a notification: %v, want #21 and #22", agenda.Untold)
+	}
 	if w := f.writes(); len(w) != 0 {
 		t.Errorf("the scheduled listing wrote: %+v", w)
+	}
+
+	// Undecided is the same judgement for one pull request, as publish
+	// asks it before it reports a scheduled evaluation that failed.
+	for number, want := range map[int]bool{1: false, 3: false, 5: true, 8: true, 14: true, 15: false, 16: true, 21: false} {
+		f.pulls = nil
+		for _, p := range strings.Split(strings.Trim(f.open, "[]"), `,{"number"`) {
+			p = `{"number"` + strings.TrimPrefix(p, `{"number"`)
+			if strings.HasPrefix(p, fmt.Sprintf(`{"number":%d,`, number)) {
+				f.pulls = []string{p}
+			}
+		}
+		f.pullNumber = number
+		head, ok, err := Undecided(context.Background(), f.config(t0, nil), number)
+		if err != nil || ok != want || !strings.Contains(f.pulls[0], head) {
+			t.Errorf("#%d: undecided %t at %s, %v; want %t", number, ok, head, err, want)
+		}
 	}
 }
 
@@ -115,16 +181,17 @@ func TestScheduledReevaluation(t *testing.T) {
 	again := func(f *fakeGitHub, now time.Time, scheduled bool, change func(*wire.Facts)) Result {
 		t.Helper()
 		before := len(f.writes())
-		waiting, unread, err := Waiting(context.Background(), f.config(now, nil))
-		if err != nil || len(unread) != 0 || len(waiting) != 1 || waiting[0].Number != testPR || waiting[0].PastDeadline {
-			t.Fatalf("waiting: %+v, unread %v, %v", waiting, unread, err)
+		agenda, err := Schedule(context.Background(), f.config(now, nil))
+		waiting := agenda.Evaluate
+		if err != nil || len(agenda.Untold) != 0 || len(waiting) != 1 || waiting[0].Number != testPR || waiting[0].Undecided || waiting[0].PastDeadline {
+			t.Fatalf("to evaluate: %+v, %v", agenda, err)
 		}
 		// The read has an answer, so there is nothing to ask the model.
 		if !slices.Equal(waiting[0].Answered, []string{keyA}) {
 			t.Fatalf("answered reads %v, want the one the comment remembers", waiting[0].Answered)
 		}
 		if len(f.writes()) != before {
-			t.Fatal("Waiting wrote something")
+			t.Fatal("Schedule wrote something")
 		}
 		// The workflow's steps: fetch again, ask the model about nothing,
 		// publish. There is no verdicts file.
@@ -177,9 +244,10 @@ func TestScheduledReevaluation(t *testing.T) {
 	if posts := f.count("POST", "/issues/7/comments"); posts != 1 {
 		t.Errorf("%d comments were created over three runs, want 1", posts)
 	}
-	waiting, unread, err := Waiting(context.Background(), f.config(due, nil))
-	if err != nil || len(waiting) != 0 || len(unread) != 0 {
-		t.Errorf("after the merge, still waiting: %+v, unread %v, %v", waiting, unread, err)
+	// The pull request is closed after the merge and no longer listed.
+	f.open = "[]"
+	if agenda, err := Schedule(context.Background(), f.config(due, nil)); err != nil || len(agenda.Evaluate) != 0 || len(agenda.Untold) != 0 {
+		t.Errorf("after the merge: %+v, %v", agenda, err)
 	}
 }
 

@@ -102,7 +102,8 @@ func handled(kind model.Kind) bool {
 // publishEvent decides the one pull request of an event's run. A run that
 // cannot (the fetch job left no facts, or deciding or acting failed
 // before anything was written) says so on the pull request: nothing else
-// would, and the scheduled job looks only at what was left waiting.
+// would for hours, until the scheduled job takes up a pull request the
+// gate has nothing for.
 func publishEvent(ctx context.Context, cfg land.Config, in string, class model.Classification) error {
 	if !handled(class.Kind) || !strings.EqualFold(class.Repo, cfg.Repo) {
 		return fmt.Errorf("publish: classify said %q of %.100q, and this job decides Dependabot's pull requests in %s", class.Kind, class.Repo, cfg.Repo)
@@ -146,16 +147,17 @@ func jobResult(env string) string {
 	return "unknown"
 }
 
-// publishRefreshed decides every pull request the scheduled job
-// refreshed. One that cannot be decided does not keep the others from
-// being decided. Nothing is written about it: its comment still says
-// wait, so the next scheduled run takes it up again.
+// publishRefreshed is publish on a scheduled run. It decides every pull
+// request the refresh job wrote; one that cannot be decided does not keep
+// the others from being decided. Then it looks at the open pull requests
+// itself (sweep), for what must not depend on the refresh job having got
+// anywhere: a wait that is past its deadline, and a notification that was
+// not delivered. A run in which the refresh job wrote nothing has no
+// refreshed artifact, and only the second part to do.
 func publishRefreshed(ctx context.Context, cfg land.Config, in string, ignore map[model.Ecosystem]bool) error {
+	cfg.Scheduled = true
 	entries, err := os.ReadDir(filepath.Join(in, refreshedArtifact))
-	if errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("publish: %s holds neither a classification nor refreshed pull requests", in)
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	failed, total := 0, 0
@@ -164,15 +166,101 @@ func publishRefreshed(ctx context.Context, cfg land.Config, in string, ignore ma
 			continue
 		}
 		total++
-		if err := refreshed(ctx, cfg, in, e, ignore); err != nil {
-			failed++
-			log.Printf("publish: %s: %v", e.Name(), err)
+		err := refreshed(ctx, cfg, in, e, ignore)
+		if err == nil {
+			continue
+		}
+		failed++
+		log.Printf("publish: %s: %v", e.Name(), err)
+		if errors.Is(err, land.ErrFactsStale) {
+			// This job came to the facts too late (a long queue). That is
+			// not the pull request's failure: the next run gathers again.
+			continue
+		}
+		if number, nerr := refreshedNumber(e); nerr == nil {
+			if rerr := unevaluated(ctx, cfg, number, ignore); rerr != nil {
+				log.Printf("publish: #%d: that it could not be evaluated was not reported on the pull request: %v", number, rerr)
+			}
 		}
 	}
-	if failed > 0 {
+	swept, err := sweep(ctx, cfg, ignore)
+	switch {
+	case failed > 0 && (err != nil || swept > 0):
+		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on, and the look at the others did not go through (%d failures; %v)", failed, total, swept, err)
+	case failed > 0:
 		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on", failed, total)
+	case err != nil:
+		return err
+	case swept > 0:
+		return fmt.Errorf("publish: %d overdue waits or undelivered notifications could not be dealt with", swept)
 	}
 	return nil
+}
+
+// unevaluated reports, on the pull request, a scheduled evaluation that
+// failed, when the gate has nothing else for that head: no decision and
+// no wait (land.Undecided). The pull request then has a status, a comment
+// and one notification, and the schedule does not try that head again.
+// One that waits keeps its wait comment: the next run tries again, and
+// its deadline is sweep's to enforce.
+//
+// The number is the refresh job's, so everything else is this job's own:
+// that the pull request is Dependabot's, open and undecided, and the
+// identity proof, by which a pull request the gate does not handle (an
+// ignored ecosystem) is left without a comment as always.
+func unevaluated(ctx context.Context, cfg land.Config, number int, ignore map[model.Ecosystem]bool) error {
+	head, ok, err := land.Undecided(ctx, cfg, number)
+	if err != nil || !ok {
+		return err
+	}
+	class, err := classify.Pull(ctx, cfg.GitHub, cfg.Repo, number, head, classify.Options{IgnoreEcosystems: ignore})
+	// A proof GitHub did not let this job finish is not the pull request's
+	// failure: nothing is reported, and the next run tries again.
+	if err != nil || !handled(class.Kind) || class.Kind == model.KindPending {
+		return err
+	}
+	return land.Failed(ctx, cfg, number, head, "The scheduled run looked at this pull request because the gate had no decision for its head, and could not evaluate it: gathering its facts or deciding on them failed.")
+}
+
+// sweep is what a scheduled publish does from its own look at the open
+// pull requests, with its own token, whatever the refresh job wrote. A
+// wait whose deadline has passed and that this run did not decide becomes
+// a person's (land.Expired): a pull request this run decided has a new
+// comment, so what still says wait past its deadline is one the run could
+// not evaluate. And a notification a run could not deliver is sent
+// (land.Tell). It returns how many of these failed.
+//
+// The identity proof does not stand in the deadline's way. A wait whose
+// refresh keeps failing may be failing in that very proof, so only a
+// proof that positively says the pull request is not the gate's (closed,
+// a newer head, an ignored ecosystem) leaves it alone.
+func sweep(ctx context.Context, cfg land.Config, ignore map[model.Ecosystem]bool) (failed int, err error) {
+	agenda, err := land.Schedule(ctx, cfg)
+	if err != nil {
+		return 0, err
+	}
+	for _, w := range agenda.Evaluate {
+		if w.Undecided || !w.PastDeadline {
+			continue
+		}
+		class, err := classify.Pull(ctx, cfg.GitHub, cfg.Repo, w.Number, w.Head, classify.Options{IgnoreEcosystems: ignore})
+		if err == nil && !handled(class.Kind) {
+			log.Printf("publish: #%d: past its wait deadline and %s now, nothing to do", w.Number, class.Kind)
+			continue
+		}
+		log.Printf("publish: #%d: still waiting after its deadline, %s: it needs a person", w.Number, w.Deadline.UTC().Format(time.RFC3339))
+		if err := land.Expired(ctx, cfg, w.Number, w.Head); err != nil {
+			failed++
+			log.Printf("publish: #%d: %v", w.Number, err)
+		}
+	}
+	for _, number := range agenda.Untold {
+		if err := land.Tell(ctx, cfg, number); err != nil {
+			failed++
+			log.Printf("publish: #%d: the notification could not be sent again: %v", number, err)
+		}
+	}
+	return failed, nil
 }
 
 // refreshed decides one pull request of a scheduled run, from its

@@ -447,10 +447,11 @@ func TestFirstSeenOnlyFromTheGatesComment(t *testing.T) {
 			// What the scheduled job makes of the comment, before publish
 			// writes its own: the marker's outcome, too, counts only from
 			// the gate app.
-			waiting, _, err := Waiting(context.Background(), f.config(t0, nil))
+			agenda, err := Schedule(context.Background(), f.config(t0, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
+			waiting := slices.DeleteFunc(agenda.Evaluate, func(w Reevaluation) bool { return w.Undecided })
 			if (len(waiting) == 1) != tc.waits {
 				t.Errorf("%d pull requests wait for the comment, want one: %t", len(waiting), tc.waits)
 			}
