@@ -752,7 +752,7 @@ func TestPoCWheelVariants(t *testing.T) {
 	env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
 	c := change{update: model.Update{Name: "demo", To: "1.0", Directory: "/"}, head: p}
 	var sum bytes.Buffer
-	fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+	fs, _, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +842,7 @@ func TestArtifactCapCountsDownloads(t *testing.T) {
 			env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
 			c := change{update: model.Update{Name: "demo", To: "1.0", Directory: "/"}, head: p}
 			var sum bytes.Buffer
-			fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+			fs, _, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1238,7 +1238,7 @@ func TestSdistAlwaysCompared(t *testing.T) {
 			env := fetch.Env{Scratch: t.TempDir(), Evidence: ev, HTTP: srv.Client()}
 			c := change{update: model.Update{Name: "demo", From: "1.0", To: "1.1", Directory: "/"}, base: pkg("1.0"), head: pkg("1.1")}
 			var sum bytes.Buffer
-			fs, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum)
+			fs, _, err := Fetcher{AllowHost: strings.TrimPrefix(srv.URL, "http://")}.verifyAndDiff(context.Background(), env, t.TempDir(), filepath.Join(env.Scratch, "w"), c, &sum, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

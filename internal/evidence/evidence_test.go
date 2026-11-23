@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -221,5 +222,61 @@ func TestPartWrittenLength(t *testing.T) {
 	_, n, err := d.AddPart("x.diff", in)
 	if err != nil || n != 100*len("a<0x1B>\n") {
 		t.Errorf("written %d (input %d), %v", n, len(in), err)
+	}
+}
+
+func TestWrapLong(t *testing.T) {
+	check := func(name string, raw []byte) []byte {
+		t.Helper()
+		text, ok := Normalize(raw)
+		if !ok {
+			t.Fatalf("%s: binary", name)
+		}
+		out := WrapLong(text)
+		for _, l := range bytes.Split(out, []byte("\n")) {
+			if len(l) > MaxReadableLine {
+				t.Errorf("%s: a line of %d bytes", name, len(l))
+			}
+		}
+		// Joining the continuations back gives the normalized text.
+		var b bytes.Buffer
+		for i, l := range bytes.Split(out, []byte("\n")) {
+			if i > 0 && bytes.HasPrefix(l, []byte("~")) {
+				b.Write(l[2:])
+				continue
+			}
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.Write(l)
+		}
+		if !bytes.Equal(b.Bytes(), text) {
+			t.Errorf("%s: wrapping changed the text", name)
+		}
+		return out
+	}
+	out := check("multi-byte", []byte("@@ -1 +1 @@\n-x\n+"+strings.Repeat("é", 3000)+"\n context\n"))
+	if !bytes.Contains(out, []byte("\n~+")) {
+		t.Errorf("no continuation marker:\n%.200s", out)
+	}
+	check("3984 bytes", []byte("+"+strings.Repeat("a", 3975)+";eval(x)\n"))
+	check("exactly 2000", []byte("+"+strings.Repeat("a", 1999)+"\n"))
+	// Normalize expands controls six-fold; the wrap measures what is written.
+	ctl := check("controls", []byte("+/*"+strings.Repeat("\x01", 400)+"*/require('child_process').execSync('x')\n"+strings.Repeat("+padding line of ordinary text\n", 200)))
+	if !bytes.Contains(ctl, []byte("\n~+")) {
+		t.Error("a control-heavy line was not wrapped after escaping")
+	}
+	// Invalid UTF-8 becomes U+FFFD first, and the loop always advances.
+	check("continuation bytes", append(append([]byte("+"), bytes.Repeat([]byte{0x80}, 2100)...), strings.Repeat("\n+ordinary text", 2000)...))
+	if got := WrapLong([]byte("+short\n")); string(got) != "+short\n" {
+		t.Errorf("short text changed: %q", got)
+	}
+}
+
+func TestNormalizeLineEnds(t *testing.T) {
+	got, _ := Normalize([]byte("+var x = 1; // note\rconsole.log(1)\r\n+a b c\u0085d\n"))
+	want := "+var x = 1; // note<0x0D>console.log(1)\r\n+a<U+2028>b<U+2029>c<U+0085>d\n"
+	if string(got) != want {
+		t.Errorf("Normalize = %q, want %q", got, want)
 	}
 }
