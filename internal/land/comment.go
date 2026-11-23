@@ -378,15 +378,16 @@ func lead(v view) string {
 }
 
 // modelSaid is the clause about the model in the lead of a decision to
-// merge. The model raised no veto only where it was asked: an image, and
-// two artifacts that hold the same files, are put before nobody.
+// merge. The model raised no veto only where it was asked. Nothing of an
+// image is read, and two artifacts that hold the same files have nothing
+// to read: neither is put before a model, and the clause holds for both.
 func modelSaid(v view) string {
 	for _, u := range v.ev.file.Facts.Updates {
 		if u.Prepared.Status == wire.Prepared {
 			return "the model raised no veto"
 		}
 	}
-	return "no model was asked, because there was no changed code to show one"
+	return "no model was asked (the gate had nothing to show one)"
 }
 
 // A fact's four states, as the tables show them.
