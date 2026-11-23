@@ -195,6 +195,9 @@ func TestFetchTransitive(t *testing.T) {
 				for _, n := range ev.names() {
 					if strings.HasPrefix(n, "actions/transitive/acme__helper/") {
 						transitive = append(transitive, n)
+						if strings.Contains(n, ".diff/D") {
+							continue // a navigable part: listed by its index, not in Files
+						}
 						if !strings.Contains(ev.files[n].desc, "transitive, actions.lock acme/act@v1.0.1 > acme/helper@v2.0.1") {
 							t.Errorf("%s: description %q", n, ev.files[n].desc)
 						}
@@ -202,6 +205,16 @@ func TestFetchTransitive(t *testing.T) {
 				}
 				if len(transitive) == 0 {
 					t.Errorf("no transitive evidence: %v", ev.names())
+				}
+				// The first-party source is navigable: one required part
+				// per changed file, each written under its index.
+				if len(res.Diffs) == 0 {
+					t.Error("no navigable source diffs")
+				}
+				for _, d := range res.Diffs {
+					if _, ok := ev.files[d.File]; !d.Required || d.ID == "" || !ok {
+						t.Errorf("diff %+v: not required, unnamed or not written", d)
+					}
 				}
 				for _, x := range res.Findings {
 					if x.Update == "acme/helper" && !strings.HasPrefix(x.Detail, "transitive (actions.lock acme/act@v1.0.1 > acme/helper@v2.0.1): ") {

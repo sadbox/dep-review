@@ -201,8 +201,11 @@ reviewer's reader cuts longer ones. A continuation starts with `~` and
 the line's own diff marker; git starts no diff line with `~`, so source
 text cannot pose as one. A lone CR, and U+2028, U+2029 and U+0085, are
 escaped like control characters, since JavaScript or Python end a line
-there and the reader does not. Actions and Docker evidence keep the single-file
-limits (400 KB a file, 4 MB in all).
+there and the reader does not. A GitHub Action's first-party source diff
+(everything but its bundle directories and lockfiles) is navigable too,
+one required part per file. Its other evidence (action.yml, lockfile
+changes, bundle attribution) and Docker's keep the single-file limits
+(400 KB a file, 4 MB in all).
 
 #### Split reviews
 

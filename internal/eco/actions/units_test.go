@@ -705,3 +705,11 @@ func TestSourceMapGlobalSwap(t *testing.T) {
 		t.Fatalf("mode %s residuals %+v", r.mode, r.residuals)
 	}
 }
+
+func TestPlainPath(t *testing.T) {
+	for p, want := range map[string]bool{"src/main.ts": true, "a.b/c..d": true, "src/./evil.js": false, "a/../b": false, "a//b": false, "/a": false, "a/": false, ".": false} {
+		if plainPath(p) != want {
+			t.Errorf("plainPath(%q) = %v", p, !want)
+		}
+	}
+}
