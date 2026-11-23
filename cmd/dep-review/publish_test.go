@@ -151,22 +151,23 @@ func TestPublishRefreshed(t *testing.T) {
 		{name: "the directory's name and its facts disagree", dir: "8", pull: pullJSON("open", "dependabot[bot]", testHead),
 			want: "facts are about #7"},
 		{name: "the facts claim an identity classify rejects", dir: "7", pull: pullJSON("open", "mallory", testHead),
-			want: "classify said", calls: "GET pulls/7, GET issues/7/comments"},
+			want: "classify said", calls: "GET pulls/7"},
 		{name: "classify rejects it and the facts say so: decided", dir: "7", facts: no, pull: pullJSON("open", "mallory", testHead),
 			// The decision is carried out: a person's. All it asks GitHub
 			// for is the pull request, the gate's comment (once to decide,
-			// for a veto it may remember, and once to write), and the
-			// branch's rules; there are no settings to fetch (spec section
-			// 11, amendments 56 and 63).
-			calls: "GET pulls/7, GET pulls/7, GET issues/7/comments, GET rules/branches/main, POST statuses/" + testHead + ", GET issues/7/comments, POST issues/7/comments"},
+			// for a veto it may remember, and once to write), the branch's
+			// rules, and the status GitHub shows, which the fake does not
+			// answer; there are no settings to fetch (spec section 11,
+			// amendments 56, 63 and 79).
+			calls: "GET pulls/7, GET pulls/7, GET issues/7/comments, GET rules/branches/main, GET commits/" + testHead + "/status, POST statuses/" + testHead + ", GET issues/7/comments, POST issues/7/comments"},
 		// A scheduled run's publish job run again by itself: nothing is
 		// written, the comment still says wait, and the next run decides.
 		{name: "facts of an earlier attempt: not decided", dir: "7", pull: pullJSON("open", "mallory", testHead),
 			facts: func(f *wire.Facts) { no(f); f.GatheredAt = testGathered.Add(-land.MaxFactsAge) },
-			is:    land.ErrFactsStale, calls: "GET pulls/7, GET pulls/7, GET issues/7/comments"},
+			is:    land.ErrFactsStale, calls: "GET pulls/7, GET pulls/7"},
 		{name: "closed since: skipped", dir: "7", pull: pullJSON("closed", "dependabot[bot]", testHead), calls: "GET pulls/7"},
 		{name: "a newer head since: skipped", dir: "7", pull: pullJSON("open", "dependabot[bot]", strings.Repeat("4", 40)), calls: "GET pulls/7"},
-		{name: "the pull request cannot be read", dir: "7", want: "404", calls: "GET pulls/7, GET issues/7/comments"},
+		{name: "the pull request cannot be read", dir: "7", want: "404", calls: "GET pulls/7"},
 		{name: "not a pull request's directory", dir: "seven", want: "not a refreshed pull request's directory"},
 		// One pull request has one directory.
 		{name: "a number spelled another way", dir: "07", want: "not a refreshed pull request's directory"},

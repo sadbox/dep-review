@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -113,25 +114,27 @@ func TestAStatusThatCannotBeWritten(t *testing.T) {
 	})
 }
 
+// youngFacts are facts of a wait for an age that is not reached at now:
+// the same status at every run.
+func youngFacts(t *testing.T, now time.Time) wire.Facts {
+	facts := goodFacts(t)
+	facts.GatheredAt = now.Add(-time.Minute)
+	facts.Facts.Updates[0].FirstSeen = allow.At(t0.Add(-time.Hour), "index.golang.org")
+	return facts
+}
+
 // TestStatusesThatSayNothingNew: Act does not set a status whose state and
-// description are what it last set for the head (spec section 11,
-// amendment 74). It does set the first of a head, a change, and the
-// success before every merge it asks for.
+// description are what GitHub shows for the gate's context on the head
+// (spec section 11, amendment 79). It does set the first of a head, a
+// change, and the success before every merge it asks for.
 func TestStatusesThatSayNothingNew(t *testing.T) {
-	// A wait for an age that is not reached: the same status at every run.
-	young := func(now time.Time) wire.Facts {
-		facts := goodFacts(t)
-		facts.GatheredAt = now.Add(-time.Minute)
-		facts.Facts.Updates[0].FirstSeen = allow.At(t0.Add(-time.Hour), "index.golang.org")
-		return facts
-	}
 	f := newFake(t)
 	cfg := f.config(t0, nil)
 	cfg.Scheduled = true
 	for run := range 3 {
 		now := t0.Add(time.Duration(run) * 30 * time.Minute)
 		cfg.Now = func() time.Time { return now }
-		if res, err := publish(t, cfg, files(t, young(now), clean(t))); err != nil || res.Action != ActionWait {
+		if res, err := publish(t, cfg, files(t, youngFacts(t, now), clean(t))); err != nil || res.Action != ActionWait {
 			t.Fatalf("run %d: %+v, %v", run, res, err)
 		}
 	}
@@ -142,13 +145,13 @@ func TestStatusesThatSayNothingNew(t *testing.T) {
 	// event's run with no verdicts leaves the read pending.
 	cfg.Scheduled = false
 	cfg.Now = func() time.Time { return t0.Add(2 * time.Hour) }
-	if res, err := publish(t, cfg, files(t, young(t0.Add(2*time.Hour)), nil)); err != nil || res.Action != ActionWait {
+	if res, err := publish(t, cfg, files(t, youngFacts(t, t0.Add(2*time.Hour)), nil)); err != nil || res.Action != ActionWait {
 		t.Fatalf("a read that is now pending: %+v, %v", res, err)
 	}
 	if s := f.statuses(headA); len(s) != 2 || !strings.HasPrefix(s[1], "pending: waiting (read_pending)") {
 		t.Errorf("after a change: statuses %q", s)
 	}
-	facts := young(t0.Add(2 * time.Hour))
+	facts := youngFacts(t, t0.Add(2*time.Hour))
 	moveTo(f, &facts, headB)
 	if res, err := publish(t, cfg, files(t, facts, nil)); err != nil || res.Action != ActionWait {
 		t.Fatalf("a new head: %+v, %v", res, err)
@@ -157,26 +160,154 @@ func TestStatusesThatSayNothingNew(t *testing.T) {
 		t.Errorf("a new head: statuses %q", s)
 	}
 
-	// A run that could not write its decision gives up what the marker
-	// says was set: it may have set another (a success before a merge
-	// call that got no answer), and the next run sets its status again.
-	t.Run("after a run that could not write", func(t *testing.T) {
+	// What GitHub shows counts, not what the comment remembers: a status
+	// GitHub has is not set again for a run with no comment to go by.
+	t.Run("GitHub shows it, the comment does not", func(t *testing.T) {
 		f := newFake(t)
 		cfg := f.config(t0, nil)
 		cfg.Scheduled = true
-		if _, err := publish(t, cfg, files(t, young(t0), clean(t))); err != nil {
+		if _, err := publish(t, cfg, files(t, youngFacts(t, t0), clean(t))); err != nil {
 			t.Fatal(err)
 		}
-		if err := Asked(context.Background(), cfg, testPR, headA, Vetoes{}); err != nil {
+		f.comments[testPR] = nil
+		if _, err := publish(t, cfg, files(t, youngFacts(t, t0), clean(t))); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := publish(t, cfg, files(t, young(t0), clean(t))); err != nil {
-			t.Fatal(err)
-		}
-		if s := f.statuses(headA); len(s) != 2 || s[0] != s[1] {
-			t.Errorf("statuses %q, want the same one twice", s)
+		if s := f.statuses(headA); len(s) != 1 {
+			t.Errorf("statuses %q, want one", s)
 		}
 	})
+}
+
+// TestAStatusIsSetWhenGitHubCannotSay: a read of the combined status that
+// fails, or an answer without the gate's context, sets the status, and
+// the read is never an error of the run (spec section 11, amendment 79).
+func TestAStatusIsSetWhenGitHubCannotSay(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		readCode      int
+		otherContexts int
+		want          int
+	}{
+		{name: "the read fails", readCode: http.StatusBadGateway, want: 2},
+		{name: "the read is refused", readCode: http.StatusForbidden, want: 2},
+		// GitHub lists 100 contexts a page, and total_count says there are
+		// more: the gate's is not among those listed.
+		{name: "the gate's context is not on the first page", otherContexts: 100, want: 2},
+		{name: "the gate's context is the hundredth", otherContexts: 99, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake(t)
+			cfg := f.config(t0, nil)
+			cfg.Scheduled = true
+			if _, err := publish(t, cfg, files(t, youngFacts(t, t0), clean(t))); err != nil {
+				t.Fatal(err)
+			}
+			f.statusReadCode, f.otherContexts = tc.readCode, tc.otherContexts
+			now := t0.Add(30 * time.Minute)
+			cfg.Now = func() time.Time { return now }
+			if res, err := publish(t, cfg, files(t, youngFacts(t, now), clean(t))); err != nil || res.Action != ActionWait {
+				t.Fatalf("%+v, %v", res, err)
+			}
+			if s := f.statuses(headA); len(s) != tc.want || s[0] != s[len(s)-1] {
+				t.Errorf("statuses %q, want the same one %d times", s, tc.want)
+			}
+		})
+	}
+}
+
+// TestAStaleSuccessIsReplaced is the verifier's sequence turned around: a
+// wait, then a merge whose success is set and whose run then runs out of
+// its time in the merge call, so that nothing records the success, then
+// the same wait again. GitHub shows the success, so the wait's status is
+// set over it. With the status the comment remembered (amendment 74) it
+// was not, and a head that waits showed the gate's success.
+func TestAStaleSuccessIsReplaced(t *testing.T) {
+	f := newFake(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/merge") {
+			io.ReadAll(r.Body)
+			select { // GitHub is slow, and the job's time ends
+			case <-r.Context().Done():
+			case <-time.After(3 * time.Second):
+			}
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := gh.New("token")
+	c.BaseURL, c.MaxRetries = srv.URL+"/", 0
+	cfg := Config{GitHub: c, Repo: testRepo, BotLogin: testBot, Scheduled: true}
+	facts := func(now time.Time, unavailable bool) wire.Facts {
+		facts := goodFacts(t)
+		facts.GatheredAt = now.Add(-time.Minute)
+		if unavailable {
+			u := goodUpdate("example.com/m")
+			u.Clean = allow.Unavailable("the advisories did not answer", "advisories")
+			facts.Facts.Updates[0] = wire.NewUpdate(u, facts.Facts.Updates[0].Prepared)
+		}
+		return facts
+	}
+
+	cfg.Now = func() time.Time { return t0 }
+	if res, err := publish(t, cfg, files(t, facts(t0, true), clean(t))); err != nil || res.Action != ActionWait {
+		t.Fatalf("run 1: %+v, %v", res, err)
+	}
+
+	t2 := t0.Add(30 * time.Minute)
+	cfg.Now = func() time.Time { return t2 }
+	dir := files(t, facts(t2, false), clean(t))
+	ev, err := Decide(context.Background(), cfg, filepath.Join(dir, wire.FactsFile), filepath.Join(dir, wire.VerdictsFile))
+	if err != nil || ev.Decision.Outcome != allow.Merge {
+		t.Fatalf("run 2 decided %v, %v", ev.Decision, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if res, err := Act(ctx, cfg, ev); err == nil || res.Action != "" {
+		t.Fatalf("run 2: %+v, %v; want nothing written", res, err)
+	}
+	Asked(ctx, cfg, testPR, headA, ev.Vetoes()) // what publish does next, on the same context
+	if s := f.statuses(headA); !strings.HasPrefix(s[len(s)-1], "success: ") {
+		t.Fatalf("run 2 left %q", s)
+	}
+
+	t3 := t0.Add(time.Hour)
+	cfg.Now = func() time.Time { return t3 }
+	res, err := publish(t, cfg, files(t, facts(t3, true), clean(t)))
+	if s := f.statuses(headA); err != nil || res.Action != ActionWait || !strings.HasPrefix(s[len(s)-1], "pending: waiting (source_unavailable)") {
+		t.Errorf("run 3: %+v, %v; statuses %q", res, err, s)
+	}
+}
+
+// TestAYearLongWaitSetsOneStatus: a wait that says the same at every run
+// costs one status however long it lasts, here a year of 48 scheduled runs
+// a day (spec section 11, amendment 79).
+func TestAYearLongWaitSetsOneStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("17520 runs")
+	}
+	f := newFake(t)
+	cfg := f.config(t0, nil)
+	cfg.Scheduled = true
+	// An age that is reached in a year: waiting for an age has no
+	// deadline.
+	firstSeen := t0.Add(365 * 24 * time.Hour)
+	runs := 0
+	for now := t0; now.Before(t0.Add(365 * 24 * time.Hour)); now = now.Add(30 * time.Minute) {
+		cfg.Now = func() time.Time { return now }
+		facts := goodFacts(t)
+		facts.GatheredAt = now.Add(-time.Minute)
+		facts.Facts.Updates[0].FirstSeen = allow.At(firstSeen, "index.golang.org")
+		res, err := publish(t, cfg, files(t, facts, clean(t)))
+		if err != nil || res.Action != ActionWait {
+			t.Fatalf("run %d: %+v, %v", runs, res, err)
+		}
+		runs++
+	}
+	if s := f.statuses(headA); runs != 365*48 || len(s) != 1 {
+		t.Errorf("%d runs, statuses %q", runs, s)
+	}
 }
 
 // TestAWaitDoesNotReachTheStatusLimit is the reviewer's simulation turned

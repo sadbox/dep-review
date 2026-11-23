@@ -301,14 +301,12 @@ func refreshed(ctx context.Context, cfg land.Config, in string, e fs.DirEntry, i
 		return err
 	}
 	kept, written, err := decideRefreshed(ctx, cfg, w, facts, ignore)
-	if err != nil && !written {
-		// Nothing was written, so nothing counted an ask. It is counted
-		// all the same when the model was asked, whatever kept this job
-		// from deciding: its own proof, the facts, GitHub. Or a pull
-		// request that cannot be decided would be asked about at every
-		// run. A veto of this run's is remembered with it, and the status
-		// Act last set is given up: this run may have set another (spec
-		// section 11, amendments 73 and 74).
+	if err != nil && !written && cfg.ModelAsked {
+		// Nothing was written, so nothing counted the ask. It is counted
+		// all the same, whatever kept this job from deciding: its own
+		// proof, the facts, GitHub. Or a pull request that cannot be
+		// decided would be asked about at every run. A veto of this run's
+		// is remembered with it (spec section 11, amendment 73).
 		if aerr := land.Asked(ctx, cfg, number, facts.PullRequest.Head, kept); aerr != nil {
 			log.Printf("publish: #%d: the ask could not be counted: %v", number, aerr)
 		}

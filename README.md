@@ -38,9 +38,9 @@ The gate writes one comment per pull request, which leads with the
 outcome and, for wait and person, the fact that failed and the cheapest
 way out. It sets the commit status `dep-review` and, when a person is
 needed and Pushover is configured, notifies once per head commit. A
-status that says what the gate last set on that head is not set again
-(GitHub keeps 1000 for a commit), and one that cannot be set does not
-stop the comment or the notification.
+status that GitHub already shows for that head is not set again (GitHub
+keeps 1000 for a commit), and one that cannot be set does not stop the
+comment or the notification.
 
 The gate does not judge CI. It asks GitHub to merge with `sha=<head>`, and
 GitHub's rules decide; a refusal because required checks are pending or

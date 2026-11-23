@@ -254,7 +254,6 @@ func TestMarkerRoundTrip(t *testing.T) {
 		NotBefore: t0.Add(time.Hour), Deadline: t0.Add(48 * time.Hour),
 		Notified: []string{headB}, NotifiedFailed: []string{headA}, NotifiedUnread: []string{headA, headB},
 		NotifiedHeld: []string{headB}, HeldSince: t0.Add(-3 * time.Hour),
-		Status:      &lastStatus{State: "pending", Description: "waiting until 2026-11-25 11:00 UTC"},
 		Fingerprint: reviewer,
 		Cache: []cached{
 			{Key: keyA, Read: allow.ReadFull},

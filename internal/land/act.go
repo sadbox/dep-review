@@ -81,11 +81,11 @@ type Result struct {
 // call that would replace it failed. On an event's run publish then calls
 // Failed, which sets the status again.
 //
-// Any other final status is set only when its state or description is not
-// the one Act last set on the head (marker.Status), and one that cannot be
-// set (GitHub keeps 1000 statuses for a commit and context) stops neither
-// the comment nor the notification: its error is returned after them,
-// with the Result (spec section 11, amendment 74).
+// Any other final status is set only when GitHub does not already show
+// it for the head (shown), and one that cannot be set (GitHub keeps 1000
+// statuses for a commit and context) stops neither the comment nor the
+// notification: its error is returned after them, with the Result (spec
+// section 11, amendments 74 and 79).
 //
 // A prepared read the model left without a verdict is a wait, and the
 // scheduled run asks again by itself (askDue), so one miss needs nobody.
@@ -138,7 +138,8 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 		}
 	}
 	// merging stays what it is now: whether a success was set, and so
-	// whether a status after it is set whatever it says.
+	// whether the status after it is set without a look. GitHub shows
+	// that success, and a look so soon after may not show it yet.
 	if merging {
 		if err := setStatus(ctx, cfg, pr.Head, "success", "every fact holds; asking GitHub to merge"); err != nil {
 			return Result{}, err
@@ -176,11 +177,9 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	}
 
 	state, description := status(res)
-	set, statusErr := ev.status, error(nil)
-	if now := (lastStatus{State: state, Description: description}); merging || set == nil || *set != now {
-		if statusErr = setStatus(ctx, cfg, pr.Head, state, description); statusErr == nil {
-			set = &now
-		} else if merging {
+	var statusErr error
+	if merging || !shown(ctx, cfg, pr.Head, state, description) {
+		if statusErr = setStatus(ctx, cfg, pr.Head, state, description); statusErr != nil && merging {
 			// The success is GitHub's status, and Failed sets another.
 			return Result{}, statusErr
 		}
@@ -198,7 +197,7 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 	// from what the comment remembered: no veto and no time is lost here.
 	mk := old.next(res.Action, pr.Head)
 	mk.Fingerprint, mk.Cache, mk.FirstSeen = ev.fingerprint, ev.cache, ev.firstSeen
-	mk.Forgot, mk.Status = mk.Forgot || ev.forgot, set
+	mk.Forgot = mk.Forgot || ev.forgot
 	if res.Action == ActionWait {
 		mk.NotBefore, mk.Deadline = res.Decision.NotBefore, res.Decision.Deadline
 	}
@@ -272,13 +271,6 @@ const unreadNotice = " waits unread: the model has not answered for code the gat
 // (askDue). kept is the vetoes of the run's evaluation, when it got that
 // far, which the marker keeps too: a veto must not hang on the write that
 // failed (spec section 11, amendment 73).
-//
-// Publish calls it for every pull request of a scheduled run it could not
-// decide, and it counts an ask only when the model was asked
-// (Config.ModelAsked). Whatever it counts, it gives up the status Act last
-// set, which the run may have replaced before it failed (a success before
-// a merge call that got no answer): the next status is set (amendment 74).
-// It writes nothing when that leaves the marker as it was.
 func Asked(ctx context.Context, cfg Config, number int, head string, kept Vetoes) error {
 	if err := cfg.check(); err != nil {
 		return err
@@ -291,15 +283,8 @@ func Asked(ctx context.Context, cfg Config, number int, head string, kept Vetoes
 	if !ok || mk.Head != head {
 		return nil
 	}
-	before := mk.String()
-	if cfg.ModelAsked {
-		mk.Asks, mk.AskedAt = min(mk.Asks+1, maxAsks), cfg.now()
-	}
-	mk.Status = nil
+	mk.Asks, mk.AskedAt = min(mk.Asks+1, maxAsks), cfg.now()
 	kept.keep(&mk)
-	if mk.String() == before {
-		return nil
-	}
 	return remark(ctx, cfg, c, mk)
 }
 
@@ -371,7 +356,6 @@ func Failed(ctx context.Context, cfg Config, number int, head, what string, kept
 	}
 	mk := old.next(ActionFailed, head)
 	kept.keep(&mk)
-	mk.Status = nil // Act's to remember
 	notifyErr := notifyOnce(ctx, cfg, &mk.NotifiedFailed, head, message(cfg, number, told))
 
 	run := "this pull request's dep-review workflow run"
@@ -434,7 +418,6 @@ func Expired(ctx context.Context, cfg Config, number int, head string) error {
 	// written or the owner from being told (spec section 11, amendment 74).
 	statusErr := setStatus(ctx, cfg, head, "failure", "needs a person: the wait deadline passed and the gate could not evaluate the pull request again")
 	mk := old.next(ActionPerson, head)
-	mk.Status = nil // Act's to remember
 	notifyErr := notifyOnce(ctx, cfg, &mk.Notified, head, message(cfg, number,
 		" needs a person: its wait deadline has passed and the scheduled run could not evaluate it again. See the comment on the pull request."+runRef(cfg)))
 
@@ -477,6 +460,29 @@ func status(res Result) (state, description string) {
 		return "error", "GitHub refused the merge; see the comment"
 	}
 	return "failure", "needs a person: " + reason
+}
+
+// shown reports whether GitHub's combined status of sha has the gate's
+// context with exactly this state and description (spec section 11,
+// amendment 79). It lists the latest status of each context, 100 a page;
+// a read that fails, or a first page without the gate's context, is no.
+func shown(ctx context.Context, cfg Config, sha, state, description string) bool {
+	var combined struct {
+		Statuses []struct {
+			Context     string `json:"context"`
+			State       string `json:"state"`
+			Description string `json:"description"`
+		} `json:"statuses"`
+	}
+	if cfg.GitHub.Get(ctx, fmt.Sprintf("repos/%s/commits/%s/status?per_page=100", cfg.Repo, sha), &combined) != nil {
+		return false
+	}
+	for _, s := range combined.Statuses {
+		if s.Context == gh.GateStatus {
+			return s.State == state && s.Description == description
+		}
+	}
+	return false
 }
 
 func setStatus(ctx context.Context, cfg Config, sha, state, description string) error {

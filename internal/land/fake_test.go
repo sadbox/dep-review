@@ -103,6 +103,12 @@ type fakeGitHub struct {
 	// lenient: a request the fake does not know is answered 404 without
 	// failing the test.
 	lenient bool
+	// statusReadCode, when set, is the status a read of a commit's
+	// combined status gets. otherContexts is how many contexts besides
+	// dep-review the commit has, the first without a description; GitHub
+	// lists them before it, 100 at most.
+	statusReadCode int
+	otherContexts  int
 
 	comments map[int][]*fakeComment
 	nextID   int64
@@ -259,6 +265,15 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		answer(404, `{"message":"Not Found"}`)
 	case r.Method == "POST" && strings.HasPrefix(rest, "statuses/"):
 		answer(201, `{}`)
+	case r.Method == "GET" && strings.HasPrefix(rest, "commits/") && strings.HasSuffix(rest, "/status"):
+		if r.URL.Query().Get("per_page") != "100" {
+			f.t.Errorf("combined status without per_page=100: %s", r.URL.RawQuery)
+		}
+		if f.statusReadCode != 0 {
+			answer(f.statusReadCode, `{"message":"Server Error"}`)
+			return
+		}
+		answer(200, f.combined(strings.TrimSuffix(strings.TrimPrefix(rest, "commits/"), "/status")))
 	case route == fmt.Sprintf("PUT pulls/%d/merge", testPR):
 		if f.mergedAfter {
 			f.pulls = []string{pullJSON(testPR, "closed", headA, "main", "unknown", true)}
@@ -334,6 +349,35 @@ func (f *fakeGitHub) statuses(sha string) []string {
 		out = append(out, s.State+": "+s.Description)
 	}
 	return out
+}
+
+// combined is GitHub's combined status of sha: the latest status of each
+// context, the gate's from the statuses it set. f.mu is held.
+func (f *fakeGitHub) combined(sha string) string {
+	type status struct {
+		Context     string `json:"context"`
+		State       string `json:"state"`
+		Description any    `json:"description"`
+	}
+	list := []status{}
+	for i := range f.otherContexts {
+		// GitHub answers null for a status set without a description.
+		list = append(list, status{fmt.Sprintf("ci/%d", i), "success", map[bool]any{true: nil, false: "ok"}[i == 0]})
+	}
+	var gate *status
+	for _, c := range f.calls {
+		if c.method == "POST" && c.path == "/repos/o/r/statuses/"+sha {
+			var s status
+			json.Unmarshal([]byte(c.body), &s)
+			gate = &s
+		}
+	}
+	total := len(list)
+	if gate != nil {
+		list, total = append(list, *gate), total+1
+	}
+	b, _ := json.Marshal(map[string]any{"state": "pending", "sha": sha, "total_count": total, "statuses": list[:min(len(list), 100)]})
+	return string(b)
 }
 
 // gateComment is the one comment the gate app has on the pull request.
