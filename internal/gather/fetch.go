@@ -55,6 +55,8 @@ type Fetch struct {
 const (
 	classifySource = "classify"
 	changesSource  = "git: the paths that differ between the merge base and the head"
+	// scriptsOffSource is where Changes.ScriptsOff comes from.
+	scriptsOffSource = "git: the root .npmrc at the base branch's commit"
 )
 
 // Run gathers the pull request's facts, prepares what the model is to
@@ -195,6 +197,12 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 	if gatherer == nil {
 		return fmt.Errorf("gather: no gatherer for %s", pr.Ecosystem)
 	}
+	// The one fact about the repository that git answers and a gatherer
+	// is handed (spec section 11, amendment 59).
+	var scriptsOff allow.Fact
+	if f.Changes.ScriptsOff {
+		scriptsOff = allow.Yes("install scripts are off in this repository (ignore-scripts=true)", scriptsOffSource)
+	}
 	res, err := gatherer.Gather(ctx, facts.Input{
 		Repo:       file.PullRequest.Repo,
 		Base:       f.Changes.Base,
@@ -205,10 +213,15 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 		GitHub:     f.GitHub,
 		Advisories: f.Advisories,
 		Now:        f.Now,
+		ScriptsOff: scriptsOff,
 	})
 	if err != nil {
 		return fmt.Errorf("gather: %s: %w", pr.Ecosystem, err)
 	}
+	// Only the fact this job made, and only as the npm gatherer handed
+	// it back: it knows which lock the pull request changes, and whether
+	// a root .npmrc is read for that one.
+	scriptsOffApplies := pr.Ecosystem == allow.NPM && scriptsOff.Holds() && res.ScriptsOff == scriptsOff
 	pr.Shape = res.Shape
 	if pr.Ecosystem == allow.NPM && len(res.NoRegressSoFar) != len(res.Updates) {
 		return errors.New("gather: the npm gatherer did not say what the registry and the lock show of NoRegress for every update")
@@ -265,8 +278,15 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 			// This is the only place an npm NoRegress is made (spec section
 			// 11, amendment 21): from what the registry and the lock say
 			// and what was found in the tarballs, so it holds only when
-			// they were looked at.
-			if inspected == (allow.Fact{}) {
+			// they were looked at. Where the repository turns install
+			// scripts off, that fact stands in the inspection's place,
+			// whatever the inspection found (amendment 59). The tarballs
+			// were fetched, verified and prepared for the model all the
+			// same: the read above does not depend on it.
+			switch {
+			case scriptsOffApplies:
+				inspected = scriptsOff
+			case inspected == (allow.Fact{}):
 				inspected = allow.Fact{Value: "the package.json, binding.gyp and .gypi files in the tarballs were not looked at"}
 			}
 			u.NoRegress = res.NoRegressSoFar[i].And(inspected)

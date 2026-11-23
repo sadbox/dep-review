@@ -100,7 +100,14 @@ func recordOf(doc versionDoc, copies []node) (installRecord, error) {
 // runs is code of the package like any other, and it is the model that
 // reads it: the Value says "hook commands" so that a reader of the
 // comment does not take an unchanged command for an unchanged install.js.
-func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnswer, source string) (allow.Fact, error) {
+//
+// scriptsOff says that the repository turns npm's install scripts off
+// and that the fact covers this lock (facts.Result.ScriptsOff). The
+// scripts and the two flags are then not compared: npm runs none of them
+// for a dependency, whatever they are. Everything else is as it is
+// without the fact: a version the registry does not have, scripts whose
+// shape cannot be read, and the provenance.
+func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnswer, source string, scriptsOff bool) (allow.Fact, error) {
 	source += " and package-lock.json"
 	to, missing, ok := a.version(u.To, source)
 	if !ok {
@@ -122,7 +129,11 @@ func noRegressFact(ctx context.Context, reg *registry, u update, a packumentAnsw
 	}
 
 	scripts := "no install script"
-	if toRecord.any() {
+	if scriptsOff {
+		// Said first: the comment shows a value's first 200 characters,
+		// and a provenance identity fills most of them.
+		scripts = "install scripts not compared: the repository turns them off"
+	} else if toRecord.any() {
 		switch {
 		case u.From == "":
 			return allow.No("a new dependency with an install script ("+showHooks(toRecord.hooks)+")", source), nil

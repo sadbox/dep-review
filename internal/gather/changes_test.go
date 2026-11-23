@@ -174,6 +174,114 @@ func TestReadChanges(t *testing.T) {
 	}
 }
 
+// The one .npmrc the gate knows (spec section 11, amendment 59): a root
+// file, regular and not executable, holding exactly "ignore-scripts=true"
+// and a newline, at the base branch's commit. git's answer for the path
+// is compared whole, so everything else is the absence of the fact.
+func TestReadChangesScriptsOff(t *testing.T) {
+	const exact = "ignore-scripts=true\n"
+	// The constant is git's answer for those bytes, not a number copied
+	// from somewhere.
+	hash := exec.Command("git", "hash-object", "--stdin")
+	hash.Stdin = strings.NewReader(exact)
+	if id, err := hash.Output(); err != nil {
+		t.Skipf("git hash-object: %v", err)
+	} else if want := "100644 blob " + strings.TrimSpace(string(id)) + "\t.npmrc\x00"; scriptsOffEntry != want {
+		t.Fatalf("scriptsOffEntry = %q, want %q", scriptsOffEntry, want)
+	}
+
+	// commit puts one more commit on main and returns it.
+	commit := func(t *testing.T, r *testRepoAt, change func()) string {
+		t.Helper()
+		change()
+		r.git(t, "add", "-A")
+		r.git(t, "commit", "-q", "--allow-empty", "-m", "main moves on again")
+		return r.git(t, "rev-parse", "HEAD")
+	}
+	for _, tc := range []struct {
+		name string
+		// change is made on main after the pull request's branch left
+		// it.
+		change func(t *testing.T, r *testRepoAt)
+		want   bool
+	}{
+		{"the file", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", exact, 0o644) }, true},
+		{"no file", func(*testing.T, *testRepoAt) {}, false},
+		{"spaces around the sign", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", "ignore-scripts = true\n", 0o644) }, false},
+		{"no final newline", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", "ignore-scripts=true", 0o644) }, false},
+		{"a carriage return", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", "ignore-scripts=true\r\n", 0o644) }, false},
+		{"a second line", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", exact+"ignore-scripts=false\n", 0o644) }, false},
+		{"a comment before it", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", "; off\n"+exact, 0o644) }, false},
+		{"false", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", "ignore-scripts=false\n", 0o644) }, false},
+		{"empty", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", "", 0o644) }, false},
+		{"executable", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc", exact, 0o755) }, false},
+		{"a symbolic link to such a file", func(t *testing.T, r *testRepoAt) {
+			r.write(t, "config/npmrc", exact, 0o644)
+			if err := os.Symlink("config/npmrc", filepath.Join(r.dir, ".npmrc")); err != nil {
+				t.Skipf("no symbolic links here: %v", err)
+			}
+		}, false},
+		{"a directory of that name", func(t *testing.T, r *testRepoAt) { r.write(t, ".npmrc/.npmrc", exact, 0o644) }, false},
+		{"in a directory only", func(t *testing.T, r *testRepoAt) { r.write(t, "web/.npmrc", exact, 0o644) }, false},
+		{"under another name", func(t *testing.T, r *testRepoAt) {
+			r.write(t, ".NPMRC", exact, 0o644)
+			r.write(t, "npmrc", exact, 0o644)
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRepo(t)
+			base := commit(t, r, func() { tc.change(t, r) })
+			got, err := ReadChanges(context.Background(), r.dir, base, r.head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ScriptsOff != tc.want {
+				t.Errorf("ScriptsOff = %v, want %v", got.ScriptsOff, tc.want)
+			}
+			// It changes nothing else: the change set is the branch's.
+			if got.Base != r.fork || got.Refused != "" || len(got.Files) != 8 {
+				t.Errorf("base %s, refused %q, %d files", got.Base, got.Refused, len(got.Files))
+			}
+		})
+	}
+
+	// It is read at the base branch's commit, not at the merge base and
+	// not at the head: the file a merge leaves is the base branch's.
+	t.Run("added on the base branch since the fork", func(t *testing.T) {
+		r := newTestRepo(t)
+		base := commit(t, r, func() { r.write(t, ".npmrc", exact, 0o644) })
+		for at, want := range map[string]bool{base: true, r.tip: false, r.fork: false} {
+			got, err := ReadChanges(context.Background(), r.dir, at, r.head)
+			if err != nil || got.ScriptsOff != want || got.Base != r.fork {
+				t.Errorf("base %s: ScriptsOff %v, merge base %s, %v; want %v", at, got.ScriptsOff, got.Base, err, want)
+			}
+		}
+	})
+	t.Run("removed on the base branch since", func(t *testing.T) {
+		r := newTestRepo(t)
+		with := commit(t, r, func() { r.write(t, ".npmrc", exact, 0o644) })
+		without := commit(t, r, func() {
+			if err := os.Remove(filepath.Join(r.dir, ".npmrc")); err != nil {
+				t.Fatal(err)
+			}
+		})
+		for at, want := range map[string]bool{with: true, without: false} {
+			if got, err := ReadChanges(context.Background(), r.dir, at, r.head); err != nil || got.ScriptsOff != want {
+				t.Errorf("base %s: ScriptsOff %v, %v; want %v", at, got.ScriptsOff, err, want)
+			}
+		}
+	})
+	// The working tree and the index are not what is asked.
+	t.Run("only in the working tree", func(t *testing.T) {
+		r := newTestRepo(t)
+		r.write(t, ".npmrc", exact, 0o644)
+		r.git(t, "add", ".npmrc")
+		if got, err := ReadChanges(context.Background(), r.dir, r.tip, r.head); err != nil || got.ScriptsOff {
+			t.Errorf("ScriptsOff %v, %v; want false for a file no commit has", got.ScriptsOff, err)
+		}
+	})
+}
+
 // A change set over the limits is refused, in the gate's words, without
 // an error: it becomes a Shape that does not hold.
 func TestReadChangesRefused(t *testing.T) {

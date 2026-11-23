@@ -421,6 +421,108 @@ func TestGatherShapeNo(t *testing.T) {
 	}
 }
 
+// A repository that turns install scripts off (spec section 11, amendment
+// 59). The fetch command hands the gatherer the fact; the gatherer says
+// whether it covers the pull request's lock, makes the registry's and the
+// lock's half without the script comparison when it does, and hands the
+// fact back for the fetch command to take in place of the tarballs'.
+func TestGatherScriptsOff(t *testing.T) {
+	off := allow.Yes("install scripts are off in this repository (ignore-scripts=true)", "git: the root .npmrc at the base branch's commit")
+	chartURL := packumentURL("chart.js")
+	twURL := packumentURL("tailwindcss")
+	chart := func(to fakeVersion) map[string]string {
+		to.version, to.integrity = "4.4.7", chartNew
+		return map[string]string{chartURL: packumentJSON(t, "chart.js", fakeVersion{version: "4.4.6", integrity: chartOld}, to)}
+	}
+	newScript := chart(fakeVersion{scripts: map[string]string{"postinstall": "node steal.js"}})
+	tests := []struct {
+		name     string
+		dir      string // of the lock; "" is the root
+		given    allow.Fact
+		override map[string]string
+		update   string
+		applied  bool
+		holds    bool
+		want     string
+	}{
+		{"the root's lock: a new install script is not compared", "", off, newScript, "chart.js", true, true, "install scripts not compared"},
+		{"the root's lock: the registry's build mark is not compared", "", off, chart(fakeVersion{extra: map[string]any{"gypfile": true}}), "chart.js", true, true, "install scripts not compared"},
+		// What is not a comparison of install scripts is asked as before.
+		{"the root's lock: scripts of a shape that cannot be read", "", off, chart(fakeVersion{extra: map[string]any{"scripts": map[string]any{"install": []string{"x"}}}}), "chart.js", true, false, "the install script is not a string"},
+		{"the root's lock: provenance lost", "", off, map[string]string{twURL: packumentJSON(t, "tailwindcss",
+			fakeVersion{version: "4.3.4", integrity: tailwindOld, provenance: true},
+			fakeVersion{version: "4.3.5", integrity: tailwindNew})}, "tailwindcss", true, false, "4.3.4 was published with provenance, 4.3.5 was not"},
+		// npm run in a directory does not read the root's .npmrc.
+		{"a lock in a directory: compared as without the file", "web/", off, newScript, "chart.js", false, false, `install scripts change from none to postinstall: "node steal.js"`},
+		{"no such file: compared", "", allow.Fact{}, newScript, "chart.js", false, false, "install scripts change from none to postinstall"},
+		// Only a fact that holds is one.
+		{"a fact that does not hold", "", allow.No("the root .npmrc says something else", off.Source), newScript, "chart.js", false, false, "install scripts change from none to postinstall"},
+		{"a fact with no answer", "", allow.Unavailable("git did not answer", off.Source), newScript, "chart.js", false, false, "install scripts change from none to postinstall"},
+		{"a fact that was never gathered", "", allow.Fact{OK: true, Value: off.Value}, newScript, "chart.js", false, false, "install scripts change from none to postinstall"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := loadCase(t, "plain")
+			res, err := Gatherer{tool: replay(t, c)}.Gather(context.Background(), facts.Input{
+				Files: c.files(tt.dir), Policy: testPolicy(), HTTP: newFakeRegistry(t, tt.override), Advisories: fakeAdvisories{},
+				Now: func() time.Time { return testNow }, ScriptsOff: tt.given,
+			})
+			if err != nil {
+				t.Fatalf("Gather: %v", err)
+			}
+			if !res.Shape.Holds() {
+				t.Fatalf("Shape = %+v", res.Shape)
+			}
+			if tt.applied && res.ScriptsOff != off {
+				t.Errorf("Result.ScriptsOff = %+v, want the fact handed back as it was given", res.ScriptsOff)
+			}
+			if !tt.applied && res.ScriptsOff != (allow.Fact{}) {
+				t.Errorf("Result.ScriptsOff = %+v, want none: the fact does not cover this pull request", res.ScriptsOff)
+			}
+			var soFar allow.Fact
+			for i, u := range res.Updates {
+				if u.Name == tt.update {
+					soFar = res.NoRegressSoFar[i]
+				}
+				if u.NoRegress != (allow.Fact{}) {
+					t.Errorf("Gather set the NoRegress of %s itself", u.Name)
+				}
+			}
+			if soFar.Holds() != tt.holds || !soFar.Gathered() || !strings.Contains(soFar.Value, tt.want) {
+				t.Errorf("what the registry and the lock say of %s = %+v, want holds %v saying %q", tt.update, soFar, tt.holds, tt.want)
+			}
+			// Why nothing was compared is the first thing the value says:
+			// the comment cuts a value, and what follows can be long.
+			if tt.applied && tt.holds && !strings.HasPrefix(soFar.Value, "install scripts not compared: the repository turns them off; ") {
+				t.Errorf("the value does not lead with the reason: %q", soFar.Value)
+			}
+		})
+	}
+
+	// A pull request that changes the .npmrc itself has no Shape, with
+	// the fact or without it: the file a merge leaves is then not the
+	// one the fact was read from.
+	for _, npmrc := range []facts.File{
+		{Path: ".npmrc", BaseMode: "100644", HeadMode: "100644", Base: []byte("ignore-scripts=true\n"), Head: []byte("ignore-scripts=false\n")},
+		{Path: ".npmrc", BaseMode: "100644", Base: []byte("ignore-scripts=true\n")},
+		{Path: ".npmrc", HeadMode: "100644", Head: []byte("ignore-scripts=true\n")},
+	} {
+		c := loadCase(t, "plain")
+		res, err := Gatherer{tool: replay(t, c)}.Gather(context.Background(), facts.Input{
+			Files: append(c.files(""), npmrc), Policy: testPolicy(), HTTP: newFakeRegistry(t, nil), Advisories: fakeAdvisories{}, ScriptsOff: off,
+		})
+		if err != nil {
+			t.Fatalf("Gather: %v", err)
+		}
+		if res.Shape.OK || !res.Shape.Gathered() || !strings.Contains(res.Shape.Value, "files other than package.json and package-lock.json: .npmrc") {
+			t.Errorf("Shape = %+v, want a no that names .npmrc", res.Shape)
+		}
+		if res.ScriptsOff != (allow.Fact{}) || len(res.Updates) != 0 || len(res.Artifacts) != 0 {
+			t.Errorf("a pull request that changes .npmrc: ScriptsOff %+v, %d updates, %d artifacts", res.ScriptsOff, len(res.Updates), len(res.Artifacts))
+		}
+	}
+}
+
 func TestGatherNotBound(t *testing.T) {
 	for name, want := range map[string]string{
 		"offregistry": `resolves to "https://registry.example.com/chart.js/-/chart.js-4.4.7.tgz", not the registry's https://registry.npmjs.org/chart.js/-/chart.js-4.4.7.tgz`,

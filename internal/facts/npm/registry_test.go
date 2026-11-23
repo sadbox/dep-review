@@ -340,20 +340,33 @@ func TestNoRegressRealPackages(t *testing.T) {
 		// lockFlag is the lock's hasInstallScript for the old and the
 		// new entry.
 		oldFlag, newFlag bool
-		want             string
-		holds            bool
+		// off: the repository turns install scripts off, and the fact
+		// covers this lock.
+		off   bool
+		want  string
+		holds bool
 	}{
-		{"core-js keeps its postinstall", "core-js", "3.38.0", "3.38.1", true, true, "install hook commands unchanged (postinstall: ", true},
+		{"core-js keeps its postinstall", "core-js", "3.38.0", "3.38.1", true, true, false, "install hook commands unchanged (postinstall: ", true},
 		// 2.4.0 builds with node-gyp on install; 2.4.1 ships prebuilt
 		// binaries and has no install script.
-		{"@parcel/watcher drops its install script", "@parcel/watcher", "2.4.0", "2.4.1", true, false, "no install script", true},
-		{"@parcel/watcher gains it going back", "@parcel/watcher", "2.4.1", "2.4.0", false, true, `install scripts change from none to install: "node-gyp rebuild"`, false},
-		{"chart.js has none", "chart.js", "4.4.6", "4.4.7", false, false, "no install script", true},
-		{"the lock flags a script the registry does not show", "chart.js", "4.4.6", "4.4.7", false, true, "the lock marks 4.4.7 as having an install script", false},
-		{"the lock flagged both", "chart.js", "4.4.6", "4.4.7", true, true, "install hook commands unchanged (none)", true},
-		{"a new name with an install script", "core-js", "", "3.38.1", false, true, "a new dependency with an install script", false},
-		{"a new name without one", "@kurkle/color", "", "0.3.4", false, false, "no install script", true},
-		{"the old version is gone from the registry", "event-stream", "3.3.6", "3.3.5", false, false, "3.3.6 is not on the registry (unpublished)", false},
+		{"@parcel/watcher drops its install script", "@parcel/watcher", "2.4.0", "2.4.1", true, false, false, "no install script", true},
+		{"@parcel/watcher gains it going back", "@parcel/watcher", "2.4.1", "2.4.0", false, true, false, `install scripts change from none to install: "node-gyp rebuild"`, false},
+		{"chart.js has none", "chart.js", "4.4.6", "4.4.7", false, false, false, "no install script", true},
+		{"the lock flags a script the registry does not show", "chart.js", "4.4.6", "4.4.7", false, true, false, "the lock marks 4.4.7 as having an install script", false},
+		{"the lock flagged both", "chart.js", "4.4.6", "4.4.7", true, true, false, "install hook commands unchanged (none)", true},
+		{"a new name with an install script", "core-js", "", "3.38.1", false, true, false, "a new dependency with an install script", false},
+		{"a new name without one", "@kurkle/color", "", "0.3.4", false, false, false, "no install script", true},
+		{"the old version is gone from the registry", "event-stream", "3.3.6", "3.3.5", false, false, false, "3.3.6 is not on the registry (unpublished)", false},
+
+		// With install scripts off in the repository none of the three
+		// comparisons is asked (spec section 11, amendment 59): npm runs
+		// no install script of a dependency, new or changed.
+		{"scripts off: an install script appears", "@parcel/watcher", "2.4.1", "2.4.0", false, true, true, "install scripts not compared: the repository turns them off; the old version has no provenance to lose", true},
+		{"scripts off: the lock flags a script the registry does not show", "chart.js", "4.4.6", "4.4.7", false, true, true, "install scripts not compared", true},
+		{"scripts off: a new name with an install script", "core-js", "", "3.38.1", false, true, true, "install scripts not compared", true},
+		{"scripts off: an unchanged script is not called compared", "core-js", "3.38.0", "3.38.1", true, true, true, "install scripts not compared", true},
+		// What is not a comparison of scripts stays.
+		{"scripts off: the old version is gone from the registry", "event-stream", "3.3.6", "3.3.5", false, false, true, "3.3.6 is not on the registry (unpublished)", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -364,7 +377,7 @@ func TestNoRegressRealPackages(t *testing.T) {
 				u.Old[0].HasInstallScript = tt.oldFlag
 			}
 			reg := &registry{client: newFakeRegistry(t, nil), packuments: map[string]packumentAnswer{}}
-			f, err := noRegressFact(context.Background(), reg, u, a, "registry")
+			f, err := noRegressFact(context.Background(), reg, u, a, "registry", tt.off)
 			if err != nil {
 				t.Fatal(err)
 			}

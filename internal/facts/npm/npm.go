@@ -48,6 +48,9 @@ import (
 	"github.com/sadbox/dep-review/internal/facts"
 )
 
+// rootLock is the path of the lock a root .npmrc is read for.
+const rootLock = "package-lock.json"
+
 // Gatherer is the npm fact gatherer. It runs the npm found on PATH.
 type Gatherer struct {
 	// tool stands in for the real npm in tests that replay recorded
@@ -68,9 +71,18 @@ func (g Gatherer) Gather(ctx context.Context, in facts.Input) (facts.Result, err
 	if err != nil {
 		return facts.Result{}, err
 	}
+	// A root .npmrc is the project file of the root package.json and of
+	// no other: npm run in a directory reads the .npmrc there. So the
+	// fact covers the root's lock only, and for any other lock the
+	// install inputs are compared as if there were no such file (spec
+	// section 11, amendment 59). A pull request without a Shape has no
+	// lock path and no updates.
+	if in.ScriptsOff.Holds() && cs.lockPath == rootLock {
+		res.ScriptsOff = in.ScriptsOff
+	}
 	reg := &registry{client: in.HTTP, packuments: map[string]packumentAnswer{}}
 	for i, u := range cs.updates {
-		pair, soFar, err := gatherUpdate(ctx, in, reg, u, &res.Updates[i])
+		pair, soFar, err := gatherUpdate(ctx, in, reg, u, res.ScriptsOff.Holds(), &res.Updates[i])
 		if err != nil {
 			return facts.Result{}, err
 		}
@@ -171,8 +183,9 @@ func lockFacts(u update, policy allow.Policy, lockSource string) allow.UpdateFac
 // except Read, Veto and NoRegress. What the registry and the lock say
 // about NoRegress is returned beside the update, never in it (see
 // facts.Result.NoRegressSoFar). The pair is nil when Bound does not hold:
-// there is then no verified hash to read an artifact against.
-func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, uf *allow.UpdateFacts) (*artifact.Pair, allow.Fact, error) {
+// there is then no verified hash to read an artifact against. scriptsOff
+// is whether facts.Result.ScriptsOff holds.
+func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, scriptsOff bool, uf *allow.UpdateFacts) (*artifact.Pair, allow.Fact, error) {
 	// A name the gate will not put in a URL gets no request at all.
 	var doc packumentAnswer
 	if !artifact.ValidNPMName(u.Name) || !artifact.ValidNPMVersion(u.To) || (u.From != "" && !artifact.ValidNPMVersion(u.From)) {
@@ -189,7 +202,7 @@ func gatherUpdate(ctx context.Context, in facts.Input, reg *registry, u update, 
 	uf.Bound = boundFact(u, doc, source)
 	uf.FirstSeen, uf.NameCreated = timeFacts(u, doc, source)
 
-	soFar, err := noRegressFact(ctx, reg, u, doc, source)
+	soFar, err := noRegressFact(ctx, reg, u, doc, source, scriptsOff)
 	if err != nil {
 		return nil, allow.Fact{}, err
 	}

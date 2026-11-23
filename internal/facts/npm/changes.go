@@ -44,6 +44,9 @@ type changeSet struct {
 	// summary is Shape's Value when there are no problems.
 	summary string
 	updates []update
+	// lockPath is the path of the package-lock.json the pull request
+	// changes, set when there are no problems.
+	lockPath string
 }
 
 // readChangeSet checks the pull request's files, has npm read the lock at
@@ -150,7 +153,7 @@ func readChangeSet(ctx context.Context, t tool, files []facts.File) (changeSet, 
 	if len(updates) == 0 {
 		summary = fmt.Sprintf("%s (lockfileVersion %d) moves no package to a version it did not have at base; %s", show(lock.Path), headLock.Version, manifestNote)
 	}
-	return changeSet{summary: summary, updates: updates}, nil
+	return changeSet{summary: summary, updates: updates, lockPath: lock.Path}, nil
 }
 
 // splitFiles finds the one package.json (nil when it did not change) and

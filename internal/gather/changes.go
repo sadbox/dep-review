@@ -33,7 +33,24 @@ type Changes struct {
 	// empty, and Fetch records a Shape that does not hold: no ecosystem's
 	// manifest and lock files come near these limits.
 	Refused string
+	// ScriptsOff says that the repository's root .npmrc, at the base
+	// branch's commit the pull request records, is the one file the gate
+	// knows to turn npm's install scripts off (scriptsOffEntry). It is
+	// about the repository, whatever the pull request changes; only the
+	// npm gatherer is told (spec section 11, amendment 59).
+	ScriptsOff bool
 }
+
+// scriptsOffEntry is everything "git ls-tree --full-tree -z <commit> --
+// .npmrc" prints for a root .npmrc that is a regular, non-executable file whose
+// bytes are exactly "ignore-scripts=true" and one newline: the mode, the
+// type, the blob's ID (git hash-object of those 20 bytes), the path and
+// the terminating NUL. The answer is compared with this whole, so no
+// .npmrc is ever parsed here: a comment, a space around the "=", a
+// second setting, a missing newline, an executable bit, a symbolic link,
+// a directory and a repository that names its objects by SHA-256 all
+// print something else, which is the absence of the fact.
+const scriptsOffEntry = "100644 blob 97b895e2f9681e5b1834e15c9e33a43cb3c7af28\t.npmrc\x00"
 
 // changeLimits bound what ReadChanges holds in memory.
 type changeLimits struct {
@@ -83,6 +100,17 @@ func readChanges(ctx context.Context, repoDir, base, head string, lim changeLimi
 		return Changes{}, fmt.Errorf("gather: git merge-base printed %q, not a commit ID", mergeBase)
 	}
 	changes := Changes{Base: mergeBase, Head: head}
+
+	// At base, the base branch's commit, and not at the merge base: the
+	// file npm will read after a merge is the base branch's, and a pull
+	// request that changes it has no Shape (the npm gatherer refuses
+	// every file but package.json and package-lock.json). --full-tree:
+	// the path is the repository root's wherever this process runs.
+	entry, err := g.run(ctx, 1<<10, "ls-tree", "--full-tree", "-z", base, "--", ".npmrc")
+	if err != nil && !errors.Is(err, errTooMuch) {
+		return Changes{}, err
+	}
+	changes.ScriptsOff = err == nil && string(entry) == scriptsOffEntry
 
 	// One record per path: the two modes, the two object IDs and a status
 	// letter, then the path. No rename detection: a rename is a path that

@@ -648,6 +648,126 @@ func TestFetchNPMInspection(t *testing.T) {
 	}
 }
 
+// A repository whose root .npmrc turns install scripts off (spec section
+// 11, amendment 59). The fetch job makes the fact from the change set's
+// answer, hands it to the gatherer, and takes it in place of the
+// tarballs' inspection only when the npm gatherer hands it back: the
+// gatherer knows whether the pull request's lock is the one a root .npmrc
+// is read for. Every row is a pull request that merges but for what the
+// row says.
+func TestFetchNPMScriptsOff(t *testing.T) {
+	inspected := func(f allow.Fact) func(artifact.Pair) (artifact.Prepared, error) {
+		return func(p artifact.Pair) (artifact.Prepared, error) {
+			out := preparedRead(p, "+x\n")
+			out.Inspected = f
+			return out, nil
+		}
+	}
+	fail := func(err error) func(artifact.Pair) (artifact.Prepared, error) {
+		return func(artifact.Pair) (artifact.Prepared, error) { return artifact.Prepared{}, err }
+	}
+	changed := inspected(allow.No("binding.gyp changes: it is a file a package is built from when it is installed", "the tarballs"))
+	const off = "install scripts are off in this repository (ignore-scripts=true)"
+	for _, tc := range []struct {
+		name string
+		eco  model.Ecosystem
+		// git: the root .npmrc at the base branch's commit is the known one.
+		git bool
+		// applies: the gatherer hands the fact back. returns: what it
+		// hands back instead.
+		applies bool
+		returns allow.Fact
+		soFar   allow.Fact
+		answer  func(artifact.Pair) (artifact.Prepared, error)
+		noPair  bool
+		// holds is the NoRegress in the facts file; outcome and reason
+		// are the decision with clean verdicts.
+		holds   bool
+		value   string
+		outcome allow.Outcome
+		reason  allow.Reason
+	}{
+		{name: "scripts off, and the tarball's binding.gyp changes", eco: model.NPM, git: true, applies: true, answer: changed,
+			holds: true, value: "nothing lost; " + off, outcome: allow.Merge},
+		{name: "scripts off, and the tarball has a new install script", eco: model.NPM, git: true, applies: true,
+			answer: inspected(allow.No("package.json is new and has an install script", "the tarballs")),
+			holds:  true, value: "nothing lost; " + off, outcome: allow.Merge},
+		{name: "scripts off, and nothing was inspected", eco: model.NPM, git: true, applies: true, answer: inspected(allow.Fact{}),
+			holds: true, outcome: allow.Merge},
+		// The other half is still the gatherer's to say.
+		{name: "scripts off, and provenance is lost", eco: model.NPM, git: true, applies: true, soFar: allow.No("1.2.3 was published with provenance, 1.3.0 was not", "registry"),
+			answer: changed, value: "1.2.3 was published with provenance, 1.3.0 was not", outcome: allow.Person, reason: allow.ReasonRegress},
+		// The fact covers NoRegress and nothing else: the tarballs are
+		// still fetched and read, and an update that was not read does
+		// not merge.
+		{name: "scripts off, and the tarball could not be downloaded", eco: model.NPM, git: true, applies: true,
+			answer: fail(fmt.Errorf("%w", artifact.ErrUnavailable)), holds: true, outcome: allow.Wait, reason: allow.ReasonReadPending},
+		{name: "scripts off, and the tarball does not match its hash", eco: model.NPM, git: true, applies: true,
+			answer: fail(fmt.Errorf("%w", artifact.ErrHashMismatch)), holds: true, outcome: allow.Person, reason: allow.ReasonReadRefused},
+		{name: "scripts off, and no artifact was named", eco: model.NPM, git: true, applies: true, noPair: true,
+			holds: true, outcome: allow.Person, reason: allow.ReasonReadUnknown},
+		// The gatherer did not apply it: a lock in a directory, which a
+		// root .npmrc is not read for.
+		{name: "the file is there and the gatherer does not apply it", eco: model.NPM, git: true, answer: changed,
+			value: "binding.gyp changes: it is a file a package is built from when it is installed", outcome: allow.Person, reason: allow.ReasonRegress},
+		// Only the fact this job made counts, and only when git said so.
+		{name: "no such file", eco: model.NPM, applies: true, answer: changed, outcome: allow.Person, reason: allow.ReasonRegress},
+		{name: "no such file, and a gatherer that claims one", eco: model.NPM, returns: allow.Yes(off, scriptsOffSource), answer: changed,
+			outcome: allow.Person, reason: allow.ReasonRegress},
+		{name: "the file is there, and the gatherer returns another fact", eco: model.NPM, git: true, returns: allow.Yes("scripts are off", "the gatherer"), answer: changed,
+			outcome: allow.Person, reason: allow.ReasonRegress},
+		// It is npm's file. A Go update's NoRegress is its gatherer's.
+		{name: "a Go module", eco: model.GoModules, git: true, applies: true, soFar: allow.No("the module lost something", "the proxy"), answer: inspected(allow.Fact{}),
+			value: "the module lost something", outcome: allow.Person, reason: allow.ReasonRegress},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name, _ := ecosystem(tc.eco)
+			u := goodUpdate(t, name, "example-package")
+			if tc.soFar != (allow.Fact{}) {
+				u.NoRegress = tc.soFar
+			}
+			j := newJob(t, tc.eco, u)
+			j.fetch.Changes.ScriptsOff = tc.git
+			j.gatherer.applies = tc.applies
+			j.gatherer.res.ScriptsOff = tc.returns
+			if tc.noPair {
+				j.gatherer.res.Artifacts = nil
+			}
+			j.preparer.answers[u.Name] = tc.answer
+			_, f := j.run(t)
+
+			// The gatherer is told what git said, in the gate's words.
+			given := j.gatherer.inputs[0].ScriptsOff
+			if want := allow.Yes(off, scriptsOffSource); tc.git && given != want {
+				t.Errorf("the gatherer was given %+v, want %+v", given, want)
+			}
+			if !tc.git && given != (allow.Fact{}) {
+				t.Errorf("the gatherer was given %+v for a repository without the file", given)
+			}
+			// The reader is asked whatever the fact says.
+			if want := 1; !tc.noPair && len(j.preparer.pairs) != want {
+				t.Errorf("the reader was asked %d times, want %d", len(j.preparer.pairs), want)
+			}
+			got := f.Facts.Updates[0].NoRegress
+			if got.Holds() != tc.holds || (tc.value != "" && got.Value != tc.value) {
+				t.Errorf("no regress %+v, want holds %v saying %q", got, tc.holds, tc.value)
+			}
+			if tc.holds && tc.eco == model.NPM && !strings.Contains(got.Source, scriptsOffSource) {
+				t.Errorf("no regress source %q does not name the .npmrc", got.Source)
+			}
+			d := decide(t, f, cleanVerdicts(f))
+			wantOutcome(t, d, tc.outcome, tc.reason)
+			if tc.outcome == allow.Merge {
+				// Merged on a read the model answered for, not on the fact.
+				if read := f.Facts.Updates[0].Prepared; read.Status != wire.Prepared || len(read.Chunks) != 1 {
+					t.Errorf("read %+v, want one prepared chunk", read)
+				}
+				wantOutcome(t, decide(t, f, nil), allow.Wait, allow.ReasonReadPending)
+			}
+		})
+	}
+}
+
 // When Shape does not hold the change set is not to be trusted, and
 // nothing it names is downloaded.
 func TestFetchShapeDoesNotHold(t *testing.T) {

@@ -95,7 +95,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |
 | NameCreated | when the package name first appeared (new names only) |
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own) |
-| NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json`, and every `.gypi` file, are the old tarball's, none new, changed or gone, while the other files those commands and a `binding.gyp` run are not compared, since the model reads them; provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
+| NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json`, and every `.gypi` file, are the old tarball's, none new, changed or gone, while the other files those commands and a `binding.gyp` run are not compared, since the model reads them (none of this is asked where the repository turns install scripts off, see below); provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
 | SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version (Go and npm only: never an image, and never an action, whose tag can be moved after the advisory was reviewed) |
 | Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker). Two artifacts that hold the same files are full with no model asked, and the comment says so |
 | Veto | none, or a category and the lines the model quoted |
@@ -160,7 +160,7 @@ needs no age and is not held up.
 | Ecosystem | Shape and change set | Bound | FirstSeen | Read |
 |---|---|---|---|---|
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
-| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json`, `binding.gyp` and `.gypi` files are also checked for install steps: npm's NoRegress holds only once they were |
+| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json`, `binding.gyp` and `.gypi` files are also checked for install steps: npm's NoRegress holds only once they were, or where the repository turns install scripts off |
 | GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included, for an action that runs its repository's own files (`using: nodeNN` or `composite` where the workflows use it from) |
 | Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`; for a gcr.io image the gate's first evaluation of the pin | nothing |
 
@@ -192,8 +192,9 @@ Limits that send real pull requests to a person:
 - A Go update that removes a requirement (a move from `example.com/m/v2`
   to `/v3` does) or changes the `toolchain` line.
 - An npm update whose tarball adds, changes or drops an install script, a
-  `gypfile`, a `binding.gyp` or a `.gypi` file, or whose lock has an
-  entry with a member npm 9 to 11 do not write.
+  `gypfile`, a `binding.gyp` or a `.gypi` file, unless the repository
+  turns install scripts off (below), or whose lock has an entry with a
+  member npm 9 to 11 do not write.
 - An npm update whose lock changes what it says of a package that keeps
   its version (its `bin`, `os`, `cpu`, `libc` or dependency ranges, like
   its source and hash). Only `dev`, `optional`, `devOptional`, `peer`,
@@ -366,6 +367,33 @@ model, whatever the comment remembers.
    admits the review job: the repository's immutable OIDC subject, event
    `workflow_run`, and a `job_workflow_ref` of this repository's
    `gate.yml`. The workflow uses no API key.
+8. For npm, optionally turn install scripts off (next section).
+
+### npm: turning install scripts off
+
+npm runs a dependency's `preinstall`, `install` and `postinstall`
+scripts, and builds a `binding.gyp`, when it installs. The gate
+otherwise sends every update that adds or changes one of these to a
+person. A repository that needs none of them can turn them off, and the
+gate then asks nothing about them:
+
+- a root `.npmrc` whose whole content is `ignore-scripts=true` and one
+  newline. The gate compares the file's git entry with the one it knows,
+  so a comment, a space or a second setting is not this file;
+- wherever npm installs from the lock, the file beside `package.json`:
+  in a Dockerfile, `COPY package.json package-lock.json .npmrc ./`
+  before `npm ci`. Without the copy the scripts run;
+- a guard before the install, because a flag or an environment variable
+  overrides the file: `RUN test "$(npm config get ignore-scripts)" = true`.
+
+The gate sees only the file. That it is copied and that nothing
+overrides it is the repository's to keep, so all three go in together,
+and before the repository runs a gate that has this rule. It covers the
+root's `package-lock.json` only, a pull request that changes `.npmrc`
+goes to a person, and the tarballs are still verified and read by the
+model. Provenance is still compared. Removing the line later turns on
+every install script in the lock at once, and none of them was compared
+while it was there.
 
 `ignore_ecosystems` (comma-separated, default empty) is for an ecosystem
 whose Dependabot pull requests another trusted process owns. Names are the
@@ -383,6 +411,10 @@ and it then gets no status, comment or notification.
   tag still resolves to the pinned digest after 72 hours merges unseen.
 - What an action or an install script downloads when it runs: a tool, an
   installer, a prebuilt binary. The model sees the lines that fetch it.
+- An install script in a repository whose `.npmrc` turns scripts off, when
+  npm runs somewhere that does not read that file or is told otherwise by
+  a flag or an environment variable. The gate reads the file's bytes at
+  the base commit and nothing about how npm is run.
 - Code the model was not shown. Files that are not text, and text beyond
   the chunk budget, are listed as unread; such an update is only partly
   read and still merges, after `unread_age_days`, as long as the model

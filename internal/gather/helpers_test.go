@@ -114,11 +114,18 @@ type fakeGatherer struct {
 	res    facts.Result
 	err    error
 	inputs []facts.Input
+	// applies makes it hand Input.ScriptsOff back in its result, as the
+	// npm gatherer does for a pull request whose lock the fact covers.
+	applies bool
 }
 
 func (g *fakeGatherer) Gather(_ context.Context, in facts.Input) (facts.Result, error) {
 	g.inputs = append(g.inputs, in)
-	return g.res, g.err
+	res := g.res
+	if g.applies {
+		res.ScriptsOff = in.ScriptsOff
+	}
+	return res, g.err
 }
 
 // fakePreparer answers by the pair's name and records every call. A name

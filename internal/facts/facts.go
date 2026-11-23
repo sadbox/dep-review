@@ -64,6 +64,12 @@ type Input struct {
 	Advisories advisory.Checker
 	// Now is the clock. A gatherer never calls time.Now itself.
 	Now func() time.Time
+	// ScriptsOff is for npm alone. It holds when the repository's root
+	// .npmrc at the base branch's commit turns npm's install scripts off,
+	// and is the zero Fact otherwise (spec section 11, amendment 59).
+	// Whether it covers this pull request is the npm gatherer's to say:
+	// see Result.ScriptsOff.
+	ScriptsOff allow.Fact
 }
 
 // Result is what every gatherer returns.
@@ -83,6 +89,15 @@ type Result struct {
 	// command makes the fact from this and the artifact reader's
 	// inspection, and without an inspection it does not hold.
 	NoRegressSoFar []allow.Fact
+	// ScriptsOff is npm's alone: Input.ScriptsOff when the gatherer
+	// applied it, and the zero Fact when it did not. It is applied to a
+	// pull request whose lock is the root's package-lock.json, the one
+	// project a root .npmrc is read for. Every NoRegressSoFar was then
+	// made without the registry's and the lock's comparison of install
+	// scripts, and the fetch command takes this fact in place of the
+	// inspection of the tarballs. One decision for both halves, made
+	// where the lock's path is known.
+	ScriptsOff allow.Fact
 	// Artifacts lists what the model is to read: for each update with
 	// something readable, the old and the new artifact, each with the
 	// hash Bound was established for. An entry belongs to the update with
