@@ -16,7 +16,10 @@ import (
 // every line that differs is one of a few exact shapes at both commits,
 // byte for byte equal once its version and commit tokens are set aside.
 // The regular expressions only find the tokens; the safety is in the
-// equality of everything else.
+// equality of everything else. Lines that did not change are not judged.
+// Of actions.lock's, the section lines and the workflow keys are read all
+// the same, because they say whose list a changed list line is in (spec
+// section 11, amendment 42).
 
 // lockPath is the workflow lockfile `gh actions-lock` writes.
 const lockPath = ".github/workflows/actions.lock"
@@ -64,11 +67,13 @@ var (
 	usesRe = regexp.MustCompile(`^( *(?:- )?uses: )(` + namePat + `)(` + subPathPat + `)@(?:(` + versionPat + `)( +#[ -~]*)?|` + shaPat + ` # ` + versionPat + `)$`)
 
 	// The lines of actions.lock that a bump rewrites (as yaml.v3 writes
-	// them: four-space indent, single quotes):
+	// them: four-space indent, single quotes), and the workflow key that
+	// says whose list a list line is in:
 	//
 	//	workflows:
-	//	    '.github/workflows/ci.yml':
+	//	    '.github/workflows/ci.yml':            workflow key
 	//	        - 'actions/setup-go@v7.1.0'        list line
+	//	    '.github/workflows/notify.yml': []     workflow key, no action used
 	//	dependencies:
 	//	    'actions/setup-go@v7.1.0':             key line
 	//	        ref: 'v7.1.0'
@@ -79,20 +84,33 @@ var (
 	//	            - 'actions/attest@<40 hex>'    list line
 	//
 	// A key names a tag, or a commit for an action that another action
-	// uses. The four lines under a key are always these, in this order.
-	lockListRe   = regexp.MustCompile(`^((?:    ){2,3}- )'(` + lockNamePat + `)@(` + versionPat + `|` + shaPat + `)'$`)
-	lockKeyRe    = regexp.MustCompile(`^    '(` + lockNamePat + `)@(` + versionPat + `|` + shaPat + `)':$`)
-	lockRefRe    = regexp.MustCompile(`^        ref: '(` + versionPat + `)'$`)
-	lockCommitRe = regexp.MustCompile(`^        commit: 'sha1-(` + shaPat + `)'$`)
-	lockOwnerRe  = regexp.MustCompile(`^        owner_id: ([1-9][0-9]{0,17})$`)
-	lockRepoRe   = regexp.MustCompile(`^        repo_id: ([1-9][0-9]{0,17})$`)
+	// uses. The four lines under a key are always these, in this order. A
+	// workflow key is never a changed line; it takes the paths that
+	// workflowPathRe does.
+	lockListRe     = regexp.MustCompile(`^((?:    ){2,3}- )'(` + lockNamePat + `)@(` + versionPat + `|` + shaPat + `)'$`)
+	lockWorkflowRe = regexp.MustCompile(`^    '(\.github/workflows/[A-Za-z0-9._-]{1,200}\.ya?ml)':( \[\])?$`)
+	lockKeyRe      = regexp.MustCompile(`^    '(` + lockNamePat + `)@(` + versionPat + `|` + shaPat + `)':$`)
+	lockRefRe      = regexp.MustCompile(`^        ref: '(` + versionPat + `)'$`)
+	lockCommitRe   = regexp.MustCompile(`^        commit: 'sha1-(` + shaPat + `)'$`)
+	lockOwnerRe    = regexp.MustCompile(`^        owner_id: ([1-9][0-9]{0,17})$`)
+	lockRepoRe     = regexp.MustCompile(`^        repo_id: ([1-9][0-9]{0,17})$`)
 
 	shaRe = regexp.MustCompile(`^` + shaPat + `$`)
 )
 
-// workflowList is the indentation of a list line under `workflows:`, as
-// opposed to one under a dependency's `uses:`.
-const workflowList = "        - "
+// workflowList is the indentation of a list line under `workflows:`, and
+// usesList that of one under a dependency's `uses:`.
+const (
+	workflowList = "        - "
+	usesList     = "            - "
+)
+
+// The two sections of actions.lock, each opened by its own line at the
+// left margin.
+const (
+	workflowsSection    = "workflows:"
+	dependenciesSection = "dependencies:"
+)
 
 // pin is one update: an action repository moving from one commit to
 // another, with the version each commit is labelled as.
@@ -159,11 +177,20 @@ type lockEntry struct {
 type lockListChange struct {
 	where    string
 	old, new string // keys
+	// workflow is the path of the workflow whose list the line is in, as
+	// the lockfile keys it. It is empty for a line of a dependency's uses
+	// list.
+	workflow string
+	// entry is the one changed dependency entry the line names.
+	entry *lockEntry
 }
 
 // tagChange is one changed pin line of a workflow.
 type tagChange struct {
-	where, name, from, to string
+	where string
+	// path is the workflow file the line is in.
+	path           string
+	name, from, to string
 }
 
 // changes is everything the changed lines say, before the files are
@@ -172,6 +199,9 @@ type changes struct {
 	tags    []tagChange
 	lists   []lockListChange
 	entries []*lockEntry
+	// workflows is every workflow path the lockfile's workflows section
+	// has a key for. It is nil when actions.lock is not a changed file.
+	workflows map[string]bool
 }
 
 // readChangeSet reads the pull request's files and returns the pins it
@@ -235,7 +265,7 @@ func (ch *changes) readUses(path string, base, head []string) string {
 			// again. Only a tag pin has an actions.lock entry to give them.
 			return where + ": the line pins a commit; only a tag pin that actions.lock records is read"
 		}
-		ch.tags = append(ch.tags, tagChange{where: where, name: b.name, from: b.version, to: h.version})
+		ch.tags = append(ch.tags, tagChange{where: where, path: path, name: b.name, from: b.version, to: h.version})
 	}
 	return ""
 }
@@ -250,22 +280,65 @@ func schemaLine(lines []string) string {
 	return ""
 }
 
-// readLock reads the changed lines of actions.lock. A changed key line
-// starts an entry, read by fixed offset; a changed ref or commit line is
-// accepted nowhere else, so a commit that changes under an unchanged key
-// (a tag that moved) is not a shape. It returns the problem, or "".
+// readLock reads actions.lock. Of the lines that did not change it takes
+// only where they are: which section, and in the workflows section under
+// which workflow's key. A changed key line starts an entry, read by fixed
+// offset; a changed ref or commit line is accepted nowhere else, so a
+// commit that changes under an unchanged key (a tag that moved) is not a
+// shape. A changed list line is in the list of the workflow whose key is
+// above it, or in a dependency's uses list. It returns the problem, or "".
 func (ch *changes) readLock(path string, base, head []string) string {
 	if schemaLine(base) != lockSchema || schemaLine(head) != lockSchema {
 		return path + ": the file does not start with " + lockSchema + ", the one lockfile schema the gate reads"
 	}
+	ch.workflows = map[string]bool{}
+	// section is the section line the walk is below: "" before the first,
+	// and after any other line at the left margin. workflow is the path
+	// in the workflow key the walk is below, "" when the lines here are
+	// not known to be one workflow's list. Only unchanged lines move
+	// either: a changed line is a list line or a dependency entry, which
+	// open nothing, or it is refused.
+	var section, workflow string
+	opened := map[string]bool{}
 	inEntry := map[int]bool{} // ref and commit lines an entry accounted for
 	for i := range base {
-		if base[i] == head[i] || inEntry[i] {
+		line := base[i]
+		where := fmt.Sprintf("%s:%d", path, i+1)
+		if line == head[i] {
+			switch {
+			case line == workflowsSection || line == dependenciesSection:
+				if opened[line] {
+					return where + ": the file has the same section twice"
+				}
+				opened[line] = true
+				section, workflow = line, ""
+			case line != "" && line[0] != ' ' && line[0] != '#':
+				section, workflow = "", ""
+			case section == workflowsSection:
+				if m := lockWorkflowRe.FindStringSubmatch(line); m != nil {
+					if ch.workflows[m[1]] {
+						return where + ": the workflows section has the same workflow twice"
+					}
+					ch.workflows[m[1]] = true
+					workflow = m[1]
+					if m[2] != "" {
+						// The empty list is on the key's line: no line
+						// below is in it.
+						workflow = ""
+					}
+				} else if !strings.HasPrefix(line, workflowList) {
+					// Not an item of the list above: what follows is no
+					// longer known to be in it.
+					workflow = ""
+				}
+			}
 			continue
 		}
-		where := fmt.Sprintf("%s:%d", path, i+1)
+		if inEntry[i] {
+			continue
+		}
 
-		if b := lockKeyRe.FindStringSubmatch(base[i]); b != nil {
+		if b := lockKeyRe.FindStringSubmatch(line); b != nil {
 			h := lockKeyRe.FindStringSubmatch(head[i])
 			if h == nil {
 				return where + ": a dependency key changed into something else"
@@ -274,12 +347,15 @@ func (ch *changes) readLock(path string, base, head []string) string {
 			if problem != "" {
 				return problem
 			}
+			if section != dependenciesSection {
+				return where + ": a dependency key changed outside the dependencies section"
+			}
 			ch.entries = append(ch.entries, e)
 			inEntry[i+1], inEntry[i+2] = true, true
 			continue
 		}
 
-		if b := lockListRe.FindStringSubmatch(base[i]); b != nil {
+		if b := lockListRe.FindStringSubmatch(line); b != nil {
 			h := lockListRe.FindStringSubmatch(head[i])
 			if h == nil {
 				return where + ": a list line changed into something else"
@@ -289,12 +365,22 @@ func (ch *changes) readLock(path string, base, head []string) string {
 			if !okOld || !okNew || b[1] != h[1] || old.name != new.name || old.isCommit != new.isCommit {
 				return where + ": more than the version or commit changed on the list line"
 			}
-			if b[1] == workflowList && old.isCommit {
-				// Workflow lines are read as tag pins only, so no line
-				// the gate reads could name this commit.
-				return where + ": a workflow's list names a commit; only tag pins are read"
+			l := lockListChange{where: where, old: old.key(), new: new.key()}
+			switch {
+			case b[1] == workflowList && section == workflowsSection && workflow != "":
+				if old.isCommit {
+					// Workflow lines are read as tag pins only, so no line
+					// the gate reads could name this commit.
+					return where + ": a workflow's list names a commit; only tag pins are read"
+				}
+				l.workflow = workflow
+			case b[1] == usesList && section == dependenciesSection:
+			default:
+				// Whose list the line is in decides what it pins, and
+				// the indentation alone does not say.
+				return where + ": the list line is neither in the list of a workflow the workflows section names nor in a dependency's uses list"
 			}
-			ch.lists = append(ch.lists, lockListChange{where: where, old: old.key(), new: new.key()})
+			ch.lists = append(ch.lists, l)
 			continue
 		}
 
@@ -357,11 +443,13 @@ func (ch *changes) pins() ([]pin, string) {
 	// not something the runner would use, and a list line that points at
 	// an entry that did not change points at a commit this pull request
 	// gives no old and new for.
-	for _, l := range ch.lists {
+	for i := range ch.lists {
+		l := &ch.lists[i]
 		n := 0
 		for _, e := range ch.entries {
 			if e.old.key() == l.old && e.new.key() == l.new {
 				e.listed = true
+				l.entry = e
 				n++
 			}
 		}
@@ -410,6 +498,24 @@ func (ch *changes) pins() ([]pin, string) {
 		}
 		if n != 1 {
 			return nil, t.where + ": the line names a tag, and no changed actions.lock entry gives the commits for it"
+		}
+		// The lockfile says what a workflow runs in that workflow's own
+		// list. An entry with the line's name and versions that only
+		// another workflow's list moves to is not this line's: the
+		// lockfile would not say that this workflow runs the commit Bound
+		// is checked for, and for a workflow it does not list at all it
+		// says nothing.
+		if !ch.workflows[t.path] {
+			return nil, t.where + ": actions.lock has no list for this workflow, so no lock entry is tied to the line"
+		}
+		tied := false
+		for _, l := range ch.lists {
+			if l.workflow == t.path && l.entry == found {
+				tied = true
+			}
+		}
+		if !tied {
+			return nil, t.where + ": this workflow's own list in actions.lock does not move to the tag the line names"
 		}
 		found.used = true
 		if problem := add(found, t.name, t.where); problem != "" {

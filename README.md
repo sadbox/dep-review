@@ -138,7 +138,7 @@ needs no age and is not held up.
 |---|---|---|---|---|
 | Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
 | npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json` and `binding.gyp` files are also checked for install steps: npm's NoRegress holds only once they were |
-| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`) | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
+| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable | the action repository's tarball, `dist/` included |
 | Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`, GCR `timeUploadedMs` | nothing |
 
 Limits that send real pull requests to a person:
@@ -146,10 +146,13 @@ Limits that send real pull requests to a person:
 - uv, OpenTofu, submodules and every other ecosystem have no rule.
 - An Actions update needs a tag pin (`@vX.Y.Z`) and `actions.lock`:
   without the lock entry there is no recorded repository and owner ID to
-  compare with. A line that pins a commit (`@<40 hex> # vX.Y.Z`) and a
-  local `action.yml` are not read. A pin update replaces lines in place:
-  one that adds or removes a line of a workflow or of `actions.lock` (an
-  action that starts or stops using another) goes to a person.
+  compare with. The lock must list the workflow the line is in, and that
+  workflow's list must move to the new tag with it: an entry that only
+  another workflow's list names does not count. A line that pins a
+  commit (`@<40 hex> # vX.Y.Z`) and a local `action.yml` are not read. A
+  pin update replaces lines in place: one that adds or removes a line of
+  a workflow or of `actions.lock` (an action that starts or stops using
+  another) goes to a person.
 - A changed `uses:` line that points at a reusable workflow never merges.
   That includes a caller's pin of this gate.
 - Docker images merge only from the list, and only when written as an

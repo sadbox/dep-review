@@ -90,6 +90,37 @@ dependencies:
 `
 )
 
+const lintPath = ".github/workflows/lint.yaml"
+
+// listing is lockText with more of the workflows section: workflows is
+// put after ci.yml's list, as `gh actions-lock` writes one workflow after
+// another.
+func listing(t *testing.T, workflows string) string {
+	t.Helper()
+	return edit(t, lockText, "dependencies:\n", workflows+"dependencies:\n")
+}
+
+// The keys and lists the tests add with listing: a second workflow that
+// uses setup-go, one that uses checkout alone, and one that uses no
+// action, which the lockfile writes as an empty list on the key's line.
+const (
+	lintUsesSetupGo  = "    '.github/workflows/lint.yaml':\n        - 'actions/setup-go@v7.0.0'\n"
+	lintUsesCheckout = "    '.github/workflows/lint.yaml':\n        - 'actions/checkout@v7.0.0'\n"
+	lintUsesNothing  = "    '.github/workflows/lint.yaml': []\n"
+)
+
+// bumpSetupGo is a lockfile with every setup-go v7.0.0 in it moved to
+// v7.1.0: the list lines, the key, the ref and the commit.
+func bumpSetupGo(t *testing.T, lock string) string {
+	t.Helper()
+	return edit(t, lock, "setup-go@v7.0.0", "setup-go@v7.1.0", "ref: 'v7.0.0'\n        commit: 'sha1-"+setupGoV700, "ref: 'v7.1.0'\n        commit: 'sha1-"+setupGoV710)
+}
+
+// lintBump is the one changed line of lint.yaml: its setup-go step.
+func lintBump() facts.File {
+	return file(lintPath, "    - uses: actions/setup-go@v7.0.0\n", "    - uses: actions/setup-go@v7.1.0\n")
+}
+
 // file is a regular file at both commits.
 func file(path, base, head string) facts.File {
 	return facts.File{Path: path, BaseMode: facts.RegularFile, HeadMode: facts.RegularFile, Base: []byte(base), Head: []byte(head)}
@@ -115,7 +146,7 @@ func edit(t *testing.T, s string, pairs ...string) string {
 func setupGoBump(t *testing.T) []facts.File {
 	t.Helper()
 	return []facts.File{
-		file(lockPath, lockText, edit(t, lockText, "setup-go@v7.0.0", "setup-go@v7.1.0", "ref: 'v7.0.0'\n        commit: 'sha1-"+setupGoV700, "ref: 'v7.1.0'\n        commit: 'sha1-"+setupGoV710)),
+		file(lockPath, lockText, bumpSetupGo(t, lockText)),
 		file(ciPath, ciTags, edit(t, ciTags, "setup-go@v7.0.0", "setup-go@v7.1.0")),
 	}
 }
@@ -165,12 +196,40 @@ func TestReadChangeSetAccepts(t *testing.T) {
 			want: []pin{with(setupGoLocked, ciPath+":13")},
 		},
 		{
+			// Two workflows use the action. The lockfile has a list for
+			// each, and each list moves.
 			name: "the same pin on several lines and files is one update",
 			files: func(t *testing.T) []facts.File {
-				fs := setupGoBump(t)
+				lock := listing(t, lintUsesSetupGo)
 				two := ciTags + "  again:\n    steps:\n      - uses: actions/setup-go@v7.0.0\n"
-				fs[1] = file(ciPath, two, edit(t, two, "setup-go@v7.0.0", "setup-go@v7.1.0"))
-				return append(fs, file(".github/workflows/lint.yaml", "    - uses: actions/setup-go@v7.0.0\n", "    - uses: actions/setup-go@v7.1.0\n"))
+				return []facts.File{
+					file(lockPath, lock, bumpSetupGo(t, lock)),
+					file(ciPath, two, edit(t, two, "setup-go@v7.0.0", "setup-go@v7.1.0")),
+					lintBump(),
+				}
+			},
+			want: []pin{with(setupGoLocked, ciPath+":9")},
+		},
+		{
+			name: "beside a workflow that uses another action, and one that uses none",
+			files: func(t *testing.T) []facts.File {
+				lock := listing(t, lintUsesCheckout+"    '.github/workflows/notify.yml': []\n")
+				fs := setupGoBump(t)
+				fs[0] = file(lockPath, lock, bumpSetupGo(t, lock))
+				return fs
+			},
+			want: []pin{with(setupGoLocked, ciPath+":9")},
+		},
+		{
+			// Lines that did not change are not judged, only placed: an
+			// item of the same list in a form the gate does not read
+			// leaves the changed item below it in that workflow's list.
+			name: "below a list item in a form the gate does not read",
+			files: func(t *testing.T) []facts.File {
+				lock := edit(t, lockText, "        - 'actions/setup-go@v7.0.0'\n", "        - 'Some/Action/in/a/dir@main'\n        - 'actions/setup-go@v7.0.0'\n")
+				fs := setupGoBump(t)
+				fs[0] = file(lockPath, lock, bumpSetupGo(t, lock))
+				return fs
 			},
 			want: []pin{with(setupGoLocked, ciPath+":9")},
 		},
@@ -545,6 +604,50 @@ func TestReadChangeSetRefuses(t *testing.T) {
 				"checkout@v6.0.2", "checkout@v6.1.0", "ref: 'v6.0.2'\n        commit: 'sha1-"+checkoutV602, "ref: 'v6.1.0'\n        commit: 'sha1-"+checkoutV610))
 			return fs
 		}, "moves a tag that no changed workflow line names"},
+
+		// A tag line is tied to the lockfile through its own workflow's
+		// list (amendment 42). The entry that has its name and versions
+		// is not enough: another workflow's list may be all that names it.
+		{"a tag line in a workflow the lockfile does not list", func(t *testing.T) []facts.File {
+			return append(setupGoBump(t), lintBump())
+		}, lintPath + ":1: actions.lock has no list for this workflow"},
+		{"the only changed workflow is one the lockfile does not list", func(t *testing.T) []facts.File {
+			return []facts.File{setupGoBump(t)[0], lintBump()}
+		}, lintPath + ":1: actions.lock has no list for this workflow"},
+		{"a tag line whose list line is under another workflow", func(t *testing.T) []facts.File {
+			lock := listing(t, lintUsesCheckout)
+			return []facts.File{file(lockPath, lock, bumpSetupGo(t, lock)), setupGoBump(t)[1], lintBump()}
+		}, lintPath + ":1: this workflow's own list in actions.lock does not move to the tag the line names"},
+		{"the only changed workflow is not the one whose list moves", func(t *testing.T) []facts.File {
+			lock := listing(t, lintUsesCheckout)
+			return []facts.File{file(lockPath, lock, bumpSetupGo(t, lock)), lintBump()}
+		}, lintPath + ":1: this workflow's own list in actions.lock does not move to the tag the line names"},
+		{"a tag line in a workflow the lockfile lists with no action", func(t *testing.T) []facts.File {
+			lock := listing(t, lintUsesNothing)
+			return []facts.File{file(lockPath, lock, bumpSetupGo(t, lock)), setupGoBump(t)[1], lintBump()}
+		}, lintPath + ":1: this workflow's own list in actions.lock does not move to the tag the line names"},
+		{"a tag line whose workflow's list did not move", func(t *testing.T) []facts.File {
+			// lint.yaml's list still says v7.0.0 at head.
+			lock := listing(t, lintUsesSetupGo)
+			head := edit(t, bumpSetupGo(t, lock), strings.Replace(lintUsesSetupGo, "v7.0.0", "v7.1.0", 1), lintUsesSetupGo)
+			return []facts.File{file(lockPath, lock, head), setupGoBump(t)[1], lintBump()}
+		}, lintPath + ":1: this workflow's own list in actions.lock does not move to the tag the line names"},
+
+		// Whose list a changed list line is in is read from the lines
+		// above it, and a line that cannot be placed is refused.
+		{"a list line under a workflow key the gate does not read", bothLocks("'.github/workflows/ci.yml':", "'.github/workflows/sub/ci.yml':"), lockPath + ":8: the list line is neither in the list of a workflow"},
+		{"a list line under a key written another way", bothLocks("'.github/workflows/ci.yml':", ".github/workflows/ci.yml:"), "the list line is neither in the list of a workflow"},
+		{"a list line below a workflow's empty list", bothLocks("'.github/workflows/ci.yml':\n        - 'actions/checkout@v7.0.0'", "'.github/workflows/ci.yml': []"), "the list line is neither in the list of a workflow"},
+		{"a list line below a line that is no list item", bothLocks("        - 'actions/checkout@v7.0.0'", "        other: x"), "the list line is neither in the list of a workflow"},
+		{"a list line below a comment", bothLocks("        - 'actions/checkout@v7.0.0'", "# a note"), "the list line is neither in the list of a workflow"},
+		{"a list line below an empty line", bothLocks("        - 'actions/checkout@v7.0.0'", ""), "the list line is neither in the list of a workflow"},
+		{"a workflow's list line outside the workflows section", bothLocks("workflows:\n", ""), "the list line is neither in the list of a workflow"},
+		{"a workflow's list line below another top-level key", bothLocks("workflows:\n", "workflows:\nother:\n"), "the list line is neither in the list of a workflow"},
+		{"a uses list line in the workflows section", bothLocks("        - 'actions/setup-go@", "            - 'actions/setup-go@"), "nor in a dependency's uses list"},
+		{"a dependency key in the workflows section", bothLocks("dependencies:\n", ""), "a dependency key changed outside the dependencies section"},
+		{"the workflows section twice", bothLocks("dependencies:\n", "workflows:\ndependencies:\n"), lockPath + ":9: the file has the same section twice"},
+		{"the dependencies section twice", bothLocks("dependencies:\n", "dependencies:\ndependencies:\n"), "the file has the same section twice"},
+		{"the same workflow twice in the workflows section", bothLocks("dependencies:\n", "    '.github/workflows/ci.yml': []\ndependencies:\n"), lockPath + ":9: the workflows section has the same workflow twice"},
 
 		// Two entries for one move must agree.
 		{"a tag entry and a commit entry give the same move other commits", nestedBump("actions/setup-go", "v7.0.0", checkoutV700, "v7.1.0", checkoutV701, setupGoRepoID), "pinned to other commits elsewhere"},
