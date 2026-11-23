@@ -519,10 +519,12 @@ func TestNodePinned(t *testing.T) {
 	}
 }
 
-// The jobs without the app's token learn the app's name from the
-// app_slug input, through env only; publish checks the input against the
-// app whose key it holds before it decides anything; and the example
-// sets it.
+// The scheduled job, which reads the gate's comment without the app's
+// token, learns the app's name from the app_slug input, through env only;
+// publish checks the input against the app whose key it holds before it
+// decides anything; and the example sets it. No job of an event's run
+// before publish looks at the gate's comment, so none is told the name:
+// what the comment remembers does not reach the review job.
 func TestAppSlugPassed(t *testing.T) {
 	g := readGate(t)
 	call := g[strings.Index(g, "workflow_call:"):strings.Index(g, "\n    secrets:\n")]
@@ -530,10 +532,12 @@ func TestAppSlugPassed(t *testing.T) {
 		t.Error("gate.yml does not declare a required app_slug input")
 	}
 	jobs := gateJobs(t)
-	for _, name := range []string{"fetch", "refresh"} {
-		job := jobs[name]
-		if !strings.Contains(job, "APP_SLUG: ${{ inputs.app_slug }}") || !strings.Contains(job, `--app-slug "$APP_SLUG"`) {
-			t.Errorf("%s does not get the app's slug from the input", name)
+	if job := jobs["refresh"]; !strings.Contains(job, "APP_SLUG: ${{ inputs.app_slug }}") || !strings.Contains(job, `--app-slug "$APP_SLUG"`) {
+		t.Error("refresh does not get the app's slug from the input")
+	}
+	for _, name := range []string{"classify", "fetch", "review"} {
+		if job := jobs[name]; job == "" || strings.Contains(job, "app_slug") || strings.Contains(job, "app-slug") {
+			t.Errorf("%s is told the gate app's name, or is not a job", name)
 		}
 	}
 	publish := jobs["publish"]

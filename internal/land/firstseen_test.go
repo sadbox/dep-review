@@ -369,18 +369,20 @@ func TestFirstSeenOnlyFromTheGatesComment(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		comment *fakeComment
-		merged  bool
+		// waits: the scheduled job takes the pull request up for the
+		// comment. merged: publish used the time the comment has.
+		waits, merged bool
 	}{
-		{"no comment", nil, false},
-		{"the gate's comment, a wait at this head", &fakeComment{1, testBot, planted(ActionWait, headA)}, true},
-		{"the gate's comment, a person's at another head", &fakeComment{1, testBot, planted(ActionPerson, headB)}, true},
-		{"the gate's comment after a failed run", &fakeComment{1, testBot, planted(ActionFailed, headB)}, true},
-		{"the gate's comment from before it remembered times", &fakeComment{1, testBot, before}, false},
-		{"the gate's comment with a marker cut short", &fakeComment{1, testBot, planted(ActionWait, headA)[:80] + " -->\n"}, false},
-		{"a comment by someone else", &fakeComment{1, "mallory", planted(ActionWait, headA)}, false},
-		{"a comment by Dependabot", &fakeComment{1, "dependabot[bot]", planted(ActionWait, headA)}, false},
-		{"a comment by another app", &fakeComment{1, "other-gate[bot]", planted(ActionWait, headA)}, false},
-		{"a comment by a user named like the app", &fakeComment{1, "gate", planted(ActionWait, headA)}, false},
+		{"no comment", nil, false, false},
+		{"the gate's comment, a wait at this head", &fakeComment{1, testBot, planted(ActionWait, headA)}, true, true},
+		{"the gate's comment, a person's at another head", &fakeComment{1, testBot, planted(ActionPerson, headB)}, false, true},
+		{"the gate's comment after a failed run", &fakeComment{1, testBot, planted(ActionFailed, headB)}, false, true},
+		{"the gate's comment from before it remembered times", &fakeComment{1, testBot, before}, true, false},
+		{"the gate's comment with a marker cut short", &fakeComment{1, testBot, planted(ActionWait, headA)[:80] + " -->\n"}, false, false},
+		{"a comment by someone else", &fakeComment{1, "mallory", planted(ActionWait, headA)}, false, false},
+		{"a comment by Dependabot", &fakeComment{1, "dependabot[bot]", planted(ActionWait, headA)}, false, false},
+		{"a comment by another app", &fakeComment{1, "other-gate[bot]", planted(ActionWait, headA)}, false, false},
+		{"a comment by a user named like the app", &fakeComment{1, "gate", planted(ActionWait, headA)}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFake(t)
@@ -389,13 +391,17 @@ func TestFirstSeenOnlyFromTheGatesComment(t *testing.T) {
 				f.comments[testPR] = []*fakeComment{tc.comment}
 			}
 			// What the scheduled job makes of the comment, before publish
-			// writes its own.
+			// writes its own: the marker's outcome, too, counts only from
+			// the gate app.
 			waiting, _, err := Waiting(context.Background(), f.config(t0, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mine := tc.comment != nil && tc.comment.author == testBot; len(waiting) > 0 && !mine {
-				t.Errorf("a comment by %s made the pull request wait", tc.comment.author)
+			if (len(waiting) == 1) != tc.waits {
+				t.Errorf("%d pull requests wait for the comment, want one: %t", len(waiting), tc.waits)
+			}
+			if w := f.writes(); len(w) != 0 {
+				t.Errorf("reading the comment wrote: %+v", w)
 			}
 
 			res, err := publish(t, f.config(t0, nil), files(t, facts, clean(t)))

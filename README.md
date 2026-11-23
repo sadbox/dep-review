@@ -249,8 +249,10 @@ same moment. fetch and refresh run npm from a pinned Node major, not the
 runner image's.
 
 A verdict is remembered in the gate's comment by a hash of what was read
-and of the question (prompt, answer schema, model, effort), so a rebase or
-a scheduled run does not ask the model again for the same content.
+and of the question (prompt, answer schema, model, effort). That is for
+the scheduled run, which has no model and decides on what was read
+before. An event's run (a push, a rebase, a re-run) always asks the
+model, whatever the comment remembers.
 
 ## Using it in a repository
 

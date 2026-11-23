@@ -13,9 +13,10 @@ import (
 // Reevaluation is one open Dependabot pull request the gate left waiting.
 // The scheduled workflow gathers its facts again, writes Verdicts as the
 // verdicts file (no model is called on a schedule, so a read with no
-// verdict here stays Read none) and runs publish on the two. Nothing here
-// is an approval: whether the pull request merges is what allow.Decide
-// then says about the fresh facts.
+// verdict here stays Read none) and runs publish on the two. This is the
+// one use of a remembered verdict: an event's run asks the model. Nothing
+// here is an approval: whether the pull request merges is what
+// allow.Decide then says about the fresh facts.
 type Reevaluation struct {
 	Number int `json:"number"`
 	// Head is its head commit now. It may be newer than the one the gate
@@ -77,22 +78,4 @@ func Waiting(ctx context.Context, cfg Config) (waiting []Reevaluation, unread []
 		}
 	}
 	return waiting, unread, nil
-}
-
-// Cached returns the verdicts the gate's comment on a pull request
-// remembers, for a job that wants to spare a model call (fetch hands them
-// to review). It only reads. With no comment by the gate app, or one whose
-// marker does not parse, there are none: an entry counts only under the
-// same reviewer fingerprint and content key (wire.Join), so nothing is
-// lost but a model call.
-func Cached(ctx context.Context, cfg Config, number int) (wire.Verdicts, error) {
-	if err := cfg.check(); err != nil {
-		return wire.Verdicts{}, err
-	}
-	var m marker
-	c, err := findComment(ctx, cfg, number)
-	if c != nil {
-		m, _ = parseMarker(c.Body)
-	}
-	return m.verdicts(), err
 }

@@ -14,7 +14,6 @@ import (
 	"github.com/sadbox/dep-review/internal/config"
 	"github.com/sadbox/dep-review/internal/gather"
 	"github.com/sadbox/dep-review/internal/gh"
-	"github.com/sadbox/dep-review/internal/land"
 	"github.com/sadbox/dep-review/internal/model"
 	"github.com/sadbox/dep-review/internal/veto"
 	"github.com/sadbox/dep-review/internal/wire"
@@ -54,14 +53,27 @@ func TestLandConfig(t *testing.T) {
 			t.Errorf("slug %q accepted", slug)
 		}
 	}
+	// The fetch job does not look at the gate's comment and is not told
+	// who the gate app is: the same configuration without a login, which
+	// internal/land takes for reading the settings and nothing else.
+	t.Setenv("GITHUB_RUN_ID", "42")
+	cfg, err = repoConfig(c)
+	if err != nil || cfg.GitHub != c || cfg.Repo != "o/r" || cfg.BotLogin != "" || cfg.RunURL != "https://github.com/o/r/actions/runs/42" {
+		t.Errorf("config %+v, %v", cfg, err)
+	}
+
 	t.Setenv("GITHUB_REPOSITORY", "o/r/../x")
 	if _, err := landConfig(c, "gate"); err == nil {
 		t.Error("a repository that is not owner/name accepted")
 	}
+	if _, err := repoConfig(c); err == nil {
+		t.Error("a repository that is not owner/name accepted without a slug")
+	}
 }
 
-// The review job and the scheduled job build the reviewer from the
-// built-in settings, and publish from the repository's. They must agree
+// The review job builds the reviewer from the built-in settings, and
+// publish, which also joins the verdicts the scheduled job hands it, from
+// the repository's. They must agree
 // on the fingerprint, or no verdict would ever be joined to a read: what
 // a repository may change is not part of it, and a read prepared under a
 // repository's lower budget fits the built-in one.
@@ -223,30 +235,6 @@ func TestCheckFactsNamesEcosystemsAsFetchDoes(t *testing.T) {
 		if err := checkFacts(class, facts); err != nil {
 			t.Errorf("%s: fetch wrote ecosystem %q: %v", eco, facts.Facts.Ecosystem, err)
 		}
-	}
-}
-
-// A verdicts file that is not there is no verdicts; one that is there has
-// to decode.
-func TestReadVerdicts(t *testing.T) {
-	dir := t.TempDir()
-	v, err := land.ReadVerdicts(filepath.Join(dir, "none.json"))
-	if err != nil || v.Version != wire.Version || len(v.Verdicts) != 0 {
-		t.Errorf("a missing file: %+v, %v", v, err)
-	}
-	b, err := wire.EncodeVerdicts(wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{
-		{Key: testKey, Fingerprint: strings.Repeat("5", 64), Read: allow.ReadFull},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(dir, "v.json"), string(b))
-	if v, err := land.ReadVerdicts(filepath.Join(dir, "v.json")); err != nil || len(v.Verdicts) != 1 || v.Verdicts[0].Key != testKey {
-		t.Errorf("a verdicts file: %+v, %v", v, err)
-	}
-	writeFile(t, filepath.Join(dir, "bad.json"), `{"version":1,"verdicts":[{"key":"x"}]}`)
-	if _, err := land.ReadVerdicts(filepath.Join(dir, "bad.json")); err == nil {
-		t.Error("a file that does not decode was read")
 	}
 }
 

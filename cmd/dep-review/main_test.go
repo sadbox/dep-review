@@ -53,7 +53,7 @@ func TestRequiredFlags(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
 	complete := map[string][]string{
 		"classify": {"--event", "e", "--trigger-path", "t", "--out", "o"},
-		"fetch":    {"--classification", "c", "--repo-dir", "r", "--out", "o", "--app-slug", "gate"},
+		"fetch":    {"--classification", "c", "--repo-dir", "r", "--out", "o"},
 		"review":   {"--facts", "f", "--out", "o"},
 		"publish":  {"--in", "i"},
 		"refresh":  {"--repo-dir", "r", "--out", "o", "--app-slug", "gate"},

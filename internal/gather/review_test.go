@@ -191,92 +191,6 @@ func TestReview(t *testing.T) {
 	}
 }
 
-// A cached verdict is reused only for the same read under the same
-// reviewer fingerprint, and only when it holds an answer of the model.
-func TestReviewCache(t *testing.T) {
-	// The quote stands for a line of a dependency that the model pointed
-	// at. It is data in a verdict and nothing runs it.
-	objection := &allow.Veto{Category: "obfuscation", Quotes: []string{"+ eval(atob(x))"}, Notes: ""}
-	for _, tc := range []struct {
-		name string
-		// cached builds the cache from the read's key.
-		cached     func(key string) []wire.Verdict
-		noReviewer bool
-		calls      int
-		// want is the one verdict written, nil for none.
-		want *wire.Verdict
-	}{
-		{name: "nothing cached", cached: func(string) []wire.Verdict { return nil },
-			calls: 1, want: &wire.Verdict{Read: allow.ReadFull}},
-		{name: "a clean verdict", cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: finger, Read: allow.ReadPartial}}
-		}, calls: 0, want: &wire.Verdict{Read: allow.ReadPartial}},
-		{name: "a veto", cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: finger, Read: allow.ReadFull, Veto: objection}}
-		}, calls: 0, want: &wire.Verdict{Read: allow.ReadFull, Veto: objection}},
-		{name: "among others", cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{
-				{Key: strings.Repeat("1", 64), Fingerprint: finger, Read: allow.ReadFull, Veto: objection},
-				{Key: key, Fingerprint: strings.Repeat("0", 64), Read: allow.ReadFull, Veto: objection},
-				{Key: key, Fingerprint: finger, Read: allow.ReadFull},
-			}
-		}, calls: 0, want: &wire.Verdict{Read: allow.ReadFull}},
-		// Another prompt, schema, model or effort is another question.
-		{name: "another fingerprint", cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: strings.Repeat("0", 64), Read: allow.ReadFull}}
-		}, calls: 1, want: &wire.Verdict{Read: allow.ReadFull}},
-		{name: "another read", cached: func(string) []wire.Verdict {
-			return []wire.Verdict{{Key: strings.Repeat("1", 64), Fingerprint: finger, Read: allow.ReadFull}}
-		}, calls: 1, want: &wire.Verdict{Read: allow.ReadFull}},
-		// A review that failed is asked again, not remembered.
-		{name: "no answer", cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: finger, Read: allow.ReadNone}}
-		}, calls: 1, want: &wire.Verdict{Read: allow.ReadFull}},
-		{name: "refused", cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: finger, Read: allow.ReadRefused}}
-		}, calls: 1, want: &wire.Verdict{Read: allow.ReadFull}},
-		{name: "not a verdict the file carries", cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: finger, Read: allow.ReadFull, Veto: &allow.Veto{Category: "Not A Category"}}}
-		}, calls: 1, want: &wire.Verdict{Read: allow.ReadFull}},
-		// The scheduled job: no model, cached verdicts only.
-		{name: "no reviewer, cached", noReviewer: true, cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: finger, Read: allow.ReadFull}}
-		}, calls: 0, want: &wire.Verdict{Read: allow.ReadFull}},
-		{name: "no reviewer, nothing cached", noReviewer: true, cached: func(string) []wire.Verdict { return nil }},
-		{name: "no reviewer, another fingerprint", noReviewer: true, cached: func(key string) []wire.Verdict {
-			return []wire.Verdict{{Key: key, Fingerprint: strings.Repeat("0", 64), Read: allow.ReadFull}}
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir, f := fetched(t, nil, "example.com/m")
-			key := f.Facts.Updates[0].Prepared.Key
-			reviewer := &fakeReviewer{}
-			r := Review{Reviewer: reviewer, Fingerprint: finger, Cached: tc.cached(key)}
-			if tc.noReviewer {
-				r.Reviewer = nil
-			}
-			got := reviewed(t, r, dir)
-
-			if len(reviewer.requests) != tc.calls {
-				t.Errorf("the reviewer was called %d times, want %d", len(reviewer.requests), tc.calls)
-			}
-			if tc.want == nil {
-				if len(got.Verdicts) != 0 {
-					t.Errorf("verdicts %+v, want none", got.Verdicts)
-				}
-				// Not reviewed: it waits, and is not a merge.
-				wantOutcome(t, allow.Decide(wire.Join(f, got, finger), defaults(t).Policy(), now), allow.Wait, allow.ReasonReadPending)
-				return
-			}
-			want := *tc.want
-			want.Key, want.Fingerprint = key, finger
-			if len(got.Verdicts) != 1 || !reflect.DeepEqual(got.Verdicts[0], want) {
-				t.Errorf("verdicts %+v, want %+v", got.Verdicts, want)
-			}
-		})
-	}
-}
-
 // Two updates with the same read have one verdict, asked for once.
 func TestReviewOncePerKey(t *testing.T) {
 	same := func(p artifact.Pair) (artifact.Prepared, error) {
@@ -391,15 +305,7 @@ func TestReviewRefusesDirectory(t *testing.T) {
 			tc.tamper(t, dir)
 			reviewer := &fakeReviewer{}
 			out := filepath.Join(t.TempDir(), "verdicts")
-			// Even a cached verdict for every read does not get a file
-			// written for a directory that does not verify.
-			cached := []wire.Verdict{}
-			if b, err := os.ReadFile(filepath.Join(dir, wire.FactsFile)); err == nil {
-				if f, err := wire.DecodeFacts(b); err == nil {
-					cached = cleanVerdicts(f)
-				}
-			}
-			if _, err := (Review{Reviewer: reviewer, Fingerprint: finger, Cached: cached}).Run(context.Background(), dir, out); err == nil {
+			if _, err := (Review{Reviewer: reviewer, Fingerprint: finger}).Run(context.Background(), dir, out); err == nil {
 				t.Error("the directory was accepted")
 			}
 			if len(reviewer.requests) != 0 {
@@ -466,6 +372,18 @@ func TestReviewEdges(t *testing.T) {
 		}
 		if len(reviewer.requests) != 0 {
 			t.Error("the reviewer was asked")
+		}
+	})
+	// There is no review without a model: a job that has none writes no
+	// verdicts file of its own making.
+	t.Run("no reviewer", func(t *testing.T) {
+		dir, _ := fetched(t, nil, "example.com/m")
+		out := filepath.Join(t.TempDir(), "verdicts")
+		if _, err := (Review{Fingerprint: finger}).Run(context.Background(), dir, out); err == nil {
+			t.Error("Run succeeded")
+		}
+		if _, err := os.Stat(filepath.Join(out, wire.VerdictsFile)); !os.IsNotExist(err) {
+			t.Errorf("a verdicts file was written: %v", err)
 		}
 	})
 }

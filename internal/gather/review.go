@@ -16,22 +16,15 @@ import (
 // Review is the review job for one pull request. It needs nothing of
 // GitHub: it reads a directory and writes a file.
 type Review struct {
-	// Reviewer asks the model. Nil means nobody is asked and only cached
-	// verdicts are written, which is the scheduled job (spec section 8: no
-	// model call on a schedule).
+	// Reviewer asks the model, for every prepared read: a verdict from an
+	// earlier run is not taken in its place (spec section 11, amendment
+	// 39).
 	Reviewer veto.Reviewer
 	// Fingerprint is the reviewer's (veto.Config.Fingerprint). Every
-	// verdict Run writes carries it, and a cached verdict counts only
-	// under the same one (spec section 11, amendment 11).
+	// verdict Run writes carries it.
 	Fingerprint string
-	// Cached is verdicts from earlier runs, of this pull request or of
-	// any other: a verdict is about a read's content. One is reused when
-	// its Key and Fingerprint are a prepared read's and this reviewer's
-	// and it holds an answer of the model (Read full or partial, with or
-	// without a veto). Anything else in the list is ignored.
-	Cached []wire.Verdict
-	// Logf, when set, receives one line for each read: reused, reviewed,
-	// or why not. Error text is quoted.
+	// Logf, when set, receives one line for each read: reviewed, or why
+	// not. Error text is quoted.
 	Logf func(format string, args ...any)
 }
 
@@ -48,14 +41,16 @@ type Review struct {
 // refused (person), any other as Read none (the pull request waits and
 // the next run asks again). A verdict the verdicts file cannot carry is
 // recorded as Read refused, never dropped: an objection must not turn
-// into a wait. With no reviewer, or after the context ended, a read
-// without a cached verdict gets no entry, which wire.Join reads as not
-// reviewed.
+// into a wait. After the context ended a read gets no entry, which
+// wire.Join reads as not reviewed.
 //
 // When the context ends the verdicts gathered so far are still written,
 // and Run returns them with the context's error: the file is good, the
 // review is incomplete. Every other error means no file.
 func (r Review) Run(ctx context.Context, dir, out string) (wire.Verdicts, error) {
+	if r.Reviewer == nil {
+		return wire.Verdicts{}, errors.New("gather: no reviewer")
+	}
 	// A fingerprint wire refuses would make every verdict unwritable.
 	if !recordable(wire.Verdict{Key: r.Fingerprint, Fingerprint: r.Fingerprint, Read: allow.ReadNone}) {
 		return wire.Verdicts{}, errors.New("gather: the reviewer's fingerprint is not a lower-case hex SHA-256")
@@ -74,14 +69,6 @@ func (r Review) Run(ctx context.Context, dir, out string) (wire.Verdicts, error)
 		return wire.Verdicts{}, err
 	}
 
-	cached := map[string]wire.Verdict{}
-	for _, v := range r.Cached {
-		answered := v.Read == allow.ReadFull || v.Read == allow.ReadPartial
-		if v.Fingerprint == r.Fingerprint && answered && recordable(v) {
-			cached[v.Key] = v
-		}
-	}
-
 	verdicts := wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{}}
 	done := map[string]bool{}
 	for i, u := range f.Facts.Updates {
@@ -90,16 +77,14 @@ func (r Review) Run(ctx context.Context, dir, out string) (wire.Verdicts, error)
 		if u.Prepared.Status != wire.Prepared || done[u.Prepared.Key] {
 			continue
 		}
-		// The key is the facts file's and the fingerprint this reviewer's,
-		// whatever a cache entry or the reviewer's answer carries.
-		v := wire.Verdict{Key: u.Prepared.Key, Fingerprint: r.Fingerprint}
-		if c, ok := cached[v.Key]; ok {
-			v.Read, v.Veto = c.Read, c.Veto
-			r.logf("gather: update %d (%q): cached verdict reused", i, u.Name)
-		} else if r.Reviewer == nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			r.logf("gather: update %d (%q): not reviewed", i, u.Name)
 			continue
-		} else if v.Read, v.Veto, err = r.review(ctx, chunks, f, i); err != nil {
+		}
+		// The key is the facts file's and the fingerprint this reviewer's,
+		// whatever the reviewer's answer carries.
+		v := wire.Verdict{Key: u.Prepared.Key, Fingerprint: r.Fingerprint}
+		if v.Read, v.Veto, err = r.review(ctx, chunks, f, i); err != nil {
 			return wire.Verdicts{}, err
 		}
 		done[v.Key] = true

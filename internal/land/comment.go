@@ -31,7 +31,8 @@ const (
 	// for.
 	maxNotified = 20
 	// maxCached is how many verdicts the marker remembers. One that does
-	// not fit is asked for again; nothing depends on it being there.
+	// not fit is a read the scheduled job has no answer for: it waits for
+	// an event's run to ask the model, and is a person's at the deadline.
 	maxCached = 100
 	// A cached veto keeps this much of what the model wrote: enough for
 	// the person reading the next comment, small enough for the marker.

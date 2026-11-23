@@ -2,9 +2,13 @@ package land
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sadbox/dep-review/internal/allow"
 	"github.com/sadbox/dep-review/internal/config"
+	"github.com/sadbox/dep-review/internal/wire"
 )
 
 // LoadConfig is how a job that gathers facts gets its settings: the same
@@ -67,4 +71,44 @@ func TestLoadConfig(t *testing.T) {
 			t.Error("a repository that is not owner/name was asked about")
 		}
 	})
+}
+
+// LoadConfig reads the repository's settings and no comment, so the fetch
+// job, which is not told who the gate app is, can run it.
+func TestLoadConfigWithoutTheGateApp(t *testing.T) {
+	f := newFake(t)
+	cfg := f.config(t0, nil)
+	cfg.BotLogin = ""
+	builtIn, _ := defaults(t)
+	got, usable, err := LoadConfig(context.Background(), cfg)
+	if err != nil || !usable || got.Fingerprint() != builtIn.Fingerprint() {
+		t.Errorf("usable %v with fingerprint %s, %v", usable, got.Fingerprint(), err)
+	}
+	if n := f.count("GET", "/comments"); n != 0 {
+		t.Errorf("%d reads of a pull request's comments", n)
+	}
+}
+
+// A verdicts file that is not there is no verdicts; one that is there has
+// to decode.
+func TestReadVerdicts(t *testing.T) {
+	dir := t.TempDir()
+	v, err := readVerdicts(filepath.Join(dir, "none.json"))
+	if err != nil || v.Version != wire.Version || len(v.Verdicts) != 0 {
+		t.Errorf("a missing file: %+v, %v", v, err)
+	}
+	b, err := wire.EncodeVerdicts(wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{
+		{Key: keyA, Fingerprint: strings.Repeat("5", 64), Read: allow.ReadFull},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overwrite(t, dir, "v.json", string(b))
+	if v, err := readVerdicts(filepath.Join(dir, "v.json")); err != nil || len(v.Verdicts) != 1 || v.Verdicts[0].Key != keyA {
+		t.Errorf("a verdicts file: %+v, %v", v, err)
+	}
+	overwrite(t, dir, "bad.json", `{"version":1,"verdicts":[{"key":"x"}]}`)
+	if _, err := readVerdicts(filepath.Join(dir, "bad.json")); err == nil {
+		t.Error("a file that does not decode was read")
+	}
 }

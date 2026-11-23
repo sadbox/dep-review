@@ -11,11 +11,10 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/classify"
-	"github.com/sadbox/dep-review/internal/gather"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/land"
 	"github.com/sadbox/dep-review/internal/model"
-	"github.com/sadbox/dep-review/internal/veto"
+	"github.com/sadbox/dep-review/internal/wire"
 )
 
 // refreshTimeout leaves the job (30 minutes) time to upload what it
@@ -78,16 +77,12 @@ func runRefresh(args []string) error {
 			return err
 		}
 		defer g.close()
-		// The reviewer's fingerprint as publish computes it: a remembered
-		// verdict counts only under the same one.
-		fingerprint := veto.FromConfig(g.conf).Fingerprint()
-
 		for _, w := range waiting {
 			if w.PastDeadline {
 				log.Printf("refresh: #%d is still waiting after its deadline, %s", w.Number, w.Deadline.UTC().Format(time.RFC3339))
 			}
 			dir := filepath.Join(*out, strconv.Itoa(w.Number))
-			done, err := g.refresh(ctx, cfg, w, fingerprint, ignore, *repoDir, dir)
+			done, err := g.refresh(ctx, cfg, w, ignore, *repoDir, dir)
 			switch {
 			case err != nil:
 				// One pull request's failure is its own: the others are
@@ -112,7 +107,7 @@ func runRefresh(args []string) error {
 // refresh evaluates one waiting pull request again, into dir. done is
 // false when there is nothing to hand on: the pull request is no longer
 // one the gate acts on at that head.
-func (g *gathering) refresh(ctx context.Context, cfg land.Config, w land.Reevaluation, fingerprint string, ignore map[model.Ecosystem]bool, repoDir, dir string) (done bool, err error) {
+func (g *gathering) refresh(ctx context.Context, cfg land.Config, w land.Reevaluation, ignore map[model.Ecosystem]bool, repoDir, dir string) (done bool, err error) {
 	// The whole proof, as for an event: nothing here takes a pull request
 	// to be Dependabot's because it was so the last time.
 	class, err := classify.Pull(ctx, cfg.GitHub, cfg.Repo, w.Number, w.Head, classify.Options{IgnoreEcosystems: ignore})
@@ -128,8 +123,18 @@ func (g *gathering) refresh(ctx context.Context, cfg land.Config, w land.Reevalu
 	if _, err := g.fetch(ctx, class, repoDir, dir); err != nil {
 		return false, err
 	}
-	// No reviewer: a read whose verdict the comment does not remember
-	// stays unread, which waits.
-	_, err = gather.Review{Fingerprint: fingerprint, Cached: w.Verdicts.Verdicts, Logf: log.Printf}.Run(ctx, dir, dir)
-	return err == nil, err
+	// No model is asked here. The verdicts file is what the gate's comment
+	// remembers, as it is: publish takes from it the verdict with a
+	// prepared read's content key and its own reviewer fingerprint
+	// (wire.Join) and no other, and a read without one stays unread, which
+	// waits.
+	b, err := wire.EncodeVerdicts(w.Verdicts)
+	if err != nil {
+		return false, err
+	}
+	log.Printf("refresh: #%d: the gate's comment remembers %d verdicts", w.Number, len(w.Verdicts.Verdicts))
+	if err := os.WriteFile(filepath.Join(dir, wire.VerdictsFile), b, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }

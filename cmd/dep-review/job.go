@@ -20,12 +20,7 @@ import (
 	"github.com/sadbox/dep-review/internal/wire"
 )
 
-// cachedFile is the file, beside the facts file, in which the fetch job
-// hands the review job the verdicts the gate's comment remembers. It is a
-// verdicts file (internal/wire).
-const cachedFile = "cached-verdicts.json"
-
-// slugUsage is shared by the jobs that have no app token and so cannot
+// slugUsage is the scheduled job's: it has no app token and so cannot
 // ask who the gate app is.
 const slugUsage = "the gate app's slug (the name in github.com/apps/<slug>), by which its comment is recognised (required)"
 
@@ -34,22 +29,31 @@ var (
 	runIDRE = regexp.MustCompile(`^[0-9]{1,20}$`)
 )
 
-// landConfig is internal/land's configuration from the job's environment:
-// the repository the workflow runs in, and the gate app by its slug.
-func landConfig(c *gh.Client, slug string) (land.Config, error) {
-	if !slugRE.MatchString(slug) {
-		return land.Config{}, fmt.Errorf("%.70q is not a GitHub App's slug", slug)
-	}
+// repoConfig is internal/land's configuration for a job that does not
+// look at the gate's comment: the repository the workflow runs in, from
+// the job's environment.
+func repoConfig(c *gh.Client) (land.Config, error) {
 	repo := os.Getenv("GITHUB_REPOSITORY")
 	if !gh.ValidRepo(repo) {
 		return land.Config{}, fmt.Errorf("GITHUB_REPOSITORY %.100q is not owner/name", repo)
 	}
-	cfg := land.Config{GitHub: c, Repo: repo, BotLogin: slug + "[bot]"}
+	cfg := land.Config{GitHub: c, Repo: repo}
 	// It goes into a comment and a notification as a link.
 	if run := os.Getenv("GITHUB_RUN_ID"); runIDRE.MatchString(run) {
 		cfg.RunURL = fmt.Sprintf("https://github.com/%s/actions/runs/%s", repo, run)
 	}
 	return cfg, nil
+}
+
+// landConfig is repoConfig for a job that reads or writes the gate's
+// comment: with the gate app, by its slug.
+func landConfig(c *gh.Client, slug string) (land.Config, error) {
+	if !slugRE.MatchString(slug) {
+		return land.Config{}, fmt.Errorf("%.70q is not a GitHub App's slug", slug)
+	}
+	cfg, err := repoConfig(c)
+	cfg.BotLogin = slug + "[bot]"
+	return cfg, err
 }
 
 // readClassification reads classify's answer: the keys classify writes

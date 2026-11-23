@@ -731,8 +731,8 @@ func TestConfigCheck(t *testing.T) {
 		if _, _, err := Waiting(context.Background(), cfg); err == nil {
 			t.Errorf("%s: Waiting ran", name)
 		}
-		if _, err := Cached(context.Background(), cfg, testPR); err == nil {
-			t.Errorf("%s: Cached ran", name)
+		if err := Failed(context.Background(), cfg, testPR, headA, "test"); err == nil {
+			t.Errorf("%s: Failed ran", name)
 		}
 	}
 	// Act works on what Decide made of the files, not on a decision someone

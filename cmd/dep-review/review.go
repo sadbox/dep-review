@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"log"
-	"path/filepath"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/config"
 	"github.com/sadbox/dep-review/internal/gather"
-	"github.com/sadbox/dep-review/internal/land"
 	"github.com/sadbox/dep-review/internal/veto"
 )
 
@@ -21,11 +19,12 @@ const reviewTimeout = 100 * time.Minute
 // runReview: dep-review review --facts <dir> --out <dir> --federation-rule-id <id> --organization-id <id>
 //
 // Puts every read the fetch job prepared before the model and writes the
-// verdicts file into --out. The job holds one credential, the model's,
-// and nothing of GitHub: it reads a directory and writes a file.
+// verdicts file into --out; no verdict of an earlier run stands in for
+// the model's answer. The job holds one credential, the model's, and
+// nothing of GitHub: it reads a directory and writes a file.
 func runReview(args []string) error {
 	fl := newFlagSet("review")
-	facts := fl.String("facts", "", "the fetch job's directory: the facts file, the chunks and the cached verdicts (required)")
+	facts := fl.String("facts", "", "the fetch job's directory: the facts file and the chunks (required)")
 	out := fl.String("out", "", "directory to write the verdicts file into (required)")
 	rule := fl.String("federation-rule-id", "", "workload identity federation rule (fdrl_...). Without it the API key in "+veto.APIKeyEnv+" is used, which is for local evaluation only")
 	org := fl.String("organization-id", "", "Anthropic organization ID, with --federation-rule-id")
@@ -70,16 +69,11 @@ func runReview(args []string) error {
 	}
 	client.Logf = log.Printf
 
-	cached, err := land.ReadVerdicts(filepath.Join(*facts, cachedFile))
-	if err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), reviewTimeout)
 	defer cancel()
 	verdicts, err := gather.Review{
 		Reviewer:    client,
 		Fingerprint: settings.Fingerprint(),
-		Cached:      cached.Verdicts,
 		Logf:        log.Printf,
 	}.Run(ctx, *facts, *out)
 	if errors.Is(err, context.DeadlineExceeded) && verdicts.Version != 0 {

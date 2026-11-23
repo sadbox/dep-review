@@ -44,7 +44,7 @@ const dependabotLogin = "dependabot[bot]"
 // Config is what the jobs need besides their files.
 type Config struct {
 	// GitHub is the REST client. Decide and Act need the gate app's token
-	// (it comments, sets a status and merges); Waiting and Cached only
+	// (it comments, sets a status and merges); Waiting and LoadConfig only
 	// read.
 	GitHub *gh.Client
 	// Repo is the repository the job runs for, owner/name. A facts file
@@ -52,6 +52,7 @@ type Config struct {
 	Repo string
 	// BotLogin is the gate app's login, "<app-slug>[bot]". The gate's
 	// comment, and the marker in it, is believed only from this author.
+	// Only LoadConfig, which reads no comment, runs without it.
 	BotLogin string
 	// Notifier is told when a pull request needs a person. Nil turns
 	// notifications off.
@@ -68,14 +69,27 @@ type Config struct {
 	Now func() time.Time
 }
 
+// check is for everything that reads or writes the gate's comment: a job
+// that is not told who the gate app is believes nobody's comment, so it
+// does not start.
 func (cfg Config) check() error {
+	if err := cfg.checkRepo(); err != nil {
+		return err
+	}
+	if !strings.HasSuffix(cfg.BotLogin, "[bot]") || len(cfg.BotLogin) == len("[bot]") {
+		return fmt.Errorf("land: gate app login %.70q is not an app's login", cfg.BotLogin)
+	}
+	return nil
+}
+
+// checkRepo is the part of check that LoadConfig needs too: it reads the
+// repository's settings and no comment.
+func (cfg Config) checkRepo() error {
 	switch {
 	case cfg.GitHub == nil:
 		return errors.New("land: no GitHub client")
 	case !gh.ValidRepo(cfg.Repo):
 		return fmt.Errorf("land: repository %.100q is not owner/name", cfg.Repo)
-	case !strings.HasSuffix(cfg.BotLogin, "[bot]") || len(cfg.BotLogin) == len("[bot]"):
-		return fmt.Errorf("land: gate app login %.70q is not an app's login", cfg.BotLogin)
 	}
 	return nil
 }
@@ -207,13 +221,13 @@ func readFiles(factsPath, verdictsPath string) (wire.Facts, wire.Verdicts, error
 	if err != nil {
 		return wire.Facts{}, wire.Verdicts{}, err
 	}
-	verdicts, err := ReadVerdicts(verdictsPath)
+	verdicts, err := readVerdicts(verdictsPath)
 	return facts, verdicts, err
 }
 
-// ReadVerdicts reads a verdicts file. One that is not there is no
+// readVerdicts reads a verdicts file. One that is not there is no
 // verdicts: the review job was skipped or failed, and every read waits.
-func ReadVerdicts(path string) (wire.Verdicts, error) {
+func readVerdicts(path string) (wire.Verdicts, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return wire.Verdicts{Version: wire.Version}, nil
@@ -296,7 +310,7 @@ func checkBranch(b string) (string, error) {
 // the built-in settings: the facts can still be gathered, and Decide
 // answers policy_invalid for them whatever they say.
 func LoadConfig(ctx context.Context, cfg Config) (conf config.Config, usable bool, err error) {
-	if err := cfg.check(); err != nil {
+	if err := cfg.checkRepo(); err != nil {
 		return config.Config{}, false, err
 	}
 	var repo struct {

@@ -1,7 +1,6 @@
 package land
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"reflect"
@@ -480,50 +479,5 @@ func TestCacheEntries(t *testing.T) {
 	}
 	if veto.Quotes[0] != long || len(veto.Quotes) != 4 {
 		t.Error("the verdict's own veto was changed")
-	}
-}
-
-// TestCacheNotFromAnotherAuthor: the marker counts only in a comment the
-// gate app wrote.
-func TestCacheNotFromAnotherAuthor(t *testing.T) {
-	_, reviewer := defaults(t)
-	planted := marker{Outcome: ActionWait, Head: headA, Fingerprint: reviewer, Cache: []cached{{Key: keyA, Read: allow.ReadFull}}}
-	body := planted.String() + "\n### dep-review: waiting\n"
-
-	for _, tc := range []struct {
-		author string
-		want   int
-	}{
-		{"mallory", 0},
-		{"dependabot[bot]", 0},
-		{"gate", 0},
-		{"other-gate[bot]", 0},
-		{testBot, 1},
-	} {
-		f := newFake(t)
-		f.comments[testPR] = []*fakeComment{{1, tc.author, body}}
-		f.open = "[" + pullJSON(testPR, "open", headA, "main", "clean", false) + "]"
-		cfg := f.config(t0, nil)
-
-		v, err := Cached(context.Background(), cfg, testPR)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(v.Verdicts) != tc.want {
-			t.Errorf("a marker in a comment by %s gave %d cached verdicts, want %d", tc.author, len(v.Verdicts), tc.want)
-		}
-		if _, err := wire.EncodeVerdicts(v); err != nil {
-			t.Errorf("author %s: what Cached returned is not a verdicts file: %v", tc.author, err)
-		}
-		waiting, unread, err := Waiting(context.Background(), cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(waiting) != tc.want || len(unread) != 0 {
-			t.Errorf("a marker in a comment by %s made %d pull requests wait, want %d (unread %v)", tc.author, len(waiting), tc.want, unread)
-		}
-		if w := f.writes(); len(w) != 0 {
-			t.Errorf("reading the cache wrote: %+v", w)
-		}
 	}
 }

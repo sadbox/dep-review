@@ -5,37 +5,32 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/gh"
-	"github.com/sadbox/dep-review/internal/land"
-	"github.com/sadbox/dep-review/internal/wire"
 )
 
 // fetchTimeout leaves the job (20 minutes) time to upload what it wrote.
 const fetchTimeout = 17 * time.Minute
 
-// runFetch: dep-review fetch --classification <file> --repo-dir <dir> --out <dir> --app-slug <slug>
+// runFetch: dep-review fetch --classification <file> --repo-dir <dir> --out <dir>
 //
-// Writes the facts file, the chunk files and the cached verdicts into
-// --out and appends review=<true|false> to $GITHUB_OUTPUT: whether there
-// is anything for the review job to read. Any error exits non-zero with
-// no facts file, and then nothing is decided.
+// Writes the facts file and the chunk files into --out and appends
+// review=<true|false> to $GITHUB_OUTPUT: whether there is anything for
+// the review job to read. Any error exits non-zero with no facts file,
+// and then nothing is decided.
 func runFetch(args []string) error {
 	fl := newFlagSet("fetch")
 	classPath := fl.String("classification", "", "classification.json from classify (required)")
 	repoDir := fl.String("repo-dir", "", "a clone with full history that holds the pull request's head; only its git objects are read (required)")
-	out := fl.String("out", "", "directory to write the facts file, the chunks and the cached verdicts into (required)")
-	slug := fl.String("app-slug", "", slugUsage)
+	out := fl.String("out", "", "directory to write the facts file and the chunks into (required)")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
-	if *classPath == "" || *repoDir == "" || *out == "" || *slug == "" || fl.NArg() > 0 {
-		return errors.New("fetch: --classification, --repo-dir, --out and --app-slug are required")
+	if *classPath == "" || *repoDir == "" || *out == "" || fl.NArg() > 0 {
+		return errors.New("fetch: --classification, --repo-dir and --out are required")
 	}
 	class, err := readClassification(*classPath)
 	if err != nil {
@@ -47,7 +42,10 @@ func runFetch(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := landConfig(c, *slug)
+	// This job does not look at the gate's comment, so it has no use for
+	// the gate app's name: what a comment remembers of earlier reads is
+	// the scheduled job's and publish's to read.
+	cfg, err := repoConfig(c)
 	if err != nil {
 		return err
 	}
@@ -66,22 +64,5 @@ func runFetch(args []string) error {
 		return err
 	}
 	log.Printf("fetch: %s #%d: %s, %d updates", cfg.Repo, class.PR, facts.Facts.Ecosystem, len(facts.Facts.Updates))
-
-	// What the gate's comment remembers of earlier reads spares the
-	// review job a model call for content that was read before. It is a
-	// saving and nothing more: when the comments cannot be read, the
-	// model is asked again.
-	cached, err := land.Cached(ctx, cfg, class.PR)
-	if err != nil {
-		log.Printf("fetch: the gate's comment could not be read, so no verdict is reused: %v", err)
-		cached = wire.Verdicts{Version: wire.Version, Verdicts: []wire.Verdict{}}
-	}
-	b, err := wire.EncodeVerdicts(cached)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(*out, cachedFile), b, 0o644); err != nil {
-		return err
-	}
 	return stepOutput("review", strconv.FormatBool(prepared(facts)))
 }

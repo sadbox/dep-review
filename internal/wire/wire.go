@@ -254,9 +254,9 @@ type Verdicts struct {
 }
 
 // Verdict is the reviewer's answer for one prepared read. It is about a
-// read's content, not about a pull request: the same entry answers for
-// the same update after a rebase or in another repository, which is what
-// lets a stored one be reused.
+// read's content, not about a pull request or a head commit, which is
+// what lets the scheduled job, which asks no model, decide on a stored
+// one.
 type Verdict struct {
 	// Key is the content key of the read that was reviewed.
 	Key string `json:"key"`

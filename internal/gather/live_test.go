@@ -102,12 +102,8 @@ func TestLiveFetch(t *testing.T) {
 		t.Logf("  read               %s %q, state %q, %d chunks, %d unread", u.Prepared.Status, u.Prepared.Detail, u.Prepared.State, len(u.Prepared.Chunks), len(u.Prepared.Unread))
 	}
 
-	// The review job without a model, as the scheduled job runs it, and
-	// then what publish would decide with no verdict at all.
-	verdicts, err := Review{Fingerprint: finger}.Run(ctx, dir, filepath.Join(t.TempDir(), "verdicts"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := allow.Decide(wire.Join(f, verdicts, finger), cfg.Policy(), time.Now())
+	// What allow.Decide makes of the facts with no verdict at all, and
+	// without publish's own clock for an update no registry dates.
+	d := allow.Decide(wire.Join(f, wire.Verdicts{Version: wire.Version}, finger), cfg.Policy(), time.Now())
 	t.Logf("decision without a model: %s %v, not before %s, deadline %s", d.Outcome, d.Reasons, d.NotBefore.Format(time.RFC3339), d.Deadline.Format(time.RFC3339))
 }

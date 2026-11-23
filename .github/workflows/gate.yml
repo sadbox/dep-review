@@ -33,9 +33,9 @@ on:
       app_slug:
         description: >-
           The gate app's slug: the name in https://github.com/apps/<slug>.
-          Not a secret. The jobs without the app's token recognise the
-          gate's own comment by it. publish fails when it is not the app
-          whose key it holds.
+          Not a secret. The scheduled refresh job, which has no app token,
+          recognises the gate's own comment by it. publish fails when it
+          is not the app whose key it holds.
         type: string
         required: true
       ignore_ecosystems:
@@ -267,13 +267,11 @@ jobs:
         id: fetch
         env:
           GH_TOKEN: ${{ github.token }}
-          APP_SLUG: ${{ inputs.app_slug }}
         run: |
           "$RUNNER_TEMP/bin/dep-review" fetch \
             --classification "$RUNNER_TEMP/in/classification.json" \
             --repo-dir pr \
-            --out "$RUNNER_TEMP/facts" \
-            --app-slug "$APP_SLUG"
+            --out "$RUNNER_TEMP/facts"
       - name: Checksum the artifact
         id: sums
         run: |
@@ -574,9 +572,9 @@ jobs:
           permission-pull-requests: write
           permission-statuses: write
           permission-workflows: write
-      # fetch and refresh looked for the gate's comment under the input's
-      # name. If that is not this app, they found none, and no verdict
-      # was reused and no waiting PR refreshed: say so loudly.
+      # refresh looked for the gate's comment under the input's name. If
+      # that is not this app, it found none and no waiting PR was
+      # refreshed: say so loudly.
       - name: The app_slug input names this app
         env:
           INPUT_SLUG: ${{ inputs.app_slug }}
