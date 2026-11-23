@@ -108,8 +108,10 @@ func runFetch(args []string) error {
 	}
 	// The review job runs for the review route, and as triage only for
 	// a person (it can never merge).
+	// The review also runs when only findings a verified rebuild relaxes
+	// keep the route from review (publish decides once it has the result).
 	review := "false"
-	if out.Route == model.RouteReview || out.Triage {
+	if out.Route == model.RouteReview || out.Triage || out.RouteIfRebuilt == model.RouteReview {
 		review = "true"
 	}
 	if err := stepOutput("review", review); err != nil {

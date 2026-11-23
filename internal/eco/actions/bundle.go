@@ -648,6 +648,7 @@ type bundleInput struct {
 	path           string
 	old, new       []byte // old is nil for an added file
 	oldMap, newMap []byte // nil when the bundle has no source map
+	newMapPath     string // the map file newMap was read from ("" if none or inline)
 	mapNote        string
 }
 

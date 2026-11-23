@@ -21,8 +21,11 @@
 // lockfile and build script produce. It does not show that they are
 // benign: a build-only package (a compiler, a bundler plugin) is in no
 // bundle diff the reviewer reads, and the build may copy any file of the
-// tree. So a result is information for the people and the reviewer, and
-// never relaxes a route by itself.
+// tree. So a result relaxes one route only, and only where fetch has
+// shown everything the build read that was not accepted before: an
+// actions.dist-residual when no locked package changed and every changed
+// file is first-party source or in the rebuilt directories, both required
+// reading (fetch marks it IfRebuilt; publish relaxes it).
 package rebuild
 
 import (
