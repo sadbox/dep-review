@@ -2,8 +2,8 @@
 
 A merge gate for Dependabot pull requests, as a reusable GitHub Actions
 workflow. It merges an update without a person when a short list of facts
-about it holds, quickly for security fixes, and hands everything else to a
-person with the one fact that failed.
+about it holds, quickly for security fixes in Go modules and npm, and
+hands everything else to a person with the one fact that failed.
 
 The full specification is [docs/v0.2-spec.md](docs/v0.2-spec.md).
 
@@ -86,7 +86,7 @@ from the pull request's title, body, labels or Dependabot's metadata:
 | NameCreated | when the package name first appeared (new names only) |
 | Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own) |
 | NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json` are the old tarball's, none new, changed or gone, while the files those commands and a `binding.gyp` run are not compared, since the model reads them; provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>`, and is what the tag resolves to |
-| SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version |
+| SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version (Go and npm only: never an image, and never an action, whose tag can be moved after the advisory was reviewed) |
 | Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker) |
 | Veto | none, or a category and the lines the model quoted |
 
@@ -115,6 +115,12 @@ With every fact holding, an update needs an age, measured from FirstSeen:
 In a pull request that carries a fully read security fix, the other
 updates that are known, not new, not major and fully read need no age
 either (`fast_path_companions: ride-along`).
+
+The two security-fix rows are for Go modules and npm. An action's
+security fix waits like any other update of an action, 72 h when read in
+full: the advisory vouches for a tag, and a tag can be moved after the
+advisory was reviewed. The comment still names the advisory, so the fix
+can be merged by hand. An image has no advisory source at all.
 
 Where a registry has no such clock (an Action release that is not
 immutable, most of all), the age runs from the gate's first evaluation of

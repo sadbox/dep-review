@@ -218,6 +218,73 @@ func TestGatherThenDecide(t *testing.T) {
 	})
 }
 
+// An action takes no fast path (spec section 11, amendment 48). The
+// advisory database vouches for a version, and a tag can be moved after
+// the advisory was reviewed: with the checker's yes passed on, a pin the
+// gate first saw a moment ago merged at once. The update waits its age
+// like one that fixes nothing, a partial read gets the unread age, and
+// no other update in the pull request rides along.
+func TestGatherSecurityFixWaitsItsAge(t *testing.T) {
+	now := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+	fix := noAdvisories()
+	fix.result.SecurityFix = allow.Yes("GHSA-zzzz-zzzz-zzzz: affects v7.0.0, not v7.0.1, first patched version 7.0.1", "advisories")
+
+	// The release is not immutable, so the publish job dates the pin from
+	// its own first evaluation of it: now.
+	gather := func(adv *advisories) allow.UpdateFacts {
+		res, _ := run(t, lockedBump("actions/checkout", "v7.0.0", "v7.0.1", checkoutV700, checkoutV701, actionsOwnerID, checkoutRepoID), nil, adv)
+		u := one(t, res)
+		mustHold(t, "Bound", u.Bound)
+		mustHold(t, "NoRegress", u.NoRegress)
+		mustHold(t, "Clean", u.Clean)
+		if u.FirstSeen.Known() {
+			t.Fatalf("FirstSeen = %+v, want a release no registry dates", u.FirstSeen)
+		}
+		u.FirstSeen = allow.At(now, "the gate's own clock")
+		return u
+	}
+	decide := func(at time.Time, updates ...allow.UpdateFacts) allow.Decision {
+		return allow.Decide(allow.PRFacts{
+			Ecosystem:        allow.GitHubActions,
+			Identity:         allow.Yes("dependabot", "test"),
+			Shape:            allow.Yes("in place", "test"),
+			ChecksConfigured: allow.Yes("ruleset", "test"),
+			Updates:          updates,
+		}, testPolicy(), at)
+	}
+	read := func(u allow.UpdateFacts, r allow.ReadState) allow.UpdateFacts {
+		u.Read = r
+		return u
+	}
+	waitsFor := func(t *testing.T, d allow.Decision, age time.Duration) {
+		t.Helper()
+		if d.Outcome != allow.Wait || !slices.Equal(d.Reasons, []allow.Reason{allow.ReasonAge}) {
+			t.Fatalf("%s %v, want a wait for age", d.Outcome, d.Reasons)
+		}
+		for _, u := range d.PerUpdate {
+			if u.RequiredAge != age {
+				t.Errorf("%s needs %s, want %s", u.Name, u.RequiredAge, age)
+			}
+		}
+	}
+
+	t.Run("read in full: min_age, as without the advisory", func(t *testing.T) {
+		waitsFor(t, decide(now, read(gather(fix), allow.ReadFull)), 72*time.Hour)
+		waitsFor(t, decide(now, read(gather(noAdvisories()), allow.ReadFull)), 72*time.Hour)
+		if d := decide(now.Add(73*time.Hour), read(gather(fix), allow.ReadFull)); d.Outcome != allow.Merge {
+			t.Errorf("at 73 h: %s %v, want merge", d.Outcome, d.Reasons)
+		}
+	})
+	t.Run("read in part: unread_age", func(t *testing.T) {
+		waitsFor(t, decide(now, read(gather(fix), allow.ReadPartial)), 14*24*time.Hour)
+	})
+	t.Run("no companion rides along", func(t *testing.T) {
+		other := read(gather(noAdvisories()), allow.ReadFull)
+		other.Name = "actions/setup-go"
+		waitsFor(t, decide(now, read(gather(fix), allow.ReadFull), other), 72*time.Hour)
+	})
+}
+
 // More recorded updates, each for the one thing it shows.
 func TestGatherRecorded(t *testing.T) {
 	t.Run("release that is not immutable has no first-seen time, and says where it looked", func(t *testing.T) {
@@ -555,13 +622,17 @@ func TestGatherRefuses(t *testing.T) {
 				t.Errorf("SecurityFix = %+v, want it blank after an error", u.SecurityFix)
 			}
 		}, holds("Bound", "NoRegress")}},
-		{"security fix is passed through", nil, &advisories{result: advisory.Result{
+		// An action's tag can be moved after the advisory was reviewed, so
+		// the checker's yes grants nothing; the advisory is still named.
+		{"a security fix is recorded as a no that names the advisory", nil, &advisories{result: advisory.Result{
 			SecurityFix:   allow.Yes("GHSA-zzzz-zzzz-zzzz", "advisories"),
 			NoMalware:     allow.Yes("none", "advisories"),
 			NoNewAdvisory: allow.Yes("none", "advisories"),
 		}}, []check{holds("Bound", "NoRegress", "Clean"), func(t *testing.T, u allow.UpdateFacts) {
-			if !u.SecurityFix.Holds() || u.SecurityFix.Value != "GHSA-zzzz-zzzz-zzzz" {
-				t.Errorf("SecurityFix = %+v", u.SecurityFix)
+			mustBeNo(t, "SecurityFix", u.SecurityFix, "GHSA-zzzz-zzzz-zzzz")
+			mustBeNo(t, "SecurityFix", u.SecurityFix, "no fast path for an action: tag v7.1.0 can be moved")
+			if u.SecurityFix.Source != "advisories" {
+				t.Errorf("SecurityFix source %q, want the checker's", u.SecurityFix.Source)
 			}
 		}}},
 	}

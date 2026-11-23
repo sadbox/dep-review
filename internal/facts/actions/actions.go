@@ -150,7 +150,7 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 	// question above is about owner/repo; each directory a workflow line
 	// uses the action from is asked about as well, and Clean holds only
 	// when every answer is clean. These answers can only take Clean away:
-	// SecurityFix stays the repository's.
+	// SecurityFix is made from the repository's alone.
 	for _, sub := range p.subPaths {
 		inDir, err := askAdvisories(ctx, adv, p, p.name+sub)
 		if err != nil {
@@ -159,10 +159,34 @@ func gatherPin(ctx context.Context, c *gh.Client, adv advisory.Checker, p pin, u
 		u.Clean = u.Clean.And(facts.AdvisoryClean(inDir))
 	}
 	u.FirstSeen = firstSeen(p, rel)
-	// As the checker returned it: unavailable or never gathered when it
-	// could not tell.
-	u.SecurityFix = advice.SecurityFix
+	u.SecurityFix = securityFix(p, advice.SecurityFix)
 	return nil
+}
+
+// securityFix is the SecurityFix fact, made from the advisory checker's.
+// For an action it never holds (spec section 11, amendment 48).
+//
+// The database answers for a version: this tag is the first that an
+// advisory does not affect. A registry's version is one set of bytes for
+// good, so there the answer is about the bytes Bound checked. A tag is
+// not. Whoever can push to the repository can move it after the advisory
+// was reviewed; only an immutable release prevents that, and a release
+// that was not immutable can be deleted and published again as one. A
+// commit that the fix's tag was moved to would then need no age and
+// merge at the gate's first evaluation of it, with the model's read as
+// the only thing in its way, and the age is what gives a moved tag time
+// to be noticed. So the checker's "yes" becomes a "no" that still names
+// the advisory, for a person who wants to merge the fix by hand, and the
+// update waits its age like any other.
+//
+// What the checker could not tell stays as it returned it: unavailable
+// is a wait and never gathered is person, and neither is turned into an
+// answer here.
+func securityFix(p pin, advised allow.Fact) allow.Fact {
+	if !advised.Holds() {
+		return advised
+	}
+	return allow.No("no fast path for an action: tag "+p.to+" can be moved after the advisory was reviewed, so the update waits its age. The advisory database says: "+advised.Value, advised.Source)
 }
 
 // askAdvisories asks the advisory database about the pin under one name:
