@@ -677,3 +677,71 @@ func TestPublishKeepsAVetoItCouldNotWrite(t *testing.T) {
 		}
 	})
 }
+
+// outOfTime is the fake behind a server that holds the first write of the
+// gate's comment until the job's time runs out, and answers the rest.
+func (f *fakeAPI) outOfTime(t *testing.T) land.Config {
+	t.Helper()
+	cfg := f.config(t)
+	var mu sync.Mutex
+	held := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hold := !held && r.Method != "GET" && strings.Contains(r.URL.Path, "comments")
+		held = held || hold
+		mu.Unlock()
+		if hold {
+			io.ReadAll(r.Body)
+			<-r.Context().Done()
+			return
+		}
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := gh.New("token")
+	c.BaseURL, c.MaxRetries = srv.URL+"/", 0
+	cfg.GitHub = c
+	return cfg
+}
+
+// A veto of a run whose time runs out in Act's write of the comment is
+// written by what publish writes for that run, which has a minute of its
+// own: on publish's own context it failed too, and the veto was nowhere
+// (spec section 11, amendment 80).
+func TestPublishKeepsAVetoWhenItRunsOutOfTime(t *testing.T) {
+	t.Run("on an event", func(t *testing.T) {
+		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead)}
+		in := t.TempDir()
+		writeFacts(t, filepath.Join(in, "facts", "facts.json"), goodFacts())
+		writeFile(t, filepath.Join(in, "verdicts", "verdicts.json"), vetoVerdicts(t))
+		class := model.Classification{Repo: "o/r", PR: 7, HeadSHA: testHead, Kind: model.KindDependabot}
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		if err := publishEvent(ctx, api.outOfTime(t), in, class); err == nil {
+			t.Fatal("no error")
+		}
+		if !strings.Contains(api.comment, "### dep-review: the run failed") || !slices.Equal(vetoesOf(t, api.comment), []string{testKey}) {
+			t.Errorf("the comment after: %q (requests %v)", api.comment, api.calls)
+		}
+	})
+	t.Run("on the schedule", func(t *testing.T) {
+		const rest = "\n### dep-review: waiting\n\nthe comment's text\n"
+		api := &fakeAPI{pull: pullJSON("open", "dependabot[bot]", testHead), proof: true,
+			comment: handMarker(`"outcome":"wait","head":"`+testHead+`"`) + rest}
+		in := t.TempDir()
+		writeFacts(t, filepath.Join(in, "refreshed", "7", "facts.json"), goodFacts())
+		writeFile(t, filepath.Join(in, "reverdicts", "7", "verdicts.json"), vetoVerdicts(t))
+		entries, err := os.ReadDir(filepath.Join(in, "refreshed"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		if err := refreshed(ctx, api.outOfTime(t), in, entries[0], nil); err == nil {
+			t.Fatal("no error")
+		}
+		if asksOf(t, api.comment) != 1 || !strings.HasSuffix(api.comment, rest) || !slices.Equal(vetoesOf(t, api.comment), []string{testKey}) {
+			t.Errorf("the comment after: %q (requests %v)", api.comment, api.calls)
+		}
+	})
+}

@@ -156,4 +156,31 @@ func TestAVetoOutlivesAWriteThatFailed(t *testing.T) {
 			t.Errorf("under another fingerprint: %s, %d entries", mk.Fingerprint, len(mk.Cache))
 		}
 	})
+	// Every veto, the run's and the marker's, comes before any clean
+	// entry, and one that does not fit is recorded as given up (spec
+	// section 11, amendment 80).
+	t.Run("vetoes first, and one cut is given up", func(t *testing.T) {
+		_, reviewer := defaults(t)
+		veto := func(i int) cached {
+			return cached{Key: fmt.Sprintf("%064x", i), Read: allow.ReadFull, Veto: &allow.Veto{Category: "exfiltration", Quotes: []string{}}}
+		}
+		var v Vetoes
+		v.fingerprint = reviewer
+		for i := range maxCached - 1 {
+			v.cache = append(v.cache, veto(i))
+		}
+		// A clean entry ahead of the marker's veto.
+		mk := marker{Outcome: ActionWait, Head: headA, Fingerprint: reviewer,
+			Cache: []cached{{Key: keyA, Read: allow.ReadFull}, veto(1000)}}
+		v.keep(&mk)
+		if len(mk.Cache) != maxCached || mk.Cache[maxCached-1].Key != veto(1000).Key || mk.Forgot {
+			t.Errorf("%d entries, last %+v, forgot %t", len(mk.Cache), mk.Cache[len(mk.Cache)-1], mk.Forgot)
+		}
+		// More vetoes than a marker holds, across the run's and the marker's.
+		mk = marker{Outcome: ActionWait, Head: headA, Fingerprint: reviewer, Cache: []cached{veto(1000), veto(1001)}}
+		v.keep(&mk)
+		if len(mk.Cache) != maxCached || !mk.Forgot {
+			t.Errorf("%d entries, forgot %t", len(mk.Cache), mk.Forgot)
+		}
+	})
 }

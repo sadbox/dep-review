@@ -166,12 +166,12 @@ func (ev Evaluation) Vetoes() Vetoes {
 	return v
 }
 
-// keep adds v to mk: the vetoes first, then what mk remembered under the
-// same fingerprint and is not among them, to maxCached in all. A marker
-// under another fingerprint has nothing this build looks at, and gives
-// its entries up for v's vetoes, as Act's marker would. The vetoes were
-// cut to what a marker holds (fitted), so String's fit gives up mk's own
-// clean entries before any of them.
+// keep adds v to mk: v's vetoes first, then mk's own under the same
+// fingerprint, then mk's clean entries, to maxCached in all; a veto cut
+// there is given up (Forgot), as in cacheEntries. A marker under another
+// fingerprint has nothing this build looks at, and gives its entries up
+// for v's vetoes, as Act's marker would. String's fit gives up clean
+// entries before any veto.
 func (v Vetoes) keep(mk *marker) {
 	mk.Forgot = mk.Forgot || v.forgot
 	if len(v.cache) == 0 {
@@ -180,13 +180,18 @@ func (v Vetoes) keep(mk *marker) {
 	if mk.Fingerprint != v.fingerprint {
 		mk.Fingerprint, mk.Cache = v.fingerprint, nil
 	}
-	cache := slices.Clone(v.cache)
+	vetoes, clean := slices.Clone(v.cache), []cached(nil)
 	for _, c := range mk.Cache {
-		if !slices.ContainsFunc(v.cache, func(e cached) bool { return e.Key == c.Key }) {
-			cache = append(cache, c)
+		switch {
+		case slices.ContainsFunc(v.cache, func(e cached) bool { return e.Key == c.Key }):
+		case c.Veto != nil:
+			vetoes = append(vetoes, c)
+		default:
+			clean = append(clean, c)
 		}
 	}
-	mk.Cache = cache[:min(len(cache), maxCached)]
+	mk.Forgot = mk.Forgot || len(vetoes) > maxCached
+	mk.Cache = append(vetoes, clean...)[:min(len(vetoes)+len(clean), maxCached)]
 }
 
 // askGap is how long after the first scheduled ask for a head the model

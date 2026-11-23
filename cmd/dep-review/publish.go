@@ -131,7 +131,9 @@ func publishEvent(ctx context.Context, cfg land.Config, in string, class model.C
 			what = fmt.Sprintf("The facts this run decided on were gathered more than %d hours earlier, or by a clock ahead of this job's: "+
 				"a job that is run again by itself gets the facts of the run's first attempt.", int(land.MaxFactsAge.Hours()))
 		}
-		if ferr := land.Failed(ctx, cfg, class.PR, class.HeadSHA, what, kept); ferr != nil {
+		wctx, cancel := afterwards(ctx)
+		defer cancel()
+		if ferr := land.Failed(wctx, cfg, class.PR, class.HeadSHA, what, kept); ferr != nil {
 			log.Printf("publish: #%d: the failed run could not be reported on the pull request: %v", class.PR, ferr)
 		}
 	}
@@ -307,7 +309,9 @@ func refreshed(ctx context.Context, cfg land.Config, in string, e fs.DirEntry, i
 		// proof, the facts, GitHub. Or a pull request that cannot be
 		// decided would be asked about at every run. A veto of this run's
 		// is remembered with it (spec section 11, amendment 73).
-		if aerr := land.Asked(ctx, cfg, number, facts.PullRequest.Head, kept); aerr != nil {
+		wctx, cancel := afterwards(ctx)
+		defer cancel()
+		if aerr := land.Asked(wctx, cfg, number, facts.PullRequest.Head, kept); aerr != nil {
 			log.Printf("publish: #%d: the ask could not be counted: %v", number, aerr)
 		}
 	}
@@ -341,6 +345,13 @@ func decideRefreshed(ctx context.Context, cfg land.Config, w decidable, facts wi
 		}
 	}
 	return decide(ctx, cfg, w)
+}
+
+// afterwards is the context of what publish writes for a run that could
+// not decide: a minute of its own, so that a run whose time ran out in Act
+// still remembers its veto (spec section 11, amendment 80).
+func afterwards(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 }
 
 // decide is Decide and Act for one pull request. written says Act wrote
