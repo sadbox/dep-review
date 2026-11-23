@@ -373,7 +373,8 @@ func gypFile(name string) bool {
 }
 
 // foldName is a file name as a file system that ignores case compares
-// it, as far as the gate goes: in upper case, then in lower. Upper first
+// it, as far as the gate goes: without the dots and blanks at its end,
+// which Windows drops, then in upper case, then in lower. Upper first
 // takes a letter whose capital is an ASCII letter (the dotless i, the
 // long s) to that letter, as such file systems do. The extraction folds
 // paths the same way, and refuses an archive in which two files or two
@@ -381,7 +382,7 @@ func gypFile(name string) bool {
 // package.json and the binding.gyp beside it are in one directory here
 // exactly when they are in one there.
 func foldName(name string) string {
-	return strings.ToLower(strings.ToUpper(name))
+	return strings.ToLower(strings.ToUpper(strings.TrimRight(name, ". ")))
 }
 
 // gypiFile reports whether a file of this name is a .gypi file, in any

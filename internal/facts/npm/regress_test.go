@@ -181,6 +181,8 @@ func TestInspectTarballs(t *testing.T) {
 		{"a binding.gyp spelled with a dotless i appears", pkg(plain), pkg(next, "b\u0131nd\u0131ng.gyp", gyp), no, "is new"},
 		{"a .gypi spelled with a dotless i changes", pkg(plain, "common.gyp\u0131", "{}"), pkg(next, "common.gyp\u0131", gypi), no, "changes"},
 		{"a package.json spelled with a long s and a script", pkg(plain), pkg(plain, "lib/package.j\u017fon", withScript), no, "is new and has an install script"},
+		{"a binding.gyp with a dot at its end appears", pkg(plain), pkg(next, "binding.gyp.", gyp), no, "is new"},
+		{"a .gypi with dots at its end changes", pkg(plain, "common.gypi..", "{}"), pkg(next, "common.gypi..", gypi), no, "changes"},
 
 		// Bundled dependencies are part of the tarball and are held to
 		// the same rule, each at its own path.

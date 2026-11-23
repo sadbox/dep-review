@@ -142,6 +142,12 @@ func TestExtractTarGzRefusesUnsafeArchives(t *testing.T) {
 		{"directories that differ only in case, two levels down", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/node_modules/Inner/binding.gyp", body: "{}\n"}, {name: "package/node_modules/inner/package.json", body: "{}\n"}}))
 		}, "differ only in case"},
+		{"directories that differ only in a dot at the end", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/sub./binding.gyp", body: "{}\n"}, {name: "package/sub/package.json", body: "{}\n"}}))
+		}, "differ only in case"},
+		{"files that differ only in a dot at the end", func(t *testing.T) []byte {
+			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/index.js.", body: "second\n"}}))
+		}, "occurs twice"},
 		{"a directory that differs from a file only in case", func(t *testing.T) []byte {
 			return gzipped(t, buildTar(t, []tarEntry{ok, {name: "package/Readme", body: "x\n"}, {name: "package/readme/x.js", body: "y\n"}}))
 		}, "a file and a directory"},

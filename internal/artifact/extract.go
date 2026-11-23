@@ -224,11 +224,17 @@ func entryPath(name string, dir bool) (string, error) {
 }
 
 // foldPath is a path as a file system that ignores case compares it, as
-// far as the gate goes: in upper case, then in lower. Upper first takes a
-// letter whose capital is an ASCII letter (the dotless i, the long s) to
-// that letter, as such file systems do. It is no one file system's table.
+// far as the gate goes: each element without the dots and blanks at its
+// end, which Windows drops, then in upper case, then in lower. Upper
+// first takes a letter whose capital is an ASCII letter (the dotless i,
+// the long s) to that letter, as such file systems do. It is no one file
+// system's table (spec section 11, amendment 72, for what that leaves).
 func foldPath(p string) string {
-	return strings.ToLower(strings.ToUpper(p))
+	elems := strings.Split(p, "/")
+	for i, e := range elems {
+		elems[i] = strings.TrimRight(e, ". ")
+	}
+	return strings.ToLower(strings.ToUpper(strings.Join(elems, "/")))
 }
 
 // directories records dir and every directory above it, and refuses one
@@ -240,7 +246,7 @@ func (x *extraction) directories(name, dir string) error {
 	for ; dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
 		key := foldPath(dir)
 		if was, ok := x.dirs[key]; ok && was != dir {
-			return unsafeArchive("%q: the directories %q and %q differ only in case", name, was, dir)
+			return unsafeArchive("%q: the directories %q and %q differ only in case or in the dots at their end", name, was, dir)
 		}
 		if x.seen[key] {
 			return unsafeArchive("%q: a file and a directory have the name %q (or two that differ only in case)", name, dir)
