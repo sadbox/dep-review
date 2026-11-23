@@ -772,7 +772,7 @@ func TestFetchNPMScriptsOff(t *testing.T) {
 			value: "binding.gyp changes: it is a file a package is built from when it is installed", outcome: allow.Person, reason: allow.ReasonRegress},
 		// Only the fact this job made counts, and only when git said so.
 		{name: "no such file", eco: model.NPM, applies: true, answer: changed, outcome: allow.Person, reason: allow.ReasonRegress},
-		{name: "no such file, and a gatherer that claims one", eco: model.NPM, returns: allow.Yes(off, scriptsOffSource), answer: changed,
+		{name: "no such file, and a gatherer that claims one", eco: model.NPM, returns: allow.Yes(off, ScriptsOffSource), answer: changed,
 			outcome: allow.Person, reason: allow.ReasonRegress},
 		{name: "the file is there, and the gatherer returns another fact", eco: model.NPM, git: true, returns: allow.Yes("scripts are off", "the gatherer"), answer: changed,
 			outcome: allow.Person, reason: allow.ReasonRegress},
@@ -798,7 +798,7 @@ func TestFetchNPMScriptsOff(t *testing.T) {
 
 			// The gatherer is told what git said, in the gate's words.
 			given := j.gatherer.inputs[0].ScriptsOff
-			if want := allow.Yes(off, scriptsOffSource); tc.git && given != want {
+			if want := allow.Yes(off, ScriptsOffSource); tc.git && given != want {
 				t.Errorf("the gatherer was given %+v, want %+v", given, want)
 			}
 			if !tc.git && given != (allow.Fact{}) {
@@ -812,8 +812,13 @@ func TestFetchNPMScriptsOff(t *testing.T) {
 			if got.Holds() != tc.holds || (tc.value != "" && got.Value != tc.value) {
 				t.Errorf("no regress %+v, want holds %v saying %q", got, tc.holds, tc.value)
 			}
-			if tc.holds && tc.eco == model.NPM && !strings.Contains(got.Source, scriptsOffSource) {
+			if tc.holds && tc.eco == model.NPM && !strings.Contains(got.Source, ScriptsOffSource) {
 				t.Errorf("no regress source %q does not name the .npmrc", got.Source)
+			}
+			// Publish tells from this fact alone whether a merge rests on
+			// the file (spec section 11, amendment 70).
+			if want := tc.holds && tc.eco == model.NPM; RestsOnScriptsOff(got) != want {
+				t.Errorf("RestsOnScriptsOff(%+v) = %t, want %t", got, !want, want)
 			}
 			d := decide(t, f, cleanVerdicts(f))
 			wantOutcome(t, d, tc.outcome, tc.reason)

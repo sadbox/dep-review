@@ -514,7 +514,12 @@ root's `package-lock.json` only, a pull request that changes `.npmrc`
 goes to a person, and the tarballs are still verified and read by the
 model. Provenance is still compared. Removing the line later turns on
 every install script in the lock at once, and none of them was compared
-while it was there.
+while it was there. The gate reads the file at the commit the pull
+request records, which GitHub moves only when Dependabot rebuilds the
+pull request, so before a merge that rests on it, publish reads the
+default branch's root `.npmrc` as it is now; when it is not the same
+file, the pull request waits (`scripts_off_changed`) until Dependabot
+rebuilds it and the new head is evaluated on its own.
 
 `ignore_ecosystems` (comma-separated, default empty) is for an ecosystem
 whose Dependabot pull requests another trusted process owns. Names are the
@@ -540,7 +545,8 @@ and it then gets no status, comment or notification.
 - An install script in a repository whose `.npmrc` turns scripts off, when
   npm runs somewhere that does not read that file or is told otherwise by
   a flag or an environment variable. The gate reads the file's bytes at
-  the base commit and nothing about how npm is run.
+  the base commit, and its git entry on the default branch before a
+  merge, and nothing about how npm is run.
 - Code the model was not shown. Files that are not text, and text beyond
   the chunk budget, are listed as unread; such an update is only partly
   read and still merges, after `unread_age_days`, as long as the model
@@ -589,8 +595,9 @@ and it then gets no status, comment or notification.
   schedule. The policy is built into the gate: no file of a repository
   or a pull request changes it. One file of the repository changes what
   a fact asks: the root `.npmrc` at the base branch's commit, by which
-  npm's install inputs are not compared. A pull request that changes
-  that file has no Shape.
+  npm's install inputs are not compared, and which must still be the
+  default branch's for a merge that rests on it. A pull request that
+  changes that file has no Shape.
 - **Third-party text.** Everything a registry, a dependency or the model
   wrote reaches the comment only through one sanitiser, in code spans,
   with a length cap; it reaches logs only through a logger that escapes

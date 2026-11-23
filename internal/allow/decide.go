@@ -184,6 +184,22 @@ func Decide(f PRFacts, p Policy, now time.Time) Decision {
 // request changes (spec section 11, amendments 17 and 62). A decision
 // that is not Merge is returned unchanged. Pure, like Decide.
 func ChecksRefused(d Decision, now time.Time) Decision {
+	return notMerged(d, now, ReasonChecksPending, ReasonChecksDeadline)
+}
+
+// ScriptsOffChanged is the decision for a merge Decide allowed and
+// publish did not ask for, because the decision rests on the root .npmrc
+// that turns install scripts off and the default branch no longer has
+// that file (spec section 11, amendment 70). Like ChecksRefused it is a
+// wait until the decision's deadline and a person's from then on, and it
+// leaves a decision that is not a merge as it is.
+func ScriptsOffChanged(d Decision, now time.Time) Decision {
+	return notMerged(d, now, ReasonScriptsOffChanged, ReasonScriptsOffDeadline)
+}
+
+// notMerged turns a merge into a wait for one reason, or a person's for
+// another at the deadline.
+func notMerged(d Decision, now time.Time, wait, deadline Reason) Decision {
 	if d.Outcome != Merge {
 		return d
 	}
@@ -191,13 +207,13 @@ func ChecksRefused(d Decision, now time.Time) Decision {
 	out.PerUpdate = append([]UpdateDecision(nil), d.PerUpdate...)
 	if !now.Before(d.Deadline) {
 		out.Outcome = Person
-		out.Reasons = []Reason{ReasonChecksDeadline}
+		out.Reasons = []Reason{deadline}
 		out.NotBefore = time.Time{}
 		out.Deadline = time.Time{}
 		return out
 	}
 	out.Outcome = Wait
-	out.Reasons = []Reason{ReasonChecksPending}
+	out.Reasons = []Reason{wait}
 	return out
 }
 

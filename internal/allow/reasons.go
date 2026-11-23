@@ -64,6 +64,7 @@ const (
 	ReasonSourceDeadline     Reason = "source_deadline"
 	ReasonSupersededDeadline Reason = "superseded_deadline"
 	ReasonChecksDeadline     Reason = "checks_deadline"
+	ReasonScriptsOffDeadline Reason = "scripts_off_deadline"
 )
 
 // Reasons to wait. All are Wait.
@@ -73,6 +74,10 @@ const (
 	ReasonSourceUnavailable Reason = "source_unavailable"
 	ReasonSuperseded        Reason = "superseded"
 	ReasonChecksPending     Reason = "checks_pending"
+	// ReasonScriptsOffChanged: publish did not ask GitHub to merge,
+	// because the default branch's root .npmrc is no longer the file the
+	// facts rest on (ScriptsOffChanged).
+	ReasonScriptsOffChanged Reason = "scripts_off_changed"
 )
 
 // The ways out that several reasons share.
@@ -199,6 +204,9 @@ var reasonTable = []reasonText{
 	{ReasonChecksDeadline, Person,
 		"The required checks were still pending or failing when the wait deadline passed.",
 		"Fix the failing checks or close the pull request."},
+	{ReasonScriptsOffDeadline, Person,
+		"The default branch's root .npmrc was still not the file that turns install scripts off, which this pull request's facts rest on, when the wait deadline passed. The update's install scripts and build files were not compared.",
+		"Ask Dependabot to rebase the pull request, so that the new head is evaluated on its own, or compare the update's install scripts by hand and merge or close the pull request."},
 	{ReasonAge, Wait,
 		"The new version has not been public for long enough yet.",
 		"Nothing to do: the gate looks again after the time shown." + sooner},
@@ -214,6 +222,9 @@ var reasonTable = []reasonText{
 	{ReasonChecksPending, Wait,
 		"GitHub refused the merge because required checks are pending or failing.",
 		"Nothing to do while checks run. If a check failed, fix it or close the pull request."},
+	{ReasonScriptsOffChanged, Wait,
+		"The default branch's root .npmrc is no longer the file that turns install scripts off. This pull request's facts rest on that file as it was at the commit the pull request records, so the update's install scripts and build files were not compared, and the gate did not ask GitHub to merge.",
+		"Once Dependabot rebuilds the pull request (ask it to rebase if it does not), the new head is evaluated on its own, with its install inputs compared. If the file is put back, this head merges at the next run."},
 }
 
 // Reasons returns the closed set, in a fixed order.

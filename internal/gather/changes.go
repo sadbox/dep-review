@@ -44,13 +44,20 @@ type Changes struct {
 // scriptsOffEntry is everything "git ls-tree --full-tree -z <commit> --
 // .npmrc" prints for a root .npmrc that is a regular, non-executable file whose
 // bytes are exactly "ignore-scripts=true" and one newline: the mode, the
-// type, the blob's ID (git hash-object of those 20 bytes), the path and
-// the terminating NUL. The answer is compared with this whole, so no
-// .npmrc is ever parsed here: a comment, a space around the "=", a
-// second setting, a missing newline, an executable bit, a symbolic link,
-// a directory and a repository that names its objects by SHA-256 all
-// print something else, which is the absence of the fact.
-const scriptsOffEntry = "100644 blob 97b895e2f9681e5b1834e15c9e33a43cb3c7af28\t.npmrc\x00"
+// type, the blob's ID (ScriptsOffBlob), the path and the terminating
+// NUL. The answer is compared with this whole, so no .npmrc is ever
+// parsed here: a comment, a space around the "=", a second setting, a
+// missing newline, an executable bit, a symbolic link, a directory and a
+// repository that names its objects by SHA-256 all print something else,
+// which is the absence of the fact.
+const scriptsOffEntry = "100644 blob " + ScriptsOffBlob + "\t.npmrc\x00"
+
+// ScriptsOffBlob is git's ID for the one root .npmrc the gate knows to
+// turn npm's install scripts off: git hash-object of the 20 bytes
+// "ignore-scripts=true" and a newline. Publish looks for it on the
+// default branch as it is now before a merge that rests on the fact
+// (spec section 11, amendment 70).
+const ScriptsOffBlob = "97b895e2f9681e5b1834e15c9e33a43cb3c7af28"
 
 // changeLimits bound what ReadChanges holds in memory.
 type changeLimits struct {

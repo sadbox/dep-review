@@ -590,11 +590,13 @@ var reasonFact = map[allow.Reason]string{
 	allow.ReasonSourceDeadline:      "",
 	allow.ReasonSupersededDeadline:  "",
 	allow.ReasonChecksDeadline:      "",
+	allow.ReasonScriptsOffDeadline:  "",
 	allow.ReasonAge:                 "FirstSeen",
 	allow.ReasonReadPending:         "Read",
 	allow.ReasonSourceUnavailable:   answerUnavailable,
 	allow.ReasonSuperseded:          "Superseded",
 	allow.ReasonChecksPending:       "",
+	allow.ReasonScriptsOffChanged:   "",
 }
 
 // failed finds the row a reason is about, and says whose fact it is: the

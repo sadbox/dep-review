@@ -86,6 +86,10 @@ type fakeGitHub struct {
 	prFilesCode int
 	compare     string
 	compareCode int
+	// tree and treeCode answer the read of main's root tree. Without a
+	// treeCode the read is a request the fake does not know.
+	tree     string
+	treeCode int
 	// mergeCode and mergeBody answer the merge call. mergedAfter makes
 	// the pull request read as merged from then on.
 	mergeCode   int
@@ -204,6 +208,11 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && strings.HasPrefix(rest, "compare/") && strings.HasSuffix(rest, "...main") &&
 		gh.ValidSHA(strings.TrimSuffix(strings.TrimPrefix(rest, "compare/"), "...main")):
 		answer(f.compareCode, f.compare)
+	case route == "GET git/trees/main" && f.treeCode != 0:
+		if r.URL.RawQuery != "" {
+			f.t.Errorf("the tree was asked for with %q", r.URL.RawQuery)
+		}
+		answer(f.treeCode, f.tree)
 	case r.Method == "GET" && strings.HasPrefix(rest, "issues/") && strings.HasSuffix(rest, "/comments"):
 		if f.commentsCode != 0 && f.commentsFirst == 0 {
 			answer(f.commentsCode, `{"message":"Server Error"}`)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sadbox/dep-review/internal/advisory"
@@ -55,12 +56,26 @@ type Fetch struct {
 const (
 	classifySource = "classify"
 	changesSource  = "git: the paths that differ between the merge base and the head"
-	// scriptsOffSource is where Changes.ScriptsOff comes from.
-	scriptsOffSource = "git: the root .npmrc at the base branch's commit"
 	// ownUnread is the detail of a read that was not prepared because the
 	// update is the gate owner's own workflow. The comment quotes it.
 	ownUnread = "nothing of the gate owner's own workflow is read: it is accepted on where its commit comes from, and no model is asked"
 )
+
+// ScriptsOffSource is the Source of the fact Changes.ScriptsOff makes. An
+// npm NoRegress that holds by it carries it in its own Source.
+const ScriptsOffSource = "git: the root .npmrc at the base branch's commit"
+
+// RestsOnScriptsOff reports whether an update's NoRegress was made with
+// the scripts-off fact: whether its Source names ScriptsOffSource. A
+// merge decided on such a NoRegress rests on the root .npmrc at the
+// commit the pull request records, which GitHub does not move when the
+// default branch moves; publish reads the file again on the default
+// branch before it merges (spec section 11, amendment 70). The test is
+// the Source's text and nothing else, so a Source that names it among
+// others counts: a wrong yes costs only that read.
+func RestsOnScriptsOff(noRegress allow.Fact) bool {
+	return strings.Contains(noRegress.Source, ScriptsOffSource)
+}
 
 // Run gathers the pull request's facts, prepares what the model is to
 // read, and writes the facts file and the chunk files into out, which it
@@ -204,7 +219,7 @@ func (f Fetch) gather(ctx context.Context, chunks string, classified allow.Fact,
 	// is handed (spec section 11, amendment 59).
 	var scriptsOff allow.Fact
 	if f.Changes.ScriptsOff {
-		scriptsOff = allow.Yes("install scripts are off in this repository (ignore-scripts=true)", scriptsOffSource)
+		scriptsOff = allow.Yes("install scripts are off in this repository (ignore-scripts=true)", ScriptsOffSource)
 	}
 	res, err := gatherer.Gather(ctx, facts.Input{
 		Repo:       file.PullRequest.Repo,

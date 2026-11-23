@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sadbox/dep-review/internal/allow"
+	"github.com/sadbox/dep-review/internal/gather"
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/wire"
 )
@@ -115,6 +116,16 @@ func Act(ctx context.Context, cfg Config, ev Evaluation) (Result, error) {
 			// gate will not ask for yet: a wait the scheduled job tries
 			// again, a person's at the deadline.
 			res.Decision, res.Held, res.Note = allow.ChecksRefused(ev.Decision, ev.now), true, file
+			merging = false
+		}
+	}
+	if merging && restsOnScriptsOff(ev.Facts) {
+		still, err := scriptsOffAtTip(ctx, cfg, ev.branch)
+		if err != nil {
+			return Result{}, err
+		}
+		if !still {
+			res.Decision = allow.ScriptsOffChanged(ev.Decision, ev.now)
 			merging = false
 		}
 	}
@@ -473,6 +484,61 @@ func baseChanged(ctx context.Context, cfg Config, pr wire.PullRequest, branch st
 		}
 	}
 	return false, "", nil
+}
+
+// restsOnScriptsOff reports whether a decision on these facts rests on the
+// root .npmrc that turns npm's install scripts off: whether an update's
+// NoRegress was made with that fact.
+func restsOnScriptsOff(f allow.PRFacts) bool {
+	for _, u := range f.Updates {
+		if gather.RestsOnScriptsOff(u.NoRegress) {
+			return true
+		}
+	}
+	return false
+}
+
+// scriptsOffAtTip reports whether the default branch, as it is now, has
+// the root .npmrc that turns npm's install scripts off (spec section 11,
+// amendment 70). The facts read that file at the base commit the pull
+// request records, and GitHub moves that commit only when the pull
+// request's branch is rebuilt, so every run that gathers the facts again
+// reads the same old commit. A repository that turned install scripts back
+// on since would have the update merged with install inputs nobody
+// compared.
+//
+// The answer is GitHub's root tree of the branch, not recursive. It must
+// have an entry for .npmrc that is a regular, non-executable file with
+// exactly the blob gather.ScriptsOffBlob, and must not be cut short. A
+// listing that does not say whether it was cut short counts as cut.
+//
+// An error is an answer that did not come or does not list the tree, and
+// is handled as baseChanged's errors are: nothing is merged.
+func scriptsOffAtTip(ctx context.Context, cfg Config, branch string) (bool, error) {
+	var tree struct {
+		Tree *[]struct {
+			Path string `json:"path"`
+			Mode string `json:"mode"`
+			Type string `json:"type"`
+			SHA  string `json:"sha"`
+		} `json:"tree"`
+		Truncated *bool `json:"truncated"`
+	}
+	if err := cfg.GitHub.Get(ctx, fmt.Sprintf("repos/%s/git/trees/%s", cfg.Repo, branch), &tree); err != nil {
+		return false, err
+	}
+	if tree.Tree == nil {
+		return false, fmt.Errorf("land: GitHub's root tree of %s does not list its entries", branch)
+	}
+	if tree.Truncated == nil || *tree.Truncated {
+		return false, nil
+	}
+	for _, e := range *tree.Tree {
+		if e.Path == ".npmrc" {
+			return e.Mode == "100644" && e.Type == "blob" && e.SHA == gather.ScriptsOffBlob, nil
+		}
+	}
+	return false, nil
 }
 
 // mergeKind is how an attempt to merge ended.

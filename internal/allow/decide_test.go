@@ -1635,6 +1635,36 @@ func TestChecksRefused(t *testing.T) {
 	wantOutcome(t, ChecksRefused(Decision{Outcome: Merge}, t0), Person, ReasonChecksDeadline)
 }
 
+// TestScriptsOffChanged: a merge publish did not ask for because the
+// default branch's root .npmrc is no longer the file the facts rest on
+// waits, and is a person's at the wait deadline (spec section 11,
+// amendment 70).
+func TestScriptsOffChanged(t *testing.T) {
+	p := testPolicy()
+	f := pr(GoModules, update(40*day))
+	f.Opened = t0.Add(-day)
+	d := Decide(f, p, t0)
+	wantOutcome(t, d, Merge)
+	deadline := f.Opened.Add(7 * day)
+
+	w := ScriptsOffChanged(d, t0)
+	wantOutcome(t, w, Wait, ReasonScriptsOffChanged)
+	if !w.Deadline.Equal(deadline) || len(w.PerUpdate) != 1 {
+		t.Fatalf("the decision lost its deadline or updates: %+v", w)
+	}
+	wantOutcome(t, ScriptsOffChanged(d, deadline.Add(-1)), Wait, ReasonScriptsOffChanged)
+	wantOutcome(t, ScriptsOffChanged(d, deadline), Person, ReasonScriptsOffDeadline)
+	for _, other := range []Decision{
+		Decide(pr(GoModules, update(hour)), p, t0),
+		Decide(pr(GoModules, update(hour, major)), p, t0),
+	} {
+		if got := ScriptsOffChanged(other, t0.Add(400*day)); !reflect.DeepEqual(got, other) {
+			t.Fatalf("ScriptsOffChanged changed a %q decision", other.Outcome)
+		}
+	}
+	wantOutcome(t, ScriptsOffChanged(Decision{Outcome: Merge}, t0), Person, ReasonScriptsOffDeadline)
+}
+
 func TestListed(t *testing.T) {
 	p := testPolicy()
 	tests := []struct {
