@@ -1,0 +1,24 @@
+{
+  "name": "@kurkle/color",
+  "time": {
+    "0.3.4": "2024-11-19T18:44:10.106Z",
+    "created": "2020-02-05T19:59:45.029Z",
+    "modified": "2026-11-19T15:39:19.898Z"
+  },
+  "versions": {
+    "0.3.4": {
+      "dist": {
+        "integrity": "sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==",
+        "tarball": "https://registry.npmjs.org/@kurkle/color/-/color-0.3.4.tgz"
+      },
+      "license": "MIT",
+      "name": "@kurkle/color",
+      "scripts": {
+        "lint": "eslint src/*.js test/*.js util/*.js",
+        "test": "node test/index.js",
+        "build": "node util/copy_dist.js && rollup -c"
+      },
+      "version": "0.3.4"
+    }
+  }
+}

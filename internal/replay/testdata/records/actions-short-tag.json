@@ -1,0 +1,13 @@
+{
+  "ecosystem": "github_actions",
+  "created": "2026-01-10T12:00:00Z",
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "base_mode": "100644",
+      "head_mode": "100644",
+      "base": "name: ci\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v4\n      - run: go test ./...\n",
+      "head": "name: ci\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb # v5\n      - run: go test ./...\n"
+    }
+  ]
+}

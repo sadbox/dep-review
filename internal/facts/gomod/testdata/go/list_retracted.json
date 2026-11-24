@@ -1,0 +1,74 @@
+{
+	"Path": "github.com/fsnotify/fsnotify",
+	"Version": "v1.5.3",
+	"Time": "2022-02-16T01:41:47Z",
+	"Update": {
+		"Path": "github.com/fsnotify/fsnotify",
+		"Version": "v1.10.1",
+		"Time": "2026-05-04T10:39:17Z"
+	},
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/github.com/fsnotify/fsnotify/@v/v1.5.3.mod",
+	"GoVersion": "1.13",
+	"Retracted": [
+		"Published an incorrect branch accidentally https://github.com/fsnotify/fsnotify/issues/445"
+	]
+}
+{
+	"Path": "github.com/fsnotify/fsnotify",
+	"Version": "v1.5.4",
+	"Time": "2022-04-27T02:06:09Z",
+	"Update": {
+		"Path": "github.com/fsnotify/fsnotify",
+		"Version": "v1.10.1",
+		"Time": "2026-05-04T10:39:17Z"
+	},
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/github.com/fsnotify/fsnotify/@v/v1.5.4.mod",
+	"GoVersion": "1.16"
+}
+{
+	"Path": "github.com/fsnotify/fsnotify",
+	"Version": "v1.5.99",
+	"Update": {
+		"Path": "github.com/fsnotify/fsnotify",
+		"Version": "v1.10.1",
+		"Time": "2026-05-04T10:39:17Z"
+	},
+	"Error": {
+		"Err": "github.com/fsnotify/fsnotify@v1.5.99: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.99.info: 404 Not Found\n\tserver response: not found: github.com/fsnotify/fsnotify@v1.5.99: invalid version: unknown revision v1.5.99"
+	}
+}
+{
+	"Path": "github.com/golang/protobuf",
+	"Version": "v1.5.4",
+	"Time": "2024-03-06T06:45:40Z",
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/github.com/golang/protobuf/@v/v1.5.4.mod",
+	"GoVersion": "1.17",
+	"Deprecated": "Use the \"google.golang.org/protobuf\" module instead.",
+	"Origin": {
+		"VCS": "git",
+		"URL": "https://github.com/golang/protobuf",
+		"Hash": "75de7c059e36b64f01d0dd234ff2fff404ec3374",
+		"Ref": "refs/tags/v1.5.4"
+	}
+}
+{
+	"Path": "google.golang.org/grpc",
+	"Version": "v1.74.0",
+	"Time": "2025-07-16T18:37:53Z",
+	"Update": {
+		"Path": "google.golang.org/grpc",
+		"Version": "v1.85.0",
+		"Time": "2026-10-27T09:27:04Z"
+	},
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/google.golang.org/grpc/@v/v1.74.0.mod",
+	"GoVersion": "1.23.0",
+	"Retracted": [
+		"v1.74.0 was published prematurely with known issues."
+	],
+	"Origin": {
+		"VCS": "git",
+		"URL": "https://github.com/grpc/grpc-go",
+		"Hash": "406c2bf4972d72d1746b156e5989228b094d6d3e",
+		"Ref": "refs/tags/v1.74.0"
+	}
+}

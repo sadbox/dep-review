@@ -14,9 +14,13 @@ import (
 	"github.com/sadbox/dep-review/internal/model"
 )
 
-// ignoreUsage is shared by classify and sweep, which must agree.
+// ignoreUsage is shared by classify, refresh and publish, which must
+// agree: each runs the identity proof.
 const ignoreUsage = "optional: comma-separated ecosystems, as in Dependabot's branch names (e.g. submodules), whose verified Dependabot PRs another process owns; the gate leaves them alone. An unknown name is an error"
 
+// runClassify: dep-review classify --event <file> --trigger-path <path> --out <file>
+//
+// Writes classification.json and appends kind=<kind> to $GITHUB_OUTPUT.
 func runClassify(args []string) error {
 	fs := newFlagSet("classify")
 	event := fs.String("event", "", "workflow_run event payload (GITHUB_EVENT_PATH) (required)")
@@ -26,7 +30,7 @@ func runClassify(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *event == "" || *trigger == "" || *out == "" {
+	if *event == "" || *trigger == "" || *out == "" || fs.NArg() > 0 {
 		return errors.New("classify: --event, --trigger-path and --out are required")
 	}
 	ignore, err := model.ParseEcosystems(*ignoreList)

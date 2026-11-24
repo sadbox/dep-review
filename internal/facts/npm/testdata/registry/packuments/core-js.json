@@ -1,0 +1,35 @@
+{
+  "name": "core-js",
+  "time": {
+    "3.38.0": "2024-08-04T18:19:09.775Z",
+    "3.38.1": "2024-08-20T11:38:43.960Z",
+    "created": "2013-07-18T10:49:42.468Z",
+    "modified": "2026-10-19T11:00:41.414Z"
+  },
+  "versions": {
+    "3.38.0": {
+      "dist": {
+        "integrity": "sha512-XPpwqEodRljce9KswjZShh95qJ1URisBeKCjUdq27YdenkslVe7OO0ZJhlYXAChW7OhXaRLl8AAba7IBfoIHug==",
+        "tarball": "https://registry.npmjs.org/core-js/-/core-js-3.38.0.tgz"
+      },
+      "license": "MIT",
+      "name": "core-js",
+      "scripts": {
+        "postinstall": "node -e \"try{require('./postinstall')}catch(e){}\""
+      },
+      "version": "3.38.0"
+    },
+    "3.38.1": {
+      "dist": {
+        "integrity": "sha512-OP35aUorbU3Zvlx7pjsFdu1rGNnD4pgw/CWoYzRY3t2EzoVT7shKHY1dlAy3f41cGIO7ZDPQimhGFTlEYkG/Hw==",
+        "tarball": "https://registry.npmjs.org/core-js/-/core-js-3.38.1.tgz"
+      },
+      "license": "MIT",
+      "name": "core-js",
+      "scripts": {
+        "postinstall": "node -e \"try{require('./postinstall')}catch(e){}\""
+      },
+      "version": "3.38.1"
+    }
+  }
+}

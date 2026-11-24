@@ -48,12 +48,13 @@ func TestParseEcosystems(t *testing.T) {
 
 func TestEcosystemFromBranch(t *testing.T) {
 	for ref, want := range map[string]Ecosystem{
-		"dependabot/submodules/tools/upstream/adblock-lists-9778b88": GitSubmodule,
-		"dependabot/go_modules/aws-1c8ebe5c54":                       GoModules,
-		"dependabot/cargo/x-1":                                       "",
-		"dependabot/submodules":                                      "",
-		"feature/submodules/x":                                       "",
-		"":                                                           "",
+		"dependabot/submodules/tools/upstream/adblock-lists-9778b88":              GitSubmodule,
+		"dependabot/go_modules/aws-1c8ebe5c54":                                    GoModules,
+		"dependabot/github_actions/sadbox/ci/dot-github/workflows/lint.yml-0.5.0": GitHubActions,
+		"dependabot/cargo/x-1":  "",
+		"dependabot/submodules": "",
+		"feature/submodules/x":  "",
+		"":                      "",
 	} {
 		got, ok := EcosystemFromBranch(ref)
 		if got != want || ok != (want != "") {

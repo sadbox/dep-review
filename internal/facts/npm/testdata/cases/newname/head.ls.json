@@ -1,0 +1,50 @@
+{"npm":"11.20.0","exit":0,"stdout":{
+  "version": "1.0.0",
+  "name": "fixture-newname",
+  "private": true,
+  "_id": "fixture-newname@1.0.0",
+  "extraneous": false,
+  "path": "/scratch/project",
+  "_dependencies": {
+    "chart.js": "4.4.7"
+  },
+  "devDependencies": {},
+  "peerDependencies": {},
+  "dependencies": {
+    "chart.js": {
+      "version": "4.4.7",
+      "resolved": "https://registry.npmjs.org/chart.js/-/chart.js-4.4.7.tgz",
+      "overridden": false,
+      "name": "chart.js",
+      "integrity": "sha512-pwkcKfdzTMAU/+jNosKhNL2bHtJc/sSmYgVbuGTEDhzkrhmyihmP7vUc/5ZK9WopidMDHNe3Wm7jOd/WhuHWuw==",
+      "license": "MIT",
+      "engines": {
+        "pnpm": ">=8"
+      },
+      "_id": "chart.js@4.4.7",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/chart.js",
+      "_dependencies": {
+        "@kurkle/color": "^0.3.0"
+      },
+      "devDependencies": {},
+      "peerDependencies": {},
+      "dependencies": {
+        "@kurkle/color": {
+          "version": "0.3.4",
+          "resolved": "https://registry.npmjs.org/@kurkle/color/-/color-0.3.4.tgz",
+          "overridden": false,
+          "name": "@kurkle/color",
+          "integrity": "sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==",
+          "license": "MIT",
+          "_id": "@kurkle/color@0.3.4",
+          "extraneous": false,
+          "path": "/scratch/project/node_modules/@kurkle/color",
+          "_dependencies": {},
+          "devDependencies": {},
+          "peerDependencies": {}
+        }
+      }
+    }
+  }
+}}

@@ -3,10 +3,8 @@ package classify
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,34 +20,35 @@ const (
 )
 
 type fixture struct {
-	event    map[string]any
-	pr       map[string]any
-	commits  []map[string]any
-	files    []map[string]any
-	byCommit []map[string]any   // GET commits/{sha}/pulls
-	activity []map[string]any   // GET activity?ref=<head branch>, oldest first
-	actCode  int                // non-zero: GET activity fails with this status
-	rulesets []map[string]any   // full rulesets; the list endpoint serves their summaries
-	rsCode   int                // non-zero: GET rulesets fails with this status
-	rsGet    int                // non-zero: GET rulesets/{id} fails with this status
-	timeline []map[string]any   // GET issues/7/timeline
-	actSeq   [][]map[string]any // successive activity responses (overrides activity)
-	actCalls int
-	slept    []time.Duration
-	tlCode   int                      // non-zero: GET timeline fails with this status
-	ignore   map[model.Ecosystem]bool // Options.IgnoreEcosystems
+	event     map[string]any
+	pr        map[string]any
+	commits   []map[string]any
+	byCommit  []map[string]any   // GET commits/{sha}/pulls
+	activity  []map[string]any   // GET activity?ref=<head branch>, oldest first
+	actCode   int                // non-zero: GET activity fails with this status
+	rules     []map[string]any   // GET rules/branches/<head branch>
+	rulesCode int                // non-zero: GET rules/branches fails with this status
+	timeline  []map[string]any   // GET issues/7/timeline
+	actSeq    [][]map[string]any // successive activity responses (overrides activity)
+	actCalls  int
+	slept     []time.Duration
+	tlCode    int                      // non-zero: GET timeline fails with this status
+	ignore    map[model.Ecosystem]bool // Options.IgnoreEcosystems
 }
 
-// dependabotRuleset is the ruleset the owner created in every repository.
-func dependabotRuleset(id int, include ...string) map[string]any {
-	if include == nil {
-		include = []string{"refs/heads/dependabot/**"}
-	}
-	return map[string]any{
-		"id": id, "name": "dependabot branches", "target": "branch", "enforcement": "active",
-		"conditions": map[string]any{"ref_name": map[string]any{"include": include, "exclude": []string{}}},
-		"rules":      []any{map[string]any{"type": "creation"}, map[string]any{"type": "update"}, map[string]any{"type": "deletion"}},
-	}
+// rule is one entry of GitHub's rules/branches answer, with the members
+// it carries besides the type.
+func rule(typ string, ruleset int) map[string]any {
+	return map[string]any{"type": typ, "ruleset_source_type": "Repository", "ruleset_source": "o/r", "ruleset_id": ruleset}
+}
+
+// dependabotRules is what GitHub answers for a dependabot/ branch in a
+// repository with the owner's "dependabot branches" ruleset. Recorded on
+// 2026-11-23 from rules/branches/dependabot/go_modules/golang.org/x/net-0.63.0
+// of a repository that has it; the update rule carries no parameters
+// there. A repository without the ruleset answers [].
+func dependabotRules() []map[string]any {
+	return []map[string]any{rule("creation", 42), rule("update", 42), rule("deletion", 42)}
 }
 
 const zero = "0000000000000000000000000000000000000000"
@@ -59,10 +58,6 @@ func act(typ, actor, before, after string) map[string]any {
 }
 
 func defaultFixture(t *testing.T) *fixture {
-	msg, err := os.ReadFile("testdata/msg_Espresso-Aficionados_sprobot_281.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
 	return &fixture{
 		event: map[string]any{
 			"action": "completed",
@@ -87,15 +82,29 @@ func defaultFixture(t *testing.T) *fixture {
 			"sha":       head,
 			"author":    map[string]any{"login": "dependabot[bot]"},
 			"committer": map[string]any{"login": "web-flow"},
-			"commit":    map[string]any{"message": string(msg), "verification": map[string]any{"verified": true, "reason": "valid"}},
+			"commit":    map[string]any{"message": "Bump the aws group with 2 updates", "verification": map[string]any{"verified": true, "reason": "valid"}},
 		}},
-		files:    []map[string]any{{"filename": "go.mod"}, {"filename": "go.sum"}},
 		activity: []map[string]any{act("branch_creation", "dependabot[bot]", zero, head)},
-		rulesets: []map[string]any{dependabotRuleset(42)},
+		rules:    dependabotRules(),
 	}
 }
 
 func (f *fixture) run(t *testing.T) (model.Classification, error) {
+	t.Helper()
+	ev, _ := json.Marshal(f.event)
+	return Classify(context.Background(), f.client(t), ev, f.options())
+}
+
+// options is what the gate passes besides the event.
+func (f *fixture) options() Options {
+	return Options{TriggerPath: trig, IgnoreEcosystems: f.ignore, Logf: func(string, ...any) {}, Sleep: func(_ context.Context, d time.Duration) error {
+		f.slept = append(f.slept, d)
+		return nil
+	}}
+}
+
+// client is a GitHub client for a server that answers from the fixture.
+func (f *fixture) client(t *testing.T) *gh.Client {
 	t.Helper()
 	mux := http.NewServeMux()
 	js := func(v any) http.HandlerFunc {
@@ -103,7 +112,6 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 	}
 	mux.Handle("GET /repos/o/r/pulls/7", js(f.pr))
 	mux.Handle("GET /repos/o/r/pulls/7/commits", js(f.commits))
-	mux.Handle("GET /repos/o/r/pulls/7/files", js(f.files))
 	mux.Handle("GET /repos/o/r/commits/"+head+"/pulls", js(f.byCommit))
 	mux.HandleFunc("GET /repos/o/r/activity", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -135,29 +143,20 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 		}
 		json.NewEncoder(w).Encode(tl)
 	})
-	mux.HandleFunc("GET /repos/o/r/rulesets", func(w http.ResponseWriter, r *http.Request) {
-		if f.rsCode != 0 {
-			w.WriteHeader(f.rsCode)
+	mux.HandleFunc("GET /repos/o/r/rules/branches/{branch...}", func(w http.ResponseWriter, r *http.Request) {
+		// The whole branch name, slashes and all, and nothing else.
+		if want := f.pr["head"].(map[string]any)["ref"].(string); r.PathValue("branch") != want {
+			t.Errorf("rules asked for branch %q, want %q", r.PathValue("branch"), want)
+		}
+		if f.rulesCode != 0 {
+			w.WriteHeader(f.rulesCode)
 			return
 		}
-		var list []map[string]any
-		for _, rs := range f.rulesets {
-			list = append(list, map[string]any{"id": rs["id"], "name": rs["name"], "target": rs["target"], "enforcement": rs["enforcement"]})
+		rules := f.rules
+		if rules == nil {
+			rules = []map[string]any{}
 		}
-		json.NewEncoder(w).Encode(list)
-	})
-	mux.HandleFunc("GET /repos/o/r/rulesets/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if f.rsGet != 0 {
-			w.WriteHeader(f.rsGet)
-			return
-		}
-		for _, rs := range f.rulesets {
-			if fmt.Sprint(rs["id"]) == r.PathValue("id") {
-				json.NewEncoder(w).Encode(rs)
-				return
-			}
-		}
-		http.NotFound(w, r)
+		json.NewEncoder(w).Encode(rules)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request %s %s", r.Method, r.URL)
@@ -168,11 +167,7 @@ func (f *fixture) run(t *testing.T) (model.Classification, error) {
 	c := gh.New("tok")
 	c.BaseURL = srv.URL + "/"
 	c.HTTP = srv.Client()
-	ev, _ := json.Marshal(f.event)
-	return Classify(context.Background(), c, ev, Options{TriggerPath: trig, IgnoreEcosystems: f.ignore, Logf: t.Logf, Sleep: func(_ context.Context, d time.Duration) error {
-		f.slept = append(f.slept, d)
-		return nil
-	}})
+	return c
 }
 
 func wr(f *fixture) map[string]any { return f.event["workflow_run"].(map[string]any) }
@@ -229,8 +224,10 @@ func TestClassify(t *testing.T) {
 		{"other committer", func(f *fixture) { f.commits[0]["committer"] = map[string]any{"login": "someone"} }, model.KindDependabotUnverified, "not committed"},
 		{"null author", func(f *fixture) { f.commits[0]["author"] = nil }, model.KindDependabotUnverified, "not authored"},
 		{"unknown ecosystem", func(f *fixture) { f.pr["head"].(map[string]any)["ref"] = "dependabot/cargo/x-1" }, model.KindDependabotUnverified, "ecosystem"},
-		{"no metadata", func(f *fixture) { f.commits[0]["commit"].(map[string]any)["message"] = "Bump x" }, model.KindDependabotUnverified, "metadata"},
-		{"unsafe file", func(f *fixture) { f.files = append(f.files, map[string]any{"filename": "../x"}) }, model.KindDependabotUnverified, "unsafe path"},
+		// What Dependabot wrote about its update decides nothing: the
+		// commit message, the body and the labels are not read.
+		{"any commit message", func(f *fixture) { f.commits[0]["commit"].(map[string]any)["message"] = "anything at all" }, model.KindDependabot, ""},
+		{"base commit malformed", func(f *fixture) { f.pr["base"].(map[string]any)["sha"] = "main" }, model.KindDependabotUnverified, "base commit is malformed"},
 		{"head repo differs on PR", func(f *fixture) { f.pr["head"].(map[string]any)["repo"] = map[string]any{"full_name": "evil/r"} }, model.KindDependabotUnverified, "not in this repository"},
 		{"signature reason not valid", func(f *fixture) {
 			f.commits[0]["commit"].(map[string]any)["verification"] = map[string]any{"verified": true, "reason": "unknown_key"}
@@ -302,42 +299,52 @@ func TestClassify(t *testing.T) {
 			f.timeline = []map[string]any{{"event": "labeled"}, {"event": "base_ref_changed"}}
 		}, model.KindDependabotUnverified, "base branch was changed"},
 		{"timeline unreadable", func(f *fixture) { f.tlCode = http.StatusForbidden }, model.KindDependabotUnverified, "timeline could not be read (HTTP 403)"},
-		// The dependabot/** ruleset that keeps everyone but Dependabot off
-		// the branches. Its name and bypass list are not checked.
-		{"ruleset renamed", func(f *fixture) { f.rulesets[0]["name"] = "anything" }, model.KindDependabot, ""},
-		{"ruleset for all branches", func(f *fixture) { f.rulesets = []map[string]any{dependabotRuleset(1, "refs/heads/**")} }, model.KindDependabot, ""},
-		{"ruleset for ~ALL", func(f *fixture) { f.rulesets = []map[string]any{dependabotRuleset(1, "~ALL")} }, model.KindDependabot, ""},
-		{"matching ruleset after others", func(f *fixture) {
-			other := dependabotRuleset(7, "~DEFAULT_BRANCH")
-			off := dependabotRuleset(8)
-			off["enforcement"] = "disabled"
-			f.rulesets = []map[string]any{other, off, dependabotRuleset(9)}
+		// The rules that keep everyone but Dependabot off the branch, as
+		// GitHub reports them for it. Which ruleset they come from, its
+		// name and its bypass list are not checked.
+		{"rules from two rulesets", func(f *fixture) {
+			f.rules = []map[string]any{rule("deletion", 7), rule("creation", 42), rule("update", 42)}
 		}, model.KindDependabot, ""},
-		{"no rulesets", func(f *fixture) { f.rulesets = nil }, model.KindDependabotUnverified, "no active ruleset"},
-		{"ruleset disabled", func(f *fixture) { f.rulesets[0]["enforcement"] = "disabled" }, model.KindDependabotUnverified, "no active ruleset"},
-		{"ruleset only evaluated", func(f *fixture) { f.rulesets[0]["enforcement"] = "evaluate" }, model.KindDependabotUnverified, "no active ruleset"},
-		{"tag ruleset", func(f *fixture) { f.rulesets[0]["target"] = "tag" }, model.KindDependabotUnverified, "no active ruleset"},
-		{"single-level pattern", func(f *fixture) { f.rulesets = []map[string]any{dependabotRuleset(1, "refs/heads/dependabot/*")} }, model.KindDependabotUnverified, "no active ruleset"},
-		{"other prefix", func(f *fixture) {
-			f.rulesets = []map[string]any{dependabotRuleset(1, "refs/heads/dependabot/npm_and_yarn/**")}
-		}, model.KindDependabotUnverified, "no active ruleset"},
-		{"wildcard in prefix", func(f *fixture) { f.rulesets = []map[string]any{dependabotRuleset(1, "refs/heads/d*/**")} }, model.KindDependabotUnverified, "no active ruleset"},
-		{"pattern without refs/heads", func(f *fixture) { f.rulesets = []map[string]any{dependabotRuleset(1, "dependabot/**")} }, model.KindDependabotUnverified, "no active ruleset"},
-		{"exclusion under dependabot/", func(f *fixture) {
-			f.rulesets[0]["conditions"] = map[string]any{"ref_name": map[string]any{"include": []string{"refs/heads/**"}, "exclude": []string{"refs/heads/dependabot/docker/**"}}}
-		}, model.KindDependabotUnverified, "no active ruleset"},
-		{"default branch excluded", func(f *fixture) {
-			f.rulesets[0]["conditions"] = map[string]any{"ref_name": map[string]any{"include": []string{"refs/heads/**"}, "exclude": []string{"~DEFAULT_BRANCH", "refs/heads/release"}}}
+		{"other rules besides", func(f *fixture) {
+			f.rules = append(f.rules, rule("required_signatures", 9),
+				map[string]any{"type": "pull_request", "parameters": map[string]any{"required_approving_review_count": 0}})
 		}, model.KindDependabot, ""},
-		{"no deletion rule", func(f *fixture) {
-			f.rulesets[0]["rules"] = []any{map[string]any{"type": "creation"}, map[string]any{"type": "update"}}
-		}, model.KindDependabotUnverified, "no active ruleset"},
+		{"update rule with null parameters", func(f *fixture) { f.rules[1]["parameters"] = nil }, model.KindDependabot, ""},
+		{"update keeps fetch and merge off", func(f *fixture) {
+			f.rules[1]["parameters"] = map[string]any{"update_allows_fetch_and_merge": false}
+		}, model.KindDependabot, ""},
+		{"nested branch name", func(f *fixture) {
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/go_modules/golang.org/x/net-0.63.0"
+		}, model.KindDependabot, ""},
+		// What Dependabot calls the branch of a reusable workflow's update:
+		// the repository, then the workflow's path with its leading dot
+		// spelled out (spec section 11, amendment 60).
+		{"a reusable workflow's branch name", func(f *fixture) {
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/github_actions/sadbox/ci/dot-github/workflows/lint.yml-0.5.0"
+		}, model.KindDependabot, ""},
+		{"no rules apply", func(f *fixture) { f.rules = nil }, model.KindDependabotUnverified, "no active rule"},
+		// A name of another shape never reaches a request path (the
+		// fixture fails the test if the rules are asked about it).
+		{"branch name with another character", func(f *fixture) {
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/go_modules/x%2f..%2fy"
+		}, model.KindDependabotUnverified, "not one the gate asks"},
+		{"branch name with a dot-dot element", func(f *fixture) {
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/go_modules/../../x"
+		}, model.KindDependabotUnverified, "not one the gate asks"},
+		{"branch name with an empty element", func(f *fixture) {
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/go_modules//x"
+		}, model.KindDependabotUnverified, "not one the gate asks"},
+		{"only other rules apply", func(f *fixture) {
+			f.rules = []map[string]any{rule("required_signatures", 9), rule("non_fast_forward", 9)}
+		}, model.KindDependabotUnverified, "no active rule"},
+		{"no creation rule", func(f *fixture) { f.rules = f.rules[1:] }, model.KindDependabotUnverified, "no active rule"},
+		{"no update rule", func(f *fixture) { f.rules = []map[string]any{f.rules[0], f.rules[2]} }, model.KindDependabotUnverified, "no active rule"},
+		{"no deletion rule", func(f *fixture) { f.rules = f.rules[:2] }, model.KindDependabotUnverified, "no active rule"},
 		{"update allows fetch and merge", func(f *fixture) {
-			f.rulesets[0]["rules"] = []any{map[string]any{"type": "creation"}, map[string]any{"type": "update", "parameters": map[string]any{"update_allows_fetch_and_merge": true}}, map[string]any{"type": "deletion"}}
-		}, model.KindDependabotUnverified, "no active ruleset"},
-		{"no conditions", func(f *fixture) { delete(f.rulesets[0], "conditions") }, model.KindDependabotUnverified, "no active ruleset"},
-		{"rulesets unreadable", func(f *fixture) { f.rsCode = http.StatusForbidden }, model.KindDependabotUnverified, "rulesets could not be read (HTTP 403)"},
-		{"ruleset unreadable", func(f *fixture) { f.rsGet = http.StatusNotFound }, model.KindDependabotUnverified, "a ruleset could not be read (HTTP 404)"},
+			f.rules[1]["parameters"] = map[string]any{"update_allows_fetch_and_merge": true}
+		}, model.KindDependabotUnverified, "no active rule"},
+		{"rules unreadable", func(f *fixture) { f.rulesCode = http.StatusForbidden }, model.KindDependabotUnverified, "rules could not be read (HTTP 403)"},
+		{"rules not found", func(f *fixture) { f.rulesCode = http.StatusNotFound }, model.KindDependabotUnverified, "rules could not be read (HTTP 404)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -381,26 +388,74 @@ func TestClassifyPendingRetries(t *testing.T) {
 	}
 }
 
-func TestClassifyRecord(t *testing.T) {
+// Pull is the same proof without an event: the scheduled job names the
+// pull request and the head itself.
+func TestPull(t *testing.T) {
+	pullOf := func(f *fixture, number int, sha string) (model.Classification, error) {
+		return Pull(context.Background(), f.client(t), "o/r", number, sha, f.options())
+	}
 	f := defaultFixture(t)
-	f.pr["labels"] = []any{map[string]any{"name": "security"}}
-	f.pr["body"] = "Fixes GHSA-2c8g-pr4w-hjxw and GHSA-2c8g-pr4w-hjxw; not GHSA-aaaa-bbbb-1111"
-	got, err := f.run(t)
+	got, err := pullOf(f, 7, head)
+	if err != nil || got.Kind != model.KindDependabot || got.Repo != "o/r" || got.PR != 7 || got.HeadSHA != head ||
+		got.BaseSHA != base || got.Ecosystem != model.GoModules {
+		t.Errorf("a Dependabot pull request: %+v, %v", got, err)
+	}
+	for name, tt := range map[string]struct {
+		mutate func(f *fixture)
+		kind   model.Kind
+	}{
+		"head moved since it was listed": {func(f *fixture) { f.pr["head"].(map[string]any)["sha"] = strings.Repeat("3", 40) }, model.KindStale},
+		"closed":                         {func(f *fixture) { f.pr["state"] = "closed" }, model.KindStale},
+		"no rules":                       {func(f *fixture) { f.rules = nil }, model.KindDependabotUnverified},
+		"pushed by a person": {func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("push", "someone", mid, head)}
+		}, model.KindDependabotUnverified},
+		"history behind the head": {func(f *fixture) {
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
+		}, model.KindPending},
+		"a person's pull request": {func(f *fixture) {
+			f.pr["user"] = map[string]any{"login": "someone"}
+			f.pr["head"].(map[string]any)["ref"] = "feature"
+		}, model.KindOther},
+		"ignored ecosystem": {func(f *fixture) { f.ignore = map[model.Ecosystem]bool{model.GoModules: true} }, model.KindIgnored},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := defaultFixture(t)
+			tt.mutate(f)
+			if got, err := pullOf(f, 7, head); err != nil || got.Kind != tt.kind {
+				t.Errorf("kind %s (%s), err %v, want %s", got.Kind, got.Reason, err, tt.kind)
+			}
+		})
+	}
+	// Arguments that are not a repository, a number and a commit ID are
+	// refused before anything is asked.
+	for _, bad := range []struct {
+		repo   string
+		number int
+		sha    string
+	}{{"o/r/../x", 7, head}, {"o/r", 0, head}, {"o/r", 7, "HEAD"}} {
+		c := gh.New("tok")
+		c.BaseURL = "https://127.0.0.1:1/"
+		if _, err := Pull(context.Background(), c, bad.repo, bad.number, bad.sha, Options{}); err == nil || !strings.Contains(err.Error(), "is not a repository, a pull request and a commit ID") {
+			t.Errorf("Pull(%q, %d, %q): %v", bad.repo, bad.number, bad.sha, err)
+		}
+	}
+}
+
+// The whole record: who, which commits, which ecosystem, and nothing
+// Dependabot declared.
+func TestClassifyRecord(t *testing.T) {
+	got, err := defaultFixture(t).run(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Repo != "o/r" || got.PR != 7 || got.HeadSHA != head || got.BaseSHA != base || got.BaseRef != "main" || !got.Private {
-		t.Errorf("identity: %+v", got)
+	want := model.Classification{
+		Repo: "o/r", PR: 7, HeadSHA: head, BaseSHA: base,
+		Kind: model.KindDependabot, Reason: "authored, committed and signed by Dependabot only", Ecosystem: model.GoModules,
 	}
-	if got.Ecosystem != model.GoModules || len(got.Declared) != 2 || strings.Join(got.Files, ",") != "go.mod,go.sum" {
-		t.Errorf("record: %+v", got)
-	}
-	d := got.Declared[1]
-	if d.Name != "github.com/aws/aws-sdk-go-v2/service/s3" || d.From != "1.114.9" || d.To != "1.114.10" || d.Type != model.Patch || !d.Direct || !d.Security {
-		t.Errorf("declared: %+v", d)
-	}
-	if len(d.Advisory) != 1 || d.Advisory[0] != "GHSA-2c8g-pr4w-hjxw" {
-		t.Errorf("advisories: %v", d.Advisory)
+	if got != want {
+		t.Errorf("classification %+v, want %+v", got, want)
 	}
 }
 
@@ -419,18 +474,13 @@ func TestClassifyRejectsMalformedEvent(t *testing.T) {
 	}
 }
 
-// submoduleFixture is linkclean#12: a genuine Dependabot submodule bump.
+// submoduleFixture is a Dependabot submodule bump on the branch name of
+// linkclean#12.
 func submoduleFixture(t *testing.T) *fixture {
-	msg, err := os.ReadFile("testdata/msg_Espresso-Aficionados_linkclean_12.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
 	const ref = "dependabot/submodules/tools/upstream/adblock-lists-9778b88"
 	f := defaultFixture(t)
 	wr(f)["head_branch"] = ref
 	f.pr["head"].(map[string]any)["ref"] = ref
-	f.commits[0]["commit"].(map[string]any)["message"] = string(msg)
-	f.files = []map[string]any{{"filename": "tools/upstream/adblock-lists"}}
 	f.ignore = map[model.Ecosystem]bool{model.GitSubmodule: true}
 	return f
 }
@@ -463,10 +513,8 @@ func TestClassifyIgnore(t *testing.T) {
 		{"unsigned", func(f *fixture) {
 			f.commits[0]["commit"].(map[string]any)["verification"] = map[string]any{"verified": false}
 		}, model.KindDependabotUnverified, "verified signature"},
-		{"no ruleset", func(f *fixture) { f.rulesets = nil }, model.KindDependabotUnverified, "no active ruleset"},
+		{"no rules", func(f *fixture) { f.rules = nil }, model.KindDependabotUnverified, "no active rule"},
 		{"base changed", func(f *fixture) { f.timeline = []map[string]any{{"event": "base_ref_changed"}} }, model.KindDependabotUnverified, "base branch"},
-		{"no metadata", func(f *fixture) { f.commits[0]["commit"].(map[string]any)["message"] = "Bump x" }, model.KindDependabotUnverified, "metadata"},
-		{"no files", func(f *fixture) { f.files = nil }, model.KindDependabotUnverified, "changes no files"},
 		{"history behind the head", func(f *fixture) {
 			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
 		}, model.KindPending, "does not reach the head"},
@@ -486,44 +534,108 @@ func TestClassifyIgnore(t *testing.T) {
 			if tt.reason != "" && !strings.Contains(got.Reason, tt.reason) {
 				t.Errorf("reason = %q, want %q", got.Reason, tt.reason)
 			}
-			if got.Kind == model.KindIgnored && (got.Ecosystem != model.GitSubmodule || len(got.Declared) != 1 || got.HeadSHA != head) {
+			if got.Kind == model.KindIgnored && (got.Ecosystem != model.GitSubmodule || got.HeadSHA != head) {
 				t.Errorf("ignored record: %+v", got)
 			}
 		})
 	}
 }
 
-func TestIgnoredBy(t *testing.T) {
-	sub := model.Update{Ecosystem: model.GitSubmodule, Name: "a"}
-	dock := model.Update{Ecosystem: model.Docker, Name: "b"}
-	gomod := model.Update{Ecosystem: model.GoModules, Name: "c"}
-	both := map[model.Ecosystem]bool{model.GitSubmodule: true, model.Docker: true}
-	subOnly := map[model.Ecosystem]bool{model.GitSubmodule: true}
-	for _, tt := range []struct {
-		name     string
-		ignore   map[model.Ecosystem]bool
-		branch   model.Ecosystem
-		declared []model.Update
-		ok       bool
-		why      string
+// A proof GitHub did not let classify finish says nothing about the pull
+// request (spec section 11, amendments 1 and 51): the log lags, or one of
+// the three reads got no answer. The classification is pending and names
+// the branch's ecosystem, so the fetch job gathers everything and the
+// pull request waits. An answer that is not proof stays a refusal,
+// whatever else is still open.
+func TestProofUnfinished(t *testing.T) {
+	behind := func(f *fixture) {
+		f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, strings.Repeat("5", 40))}
+	}
+	tests := []struct {
+		name   string
+		mutate func(f *fixture)
+		kind   model.Kind
+		reason string
+		sleeps int // re-reads of a log that lags
 	}{
-		{"all in the ignored ecosystem", subOnly, model.GitSubmodule, []model.Update{sub, sub}, true, "submodules"},
-		{"nothing ignored", nil, model.GitSubmodule, []model.Update{sub}, false, ""},
-		{"branch not ignored", subOnly, model.GoModules, []model.Update{gomod}, false, ""},
-		{"no declared updates", subOnly, model.GitSubmodule, nil, false, "no declared updates"},
-		{"mixed with a gated ecosystem", subOnly, model.GitSubmodule, []model.Update{sub, gomod}, false, "mixes submodules with go_modules"},
-		{"mixed, gated one first", subOnly, model.GitSubmodule, []model.Update{gomod, sub}, false, "mixes"},
-		// Both ignored, but the metadata and the branch disagree.
-		{"declared disagrees with the branch", both, model.GitSubmodule, []model.Update{dock}, false, "disagrees"},
-		{"one declared disagrees", both, model.GitSubmodule, []model.Update{sub, dock}, false, "disagrees"},
-		{"declared ecosystem missing", subOnly, model.GitSubmodule, []model.Update{{Name: "x"}}, false, "mixes"},
-		{"declared ecosystem malformed", subOnly, model.GitSubmodule, []model.Update{{Ecosystem: "x\ny", Name: "x"}}, false, "with unknown"},
-	} {
+		{"the log lags", behind, model.KindPending, "does not reach the head", len(historyBackoff)},
+		{"no log yet", func(f *fixture) { f.activity = nil }, model.KindPending, "no push history yet", len(historyBackoff)},
+		{"the log: 503", func(f *fixture) { f.actCode = http.StatusServiceUnavailable }, model.KindPending,
+			"push history could not be read: GitHub did not answer (HTTP 503)", 0},
+		{"the log: rate limit", func(f *fixture) { f.actCode = http.StatusTooManyRequests }, model.KindPending,
+			"push history could not be read: GitHub did not answer (HTTP 429)", 0},
+		{"the timeline: 502", func(f *fixture) { f.tlCode = http.StatusBadGateway }, model.KindPending,
+			"timeline could not be read: GitHub did not answer (HTTP 502)", 0},
+		{"the rules: 500", func(f *fixture) { f.rulesCode = http.StatusInternalServerError }, model.KindPending,
+			"rules could not be read: GitHub did not answer (HTTP 500)", 0},
+		{"the rules: rate limit", func(f *fixture) { f.rulesCode = http.StatusTooManyRequests }, model.KindPending,
+			"rules could not be read: GitHub did not answer (HTTP 429)", 0},
+		// GitHub answered, and the answer is not proof.
+		{"the log: 403", func(f *fixture) { f.actCode = http.StatusForbidden }, model.KindDependabotUnverified, "could not be read (HTTP 403)", 0},
+		{"the timeline: 404", func(f *fixture) { f.tlCode = http.StatusNotFound }, model.KindDependabotUnverified, "could not be read (HTTP 404)", 0},
+		{"the rules: 404", func(f *fixture) { f.rulesCode = http.StatusNotFound }, model.KindDependabotUnverified, "could not be read (HTTP 404)", 0},
+		// A "no" is a person's now, whatever is still open.
+		{"the log lags and the base was changed", func(f *fixture) {
+			behind(f)
+			f.timeline = []map[string]any{{"event": "base_ref_changed"}}
+		}, model.KindDependabotUnverified, "base branch was changed", len(historyBackoff)},
+		{"the log: 503, and no rules apply", func(f *fixture) {
+			f.actCode, f.rules = http.StatusServiceUnavailable, nil
+		}, model.KindDependabotUnverified, "no active rule", 0},
+		{"the timeline: 502, and a person pushed", func(f *fixture) {
+			mid := strings.Repeat("5", 40)
+			f.tlCode = http.StatusBadGateway
+			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("push", "someone", mid, head)}
+		}, model.KindDependabotUnverified, "someone other than dependabot", 0},
+		{"the rules: 500, and an ecosystem the gate does not know", func(f *fixture) {
+			f.rulesCode = http.StatusInternalServerError
+			f.pr["head"].(map[string]any)["ref"] = "dependabot/cargo/x-1"
+		}, model.KindDependabotUnverified, "ecosystem", 0},
+	}
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			why, ok := ignoredBy(tt.ignore, tt.branch, tt.declared)
-			if ok != tt.ok || !strings.Contains(why, tt.why) || (tt.why == "" && why != "") {
-				t.Errorf("got %v %q, want %v %q", ok, why, tt.ok, tt.why)
+			f := defaultFixture(t)
+			tt.mutate(f)
+			c := f.client(t)
+			// The client's own retries are internal/gh's to test.
+			c.MaxRetries = 0
+			got, err := Pull(context.Background(), c, "o/r", 7, head, f.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Kind != tt.kind || !strings.Contains(got.Reason, tt.reason) {
+				t.Fatalf("kind %s (%s), want %s (%q)", got.Kind, got.Reason, tt.kind, tt.reason)
+			}
+			// GitHub not answering is not a log that lags: the client has
+			// asked more than once already, and it is not waited out here.
+			if len(f.slept) != tt.sleeps {
+				t.Errorf("%d waits for the log, want %d: %v", len(f.slept), tt.sleeps, f.slept)
+			}
+			if tt.kind == model.KindPending && (got.Ecosystem != model.GoModules || got.PR != 7 || got.HeadSHA != head || got.BaseSHA != base) {
+				t.Errorf("a pending classification names %+v, want the pull request, both commits and the branch's ecosystem", got)
 			}
 		})
+	}
+}
+
+// A context that ended is not GitHub failing to answer: to gh.Unavailable
+// a deadline that ran out is a timeout like any other, and classify
+// running out of time must fail the job, not leave a pull request
+// waiting on a proof nobody tried.
+func TestProofReadsEndWithTheContext(t *testing.T) {
+	f := defaultFixture(t)
+	c := f.client(t)
+	c.MaxRetries = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	const branch = "dependabot/go_modules/aws-1c8ebe5c54"
+	if why, got, err := branchHistoryProblem(ctx, c, "o/r", branch, head); err == nil {
+		t.Errorf("the activity log: %q, %v, and no error", why, got)
+	}
+	if why, got, err := timelineProblem(ctx, c, "o/r", 7); err == nil {
+		t.Errorf("the timeline: %q, %v, and no error", why, got)
+	}
+	if why, got, err := rulesProblem(ctx, c, "o/r", branch); err == nil {
+		t.Errorf("the rules: %q, %v, and no error", why, got)
 	}
 }

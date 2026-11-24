@@ -1,686 +1,663 @@
 # dep-review
 
-A merge gate for Dependabot pull requests. It replaces an LLM session that
-held write credentials and merged PRs itself with a split design:
+A merge gate for Dependabot pull requests, as a reusable GitHub Actions
+workflow. It merges an update without a person when a short list of facts
+about it holds, quickly for security fixes in Go modules and npm, and
+hands everything else to a person with the one fact that failed.
 
-- **Deterministic code decides who a PR belongs to and what changed.** It
-  verifies the PR is Dependabot's alone (Dependabot's signed commits, a
-  branch activity log in which only Dependabot ever pushed, and a ruleset
-  that keeps everyone else off `dependabot/` branches), recomputes the real change set from
-  the manifests and lockfiles, downloads both versions of every changed
-  dependency and diffs them, and runs hard checks (provenance, hashes,
-  install scripts, new packages, …). Nothing from the PR or a dependency is
-  ever executed.
-- **A model reviews only the prepared evidence**, with read-only file tools,
-  no shell, no network, no write access and no secrets. Its credential is a
-  short-lived federated token. It returns a schema-checked verdict.
-- **Deterministic code merges**, through a dedicated GitHub App, and only
-  the exact head SHA that was classified and reviewed. A deterministic
-  finding always overrides a model "pass".
+The full specification is [docs/v0.2-spec.md](docs/v0.2-spec.md).
 
-A fully prompt-injected reviewer can therefore at worst approve one
-Dependabot update that already passed CI, the cooldown and every
-deterministic check. It cannot push, change workflows or reach other repos.
+## The rule
 
-## Flow
+The default outcome is a person. Deterministic code grants a merge, from
+facts it takes from authoritative sources (the manifests at two commits,
+the registries, GitHub). A model reads the changed code and can only veto.
+One kind of update merges with nothing read: a reusable workflow of the
+gate owner's own repositories (see "The owner's own workflows" below).
 
-```
-PR opened/synchronized
-  └─ caller's dep-review-trigger (no-op, every PR; its job runs for Dependabot's)
-       └─ workflow_run → gate.yml (nothing runs when the trigger's job was skipped)
-            build    build the gate from its own pinned commit
-            classify Dependabot's alone? head still current?        (read-only)
-            fetch    real change set, downloads, diffs, findings,   (read-only)
-                     route: auto | review | human | refuse
-            review   model reads ./evidence and ./repo → verdict    (gVisor sandbox;
-                     proxy holds the Claude token)
-            rebuild  an action's bundle, rebuilt from its source    (gVisor; no
-                     and compared byte for byte (information only)   permissions)
-            publish  decide, comment, status, merge on green CI     (gate app)
-  schedule → sweep   merge approved PRs whose CI finished later;    (gate app)
-                     report PRs stuck without a decision (including
-                     dependabot-pending ones) so a maintainer re-runs them
-```
+Deterministic code never tries to understand what a dependency's code
+does: there is no reachability analysis, no attribution, no build
+simulation. Anything the gate does not recognise goes to a person; it
+never gets a detector of its own.
 
-`publish` sets a commit status `dep-review` on the head SHA (by the gate
-app): `success` = approved, `failure` = needs a human, `pending`/none = not
-decided. It is informational, not a required check, so human PRs never wait
-on the gate. Merging uses the REST merge API with `sha=<reviewed head>`, so
-a newer head can never be merged on an old verdict.
+It is aimed at commodity attacks: a compromised maintainer account, a new
+install script, credential theft, an obvious obfuscated payload, a
+re-pointed Action tag, a malicious new transitive dependency, cheap prompt
+injection. An attacker who studies the gate and crafts input against its
+readers is out of scope.
 
-## Routes
+## Outcomes
 
-| Route | When | Result |
+| Outcome | When | What happens |
 |---|---|---|
-| auto | a fetcher proved the update is a no-op for everything the repo builds (e.g. a Docker digest refresh whose old and new indexes hold identical manifests for every platform, or, when the caller sets `docker_platforms`, for exactly those platforms) | merge on green CI |
-| review | patch/minor/digest updates whose deterministic checks all passed, or flagged only items the reviewer assesses one by one (see below) | model review; merge only on `pass` with every flagged item assessed `benign` |
-| human | majors (0.x minors are reviewed like any minor), anything a check routes to a person (including an `actions.lock` change that neither a bump nor an analyzed transitive pair explains), truncated evidence, more than 200 flagged items, model `fail`/`unsure` or a `pass` that does not assess every flagged item `benign` or list every required diff as examined, a Dependabot PR someone else pushed or merged into, or whose branch history cannot be read | comment + notification, no merge |
-| refuse | the PR is malformed (no updates, tag instead of SHA pin outside a workflow onboarded to `actions.lock`, a lockfile the gate cannot read strictly or that disagrees with the `uses:` lines, change set disagrees with Dependabot's metadata in a way that matters) | comment + notification |
+| merge | every fact holds, no veto, the default branch has not changed a file of the pull request, and GitHub accepts the merge | squash merge of exactly the head commit the facts are about |
+| wait | only time, CI, or a retry is missing | status `pending`; the scheduled run looks again |
+| person | a fact is false or was never established, or the model raised a veto | status `failure`, one comment, one notification |
 
-### Flagged items (Go modules)
+The gate writes one comment per pull request, which leads with the
+outcome and, for wait and person, the fact that failed and the cheapest
+way out. It sets the commit status `dep-review` and, when a person is
+needed and Pushover is configured, notifies once per head commit. A
+status that GitHub already shows for that head is not set again (GitHub
+keeps 1000 for a commit), and one that cannot be set does not stop the
+comment or the notification.
 
-The Go checks flag code that runs on import (a new or changed `func init`,
-a package-level initializer that calls code, any changed declaration that
-init code reaches within its package), code the compiler does not
-check (cgo and its preamble, C/C++/assembly sources, `//go:linkname`), new
-risky or blank imports, every `//go:linkname`, `//go:cgo_*` and
-`//go:generate` directive in a changed file, newly embedded files,
-binaries and long encoded literals. These route to the model review, not to
-a person: `evidence.json` lists every flagged item (`flagged`, capped at
-200, past which a person decides), and a `.flagged.md` evidence file per
-module shows exactly what changed for each one. For binaries and decoded
-blobs the gate renders, with Go's own parsers only (run in a child
-process of the gate under a 2 GiB address-space limit on Linux, which
-leaves its Go heap roughly 360 to 515 MB, and a timeout; with a
-per-module budget of bytes parsed and decompressed and a 10-minute
-rendering clock per fetch that starts with the first rendering), the type, structure
-(ELF/Mach-O/PE sections, imported libraries and symbols, Go build info;
-zip/tar/gzip entries), a hexdump, printable strings, a comparison with the
-previous version, and where the module refers to the file (linked `.syso`,
-`//go:embed`, test-only mentions). The verdict must assess every flagged
-item (`items`: `benign`, `suspicious` or `unclear`); `publish` compares that
-list with the evidence's, and merges only when every flagged item, and
-nothing else, is `benign`.
+The gate does not judge CI. It asks GitHub to merge with `sha=<head>`, and
+GitHub's rules decide; a refusal because required checks are pending or
+failing is a wait, and so is GitHub's "Base branch was modified" (another
+merge landed at the same moment; the next scheduled run asks again). Any
+other refusal is reported (status `error`) and not retried.
 
-The default is a person, and only text can stay on the review route:
-valid UTF-8 with no control characters but tab, newline and carriage
-return, quoted in full. That is the whole new text of every file with a
-flagged Go item, and of every C, assembly or cgo file (always as text,
-controls and invisible letters shown as escapes), the whole declaration
-for an init callee, and a literal that decodes to such text (decoded again,
-up to three times, if the text looks encoded itself; for a person if that
-fails), when it fits an evidence file.
+Before it asks, the gate looks at what the default branch has changed
+since the commit the pull request branches from. If that includes a file
+the pull request changes, it does not ask: the facts are about the head
+on the base it had, and two edits of one lock file can merge without a
+conflict into a lock nobody proposed. The pull request waits
+(`base_changed`). Dependabot usually rebuilds it within minutes, and the
+new head gets a run of its own; if not, the owner is told, once for the
+head: at once for a security fix, otherwise at the first scheduled run a
+day after the hold began. The notification names the file and the
+comment that has Dependabot rebase. At the wait deadline it needs a
+person (`base_changed_deadline`). A pull request
+that is only behind merges as it is. The gate never rebases, updates or
+comments to bring a pull request up to date.
 
-Every flagged binary goes to a person; the AI never clears one. So do
-cgo, C, C++, Objective-C, Fortran, SWIG and assembly sources (`gomod.cgo`,
-`gomod.cgo-source-changed`, `gomod.assembly-changed`), as on main: what
-they compile, include or link is beyond what the gate shows. Their full
-text is still in the focused evidence, and when a person is needed only
-for such items (and binaries and other items not shown in full: no
-refusal, truncation, major or unknown version, or other reason), the
-review still runs as **triage**: `fetch` outputs `review=true`, and the PR
-comment shows the model's per-item notes under "Triage for the person
-deciding". The decision stays a person's whatever the model answers;
-`publish` never merges from triage.
+A run that cannot decide is not silent. When the fetch job leaves no
+facts, or deciding fails, publish still runs: it sets the status to
+`error`, writes the comment ("the run failed", with the workflow run to
+re-run) and notifies once per head commit. A classify job that fails
+leaves only the failed workflow run: nothing is written on a pull
+request that was not classified.
 
-What is flagged:
+When the model leaves a prepared read without a verdict (it did not
+answer, the review job failed, the token exchange was denied), the pull
+request waits and the scheduled run asks again by itself: at its next
+run, then 30 minutes after that ask, then after 1 hour, 2 hours and so
+on, each gap twice the one before, until the wait deadline; on a
+schedule slower than a gap, at the first run after the ask is due. One
+miss needs nobody. When the second scheduled ask also gets no answer the
+owner is told once per head commit, and the gate goes on asking.
 
-- a binary added or changed outside `testdata/` (as on main);
-- a changed binary under `testdata/` (never built by itself) when the new
-  tree embeds it, or when the module has cgo, C or assembly sources or a
-  `.syso` (which can link or include any file without naming it);
-- in such a module, any other changed text file except `go.mod`
-  (`gomod.includable-changed`), whatever its extension. Assembly, C or
-  cgo can `#include` or `.incbin` it by name, so it can be compiled code.
-  A `.go` file (built, unbuilt or a test) counts only when an include
-  names it, or any include is computed (a macro, `-include`); a `go.sum`
-  counts unless every line is a hash line, since cmd/go never reads a
-  dependency's go.sum. A deleted file counts too, because the same
-  include may now find another file of that name. It routes like
-  assembly: to a person, with the review as triage, or reviewed for
-  well-known modules;
-- a file the new tree newly embeds, changed or not: what each package
-  embeds is `go list`'s `EmbedFiles` in both trees (the union over every
-  `go tool dist list` platform, cgo on and off), compared per package. An
-  unchanged file newly embedded is quoted in full under the package's
-  embed item if it is not binary (escapes show any control bytes), and
-  goes to a person otherwise. A package `go list` gives no answer for, a
-  file with `//go:embed` that only a `-tags` build builds (when anything
-  under its directory changed), or any
-  non-ASCII path element in either tree puts the embed item in front of a
-  person (and counts every binary it could reach as embedded). A `.go`
-  file that some configuration builds in the new tree and did not in the
-  old (go/build's answer, compared per configuration and for `-tags`
-  builds) is checked as a new file throughout (init code,
-  imports, the declarations init reaches);
-- an assembly (`.s`, `.S`, `.sx`) or `.syso` file, changed or not, that
-  some configuration newly assembles or links: one the toolchain lists
-  (`SFiles`, `SysoFiles`) in a package that builds there and did not
-  before. Assembly goes to a person with its full text, a `.syso` as a
-  binary;
-- every binary, when the module's link sources change (new cgo, C or
-  assembly, or a new `.syso` or library).
+To run the gate again, re-run all jobs of the workflow run, which is
+what the comment and the notification say. Publish decides only on facts
+gathered in the last 4 hours, by the fetch job's clock and its own.
+GitHub's "re-run failed jobs" hands a job that runs again the artifacts
+of the first attempt, so a publish or review job run again by itself
+would decide on what the registries said then with the clock of now.
+Such a run is reported as one that could not decide. The 4 hours are the
+timeouts of fetch, review and publish (2 h 35 min; a scheduled run's
+refresh, reread and publish have 2 h 45 min) and the time a job may wait
+for a runner or for the publishes ahead of it.
 
-The gate still renders every flagged binary and every literal that
-decodes to bytes that are not text (ELF, PE/COFF, Mach-O, tar, zip, gzip;
-parsed in the isolated child process), labelled "for the person deciding;
-the gate does not clear binaries by their content", with how it can reach
-the build. Module text in that evidence, reasons included, is always
-quoted, with controls and default-ignorable characters shown as escapes.
-Unparseable Go files, truncated evidence and a module with more flagged
-items than a review can take also go to a person. Module diffs do not
-detect renames.
+Waiting for an age has no deadline. Waiting for a retry (a model read, a
+source that did not answer, a superseded Docker digest, required checks,
+a merge held because the default branch changed a file of the pull request)
+ends `wait_deadline_days` after the latest time the update could have
+merged, or after the pull request was opened if that is later; then it is
+a person's. While neither time is known (GitHub and the registry's clock
+both went unanswered) there is no deadline, and the pull request waits.
+A wait the scheduled run cannot evaluate again (gathering its facts
+keeps failing) is a person's at the deadline of its last decision all
+the same: publish says so on the pull request and notifies.
 
-#### The init walk
+The scheduled run also takes up a Dependabot pull request the gate has
+nothing for at its head: the event's run died before it could write
+anything, or the comment is one this version cannot read, as on every
+pull request left open by v0.1. It waits until the pull request has not
+changed for 4 hours, so as not to race the event's run, evaluates at
+most five such pull requests in a run, from scratch and without the
+model, and asks the model at the run after. If it cannot evaluate one,
+publish reports that once (status `error`, the comment, a notification)
+and the schedule does not try that head again.
 
-The walk from init code follows each reached declaration's references as
-`go/types` resolves them. It type-checks the package once per distinct
-set of files go/build builds, with the module's own imports from the tree
-and the standard library from GOROOT's source (cgo off). It runs in a
-memory-limited child with a timeout. The rules:
-- a package-level object of the package is followed;
-- a local, a parameter, a field, an import or a definition is not;
-- a method selected on a concrete type of the package reaches that
-  type's method only;
-- one on another package's concrete type (`sync.Pool.Put`) reaches no
-  code of this package;
-- one on an interface reaches every method of that name;
-- reaching a type still reaches all its methods, since a value handed to
-  another package can have any of them called;
-- anything the checker can't resolve is followed by name, as before:
-  imports outside the module and the standard library, type errors, and
-  files no configuration builds.
+A notification that could not be sent is sent by the next scheduled run.
+Without Pushover configured there is nobody to tell, and nothing is
+owed.
 
-The walk runs over the whole module from the init code of every package
-that is, or imports within the module, a changed package (any file, any
-build tags; a `//go:linkname` pull counts as an import). A qualified use
-of another of the module's packages (`b.F`, a method of `b.T`, a
-dot-imported name) is followed into that package, with or without the
-type checker: the import spec names the package, and its package clause
-says what it is called. A `//go:linkname` pull is followed to its
-target. An unchanged init can therefore reach a changed function of
-another package. Calls into other modules aren't followed. A module
-without a go.mod uses the update's module path.
+## Facts
 
-The type checker runs on those packages 24 directories per child, with a
-six-minute budget per module. A chunk that fails or runs past the budget
-is walked by name, and the summary says how many directories the type
-checker resolved. On aws-sdk-go with its core `aws` package changed, all
-724 directories type-check in 70 seconds.
+For the pull request:
 
-#### Navigable diffs
+| Fact | Meaning | Source |
+|---|---|---|
+| Identity | Dependabot's alone, on the default branch, at its current head | `internal/classify`: author, signed commits, the branch's activity log, the pull request's timeline, GitHub's rules for the branch |
+| Shape | only that ecosystem's manifest and lock files changed, each a plain file (mode 100644) at both commits, and only version or hash tokens | the real tool's reading of base and head, or exact line shapes |
+| ChecksConfigured | the default branch has an active rule requiring a status check other than `dep-review` | GitHub `rules/branches` |
 
-A Go module's, npm package's or Python package's diff is split per file,
-and each file's diff is its own evidence file. The parts have caps of their own: 2 MB each, 50 MB
-together. A gate-written `diffs.md` index lists every changed file with an
-ID. Every file is required reading unless the go command's own rules say
-no consumer build reads it: a `_test.go` file that nothing embeds, in a
-module with no assembly or cgo that could include it, or, with declared
-builds, a file none of them compiles. The verdict's `examined` must list every
-required ID, or a person decides. A person also decides when:
-- more than 500 files are required;
-- the required diffs and flagged items together pass 4 MB, the most one
-  review is asked to read;
-- a part is cut by the caps;
-- git stopped reading the diff;
-- the diffs' paths don't match the files that changed (a path git can't
-  write unambiguously); every diff is then required.
+For every update, computed from the base and head manifests and never
+from the pull request's title, body, labels or Dependabot's metadata:
 
-Parts are named by ID. The fetch job ships the evidence's checksums as a
-`SHA256SUMS` manifest inside the artifact and outputs only that file's
-sum, which review and publish verify first.
-The flagged-items file uses the same caps. For npm and Python packages every file is required, since whatever is
-installed can be loaded. A diff that is binary on either side goes to a person
-(`<eco>.binary-diff`), since git shows no content for it. Lines longer
-than 2,000 bytes are wrapped in the part after escaping, because the
-reviewer's reader cuts longer ones. A continuation starts with `~` and
-the line's own diff marker; git starts no diff line with `~`, so source
-text cannot pose as one. A lone CR, and U+2028, U+2029 and U+0085, are
-escaped like control characters, since JavaScript or Python end a line
-there and the reader does not. A GitHub Action's first-party source diff
-(everything but its bundle directories and lockfiles) is navigable too,
-one required part per file. Its other evidence (action.yml, lockfile
-changes, bundle attribution) and Docker's keep the single-file limits
-(400 KB a file, 4 MB in all).
+| Fact | Meaning |
+|---|---|
+| Known | the name is a dependency at the base commit, or is on the list (Docker: on the list only) |
+| Listed | the name is on the owner's list |
+| NewName | the name is absent at base |
+| Increase | `to` is a plain release above `from` (Go: a listed module may also move to a higher pseudo-version) |
+| Major | the leading version component changed (for an image, the tag's: a refresh under an unchanged tag is never a major, also when the tag is `latest` or another name that is not a version and nothing could be compared) |
+| Indirect | the repository's own manifest shows it does not declare the dependency: `// indirect` in `go.mod`, or in none of the root package's dependency maps in `package-lock.json` (Go and npm only) |
+| Bound | the pinned hash, commit or digest is what the registry reports now; for an action also that the repository has the IDs `actions.lock` records, or for an own workflow the IDs the policy records |
+| FirstSeen | when the version became public, by a clock the publisher cannot set; where the registry has none, when the gate first evaluated that exact pin (name, version and hash) on the pull request, which its comment remembers |
+| NameCreated | when the package name first appeared (new names only) |
+| Clean | still published; not retracted, yanked or deprecated; no malware advisory; no advisory on `to` that `from` did not have (an action used from a directory, `owner/repo/path`, is asked about under the repository's name and its own; an own workflow needs no published release) |
+| NoRegress | no new or changed install script; npm: in the tarball the install scripts (each hook's command as written), `gypfile` and `binding.gyp` beside every `package.json`, and every `.gypi` file, are the old tarball's, none new, changed or gone, while the other files those commands and a `binding.gyp` run are not compared, since the model reads them (none of this is asked where the repository turns install scripts off, see below); provenance not lost; Actions: the new commit descends from the old one, is on the default branch or `releases/v<major>` (an own workflow: the default branch only), and is what the tag resolves to |
+| SecurityFix | GitHub's Advisory Database has a reviewed advisory that affects `from`, not `to`, and names `to` as first patched version (Go and npm only: never an image, and never an action, whose tag can be moved after the advisory was reviewed) |
+| Own | Actions only: the update moves the commit pin of a reusable workflow in one of the gate owner's own repositories (`own_workflows`) |
+| Read | how much of the changed code the model was shown and answered for: full, partial, none, refused, or not applicable (Docker, and an own workflow). Two artifacts that hold the same files are full with no model asked, and the comment says so |
+| Veto | none, or a category and the lines the model quoted |
 
-#### Split reviews
+A fact is in one of four states, and only the first contributes to a
+merge: it holds; it does not hold (person); its source was asked and did
+not answer (wait, then person at the deadline); it was never gathered
+(person). That goes for Bound too. When the registry or GitHub does not
+answer for the pin of a Go, npm or Actions update, there is no verified
+hash to read the code against yet, so nothing is fetched and the update
+waits (`source_unavailable`, `read_pending`); the scheduled run gathers
+again, and reads the code once the pin is bound. A pin the registry
+answered "no" for is a person's at once.
+Identity waits like any other fact: when the branch's activity log has
+not caught up with the push, or GitHub does not answer for the log, the
+timeline or the branch's rules, the proof is unfinished, the other facts
+are gathered all the same, and the scheduled run tries the proof again.
+An answer that is not proof (someone else pushed, no ruleset, a 403 or a
+404) is a person's at once.
 
-When the required reading passes about 900 KB, one reviewer run doesn't
-finish it. homelab-configs#127 read 37 of about 90 required diffs in 80
-turns. Such a review is split into passes, each a full sandboxed run with
-its own budget:
-- pass 1 assesses every flagged item and reads as many required diffs as
-  fit;
-- each later pass reads the next share of required diffs;
-- a final pass, given every pass's report as data, decides on the whole.
+With every fact holding, an update needs an age, measured from FirstSeen:
 
-The merged verdict is the worst of them all, with every flag, pass 1's
-items, every reading pass's `examined` and the final pass's summary.
-Publish checks it like a single verdict, with two more rules:
-- an item any pass marks suspicious or unclear makes the review unsure;
-- so do items from a pass that wasn't asked to assess them.
+| Case | Required age (default) |
+|---|---|
+| read in full, security fix | none |
+| read in full | `min_age_hours` (72 h) |
+| read in part, security fix | `min_age_hours` (72 h) |
+| read in part | `unread_age_days` (14 d) |
+| Docker (nothing is read) | `min_age_hours` (72 h) |
+| the owner's own workflow (nothing is read) | none |
+| major update of the owner's own workflow | person |
+| major update of a listed name, or of an indirect dependency | at least `major_age_days` (14 d) |
+| major update of an unlisted name the repository declares itself | person |
+| new name, unlisted | person unless read in full and the name is `new_name_age_days` (365 d) old |
 
-Diffs are packed largest first. Reading that doesn't fit six passes of
-900 KB is refused, and a person decides: it is never piled onto the last
-pass, because the attacker picks the sizes and the order. A pass with no
-verdict also leaves no verdict at all. The final pass sees which files
-each pass read, so it can look for something one share defines and
-another uses.
+In a pull request that carries a fully read security fix, the other
+updates that are known, not new, not major and fully read need no age
+either (`fast_path_companions: ride-along`).
 
-Each pass has the per-run limits (`max_model_requests`, 80 turns, 20
-minutes), and all of them together get 140 minutes. A split review costs
-up to seven runs.
+The two security-fix rows are for Go modules and npm. An action's
+security fix waits like any other update of an action, 72 h when read in
+full: the advisory vouches for a tag, and a tag can be moved after the
+advisory was reviewed. The comment still names the advisory, so the fix
+can be merged by hand. An image has no advisory source at all.
 
-#### Upstream commits
+Where a registry has no such clock (an Action release that is not
+immutable, most of all, and every gcr.io image: GCR dates the upload of
+a manifest, not the moment a tag was pointed at it), the age runs from
+the gate's first evaluation of the pin, not from the day the pull request
+was opened: Dependabot rewrites a grouped pull request in place, and a
+version it adds today is new today. A rebase keeps the pin's time;
+another version or hash starts again.
 
-For an update with flagged items, the gate also fetches the module's
-upstream history between the two versions and attaches, per item, the
-commits that touched its files (`.upstream.md`). Go's own tooling makes
-those commits the change. `go mod download -json` reports the proxy's
-`Origin` for each version: repository, subdirectory and commit.
-`x/mod/zip.CreateFromVCS` rebuilds each module zip from the repository at
-that commit, as the go command does, and `dirhash` must give the go.sum
-hash. A mismatch is `gomod.upstream-mismatch`, which goes to a person.
-When upstream history is verified, a benign item that has commits listed
-counts only if the verdict cites at least one of them and nothing else.
-The history is read in pieces like the flagged-items file, up to 1 MB,
-and counts toward the 4 MB of required reading.
-The reviewer is told to read each message against the diff, since the
-repository's owner wrote it. A message that doesn't fit makes the item
-unclear.
+For Go the registry's clock has a limit of its own. The index has no
+lookup by module: it is read forward from a point in time. The gate
+starts where proxy.golang.org says it stored the version (the
+`Last-Modified` header of its answer for the version's `.mod` file),
+which is where the index has it; the date is the one on the index's own
+line. When the header is missing or leads to no line, the index is read
+from the version's commit time, 50 pages for one version, and a tag that
+was cut days after its commit is not in those pages. One run reads 150
+pages in all. A version found neither way is dated from the gate's first
+evaluation and waits its age from there. A fully read security fix needs
+no age and is not held up.
 
-Nothing is attached, and the review runs as without it, when any of
-these hold:
-- the update is a new module;
-- the proxy recorded no origin, or the repository isn't git;
-- the host isn't github.com, go.googlesource.com or gitlab.com;
-- the two versions share no history within 1000 commits;
-- more than 400 commits lie between them;
-- the attachment would pass its size budget;
-- the fetch fails.
+## Ecosystems
 
-git runs in its own memory-limited child, killed after four minutes. Its
-configuration is the gate's alone: https only, no system or global
-config, no credential helper or hooks, and objects are fsck'd on fetch.
-It makes a blob-less shallow fetch and a sparse checkout of the module's
-directory.
+| Ecosystem | Shape and change set | Bound | FirstSeen | Read |
+|---|---|---|---|---|
+| Go modules | `golang.org/x/mod/modfile` on base and head `go.mod`; `go.sum` lines by exact shape; only `require` lines and the `go` line change, and no requirement is removed | `go mod download -json` in an empty module, checksum database on | index.golang.org | the module zips, from proxy.golang.org, checked against the `go.sum` hash |
+| npm | `npm ls --package-lock-only --ignore-scripts --offline` at base and head; lockfile v2 and v3 only; every lock entry has only the members npm writes, and a new version replaces one old version at the same lock paths and is not marked as bringing an `npm-shrinkwrap.json` | lock `integrity` equals the registry's and the downloaded bytes | registry `time[version]` | the tarballs, whose `package.json`, `binding.gyp` and `.gypi` files are also checked for install steps: npm's NoRegress holds only once they were, or where the repository turns install scripts off |
+| GitHub Actions | changed lines must be tag pin lines in a workflow (`uses: owner/repo@vX.Y.Z`) and the `actions.lock` entries that record them (lock schema `v0.0.3`), each tag line through its own workflow's list in the lock; or the commit pin line of the owner's own reusable workflow (`uses: owner/repo/.github/workflows/<file>.yml@<40 hex> # vX.Y.Z`) | the tag resolves to the pinned commit; repository and owner IDs unchanged | the release's `published_at` when the release is immutable; not asked for an own workflow | the action repository's tarball, `dist/` included, for an action that runs its repository's own files (`using: nodeNN` or `composite` where the workflows use it from); nothing of an own workflow |
+| Docker | changed lines must be `FROM` lines that name an official Docker Hub image by its bare name (`golang`) or a gcr.io image, differing only in tag and digest | the registry resolves the tag to the new digest now | Docker Hub `tag_last_pushed`; for a gcr.io image the gate's first evaluation of the pin | nothing |
 
-#### Well-known modules
+Limits that send real pull requests to a person:
 
-For `golang.org/x/*`, `google.golang.org/*` and `cloud.google.com/go` (and
-below it), and only when the update's upstream history is verified, some
-person-routed items are reviewed instead:
-- cgo, C and assembly source;
-- binaries under testdata/ that nothing embeds and that only link lines
-  could reach, other than files the linker takes by name (.syso and
-  libraries);
-- embeds the gate could not resolve.
+- uv, OpenTofu, submodules and every other ecosystem have no rule.
+- An Actions update needs a tag pin (`@vX.Y.Z`) and `actions.lock`:
+  without the lock entry there is no recorded repository and owner ID to
+  compare with. The lock must list the workflow the line is in, and that
+  workflow's list must move to the new tag with it: an entry that only
+  another workflow's list names does not count. A line that pins an
+  action by commit (`@<40 hex> # vX.Y.Z`) and a local `action.yml` are
+  not read. A pin update replaces lines in place: one that adds or
+  removes a line of a workflow or of `actions.lock` (an action that
+  starts or stops using another) goes to a person.
+- A changed `uses:` line that points at a reusable workflow never
+  merges, unless the workflow is one of the owner's own (next section).
+- A container action: `runs.using: docker` in its `action.yml`, with an
+  image by reference or built from a Dockerfile, or a composite action
+  with a `docker://` step. It runs an image, and nothing of an image is
+  read. The gate looks at the `action.yml` (or `action.yaml`) in the
+  directory the workflows use the action from, and takes one line there,
+  `using: nodeNN` or `using: composite`, under a bare `runs:`, in a
+  file written in YAML's plain block form (plain keys, no flow style,
+  quoted keys, anchors, aliases or second document); a file that says it
+  any other way, or no file, goes to a person too. A composite action
+  can run other actions of its repository, so when one is used every
+  `action.yml` of the repository is held to this.
+- Docker images merge only from the list, and only when written as an
+  official Docker Hub image by its bare name or as a gcr.io image. Any
+  other spelling (`library/golang`, `grafana/grafana`, another registry)
+  is not read, whatever the list says.
+- A Go update that removes a requirement (a move from `example.com/m/v2`
+  to `/v3` does) or changes the `toolchain` line.
+- An npm update whose tarball adds, changes or drops an install script, a
+  `gypfile`, a `binding.gyp` or a `.gypi` file, unless the repository
+  turns install scripts off (below), or whose lock has an entry with a
+  member npm 9 to 11 do not write.
+- An npm update whose lock changes what it says of a package that keeps
+  its version (its `bin`, `os`, `cpu`, `libc` or dependency ranges, like
+  its source and hash). Only `dev`, `optional`, `devOptional`, `peer`,
+  `deprecated`, `license`, `funding` and `engines` may differ there.
+- An npm update to a version whose lock entry has `hasShrinkwrap`: the
+  package ships an `npm-shrinkwrap.json`, npm installs what is below it
+  as that file says, scripts included, and the gate does not read it.
+- An npm update whose lock at the base commit npm itself reports a
+  problem for (a missing or invalid entry, as two lock edits merged
+  without a rebase leave behind). The pull request that repairs the lock
+  is the one that goes to a person.
+- An update that changes, adds or removes a file whose path has anything
+  but ASCII letters, digits and `._/@+-` in it (a space, a parenthesis,
+  another script). A path stands on lines the model is told the gate
+  wrote, so one that can read as a sentence is not written there.
+- An update in which nothing that changed can be shown to the model:
+  only files that are not text changed (a prebuilt object, an image), or
+  nothing of the change fits the chunk budget. No model is asked, so it
+  is not a read in part.
+- The gate runs on github.com only.
+- A pre-release is never an increase. A Go pseudo-version (a commit, not
+  a release) is one only for a listed module, and can then merge like a
+  release: `google.golang.org/genproto` publishes nothing else. For it
+  the retraction check is the go command's word alone, since no version
+  list carries a pseudo-version. A module that is not listed never moves
+  to one; from one to a release it moves like any other update. The
+  advisory database is asked about a pseudo-version only in the two forms
+  it was seen to read, `vX.0.0-TIME-COMMIT` and, after a release,
+  `vX.Y.Z-0.TIME-COMMIT`. An update to or from any other, such as one
+  that follows a pre-release (`v1.2.0-rc.1.0.TIME-COMMIT`), goes to a
+  person.
 
-The per-item accounting and the commit citations still apply. Every
-other binary, a decoded blob that is not text, an unparseable file and an
-unanalyzable module still go to a person. The list is the gate's, with no
-per-repository input. `github.com/google/*` is not on it.
+## The owner's own workflows
 
-### GitHub workflow lockfiles
+A caller pins this gate, and the shared CI workflows, as reusable
+workflows by commit:
 
-In a workflow onboarded to `.github/workflows/actions.lock`, a step names
-an exact tag (`uses: owner/repo@v1.2.3`) and the runner runs the commit
-the lockfile records. The actions fetcher takes both commits from the base
-and head lockfiles and runs the usual upstream checks on them. The named
-tag must dereference to the locked commit, and the locked owner/repo IDs
-must be upstream's. The lockfile is read only in the exact form
-`gh actions-lock` writes (schema v0.0.3, no `hostname`); anything else
-refuses.
+```
+    uses: sadbox/dep-review/.github/workflows/gate.yml@<40 hex> # vX.Y.Z
+```
 
-A bumped composite can change its own pinned actions. Each transitive
-entry that moves to another key and commit of the same repository, under
-the same parent, at a subpath the parent's old version ran, is analyzed
-as a bump of its own (`Direct: false`, evidence under
-`actions/transitive/`), with the same identity checks; the old exact tag
-must still name the old commit. A nested `uses:` change that such a pair
-explains no longer forces a human; the PR's route is the worst of all
-pairs. A transitive pair's old version comes from its old ref: an exact
-tag, the highest tag under a floating `vN`/`vN.M` ref, or for any other
-ref the old commit's only vX.Y.Z tag. These go to a human: a moved tag
-(the same key at another commit, or one exact ref recorded at two
-commits), an old version the old ref does not anchor, a subpath the
-parent did not run before, a transitive action from a repository the old
-version did not use, two pins of one repository under one parent, more
-than 8 transitive pairs, a step of any onboarded workflow whose pin the
-new lockfile does not lock (or a workflow whose steps the gate cannot
-read in full), and any other lockfile change. Job-level reusable workflows and workflows not in the lockfile
-keep SHA pins.
+The gate's owner publishes those, and ruled that the gate trusts them. A
+Dependabot pull request that moves such a line merges at the gate's
+first look at it, once the required checks pass, with **nothing of the
+update read and no age**. The comment says so in those words.
 
-### Rebuilding action bundles
+It applies to the repositories in `own_workflows` in `defaults.json` and
+to no other: `sadbox/ci` and `sadbox/dep-review`, each named whole and
+with the repository ID and owner ID GitHub gave it. There is no prefix
+and no entry for an owner or an organisation. What must hold:
 
-When an action's committed bundle changed, the `rebuild` job rebuilds it
-from the new commit's source and compares the result byte for byte with
-what is committed (`internal/rebuild`). It works when the action runs on
-Node 20, 22 or 24, its entrypoints are inside bundle directories, and the
-repository root has a plain npm project: `package-lock.json` version 2
-or 3, no workspaces, and every package a `registry.npmjs.org` tarball
-with sha512 integrity. The first of the scripts `build`, `package`,
-`bundle` and `release` that it has is run, and up to three are tried. On
-actions/setup-go 7.1.0, `npm run build` reproduces all four files.
+- Identity, Shape and ChecksConfigured, as for every pull request. The
+  line keeps its repository and its workflow file; only the commit and
+  the version in the comment move, and no other line changes with it.
+  A tag pin of such a workflow is not read.
+- Increase, from the two versions.
+- Bound: the tag of the new version, in the repository with exactly
+  those two IDs, resolves to the new commit. A look-alike name, a
+  repository that was renamed away, and a name someone else registered
+  again fail here or in Shape.
+- NoRegress: the new commit descends from the old pin and is on the
+  repository's default branch. A release branch does not count, and a
+  commit that only a fork has is on no branch.
+- Clean: no advisory names it. A release is not asked for.
+- Not a major. A major version of an own workflow always goes to a
+  person, listed or not: that is how a release says that callers may
+  have to change with it.
 
-The build runs the action's own code, so the job has no permissions, no
-secrets and no OIDC token, and runs two containers under gVisor, neither
-with a network. Both are
-the official Node image pinned in `sandbox/rebuild/Dockerfile`, with no
-capabilities, a read-only root and an unprivileged user.
+An action in the same (grouped) pull request is read and aged by its own
+rules. Everything about a reusable workflow of any other repository is
+as before: a person.
 
-1. **Install.** The gate downloads every tarball the lockfile pins from
-   `registry.npmjs.org` and checks its sha512. Only those,
-   `package.json` and `package-lock.json` go in, and `npm ci --offline
-   --ignore-scripts` runs with no network. Every dependency spec, in
-   `package.json` and in the lockfile, must be a registry version (no
-   git, URL, `file:` or `link:`, no `overrides`). npm installs a
-   `package.json` spec over the lockfile's, so without this a spec could
-   fetch, or run, code the lockfile does not pin.
-2. **Build.** The tree goes in without its bundle directories, plus the
-   installed `node_modules`, and the script runs with no network. The
-   input is written by the gate from the git tree, so no `.gitattributes`
-   export rule applies. The only output is a tar of the bundle
-   directories, read with caps: regular files only, inside those
-   directories, each named once.
+What this trusts and does not check: that only the owner can put a
+version tag on those two default branches. A gate release reaches every
+caller unread, and no pull request runs the new gate before it merges
+(a new CI workflow is run by the caller's required checks). So a gate
+release that changes `gate.yml`'s inputs or secrets has to be a new
+major. While both repositories are on v0 there are no majors, and that
+safeguard does nothing.
 
-The result (`verified`, `differs`, `failed`, or `not run`) is shown in
-the comment. A match shows that the committed bundle is what the source,
-lockfile and build script produce, not that they are benign, so it
-changes one route only. An `actions.dist-residual` (bundle bytes nothing
-changed explains) goes to review instead of a person when the rebuild of
-that update verified, no locked package changed (so the build's
-dependencies are the bytes accepted before), and every changed file is
-first-party source, which the reviewer reads in full, or inside the
-rebuilt bundle directories. Which packages a build runs can't be told
-from the bundle, which the attacker writes, so a changed lockfile keeps
-the residual with a person. Fetch marks such a finding `if_rebuilt`;
-publish relaxes it only for a verified result bound to every plan of the
-update.
-The full diff of every changed file under the rebuilt directories is
-then required reading (navigable parts, examined like any other; a
-binary one goes to a person), and the review's verdict and accounting
-decide as for any other review. A build can also read files accepted
-with earlier versions, which were not necessarily shown then (a source
-map's extra fields, attributed code the summary does not render); what
-it makes of them lands in a changed file under the rebuilt directories,
-whose full diff is required. A changed source map that no analyzed
-bundle read is shown as a residual of its own. A gVisor
-escape could forge a result; at worst that puts the PR on review, never
-past it.
+## Configuration
 
-## Design rules
+The settings are built into the gate, in
+[internal/config/policy/defaults.json](internal/config/policy/defaults.json),
+and they are the only ones. A repository has no settings file, and
+nothing in a repository or a pull request changes a value. What differs
+between repositories is in the caller's workflow (`app_slug`,
+`ignore_ecosystems`, the Anthropic IDs) and in `dependabot.yml`. One
+file of a repository is read for a fact, and it is no setting: a root
+`.npmrc` that turns npm's install scripts off (see "npm: turning install
+scripts off").
 
-**Don't re-implement Go toolchain behaviour.** Where Go's own tooling
-(`go/build`, `go list`, `go/parser`, `go/scanner`, `go/build/constraint`)
-gives an authoritative answer, the gate uses it. For every platform of `go
-tool dist list`, cgo on and off, with each target's own tool tags (GOARCH
-feature levels, default GOEXPERIMENTs) read from the toolchain: which
-files are built, and what a package embeds, is `go list -e -json`
-(`GoFiles`, `CgoFiles`, `EmbedFiles`) for every package with a
-`//go:embed` comment, run offline in isolated children with a clean
-environment, and `build.Context.ImportDir` over the module tree for the
-other packages. Where the tooling gives no answer, the gate
-over-approximates in the direction that flags more (for the new tree, a
-directory the tooling fails on counts as built everywhere; for the old
-tree, nowhere), and it never credits the old side with a hand-ported
-rule: directives go/build does not report (`//go:linkname`, `//go:cgo_*`,
-`//go:generate`) are flagged in every changed or newly built file whether
-or not they were there before.
+| Key | Value |
+|---|---|
+| `min_age_hours` | 72 |
+| `unread_age_days` | 14 |
+| `major_age_days` | 14 |
+| `new_name_age_days` | 365 |
+| `wait_deadline_days` | 7 |
+| `fast_path` | true |
+| `fast_path_companions` | `ride-along` |
+| `listed` | see below |
+| `own_workflows` | `sadbox/ci`, `sadbox/dep-review`, with their IDs (see above) |
+| `chunk_bytes`, `max_chunks` | 400000, 12 |
+| `model`, `effort`, `context_tokens`, `max_output_tokens`, `request_timeout_seconds`, `attempts` | `claude-opus-5-5`, `high`, ... |
 
-Why: every differential review rounds 8 to 10 (and the later scans) found
-came from cmd/go logic re-implemented in the gate (constraint headers,
-block comments, a BOM, `package documentation`, default release tags,
-embed pattern matching, directive placement). Each port was close, and
-each gap was a way to bring old or unseen text into the build.
+The list names the publishers whose major updates and new packages may
+merge, and the only Docker images that may. A major update of a
+dependency the repository does not declare itself (one that a parent
+pulls in) needs no entry. An entry ending in `/` is a
+namespace; any other entry is a name and everything below it. Matching is
+exact and case-sensitive, with no wildcards. A Docker entry is matched
+against `docker.io/library/<name>` for an official image and
+`gcr.io/<repository>` for a gcr.io image; no other image is read, so an
+entry for one (`docker.io/your-org/`) never matches.
 
-What varies between consumers has no authoritative answer: tags set with
-`-tags` (`purego`, `netgo`, even `ignore`), `go1.N` (older and newer
-toolchains), `gccgo`, GOARCH feature levels (`GOAMD64`) and
-`goexperiment.*` (`GOEXPERIMENT`); only exact GOOS/GOARCH values, `unix`,
-`cgo` and `gc` are fixed by a platform (`arm.7`, `arm64.v9.0`,
-`foo_windows` vary). A changed file whose constraint
-consults a varying tag in either tree (go/build's `AllTags` for the file)
-gets no old text credited, and nothing its `//go:embed` patterns match is
-credited. A file no default configuration builds counts as possibly built
-when go/build builds it, alone in its directory, with exactly some subset
-of the tags it consults turned on (default release and tool tags such as
-`go1.27`, a default GOEXPERIMENT or `arm.7` off unless the subset turns
-them on); its embeds go to a person when its directory changes.
-A byte-identical file keeps its credit only when every configuration that
-builds it now built it before (a sibling's fixed package clause can bring
-it into a build). Every old file a build newly includes is quoted
-in full under `gomod.newly-built`: its diff can be a constraint line, or
-nothing. Past a work or time budget, nothing is credited and a
-person decides.
+To list a publisher, add the entry to `defaults.json` and to the block in
+section 5 of [the spec](docs/v0.2-spec.md) (a test holds the two
+together), measure it with the replay below, release the gate and move
+the caller's pin of `gate.yml`. Until the pin has moved, the pull request
+is merged by hand. Every entry is public here, also one that only a
+private repository uses.
 
-An old `EmbedFiles` answer is credited only where every file the package
-takes `//go:embed` patterns from (the files go list builds there with a
-`//go:embed` comment, per configuration) is byte-identical and built as
-before: go list also reports patterns the compiler rejects, and this needs
-no rule about where a directive may stand. A pattern with a backslash (an
-escape on Linux, a separator on Windows) or a byte a module file path
-cannot hold, other than the glob characters, goes to a person.
+```json
+{
+  "go_modules": ["golang.org/x/", "google.golang.org/", "cloud.google.com/go",
+                 "github.com/aws/", "github.com/Azure/", "github.com/AzureAD/",
+                 "github.com/microsoft/", "github.com/microsoftgraph/",
+                 "go.opentelemetry.io/"],
+  "github_actions": ["actions/", "github/", "docker/", "astral-sh/"],
+  "docker": ["docker.io/library/", "gcr.io/distroless/"],
+  "npm": ["tailwindcss", "@tailwindcss/"]
+}
+```
 
-One rule is the gate's own, because go/build has no answer for it: a
-package-level var initializer such as `var _ I = (*T)(nil)`, `T(nil)` or
-`G[int](nil)` is a conversion, not a call, when `T` or `G` is a type
-declared in that same file. That follows from Go's scoping: wherever the
-file compiles, any other package-level declaration of the name, in a
-sibling file or imported into this one, is a redeclaration error. So it
-holds under every build constraint, including files only a `-tags` or
-newer-toolchain build compiles (x/net's `http2` files at go1.27). It
-yields to every doubt: a func, var or const of that name in any `.go`
-file of the directory, a dot import, an import of that name, or a file
-that does not parse make it a call. A type declared in another file
-counts only when that file is built in every configuration. Each version
-of a file is classified in the scope of its own tree.
+### Measuring a change before shipping it
 
-Known limits:
+`dep-review replay` decides a directory of recorded pull requests offline
+and prints one line for each (outcome, reasons, and what it stopped on),
+then the totals for each ecosystem:
 
-- go/build is compiled into the gate and `go list` is the runner's `go`
-  (the fetch summary records both versions).
-- Under a non-default build tag, an old package that did not build at all
-  in that configuration (a package-consistency error, such as two package
-  clauses among the files that tag selects) and that a sibling's fix makes
-  buildable keeps credit for its unchanged files. The `-tags` search
-  looks at each file alone, so it does not see the old package fail. The
-  gap is narrow: no build using that tag could have used the old package,
-  so nothing of it ran before. A repository that declares its builds
-  (below) does not have this limit for the tags it declares.
+```
+dep-review replay --dir records --now 2026-11-23T00:00:00Z \
+    [--policy changed-defaults.json] [--name-created 2020-01-01T00:00:00Z]
+```
 
-### Declared Go builds
+A record is one JSON file for one pull request: its ecosystem, when it was
+created, and every changed path with its mode and content at the merge
+base and at the head ([internal/replay](internal/replay/replay.go) has the
+form, `internal/replay/testdata` an example). The replay runs the real
+reading of those files and the real decision. Everything a registry,
+GitHub or the model would be asked is taken to be favourable, and a
+version is taken to be as old as its pull request. Run it with the
+built-in policy and with the changed one, and compare who goes to a
+person. `--policy` takes a complete file in the form of `defaults.json`.
+It may be wider or narrower than the built-in one, and the replay is the
+only thing that reads a policy from a file (`replay.ReadPolicy`).
+`--name-created` is the one stand-in with a choice: without it the
+age of a new name is unknown, which is person. With it, the pull requests
+that do not go to a person are an upper bound on those that would not in
+the gate. npm records need a local npm; nothing else is run and no
+network is used.
 
-A caller can set `go_platforms`, the GOOS/GOARCH pairs it builds Go for,
-and `go_tags`, tag sets its builds also use: sets separated by spaces,
-tags within a set by commas, such as `race` for `go test -race`. Go module
-checks then evaluate each platform, cgo off and on, with no tags and with
-each tag set, using go/build and go list. That replaces every platform
-with `-tags` over-approximated. Tags the toolchain sets still vary between
-consumers whatever they declare: `go1.N`, GOARCH feature levels such as
-`amd64.v3`, `gccgo` and GOEXPERIMENT. A file whose constraint consults one
-is still treated as possibly built, and checked as new when it changes.
+## Jobs
 
-The checks then skip:
-- `.go` and `.syso` files that none of those builds compile;
-- C and other cgo sources, when no package builds cgo or SWIG files in
-  them and the module has no assembly.
+```
+PR opened or pushed to
+  └─ caller's dep-review-trigger (no-op; its job runs for Dependabot's PRs)
+       └─ workflow_run → gate.yml (nothing runs when the trigger's job was skipped)
+            build     the gate, from the workflow's own commit
+            classify  Dependabot's alone? head still current?     (read-only token)
+            fetch     change set, facts, artifacts, text chunks    (read-only token)
+            review    one tool-less model request per chunk        (OIDC token only)
+            publish   decide, comment, status, merge               (gate app)
+schedule → gate.yml
+            build
+            refresh   for every PR left waiting, and every one     (read-only token)
+                      the gate has nothing for at its head: the
+                      identity proof and the facts again, and which
+                      reads the model need not be asked about now
+            reread    one tool-less model request per chunk of     (OIDC token only)
+                      a read that has no answer yet; not on a
+                      manual dispatch
+            publish   the identity proof once more, then decide    (gate app)
+                      on the facts, reread's verdicts and what
+                      its own comment remembers; then its own look
+                      at the open PRs for a wait past its deadline
+                      and a notification that was not sent
+```
 
-Nothing else is skipped:
-- assembly, since a built `.s` can include another under any spelling;
-- anything go list embeds;
-- anything in a package whose embeds go list could not resolve.
+Publish jobs run one at a time in a repository and wait for each other
+in order (`queue: max`), so two merges never reach the base branch at the
+same moment. fetch and refresh run npm from a pinned Node major, not the
+runner image's.
 
-The list must cover every build the repository uses: CI, releases and
-developer machines. A build missing from it is not checked.
+A verdict is remembered in the gate's comment by a hash of what was read
+and of the question (prompt, answer schema, model, effort). The
+scheduled run asks the model only about a read the comment has no
+answer for, and only when an ask is due; for the rest it decides on what
+was read before. An event's run (a push, a rebase, a re-run) always asks
+the model about every read, whatever the comment remembers. A verdict
+remembered under an older prompt or model is no answer: the scheduled
+run asks again.
+
+A veto is remembered for good. Once the model has objected to an
+update's code, that veto stands for the same code under the same
+question in every later run, on an event and on the schedule, whatever
+the model answers when it is asked again and also when it does not
+answer. A rebase does not clear it and neither does running the gate
+again. A person does, by merging or closing the pull request; so does
+other code (a new version) and a changed prompt or model. A run that
+could not write its decision keeps the veto in what it does write. The comment
+keeps a veto's quotes only while there is room, and the veto without
+them after that; a pull request with more vetoes than the comment can
+remember at all needs a person for good (`vetoes_forgotten`).
+
+## Using it in a repository
+
+1. Copy `examples/dep-review-trigger.yaml` and `examples/dep-review.yaml`
+   into `.github/workflows/`. Pin `gate.yml` by the commit of a release
+   tag, with the version in the comment as the example has it
+   (`@<40 hex> # vX.Y.Z`): that is the line the gate reads when
+   Dependabot moves it. Set `app_slug` and the Anthropic IDs. The
+   example runs the schedule every four hours; choose another if you
+   like. Publish does not wait for checks: a merge the gate decides while
+   required checks are still running lands at the first scheduled run
+   after they pass, a security fix included. GitHub starts scheduled runs
+   late and may skip one, and a run with nothing to do costs about two
+   billed minutes.
+2. Create the environment `dep-review` (deployment branches: default
+   branch only) with variable `DEP_REVIEW_APP_ID`, secret
+   `DEP_REVIEW_APP_KEY` (the gate app's private key), and optionally
+   `PUSHOVER_APP_TOKEN` and `PUSHOVER_USER_KEY`.
+3. Install the gate app on the repository, with write permission for
+   contents, pull requests, workflows and commit statuses.
+4. Create an active branch ruleset that applies to every `dependabot/`
+   branch with *Restrict creations*, *Restrict updates* and *Restrict
+   deletions*, and Dependabot as the only bypass actor. classify asks
+   GitHub which rules apply to the pull request's branch and treats the
+   pull request as not Dependabot's alone without all three. An update
+   rule that lets anyone pull the base branch in
+   (`update_allows_fetch_and_merge`) does not count. It cannot see the
+   bypass list, so keeping that list to Dependabot is the owner's job.
+5. Give the default branch a ruleset rule that requires at least one
+   status check besides `dep-review`. Classic branch protection does not
+   count.
+6. Pin actions by tag and onboard the workflows to
+   `.github/workflows/actions.lock` if Actions updates should merge.
+7. Give the Anthropic workspace a workload identity federation rule that
+   admits the two review jobs: the repository's immutable OIDC subject,
+   the default branch as `ref`, an event that is `workflow_run` or
+   `schedule` (`claims.event_name in ["workflow_run", "schedule"]`), and
+   a `job_workflow_ref` of this repository's `gate.yml`. No other event:
+   the gate asks no model on a manual dispatch. The workflow uses no API
+   key. While the rule does not admit `schedule`, a scheduled ask is
+   denied, counts as a miss and is tried again later; nothing merges
+   unread. An owner with more than one rule changes each: every
+   repository passes the ID of its own as `anthropic_federation_rule_id`.
+8. For npm, optionally turn install scripts off (next section).
+
+### npm: turning install scripts off
+
+npm runs a dependency's `preinstall`, `install` and `postinstall`
+scripts, and builds a `binding.gyp`, when it installs. The gate
+otherwise sends every update that adds or changes one of these to a
+person. A repository that needs none of them can turn them off, and the
+gate then asks nothing about them:
+
+- a root `.npmrc` whose whole content is `ignore-scripts=true` and one
+  newline. The gate compares the file's git entry with the one it knows,
+  so a comment, a space or a second setting is not this file;
+- wherever npm installs from the lock, the file beside `package.json`:
+  in a Dockerfile, `COPY package.json package-lock.json .npmrc ./`
+  before `npm ci`. Without the copy the scripts run;
+- a guard before the install, because a flag or an environment variable
+  overrides the file: `RUN test "$(npm config get ignore-scripts)" = true`.
+
+The gate sees only the file. That it is copied and that nothing
+overrides it is the repository's to keep, so all three go in together,
+and before the repository runs a gate that has this rule. It covers the
+root's `package-lock.json` only, a pull request that changes `.npmrc`
+goes to a person, and the tarballs are still verified and read by the
+model. Provenance is still compared. Removing the line later turns on
+every install script in the lock at once, and none of them was compared
+while it was there. The gate reads the file at the commit the pull
+request records, which GitHub moves only when Dependabot rebuilds the
+pull request, so before a merge that rests on it, publish reads the
+default branch's root `.npmrc` as it is now; when it is not the same
+file, the pull request waits (`scripts_off_changed`) until Dependabot
+rebuilds it and the new head is evaluated on its own.
+
+`ignore_ecosystems` (comma-separated, default empty) is for an ecosystem
+whose Dependabot pull requests another trusted process owns. Names are the
+ones in Dependabot's branch names (`go_modules`, `npm_and_yarn`,
+`github_actions`, `docker`, `submodules`, `uv`); an unknown name fails the
+run. Only a pull request that passes the whole identity proof is ignored,
+and it then gets no status, comment or notification.
+
+## What it does not catch
+
+- An attacker who studies the gate. A payload that the model does not
+  object to, in a release that stays published and unflagged for the
+  required age, merges.
+- Anything in a Docker image: images are never read. A listed image whose
+  tag still resolves to the pinned digest after 72 hours merges unseen.
+- Anything in the owner's own reusable workflows (`sadbox/ci`,
+  `sadbox/dep-review`): a release of one merges unread and at once.
+  That covers what the owner wrote and whatever third-party update the
+  owner merged there by hand before tagging; neither repository runs the
+  gate on itself, and the gate's jobs run with the gate app's key.
+- What an action or an install script downloads when it runs: a tool, an
+  installer, a prebuilt binary. The model sees the lines that fetch it.
+- An install script in a repository whose `.npmrc` turns scripts off, when
+  npm runs somewhere that does not read that file or is told otherwise by
+  a flag or an environment variable. The gate reads the file's bytes at
+  the base commit, and its git entry on the default branch before a
+  merge, and nothing about how npm is run.
+- Code the model was not shown. Files that are not text, and text beyond
+  the chunk budget, are listed as unread; such an update is only partly
+  read and still merges, after `unread_age_days`, as long as the model
+  was shown at least some of the change. For a bundled file over
+  256 KB only the lines that occur nowhere in the old file are shown.
+- A forged npm provenance statement: the gate reads the statement the
+  registry serves and does not verify its signature.
+- A broken update. The gate does not look at CI; the default branch's
+  required checks are the only thing between a failing update and a
+  merge, which is why ChecksConfigured is a fact.
+- Who may push to `dependabot/` branches beyond what GitHub's rules say:
+  the ruleset's bypass list is not visible to the gate.
+- A wrong answer from a source the gate trusts: the Go checksum database
+  and index, the npm registry, Docker Hub, GCR, GitHub's API and its
+  Advisory Database.
+
+## Trust boundaries
+
+- **Default-branch code only.** `workflow_run` and `schedule` run the
+  caller's workflow from the default branch, and every job runs the gate
+  built from the commit the caller pinned. Nothing from a pull request is
+  executed: the change set is read from git objects, and artifacts are
+  downloaded, verified against the pinned hash and diffed.
+- **Checksums between jobs.** Anything holding a run's runtime token can
+  replace the run's artifacts, so every job checks the gate binary and
+  every artifact it uses against sha256 sums that their producers passed
+  as job outputs.
+- **Secrets.** classify, fetch and refresh hold a read-only token and no
+  secret. review and reread hold only the OIDC token they exchange for a
+  short-lived Claude token, and no access to the repository; the model
+  gets text in a request and has no tools. publish alone holds the gate
+  app's token, in the `dep-review` environment, and parses no untrusted
+  text in a shell.
+- **What a job can assert.** The model can only veto: no answer of its
+  makes a decision more permissive than "no veto", and none takes back a
+  veto the gate's comment remembers. The facts file has no
+  member that says a model read an update; that comes only from the
+  verdicts file, matched by content hash. The one read that counts
+  without a verdict is of two artifacts that hold the same files, where
+  there is nothing to show a model and the facts file says so. The one
+  update that merges with no read at all is the owner's own workflow:
+  the facts file says `own`, and publish takes that only for a name on
+  the list built into its own binary. publish
+  believes the facts only about the pull request and head that classify
+  proved: the classify job on an event, its own run of the proof on a
+  schedule. The policy is built into the gate: no file of a repository
+  or a pull request changes it. One file of the repository changes what
+  a fact asks: the root `.npmrc` at the base branch's commit, by which
+  npm's install inputs are not compared, and which must still be the
+  default branch's for a merge that rests on it. A pull request that
+  changes that file has no Shape.
+- **Third-party text.** Everything a registry, a dependency or the model
+  wrote reaches the comment only through one sanitiser, in code spans,
+  with a length cap; it reaches logs only through a logger that escapes
+  control characters and workflow commands. Commit statuses carry only
+  the gate's own words, and so do notifications but for one thing: the
+  name of the file a held merge is held for, through the same sanitiser.
+- **The scheduled path.** refresh runs both the identity proof and the
+  fetch in one unprivileged job, so publish takes neither on its word:
+  it runs the proof again itself for every refreshed pull request and
+  believes the facts only as far as that goes; when its proof says the
+  pull request is not Dependabot's alone, that is the decision's
+  Identity whatever the facts say. refresh also reads the
+  gate's comment, and its copy of what the comment remembers goes to
+  reread only, as a list of reads to skip in which no entry says a read
+  was read. publish takes a verdict from reread's own artifact or from
+  the comment, which it reads itself. A wrong list makes the model answer
+  twice or leaves a read waiting; it cannot make a read count.
+- **One app per owner.** The gate app's private key sits in the
+  `dep-review` environment of every repository the app is installed on.
+  Anyone who can get a workflow change onto one such repository's default
+  branch can mint the app's token for all of them.
+- **Caches** are outside the checksum chain. The gate uses none.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `.github/workflows/gate.yml` | the reusable workflow |
-| `cmd/dep-review` | entry point: `classify`, `fetch`, `review-prep`, `review`, `proxy`, `publish`, `sweep` |
-| `internal/model` | the JSON contract between jobs (read this first) |
-| `internal/policy` | version policy and route combination |
-| `internal/gh` | minimal GitHub REST client (no GraphQL) |
-| `internal/classify` | who the PR belongs to; Dependabot metadata |
-| `internal/fetch`, `internal/eco/*` | per-ecosystem change sets, downloads, diffs, findings |
-| `internal/evidence` | evidence directory writer, size caps, untrusted/ split |
-| `internal/publish` | decision, comment rendering, status, merge, notifications, sweep |
-| `internal/sandbox`, `internal/proxy` | the reviewer sandbox (docker, gVisor, networks) and its credential proxy |
-| `sandbox/` | reviewer image (Dockerfile, pinned CLI lockfile), gVisor installer, CI isolation probes |
-| `prompts/review.md`, `schema/verdict.json` | the reviewer's instructions and output schema |
-| `examples/` | what a repository adds to use the gate |
-
-Dependencies: the standard library unless there is a strong reason; each
-one is reviewed by this gate too.
-
-## Using it in a repository
-
-1. Copy `examples/dep-review-trigger.yaml` and `examples/dep-review.yaml`
-   into `.github/workflows/`, pin `gate.yml` by commit SHA, set the
-   Anthropic IDs.
-   The repository must use immutable OIDC subjects (see "Model
-   credential").
-2. Add `.github/dep-review.md` (review notes; see `examples/dep-review.md`).
-3. Create environment `dep-review` (deployment branches: default branch
-   only) with variable `DEP_REVIEW_APP_ID`, secret `DEP_REVIEW_APP_KEY`
-   (the gate app's private key), and optionally `PUSHOVER_APP_TOKEN` /
-   `PUSHOVER_USER_KEY`.
-4. Install the gate app on the repository (permissions: contents, pull
-   requests, workflows, commit statuses: write; checks, actions: read).
-5. Create an active branch ruleset (any name) targeting
-   `refs/heads/dependabot/**` with the rules *Restrict creations*,
-   *Restrict updates* and *Restrict deletions*, and Dependabot as the only
-   bypass actor. classify reads the repository's rulesets with its
-   read-only token and treats every PR as `dependabot-unverified` without
-   one. It cannot see the bypass list (GitHub returns `bypass_actors` only
-   to tokens that may edit the ruleset), so keeping that list to
-   Dependabot alone is the owner's job.
-
-### Ignoring an ecosystem
-
-`ignore_ecosystems` (comma-separated, default empty) is for an ecosystem
-whose Dependabot PRs another trusted process already owns, e.g. a routine
-that opens its own PR for every submodule bump and closes Dependabot's as
-superseded. Use it only then: an ignored PR is never reviewed, merged or
-reported. Names are the ones in Dependabot's branch names
-(`dependabot/<ecosystem>/...`): `docker`, `github_actions`, `go_modules`,
-`npm_and_yarn`, `submodules`, `uv`, not the `package-ecosystem` names in
-`dependabot.yml` (`gitsubmodule`, `gomod`, ...). An unknown name fails the
-run.
-
-classify still runs every check above. Only a PR that passes them all
-(kind `dependabot`) and whose branch ecosystem and every declared update
-are in the list becomes `dependabot-ignored`: fetch, review and publish
-do not run, so it gets no status, comment or notification, and the
-classify log says why. An unverified PR, or an update set that mixes an
-ignored ecosystem with another, is gated as usual. Dependabot's
-`updated-dependencies` metadata names no ecosystem, so in practice the
-branch name decides. Sweep cannot classify, so it skips every open
-Dependabot PR whose branch names an ignored ecosystem; such a PR is
-therefore never reported as stuck either (publish has already marked an
-unverified one `failure`).
-
-### Trust boundaries
-
-Each owner has one gate GitHub App: sadbox uses app 5855685 (installed on
-sadbox.org, homelab-configs, towngear, oncall-sync), Espresso-Aficionados
-uses app 5855747 (sprobot, linkclean). Its private key sits in the
-`dep-review` environment of every repository it is installed on. So
-anyone who can run a job in one repository's `dep-review` environment, in
-practice anyone who can get a workflow change onto its default branch,
-can mint contents- and workflows-write tokens for every repository that
-app is installed on, and can forge the `dep-review` status that sweep
-merges on.
-
-Accepted: write access on those repositories is limited to trusted
-people (the owner, plus sprobot's collaborators), so write on one of an
-owner's gated repositories already means write on all of them. Revisit,
-by moving to one app per repository, if a gated repository gains
-collaborators who should not have write on the others.
-
-Caches are outside the sha256 chain that protects the gate's artifacts.
-The fetch job and the review job's host steps still hold the run's
-runtime token, so code execution in either could write cache entries
-scoped to the default branch, which the caller's other workflows would
-then restore. The gate itself uses no cache.
-
-## Model credential
-
-Claude API workload identity federation, done by the credential proxy
-(`dep-review proxy`), never by the reviewer. The job's OIDC request token
-(`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, which in actions/runner is also the
-job's runtime token: it can replace the run's artifacts and write caches)
-never leaves the host process `dep-review review`. That process serves
-the proxy container one thing over a unix socket: a fresh GitHub OIDC JWT
-for the audience `https://api.anthropic.com`. The proxy exchanges each JWT
-at `POST /v1/oauth/token` (RFC 7523 jwt-bearer) for a short-lived
-Claude token, sends that as `Authorization: Bearer`, and exchanges again,
-with a fresh OIDC token each time, two minutes before expiry (federated
-tokens live about ten minutes; a review can take twenty). No API key is
-stored anywhere.
-
-Every gated repository uses GitHub's immutable OIDC subjects, which carry
-numeric IDs (e.g.
-`repo:Espresso-Aficionados@76916743/linkclean@1420833610:ref:refs/heads/main`),
-so each owner's federation rule matches `repo:<owner>@<owner_id>/*`:
-`repo:sadbox@2502941/*` and `repo:Espresso-Aficionados@76916743/*`. Before
-adding a repository to the gate, make sure it has immutable subjects
-enabled: `GET`/`PUT repos/{owner}/{repo}/actions/oidc/customization/sub`,
-`use_immutable_subject: true` (new repositories get it by default). The
-rule's CEL checks on `repository_id` add rename safety on top. The rule
-also pins `event_name == "workflow_run"`, the default branch and
-`job_workflow_ref` starting with this repository's `gate.yml`. Its scope
-is `workspace:developer`, the narrowest the Claude Console offers (the
-other is `org:admin`), in a workspace that has a spend limit. That scope
-allows more than inference, but the token never enters the sandbox and
-the proxy forwards only `POST /v1/messages`, so the rest is reachable
-only from the host side. Inputs: `anthropic_federation_rule_id`,
-`anthropic_organization_id`, optional `anthropic_workspace_id` and
-`anthropic_service_account_id`; `max_model_requests` (default 200) caps
-Messages requests per review.
-
-## Sandbox
-
-The reviewer is the Claude Code CLI (pinned in `sandbox/package-lock.json`)
-alone on a glibc distroless image (no shell, no Node, no npm, no package
-manager), in a container run under gVisor (`runsc`, pinned and sha512-checked by
-`sandbox/install-gvisor.sh`), so even code execution inside it gets:
-
-- **No credentials.** Its environment is a fixed list (`internal/sandbox`):
-  the proxy URL, a placeholder API key, telemetry and updates off. No
-  `GITHUB_*`, `ACTIONS_*` or `RUNNER_*` variable, no token, no OIDC.
-- **No network but the Messages API.** It is attached only to a
-  `docker network create --internal` network with no host gateway; its only
-  peer is the proxy, at a fixed IP (no DNS). The proxy (its own runc
-  container, also on a normal bridge) forwards only `POST /v1/messages`,
-  only for the gate's model, refuses server tools, the MCP connector and
-  URL/file content sources (each would make Anthropic fetch something for
-  the caller), drops the client's headers but a short allowlist, injects the
-  token, caps the request count and logs path, status and token usage only.
-- **No writable persistent state.** Read-only root, `--cap-drop=ALL`,
-  `no-new-privileges`, non-root, pids and memory limits; `./evidence`,
-  `./repo` and the settings file are read-only mounts; `$HOME` and `/tmp` are
-  tmpfs.
-- **Only data we already publish**: the evidence and the default branch.
-
-Its answer comes back only on stdout: one `claude -p --output-format json`
-result, at most 2 MB, whose `structured_output` must pass the verdict
-schema before `verdict.json` is written. Anything else is no verdict, which
-sends the PR to a human. The Read/Grep/Glob-only tool set and the
-permission settings from `review-prep` still apply inside, as a second
-layer. CI (`ci.yml`, job `sandbox`, amd64 and arm64) runs the same setup
-against a fake upstream: isolation probes, then a scripted end-to-end
-review.
-
-## Updating pins
-
-Dependabot (`.github/dependabot.yml`) bumps the Go toolchain, the actions,
-the sandbox images' bases (`sandbox/Dockerfile`, one grouped PR), the
-rebuild job's Node images (`sandbox/rebuild/Dockerfile`) and the
-Claude Code CLI (`sandbox/package.json`, both architectures in one PR),
-daily with a three-day cooldown. Two things are by hand:
-
-- **gVisor.** `sandbox/install-gvisor.sh` pins a release and the sha512 of
-  each architecture's tarball; set `release` and copy both sums from that
-  release's `{x86_64,aarch64}/gvisor.tar.zstd.sha512` in the bucket.
-- **The proxy's allowlist after a CLI bump.** The proxy accepts only the
-  request fields, block types and betas the pinned CLI sends, and CI's
-  `sandbox` job fails on any refused request or dropped beta. To re-record,
-  run the end-to-end review from that job (`dep-review review ...
-  --test-fake-upstream canned.json`, sandboxtest build) with
-  `--test-fake-record <dir>` (a directory the container user 65532 can
-  write). The fake writes each request body as `messages-NNN.json` and its
-  forwarded headers as `messages-NNN.headers.json`. Then:
-  1. copy the last `messages-NNN.json` to
-     `internal/proxy/testdata/claude-code-request.json`;
-  2. compare the CLI's betas (in the proxy log, `dropped anthropic-beta
-     ...`) with `allowedBetas` in `internal/proxy/proxy.go`, and any
-     refusal reason with the allowlists in `internal/proxy/validate.go`;
-  3. add only what the new CLI really sends and is inert (no server tool,
-     no fetch by Anthropic), with a test, and re-run until the job is
-     green.
-
-The baseline every project follows (images, CI, Dependabot, repository
-settings) lives in [sadbox/ci](https://github.com/sadbox/ci/blob/main/STANDARDS.md).
+| `cmd/dep-review` | one subcommand per job, and `replay`; flags, files, exit codes |
+| `internal/classify` | the identity proof |
+| `internal/model` | classify's answer as a file, and Dependabot's names for the ecosystems |
+| `internal/gather` | the fetch and review jobs |
+| `internal/facts` | what a gatherer is given and hands back |
+| `internal/facts/{gomod,npm,actions,docker}` | each ecosystem's facts |
+| `internal/advisory` | GitHub's Advisory Database |
+| `internal/artifact` | download, verify, extract, diff, chunk |
+| `internal/veto` | the model request and its credentials |
+| `internal/wire` | the files the jobs hand each other |
+| `internal/allow` | the decision: a pure function of facts, policy and time |
+| `internal/config` | the built-in settings |
+| `internal/land` | the publish job: comment, status, merge, notification |
+| `internal/replay` | the decision over recorded pull requests, offline |
+| `internal/gh` | the GitHub REST client |

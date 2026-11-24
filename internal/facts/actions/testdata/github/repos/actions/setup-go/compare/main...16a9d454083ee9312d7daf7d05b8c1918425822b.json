@@ -1,0 +1,12 @@
+{
+  "status": "diverged",
+  "ahead_by": 3,
+  "behind_by": 242,
+  "total_commits": 3,
+  "base_commit": {
+    "sha": "d8cbb8045d7f43706b9177cceb36c1f91a6644d5"
+  },
+  "merge_base_commit": {
+    "sha": "65771601fffb58bc9398f4840ef80fafd2de713e"
+  }
+}

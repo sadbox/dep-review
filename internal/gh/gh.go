@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -61,20 +62,19 @@ func New(token string) *Client {
 	}
 }
 
-// NewFromEnv reads the token from GH_TOKEN, and GITHUB_API_URL if set.
+// NewFromEnv returns a client for api.github.com with the token in
+// GH_TOKEN. The gate runs on github.com only: where the runner names
+// another API it stops, and does not send that server's token to
+// api.github.com.
 func NewFromEnv() (*Client, error) {
 	tok := os.Getenv("GH_TOKEN")
 	if tok == "" {
 		return nil, errors.New("GH_TOKEN is not set")
 	}
-	c := New(tok)
-	if u := os.Getenv("GITHUB_API_URL"); u != "" {
-		if !strings.HasPrefix(u, "https://") {
-			return nil, fmt.Errorf("GITHUB_API_URL must be https")
-		}
-		c.BaseURL = strings.TrimSuffix(u, "/") + "/"
+	if u := os.Getenv("GITHUB_API_URL"); u != "" && strings.TrimSuffix(u, "/")+"/" != DefaultBaseURL {
+		return nil, fmt.Errorf("GITHUB_API_URL is %.100q, and the gate runs on github.com only", u)
 	}
-	return c, nil
+	return New(tok), nil
 }
 
 // Error is a non-2xx response.
@@ -82,7 +82,11 @@ type Error struct {
 	Method     string
 	Path       string
 	StatusCode int
-	Message    string // GitHub's "message" field, if any
+	Message    string // GitHub's "message" field, if any, up to MaxMessage bytes
+	// RateLimited: GitHub refused the request for a rate limit: a 429, or
+	// a 403 that carries one of its rate-limit signals (see retryable).
+	// The client has retried it already.
+	RateLimited bool
 }
 
 func (e *Error) Error() string {
@@ -92,16 +96,34 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("github: %s %s: %d", e.Method, e.Path, e.StatusCode)
 }
 
-// ErrNotFound is the gate's one "does not exist" sentinel, checked with
-// errors.Is. A *Error matches it for a 404. The fetchers' other HTTP
-// clients (registries, package indexes, the OCI client) wrap it for their
-// own not-found statuses, so a fetcher never inspects status codes or
+// ErrNotFound is the "does not exist" sentinel, checked with errors.Is. A
+// *Error matches it for a 404, so a caller never inspects status codes or
 // error text to tell "missing" from "failed".
+
 var ErrNotFound = errors.New("not found")
 
 // Is makes errors.Is(err, ErrNotFound) true for a 404.
 func (e *Error) Is(target error) bool {
 	return target == ErrNotFound && e.StatusCode == http.StatusNotFound
+}
+
+// Unavailable reports whether err, from a call on a Client, means GitHub
+// was asked and did not answer: no response at all (a network error or a
+// timeout), a server error, or a rate limit, each after the client's own
+// retries. Such a failure says nothing about what was asked for, and the
+// v0.2 gate waits and asks again (docs/v0.2-spec.md, section 11,
+// amendment 1). Every other error is an answer: a 404, a 403 that is not
+// a rate limit, a body that could not be decoded.
+//
+// A caller whose own context has ended must look at that first: a
+// deadline that ran out is a timeout here too.
+func Unavailable(err error) bool {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.RateLimited || e.StatusCode >= 500
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 // StatusCode returns the HTTP status of a *Error anywhere in err's chain,
@@ -163,7 +185,9 @@ func (c *Client) Pages(ctx context.Context, path string, fn func(body []byte) er
 		if err := fn(raw); err != nil {
 			return err
 		}
-		next, err = c.nextPath(h.Get("Link"))
+		// Every Link line: Get would return the first and miss a next link
+		// on a second.
+		next, err = c.nextPath(strings.Join(h.Values("Link"), ", "))
 		if err != nil {
 			return err
 		}
@@ -195,23 +219,29 @@ func withPerPage(path string) string {
 	return path + "?per_page=100"
 }
 
-var linkNextRe = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="?next"?`)
+var (
+	// linkNextRe is the one form of a next link the client follows: the
+	// URL, then rel="next" as its first parameter.
+	linkNextRe = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="?next"?\s*(?:[,;]|$)`)
+	linkURLRe  = regexp.MustCompile(`<[^>]*>`)
+)
 
 // nextPath extracts rel="next" and turns it back into a path, refusing any
 // URL outside BaseURL so the token is never sent elsewhere.
+//
+// A header that names a next page in any other form is an error, not the
+// last page: a list cut short must never be taken for a whole one. "Names"
+// is the word next outside the URLs, so a repository called next does not
+// end its own lists with an error.
 func (c *Client) nextPath(link string) (string, error) {
-	if link == "" {
-		return "", nil
-	}
-	for _, part := range strings.Split(link, ",") {
-		m := linkNextRe.FindStringSubmatch(part)
-		if m == nil {
-			continue
-		}
-		if !strings.HasPrefix(m[1], c.BaseURL) {
-			return "", fmt.Errorf("github: next page %q is outside %s", m[1], c.BaseURL)
-		}
+	m := linkNextRe.FindStringSubmatch(link)
+	switch {
+	case m != nil && strings.HasPrefix(m[1], c.BaseURL):
 		return strings.TrimPrefix(m[1], c.BaseURL), nil
+	case m != nil:
+		return "", fmt.Errorf("github: next page %q is outside %s", m[1], c.BaseURL)
+	case strings.Contains(strings.ToLower(linkURLRe.ReplaceAllString(link, "")), "next"):
+		return "", fmt.Errorf("github: Link header %.300q names a next page in a form this client does not read", link)
 	}
 	return "", nil
 }
@@ -302,7 +332,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) (http
 			retry = method == http.MethodGet && ctx.Err() == nil
 		} else {
 			retry, wait = c.retryable(method, &http.Response{StatusCode: status, Header: h}, body)
-			err = &Error{Method: method, Path: path, StatusCode: status, Message: apiMessage(body)}
+			// retryable says yes to a 403 only for a rate limit.
+			limited := status == http.StatusTooManyRequests || (status == http.StatusForbidden && retry)
+			err = &Error{Method: method, Path: path, StatusCode: status, Message: apiMessage(body), RateLimited: limited}
 		}
 		if !retry || attempt >= c.MaxRetries {
 			return h, err
@@ -348,6 +380,51 @@ func (c *Client) once(ctx context.Context, method, u string, payload []byte) (ht
 	return resp.Header, body, resp.StatusCode, nil
 }
 
+// MaxMessage is how many bytes of GitHub's "message" an Error keeps. A
+// refused merge names every required check on a line of its own, and a
+// caller reads those lines (internal/land), so the cap is well above a
+// rule violation with a dozen checks.
+const MaxMessage = 2000
+
+// GateStatus is the commit status the gate itself sets. A rule that
+// requires only this one requires no CI at all: the gate would be vouching
+// for its own merge.
+const GateStatus = "dep-review"
+
+// RequiredChecks returns the status checks, other than the gate's own,
+// that an active rule on branch requires. GitHub's rules/branches answer
+// lists every active rule that applies to the branch, whichever ruleset it
+// comes from, and leaves out rulesets that are disabled or only evaluated.
+// Classic branch protection is not a rule and does not count: the spec
+// names this source. Both jobs that establish ChecksConfigured read it
+// here, so they cannot come to disagree on what counts.
+func RequiredChecks(ctx context.Context, c *Client, repo, branch string) ([]string, error) {
+	type rule struct {
+		Type       string `json:"type"`
+		Parameters struct {
+			RequiredStatusChecks []struct {
+				Context string `json:"context"`
+			} `json:"required_status_checks"`
+		} `json:"parameters"`
+	}
+	rules, err := List[rule](ctx, c, fmt.Sprintf("repos/%s/rules/branches/%s", repo, branch))
+	if err != nil {
+		return nil, err
+	}
+	var contexts []string
+	for _, r := range rules {
+		if r.Type != "required_status_checks" {
+			continue
+		}
+		for _, check := range r.Parameters.RequiredStatusChecks {
+			if check.Context != "" && check.Context != GateStatus {
+				contexts = append(contexts, check.Context)
+			}
+		}
+	}
+	return contexts, nil
+}
+
 func apiMessage(body []byte) string {
 	var m struct {
 		Message string `json:"message"`
@@ -355,8 +432,8 @@ func apiMessage(body []byte) string {
 	if json.Unmarshal(body, &m) != nil {
 		return ""
 	}
-	if len(m.Message) > 200 {
-		return m.Message[:200]
+	if len(m.Message) > MaxMessage {
+		return m.Message[:MaxMessage]
 	}
 	return m.Message
 }

@@ -1,0 +1,6 @@
+{
+	"Path": "github.com/fsnotify/fsnotify",
+	"Version": "v1.5.4",
+	"Error": "github.com/fsnotify/fsnotify@v1.5.4: verifying go.mod: checksum mismatch\n\tdownloaded: h1:KOil/w6cxr3ALagyF6SIPYeoV9XN+Pjkp5hICIRMzgM=\n\tsum.golang.org: h1:OVB6XrOHzAwXMpEM7uPOzcehqUV2UqJxmVXmkdnm1bU=\n\nSECURITY ERROR\nThis download does NOT match the one reported by the checksum server.\nThe bits may have been replaced on the origin server, or an attacker may\nhave intercepted the download attempt.\n\nFor more information, see 'go help module-auth'.\n",
+	"Info": "/scratch/gopath/pkg/mod/cache/download/github.com/fsnotify/fsnotify/@v/v1.5.4.info"
+}

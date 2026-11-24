@@ -1,0 +1,25 @@
+actions-major-unlisted	github_actions	person	major_unlisted	example/setup-tool v1.4.0 -> v2.0.0: major_unlisted
+actions-own-lookalike	github_actions	person	shape,no_updates	shape: .github/workflows/lint.yaml:5: the line pins a reusable workflow that is not a workflow file of a repository on the policy's own list; such a pin never merges without a person
+actions-own-major	github_actions	person	major_own	sadbox/ci v1.5.0 -> v2.0.0: major_own
+actions-own-workflow	github_actions	merge	-	needs 0h after creation
+actions-pin	github_actions	merge	-	needs 72h after creation
+actions-short-tag	github_actions	person	shape,no_updates	shape: .github/workflows/ci.yml:7: the changed line is not an action pin in an accepted shape at both commits
+docker-listed	docker	merge	-	needs 72h after creation
+docker-unlisted	docker	person	not_known	gcr.io/example-project/app 2.1.0@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc -> 2.2.0@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd: not_known
+go-major-listed	go_modules	merge	-	needs 336h after creation
+go-major-unlisted	go_modules	person	major_unlisted	example.com/lib v0.9.0 -> v1.0.0: major_unlisted
+go-new-name	go_modules	person	name_created_unknown	example.com/helper (new) -> v1.0.0: name_created_unknown
+go-other-file	go_modules	person	shape,no_updates	shape: changes main.go, which is not go.mod or go.sum
+go-others-pushed	go_modules	person	identity,fact_missing,no_updates	-
+go-patch-recent	go_modules	wait	age	needs 72h after creation
+go-patch	go_modules	merge	-	needs 72h after creation
+uv-no-rule	uv	person	no_rule,fact_missing,no_updates	-
+
+ecosystem        total merge  wait person
+docker               2     1     0      1
+github_actions       6     2     0      4
+go_modules           7     2     1      4
+uv                   1     0     0      1
+all                 16     5     1     10
+
+Every version is taken to be as old as its pull request. The gate counts from the registry's clock, or from its own first evaluation of the pin where the registry has none.

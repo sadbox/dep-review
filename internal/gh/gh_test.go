@@ -12,11 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/sadbox/dep-review/internal/fetch"
 )
-
-var _ fetch.GitHub = (*Client)(nil)
 
 // testClient returns a client against srv that records its sleeps instead
 // of sleeping.
@@ -34,6 +30,29 @@ func testClient(srv *httptest.Server) (*Client, *[]time.Duration) {
 		return ctx.Err()
 	}
 	return c, &sleeps
+}
+
+// The client from the job's environment talks to api.github.com or not
+// at all.
+func TestNewFromEnv(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_API_URL", "")
+	if _, err := NewFromEnv(); err == nil {
+		t.Error("a client without a token")
+	}
+	t.Setenv("GH_TOKEN", "tok")
+	for _, u := range []string{"", "https://api.github.com", "https://api.github.com/"} {
+		t.Setenv("GITHUB_API_URL", u)
+		if c, err := NewFromEnv(); err != nil || c.BaseURL != DefaultBaseURL || c.Token != "tok" {
+			t.Errorf("GITHUB_API_URL=%q: %+v, %v", u, c, err)
+		}
+	}
+	for _, u := range []string{"http://api.github.com", "https://github.example/api/v3", "https://api.github.com.evil.example/", "api.github.com"} {
+		t.Setenv("GITHUB_API_URL", u)
+		if c, err := NewFromEnv(); err == nil {
+			t.Errorf("GITHUB_API_URL=%q: a client for %s", u, c.BaseURL)
+		}
+	}
 }
 
 func TestRetries(t *testing.T) {
@@ -122,6 +141,28 @@ func TestErrorMessage(t *testing.T) {
 	}
 }
 
+// A refused merge lists every required check on a line of its own: the
+// message is kept long enough for a dozen of them, and no longer.
+func TestErrorMessageCap(t *testing.T) {
+	line := "Required status check \"a long name / with a matrix (ubuntu-26.04)\" is expected.\n\n"
+	for _, lines := range []int{12, 100} {
+		message := strings.Repeat(line, lines)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(405)
+			json.NewEncoder(w).Encode(map[string]string{"message": message})
+		}))
+		c, _ := testClient(srv)
+		var e *Error
+		if err := c.Put(context.Background(), "repos/o/r/pulls/1/merge", nil, nil); !errors.As(err, &e) {
+			t.Fatal(err)
+		}
+		srv.Close()
+		if want := message[:min(len(message), MaxMessage)]; e.Message != want {
+			t.Errorf("%d lines: the error keeps %d bytes of the message, want %d", lines, len(e.Message), len(want))
+		}
+	}
+}
+
 func TestErrNotFound(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -184,6 +225,68 @@ func TestPaginationRefusesForeignHost(t *testing.T) {
 	}
 }
 
+// A Link header that names a next page in a form the client does not
+// follow is an error: a list cut short is never taken for a whole one.
+// One that only has the word in a URL is the last page.
+func TestPaginationNeverCutsAListShort(t *testing.T) {
+	const base = "https://api.github.com/"
+	c := New("tok")
+	for _, tt := range []struct {
+		link string
+		want string // the next path; "error" for a refusal
+	}{
+		{``, ""},
+		{`<` + base + `items?page=2>; rel="next"`, "items?page=2"},
+		{`<` + base + `items?page=1>; rel="prev", <` + base + `items?page=3>; rel="next", <` + base + `items?page=9>; rel="last"`, "items?page=3"},
+		{`<` + base + `items?after=a,b>; rel="next"`, "items?after=a,b"},
+		{`<` + base + `items?page=2>; rel=next`, "items?page=2"},
+		// The last page of a repository whose name has the word in it.
+		{`<` + base + `repos/o/next/pulls?page=1>; rel="prev", <` + base + `repos/o/next/pulls?page=1>; rel="first"`, ""},
+		{`<https://docs.example/next>; rel="deprecation"; type="text/html"`, ""},
+
+		{`<` + base + `items?page=2>; rel="Next"`, "error"},
+		{`<` + base + `items?page=2>; REL="NEXT"`, "error"},
+		{`<` + base + `items?page=2>; rel="prev next"`, "error"},
+		{`<` + base + `items?page=2>; rel="next-page"`, "error"},
+		{`<` + base + `items?page=2>; type="x"; rel="next"`, "error"},
+		{`<` + base + `items?page=2> rel="next"`, "error"},
+		{`<>; rel="next"`, "error"},
+		{base + `items?page=2; rel="next"`, "error"},
+		{`<` + base + `items?a=>b>; rel="next"`, "error"},
+	} {
+		got, err := c.nextPath(tt.link)
+		if tt.want == "error" {
+			if err == nil || !strings.Contains(err.Error(), "does not read") {
+				t.Errorf("%q: next %q, err %v; want a refusal", tt.link, got, err)
+			}
+		} else if err != nil || got != tt.want {
+			t.Errorf("%q: next %q, err %v; want %q", tt.link, got, err, tt.want)
+		}
+	}
+
+	// Through the client: the refusal fails the list, and a next link on a
+	// second Link line is followed.
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path + "?" + r.URL.Query().Get("page") {
+		case "/odd?":
+			w.Header().Set("Link", fmt.Sprintf(`<%s/odd?page=2>; rel="NEXT"`, srv.URL))
+		case "/two?":
+			w.Header().Add("Link", `<https://docs.example/x>; rel="deprecation"`)
+			w.Header().Add("Link", fmt.Sprintf(`<%s/two?page=2>; rel="next"`, srv.URL))
+		}
+		io.WriteString(w, `[{"n":1}]`)
+	}))
+	defer srv.Close()
+	c, _ = testClient(srv)
+	if got, err := List[struct{ N int }](context.Background(), c, "odd"); err == nil {
+		t.Errorf("a list whose next link was not read came back as whole: %+v", got)
+	}
+	if got, err := List[struct{ N int }](context.Background(), c, "two"); err != nil || len(got) != 2 {
+		t.Errorf("a next link on a second Link line: %+v, %v", got, err)
+	}
+}
+
 func TestTimeout(t *testing.T) {
 	block := make(chan struct{})
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,5 +322,82 @@ func TestValid(t *testing.T) {
 	}
 	if !ValidSHA(strings.Repeat("a", 40)) || ValidSHA(strings.Repeat("A", 40)) || ValidSHA("abc") {
 		t.Error("ValidSHA")
+	}
+}
+
+// Unavailable tells "GitHub did not answer" from every answer GitHub
+// gave, after the client's own retries.
+func TestUnavailable(t *testing.T) {
+	type resp struct {
+		status int
+		header map[string]string
+		body   string
+	}
+	for _, tc := range []struct {
+		name string
+		resp resp
+		want bool
+	}{
+		{"500", resp{500, nil, `{"message":"boom"}`}, true},
+		{"502", resp{502, nil, ""}, true},
+		{"503", resp{503, nil, ""}, true},
+		{"429", resp{429, nil, ""}, true},
+		{"secondary rate limit", resp{403, nil, `{"message":"You have exceeded a secondary rate limit."}`}, true},
+		{"primary rate limit", resp{403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0"}, `{"message":"API rate limit exceeded"}`}, true},
+		{"a 403 with retry-after", resp{403, map[string]string{"Retry-After": "1"}, ""}, true},
+		{"plain 403", resp{403, nil, `{"message":"Resource not accessible by integration"}`}, false},
+		{"a 403 whose text only mentions a rate limit", resp{403, nil, `{"message":"Repository access blocked; see the rate limit documentation"}`}, false},
+		{"404", resp{404, nil, `{"message":"Not Found"}`}, false},
+		{"401", resp{401, nil, `{"message":"Bad credentials"}`}, false},
+		{"422", resp{422, nil, `{"message":"Validation Failed"}`}, false},
+		{"a 200 that is not JSON", resp{200, nil, `<html>`}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.resp.header {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.resp.status)
+				io.WriteString(w, tc.resp.body)
+			}))
+			defer srv.Close()
+			c, _ := testClient(srv)
+			var out struct{ N int }
+			err := c.Get(context.Background(), "x", &out)
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if got := Unavailable(err); got != tc.want {
+				t.Errorf("Unavailable(%v) = %v, want %v", err, got, tc.want)
+			}
+			if got := Unavailable(fmt.Errorf("advisory: asking: %w", err)); got != tc.want {
+				t.Errorf("wrapped: Unavailable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("nothing listening", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		c, _ := testClient(srv)
+		srv.Close()
+		if err := c.Get(context.Background(), "x", nil); err == nil || !Unavailable(err) {
+			t.Errorf("Unavailable(%v) is false", err)
+		}
+	})
+	t.Run("an attempt that times out", func(t *testing.T) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+		defer srv.Close()
+		defer close(release)
+		c, _ := testClient(srv)
+		c.Timeout, c.MaxRetries = 50*time.Millisecond, 0
+		if err := c.Get(context.Background(), "x", nil); err == nil || !Unavailable(err) {
+			t.Errorf("Unavailable(%v) is false", err)
+		}
+	})
+	for _, err := range []error{nil, errors.New("github: bad path"), context.Canceled, ErrNotFound} {
+		if Unavailable(err) {
+			t.Errorf("Unavailable(%v) is true", err)
+		}
 	}
 }

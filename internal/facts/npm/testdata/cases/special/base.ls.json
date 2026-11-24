@@ -1,0 +1,227 @@
+{"npm":"11.20.0","exit":0,"stdout":{
+  "version": "1.0.0",
+  "name": "special",
+  "workspaces": [
+    "packages/*"
+  ],
+  "_id": "special@1.0.0",
+  "extraneous": false,
+  "path": "/scratch/project",
+  "_dependencies": {
+    "aliased": "npm:is-number@7.0.0",
+    "gitdep": "github:jonschlinkert/is-odd#2.0.0",
+    "left-pad": "1.3.0",
+    "tarball": "https://registry.npmjs.org/is-even/-/is-even-1.0.0.tgz"
+  },
+  "devDependencies": {},
+  "peerDependencies": {},
+  "problems": [
+    "extraneous: ws-a@0.0.1 /scratch/project/node_modules/ws-a"
+  ],
+  "dependencies": {
+    "aliased": {
+      "version": "7.0.0",
+      "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+      "overridden": false,
+      "name": "is-number",
+      "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.12.0"
+      },
+      "_id": "is-number@7.0.0",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/aliased",
+      "_dependencies": {},
+      "devDependencies": {},
+      "peerDependencies": {}
+    },
+    "gitdep": {
+      "version": "2.0.0",
+      "resolved": "git+ssh://git@github.com/jonschlinkert/is-odd.git#b0a5ca0228bd6b502c080ba0cfcd717df91d0e63",
+      "overridden": false,
+      "name": "is-odd",
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "_id": "is-odd@2.0.0",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/gitdep",
+      "_dependencies": {
+        "is-number": "^4.0.0"
+      },
+      "devDependencies": {},
+      "peerDependencies": {},
+      "dependencies": {
+        "is-number": {
+          "version": "4.0.0",
+          "resolved": "https://registry.npmjs.org/is-number/-/is-number-4.0.0.tgz",
+          "overridden": false,
+          "name": "is-number",
+          "integrity": "sha512-rSklcAIlf1OmFdyAqbnWTLVelsQ58uvZ66S/ZyawjWqIviTWCjg2PzVGw8WUA+nNuPTqb4wgA+NszrJ+08LlgQ==",
+          "license": "MIT",
+          "engines": {
+            "node": ">=0.10.0"
+          },
+          "_id": "is-number@4.0.0",
+          "extraneous": false,
+          "path": "/scratch/project/node_modules/is-number",
+          "_dependencies": {},
+          "devDependencies": {},
+          "peerDependencies": {}
+        }
+      }
+    },
+    "left-pad": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+      "overridden": false,
+      "name": "left-pad",
+      "integrity": "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==",
+      "deprecated": "use String.prototype.padStart()",
+      "license": "WTFPL",
+      "_id": "left-pad@1.3.0",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/left-pad",
+      "_dependencies": {},
+      "devDependencies": {},
+      "peerDependencies": {}
+    },
+    "tarball": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/is-even/-/is-even-1.0.0.tgz",
+      "overridden": false,
+      "name": "is-even",
+      "integrity": "sha512-LEhnkAdJqic4Dbqn58A0y52IXoHWlsueqQkKfMfdEnIYG8A1sm/GHidKkS6yvXlMoRrkM34csHnXQtOqcb+Jzg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "_id": "is-even@1.0.0",
+      "extraneous": false,
+      "path": "/scratch/project/node_modules/tarball",
+      "_dependencies": {
+        "is-odd": "^0.1.2"
+      },
+      "devDependencies": {},
+      "peerDependencies": {},
+      "dependencies": {
+        "is-odd": {
+          "version": "0.1.2",
+          "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-0.1.2.tgz",
+          "overridden": false,
+          "name": "is-odd",
+          "integrity": "sha512-Ri7C2K7o5IrUU9UEI8losXJCCD/UtsaIrkR5sxIcFg4xQ9cRJXlWA5DQvTE0yDc0krvSNLsRGXN11UPS6KyfBw==",
+          "license": "MIT",
+          "engines": {
+            "node": ">=0.10.0"
+          },
+          "_id": "is-odd@0.1.2",
+          "extraneous": false,
+          "path": "/scratch/project/node_modules/is-odd",
+          "_dependencies": {
+            "is-number": "^3.0.0"
+          },
+          "devDependencies": {},
+          "peerDependencies": {},
+          "dependencies": {
+            "is-number": {
+              "version": "3.0.0",
+              "resolved": "https://registry.npmjs.org/is-number/-/is-number-3.0.0.tgz",
+              "overridden": false,
+              "name": "is-number",
+              "integrity": "sha512-4cboCqIpliH+mAvFNegjZQ4kgKc3ZUhQVr3HvWbSh5q3WH2v82ct+T2Y1hdU5Gdtorx/cLifQjqCbL7bpznLTg==",
+              "license": "MIT",
+              "engines": {
+                "node": ">=0.10.0"
+              },
+              "_id": "is-number@3.0.0",
+              "extraneous": false,
+              "path": "/scratch/project/node_modules/is-odd/node_modules/is-number",
+              "_dependencies": {
+                "kind-of": "^3.0.2"
+              },
+              "devDependencies": {},
+              "peerDependencies": {},
+              "dependencies": {
+                "kind-of": {
+                  "version": "3.2.2",
+                  "name": "kind-of",
+                  "resolved": "https://registry.npmjs.org/kind-of/-/kind-of-3.2.2.tgz",
+                  "integrity": "sha512-NOW9QQXMoZGg/oqnVNoNTTIFEIid1627WCffUBJEdMxYApq7mNE7CpzucIPc+ZQg25Phej7IJSmX3hO+oblOtQ==",
+                  "license": "MIT",
+                  "engines": {
+                    "node": ">=0.10.0"
+                  },
+                  "_id": "kind-of@3.2.2",
+                  "extraneous": false,
+                  "path": "/scratch/project/node_modules/kind-of",
+                  "_dependencies": {
+                    "is-buffer": "^1.1.5"
+                  },
+                  "devDependencies": {},
+                  "peerDependencies": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ws-a": {
+      "version": "0.0.1",
+      "resolved": "file:../packages/a",
+      "overridden": false,
+      "name": "ws-a",
+      "_id": "ws-a@0.0.1",
+      "extraneous": true,
+      "path": "/scratch/project/node_modules/ws-a",
+      "_dependencies": {
+        "kind-of": "3.2.2"
+      },
+      "devDependencies": {},
+      "peerDependencies": {},
+      "problems": [
+        "extraneous: ws-a@0.0.1 /scratch/project/node_modules/ws-a"
+      ],
+      "dependencies": {
+        "kind-of": {
+          "version": "3.2.2",
+          "resolved": "https://registry.npmjs.org/kind-of/-/kind-of-3.2.2.tgz",
+          "overridden": false,
+          "name": "kind-of",
+          "integrity": "sha512-NOW9QQXMoZGg/oqnVNoNTTIFEIid1627WCffUBJEdMxYApq7mNE7CpzucIPc+ZQg25Phej7IJSmX3hO+oblOtQ==",
+          "license": "MIT",
+          "engines": {
+            "node": ">=0.10.0"
+          },
+          "_id": "kind-of@3.2.2",
+          "extraneous": false,
+          "path": "/scratch/project/node_modules/kind-of",
+          "_dependencies": {
+            "is-buffer": "^1.1.5"
+          },
+          "devDependencies": {},
+          "peerDependencies": {},
+          "dependencies": {
+            "is-buffer": {
+              "version": "1.1.6",
+              "resolved": "https://registry.npmjs.org/is-buffer/-/is-buffer-1.1.6.tgz",
+              "overridden": false,
+              "name": "is-buffer",
+              "integrity": "sha512-NcdALwpXkTm5Zvvbk7owOUSvVvBKDgKP5/ewfXEznmQFfs4ZRmanOeKBTjRVjka3QFoN6XJ+9F3USqfHqTaU5w==",
+              "license": "MIT",
+              "_id": "is-buffer@1.1.6",
+              "extraneous": false,
+              "path": "/scratch/project/node_modules/is-buffer",
+              "_dependencies": {},
+              "devDependencies": {},
+              "peerDependencies": {}
+            }
+          }
+        }
+      }
+    }
+  }
+}}

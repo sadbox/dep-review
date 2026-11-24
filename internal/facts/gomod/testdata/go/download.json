@@ -1,0 +1,20 @@
+{
+	"Path": "golang.org/x/mod",
+	"Version": "v0.5.1",
+	"Info": "/scratch/gopath/pkg/mod/cache/download/golang.org/x/mod/@v/v0.5.1.info",
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/golang.org/x/mod/@v/v0.5.1.mod",
+	"Zip": "/scratch/gopath/pkg/mod/cache/download/golang.org/x/mod/@v/v0.5.1.zip",
+	"Dir": "/scratch/gopath/pkg/mod/golang.org/x/mod@v0.5.1",
+	"Sum": "h1:OJxoQ/rynoF0dcCdI7cLPktw/hR2cueqYfjm43oqK38=",
+	"GoModSum": "h1:5OXOZSfqPIIbmVBIIKWRFfZjPR0E5r58TLhUjH0a2Ro="
+}
+{
+	"Path": "golang.org/x/text",
+	"Version": "v0.3.3",
+	"Info": "/scratch/gopath/pkg/mod/cache/download/golang.org/x/text/@v/v0.3.3.info",
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/golang.org/x/text/@v/v0.3.3.mod",
+	"Zip": "/scratch/gopath/pkg/mod/cache/download/golang.org/x/text/@v/v0.3.3.zip",
+	"Dir": "/scratch/gopath/pkg/mod/golang.org/x/text@v0.3.3",
+	"Sum": "h1:cokOdA+Jmi5PJGXLlLllQSgYigAEfHXJAERHVMaCc2k=",
+	"GoModSum": "h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ="
+}

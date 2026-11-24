@@ -1,0 +1,10 @@
+{
+  "id": 197814629,
+  "full_name": "actions/checkout",
+  "default_branch": "main",
+  "archived": false,
+  "owner": {
+    "id": 44036562,
+    "login": "actions"
+  }
+}

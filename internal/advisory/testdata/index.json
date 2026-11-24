@@ -1,0 +1,262 @@
+{
+  "note": "Responses of GET https://api.github.com/advisories, recorded by ADVISORY_RECORD=1 go test ./internal/advisory/. Bodies are exactly as received. Source: GitHub Advisory Database, https://github.com/advisories, CC BY 4.0.",
+  "fixtures": [
+    {
+      "request": "/advisories?affects=%40babel%2Ftraverse%407.23.0&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm__babel_traverse_7.23.0.json"
+    },
+    {
+      "request": "/advisories?affects=%40babel%2Ftraverse%407.23.2&ecosystem=npm&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_npm__babel_traverse_7.23.2.json"
+    },
+    {
+      "request": "/advisories?affects=%40babel%2Ftraverse%407.23.2&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm__babel_traverse_7.23.2.json"
+    },
+    {
+      "request": "/advisories?affects=Azure%2Fsetup-kubectl%402.0.0&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_Azure_setup-kubectl_2.0.0_c1013994.json"
+    },
+    {
+      "request": "/advisories?affects=Azure%2Fsetup-kubectl%402.1.0&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_Azure_setup-kubectl_2.1.0_ba5d9cda.json"
+    },
+    {
+      "request": "/advisories?affects=TJ-Actions%2FChanged-Files&ecosystem=actions&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_actions_TJ-Actions_Changed-Files_079101e9.json"
+    },
+    {
+      "request": "/advisories?affects=TJ-Actions%2FChanged-Files&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_TJ-Actions_Changed-Files_079101e9.json"
+    },
+    {
+      "request": "/advisories?affects=actions%2Fsetup-go&ecosystem=actions&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_actions_actions_setup-go.json"
+    },
+    {
+      "request": "/advisories?affects=actions%2Fsetup-go&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_actions_setup-go.json"
+    },
+    {
+      "request": "/advisories?affects=azure%2Fsetup-kubectl&ecosystem=actions&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_actions_azure_setup-kubectl.json"
+    },
+    {
+      "request": "/advisories?affects=azure%2Fsetup-kubectl&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_azure_setup-kubectl.json"
+    },
+    {
+      "request": "/advisories?affects=chalk%405.6.0&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_chalk_5.6.0.json"
+    },
+    {
+      "request": "/advisories?affects=chalk%405.6.1&ecosystem=npm&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_npm_chalk_5.6.1.json"
+    },
+    {
+      "request": "/advisories?affects=chalk%405.6.1&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_chalk_5.6.1.json"
+    },
+    {
+      "request": "/advisories?affects=debug%404.4.1&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_debug_4.4.1.json"
+    },
+    {
+      "request": "/advisories?affects=debug%404.4.2&ecosystem=npm&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_npm_debug_4.4.2.json"
+    },
+    {
+      "request": "/advisories?affects=debug%404.4.2&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_debug_4.4.2.json"
+    },
+    {
+      "request": "/advisories?affects=debug%404.4.3&ecosystem=npm&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_npm_debug_4.4.3.json"
+    },
+    {
+      "request": "/advisories?affects=debug%404.4.3&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_debug_4.4.3.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fnet%400.16.0&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_net_0.16.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fnet%400.17.0&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_net_0.17.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fnet%400.17.0&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_net_0.17.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.26.0&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.26.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.26.1-0.20250214215532-3f78298beea3&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.26.1-0.20250214215532-3f78298beea3.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.26.1-0.20250214215532-3f78298beea3&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.26.1-0.20250214215532-3f78298beea3.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.0&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.27.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.0&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.27.0.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.1-0.20250228195905-9c82a8cf7ac2&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_oauth2_0.27.1-0.20250228195905-9c82a8cf7ac2.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Foauth2%400.27.1-0.20250228195905-9c82a8cf7ac2&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_oauth2_0.27.1-0.20250228195905-9c82a8cf7ac2.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220406163625-3f8b81556e12&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_sys_0.0.0-20220406163625-3f8b81556e12.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220406163625-3f8b81556e12&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_sys_0.0.0-20220406163625-3f8b81556e12.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220412211240-33da011f77ad&ecosystem=go&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_go_golang.org_x_sys_0.0.0-20220412211240-33da011f77ad.json"
+    },
+    {
+      "request": "/advisories?affects=golang.org%2Fx%2Fsys%400.0.0-20220412211240-33da011f77ad&ecosystem=go&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_go_golang.org_x_sys_0.0.0-20220412211240-33da011f77ad.json"
+    },
+    {
+      "request": "/advisories?affects=lodash%404.17.20&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_lodash_4.17.20.json"
+    },
+    {
+      "request": "/advisories?affects=lodash%404.17.21&ecosystem=npm&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_npm_lodash_4.17.21.json"
+    },
+    {
+      "request": "/advisories?affects=lodash%404.17.21&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_lodash_4.17.21.json"
+    },
+    {
+      "request": "/advisories?affects=tj-actions%2Fchanged-files%4040.2.3&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_tj-actions_changed-files_40.2.3.json"
+    },
+    {
+      "request": "/advisories?affects=tj-actions%2Fchanged-files%4041.0.0&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_tj-actions_changed-files_41.0.0.json"
+    },
+    {
+      "request": "/advisories?affects=tj-actions%2Fchanged-files%4045.0.7&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_tj-actions_changed-files_45.0.7.json"
+    },
+    {
+      "request": "/advisories?affects=tj-actions%2Fchanged-files%4046.0.1&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_tj-actions_changed-files_46.0.1.json"
+    },
+    {
+      "request": "/advisories?affects=tj-actions%2Fchanged-files&ecosystem=actions&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_actions_tj-actions_changed-files.json"
+    },
+    {
+      "request": "/advisories?affects=tj-actions%2Fchanged-files&ecosystem=actions&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_actions_tj-actions_changed-files.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.28&ecosystem=npm&per_page=1&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_ua-parser-js_0.7.28_per1.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.28&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_ua-parser-js_0.7.28.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.29&ecosystem=npm&per_page=1&type=malware",
+      "status": 200,
+      "body": "malware_npm_ua-parser-js_0.7.29_per1.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.29&ecosystem=npm&per_page=1&type=reviewed",
+      "status": 200,
+      "link": "<https://api.github.com/advisories?affects=ua-parser-js%400.7.29&ecosystem=npm&per_page=1&type=reviewed&after=Y3Vyc29yOnYyOpK0MjAyMi0wNS0yNVQwMDowMDozMVrOAAKzGQ%3D%3D>; rel=\"next\"",
+      "body": "reviewed_npm_ua-parser-js_0.7.29_per1.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.29&ecosystem=npm&per_page=1&type=reviewed&after=Y3Vyc29yOnYyOpK0MjAyMi0wNS0yNVQwMDowMDozMVrOAAKzGQ%3D%3D",
+      "status": 200,
+      "link": "<https://api.github.com/advisories?affects=ua-parser-js%400.7.29&ecosystem=npm&per_page=1&type=reviewed&before=Y3Vyc29yOnYyOpK0MjAyMS0xMC0yMlQyMDozODoxNFrNFq8%3D>; rel=\"prev\"",
+      "body": "reviewed_npm_ua-parser-js_0.7.29_per1_afterbb609cb8.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.29&ecosystem=npm&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_npm_ua-parser-js_0.7.29.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.29&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_ua-parser-js_0.7.29.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.30&ecosystem=npm&per_page=100&type=malware",
+      "status": 200,
+      "body": "malware_npm_ua-parser-js_0.7.30.json"
+    },
+    {
+      "request": "/advisories?affects=ua-parser-js%400.7.30&ecosystem=npm&per_page=100&type=reviewed",
+      "status": 200,
+      "body": "reviewed_npm_ua-parser-js_0.7.30.json"
+    }
+  ]
+}

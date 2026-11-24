@@ -6,9 +6,9 @@ import (
 	"regexp"
 )
 
-// stepValueRe is what a single-line step output may hold: the gate's own
-// enums (kind, route), never untrusted text. Multi-line values use
-// reviewprep.WriteOutputs (random heredoc delimiters) instead.
+// stepValueRe is what a step output may hold: the gate's own words (a
+// kind, true or false), never untrusted text.
+
 var stepValueRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 // stepOutput appends name=value to $GITHUB_OUTPUT, or prints it to stdout

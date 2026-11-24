@@ -8,9 +8,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/sadbox/dep-review/internal/sandbox"
 )
+
+// requiredMark in a flag's usage marks it required. The subcommand still
+// checks it itself; the mark is what TestGateInvocations checks gate.yml
+// against.
+const requiredMark = "(required)"
 
 // flagsOf returns the flags subcommand cmd defines and the ones whose
 // usage marks them required, from its real FlagSet: the command runs with
@@ -22,13 +25,16 @@ func flagsOf(t *testing.T, cmd string) (defined, required map[string]bool) {
 		t.Fatalf("gate.yml runs unknown subcommand %q", cmd)
 	}
 	var got *flag.FlagSet
-	flagSetHook = func(fs *flag.FlagSet) {
+	real := newFlagSet
+	newFlagSet = func(name string) *flag.FlagSet {
+		fs := real(name)
 		fs.SetOutput(io.Discard)
 		if got == nil {
 			got = fs
 		}
+		return fs
 	}
-	defer func() { flagSetHook = nil }()
+	defer func() { newFlagSet = real }()
 	if err := run([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("%s -h: %v", cmd, err)
 	}
@@ -76,9 +82,16 @@ func gateInvocations(t *testing.T) []invocation {
 // otherwise surface only when the gate runs in a caller's repository.
 func TestGateInvocations(t *testing.T) {
 	invs := gateInvocations(t)
-	seen := map[string]bool{}
+	seen := map[string]string{}
 	for _, inv := range invs {
-		seen[inv.cmd] = true
+		if job, twice := seen[inv.cmd]; twice {
+			t.Errorf("gate.yml runs `dep-review %s` in %s and in %s", inv.cmd, job, inv.where)
+		}
+		seen[inv.cmd] = inv.where
+		// A job is named for the one command it runs.
+		if inv.where != inv.cmd {
+			t.Errorf("job %s runs `dep-review %s`", inv.where, inv.cmd)
+		}
 		defined, required := flagsOf(t, inv.cmd)
 		passed := map[string]bool{}
 		for _, f := range inv.flags {
@@ -93,40 +106,14 @@ func TestGateInvocations(t *testing.T) {
 			}
 		}
 	}
-	for _, want := range []string{"classify", "fetch", "review-prep", "review", "publish", "sweep"} {
-		if !seen[want] {
-			t.Errorf("found no `dep-review %s` in gate.yml; the extraction is broken", want)
+	// Every subcommand has its job, and no job runs anything else.
+	for cmd := range commands {
+		if seen[cmd] == "" {
+			t.Errorf("found no `dep-review %s` in gate.yml", cmd)
 		}
 	}
-}
-
-// The proxy is started by internal/sandbox, not by gate.yml; its argv
-// gets the same check.
-func TestProxyInvocation(t *testing.T) {
-	c := sandbox.Config{Model: "m", MaxRequests: 1, MaxTokens: 1,
-		Federation: sandbox.Federation{RuleID: "r", OrganizationID: "o", WorkspaceID: "w", ServiceAccountID: "s"}}
-	args := c.ProxyArgs()
-	i := 0
-	for i < len(args) && args[i] != "proxy" {
-		i++
-	}
-	if i == len(args) {
-		t.Fatal("no proxy command in ProxyArgs")
-	}
-	defined, required := flagsOf(t, "proxy")
-	passed := map[string]bool{}
-	for _, a := range args[i+1:] {
-		if name, ok := strings.CutPrefix(a, "--"); ok {
-			passed[name] = true
-			if !defined[name] {
-				t.Errorf("the sandbox runs `dep-review proxy --%s`, which proxy does not define", name)
-			}
-		}
-	}
-	for f := range required {
-		if !passed[f] {
-			t.Errorf("the sandbox runs `dep-review proxy` without its required --%s", f)
-		}
+	if len(seen) != len(commands) {
+		t.Errorf("gate.yml runs %d subcommands, and there are %d", len(seen), len(commands))
 	}
 }
 

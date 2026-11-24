@@ -2,14 +2,20 @@ package main
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
 
-// Errors can embed git's stderr or a registry's message (see
-// ecoutil.Git.run); none of it may start a workflow command or a new line.
+// Errors can embed git's stderr or a registry's message; none of it may
+// start a workflow command or a new line.
 func TestLogLine(t *testing.T) {
 	for in, want := range map[string]string{
 		"plain error": "plain error",
@@ -41,24 +47,136 @@ func TestLineWriter(t *testing.T) {
 	}
 }
 
-// A missing trigger path would let the trigger's no-op run count as CI,
-// so publish and sweep refuse to start without one.
-func TestTriggerPathRequired(t *testing.T) {
-	for name, run := range map[string]func() error{
-		"publish":       func() error { return runPublish([]string{"--in", t.TempDir()}) },
-		"publish empty": func() error { return runPublish([]string{"--in", t.TempDir(), "--trigger-path", ""}) },
-		"sweep":         func() error { return runSweep([]string{"--repo", "o/r"}) },
-		"sweep empty":   func() error { return runSweep([]string{"--repo", "o/r", "--trigger-path="}) },
-	} {
-		if err := run(); err == nil || !strings.Contains(err.Error(), "--trigger-path") {
-			t.Errorf("%s: err = %v", name, err)
+// Every subcommand refuses to start without its required flags, before it
+// reads anything or calls an API, and takes no stray argument.
+func TestRequiredFlags(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	complete := map[string][]string{
+		"classify": {"--event", "e", "--trigger-path", "t", "--out", "o"},
+		"fetch":    {"--classification", "c", "--repo-dir", "r", "--out", "o"},
+		"review":   {"--facts", "f", "--out", "o"},
+		"publish":  {"--in", "i"},
+		"refresh":  {"--repo-dir", "r", "--out", "o", "--app-slug", "gate"},
+		"reread":   {"--refreshed", "r", "--out", "o"},
+	}
+	for cmd, run := range commands {
+		args, ok := complete[cmd]
+		if !ok {
+			t.Errorf("%s: no arguments in this test", cmd)
+			continue
+		}
+		for i := 0; i < len(args); i += 2 {
+			without := append(append([]string{}, args[:i]...), args[i+2:]...)
+			if err := run(without); err == nil || !strings.Contains(err.Error(), "required") {
+				t.Errorf("%s without %s: %v", cmd, args[i], err)
+			}
+			empty := append([]string{}, args...)
+			empty[i+1] = ""
+			if err := run(empty); err == nil || !strings.Contains(err.Error(), "required") {
+				t.Errorf("%s with an empty %s: %v", cmd, args[i], err)
+			}
+		}
+		if err := run(append(append([]string{}, args...), "stray")); err == nil || !strings.Contains(err.Error(), "required") {
+			t.Errorf("%s with a stray argument: %v", cmd, err)
 		}
 	}
 }
 
-func TestFetchRejectsBadDockerPlatforms(t *testing.T) {
-	err := runFetch([]string{"--classification", "x", "--repo-dir", "y", "--out", "z", "--docker-platforms", "linux/amd64;id"})
-	if err == nil || !strings.Contains(err.Error(), "docker platform") {
-		t.Errorf("err = %v", err)
+// An unknown ecosystem name fails classify, refresh and publish before
+// they read anything or call the API.
+func TestIgnoreEcosystemsUnknownFails(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	for cmd, args := range map[string][]string{
+		"classify": {"--event", "/nonexistent", "--trigger-path", "t", "--out", "/nonexistent/c.json"},
+		"refresh":  {"--repo-dir", "/nonexistent", "--out", "/nonexistent", "--app-slug", "gate"},
+		"publish":  {"--in", "/nonexistent"},
+	} {
+		for _, bad := range []string{"gitsubmodule", "submodules,", "*"} {
+			err := commands[cmd](append(args, "--ignore-ecosystems", bad))
+			if err == nil || !strings.Contains(err.Error(), "--ignore-ecosystems: unknown ecosystem") {
+				t.Errorf("%s --ignore-ecosystems %q: %v", cmd, bad, err)
+			}
+		}
+	}
+}
+
+// replay is no job's subcommand, so the tests over commands do not see
+// it. It refuses to start without its flags, or with a clock or a policy
+// it cannot read, before it reads a record.
+func TestReplayFlags(t *testing.T) {
+	const records = "../../internal/replay/testdata/records"
+	notPolicy := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(notPolicy, []byte(`{"min_age_hours": 1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no directory", []string{"--now", "2026-03-02T00:00:00Z"}, "required"},
+		{"no clock", []string{"--dir", records}, "required"},
+		{"a stray argument", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "stray"}, "required"},
+		{"a clock that is not a time", []string{"--dir", records, "--now", "yesterday"}, "--now"},
+		{"a name time that is not a time", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "--name-created", "2020"}, "--name-created"},
+		{"a policy file that is not complete", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "--policy", notPolicy}, "a key is missing"},
+		{"a policy file that is not there", []string{"--dir", records, "--now", "2026-03-02T00:00:00Z", "--policy", notPolicy + ".none"}, "no such file"},
+	} {
+		if err := tools["replay"](tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error that says %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// The gate's jobs take their policy from config.Load, which reads the
+// file embedded in the binary and nothing else. The one reader of a
+// policy file anyone can hand it is internal/replay's, for measuring a
+// policy, and no job's path may reach it. Imports are per file, so that
+// is: replay.go is the only file of the module that imports
+// internal/replay, replay is no job's subcommand, and Load is the only
+// function internal/config exports.
+func TestOnlyReplayReadsAPolicyWithoutFloors(t *testing.T) {
+	const root, replayPackage = "../..", "github.com/sadbox/dep-review/internal/replay"
+	if _, ok := commands["replay"]; ok {
+		t.Error("replay is a job's subcommand")
+	}
+	fset := token.NewFileSet()
+	var importers, exported []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		rel := filepath.ToSlash(strings.TrimPrefix(path, root+"/"))
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && (d.Name() == "testdata" || rel == "internal/replay"):
+			return filepath.SkipDir
+		case d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go"):
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, imp := range f.Imports {
+			if imp.Path.Value == `"`+replayPackage+`"` {
+				importers = append(importers, rel)
+			}
+		}
+		if strings.HasPrefix(rel, "internal/config/") {
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.IsExported() {
+					exported = append(exported, fn.Name.Name)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(importers, " "); got != "cmd/dep-review/replay.go" {
+		t.Errorf("internal/replay is imported by %q, want cmd/dep-review/replay.go alone", got)
+	}
+	if got := strings.Join(exported, " "); got != "Load" {
+		t.Errorf("internal/config exports the functions %q, want Load alone: any other way to a Config is a way around the built-in policy", got)
 	}
 }

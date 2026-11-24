@@ -1,7 +1,10 @@
-// Package classify decides who a pull request belongs to (model.Kind) and
-// records what Dependabot declared it changes. Everything read from the
-// event or the API is untrusted: identifiers are validated before they are
-// used in a request path, and nothing reaches a shell.
+// Package classify decides who a pull request belongs to (model.Kind):
+// the proof that it is Dependabot's alone, which is the first half of the
+// gate's Identity fact. It records nothing Dependabot declared about its
+// updates; what a pull request changes is read from its commits
+// (internal/gather). Everything read from the event or the API is
+// untrusted: identifiers are validated before they are used in a request
+// path, and nothing reaches a shell.
 package classify
 
 import (
@@ -10,11 +13,9 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"path"
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/sadbox/dep-review/internal/gh"
 	"github.com/sadbox/dep-review/internal/model"
@@ -28,12 +29,10 @@ const (
 
 // Event is the subset of a workflow_run event payload classify reads.
 type Event struct {
-	Action      string `json:"action"`
 	WorkflowRun struct {
 		Event          string `json:"event"`
 		Path           string `json:"path"`
 		HeadSHA        string `json:"head_sha"`
-		HeadBranch     string `json:"head_branch"`
 		HeadRepository *repo  `json:"head_repository"`
 		PullRequests   []struct {
 			Number int `json:"number"`
@@ -47,7 +46,6 @@ type Event struct {
 
 type repo struct {
 	FullName string `json:"full_name"`
-	Private  bool   `json:"private"`
 }
 
 type user struct {
@@ -57,19 +55,14 @@ type user struct {
 type pull struct {
 	Number int    `json:"number"`
 	State  string `json:"state"`
-	Body   string `json:"body"`
 	User   *user  `json:"user"`
-	Labels []struct {
-		Name string `json:"name"`
-	} `json:"labels"`
-	Head struct {
+	Head   struct {
 		SHA  string `json:"sha"`
 		Ref  string `json:"ref"`
 		Repo *repo  `json:"repo"`
 	} `json:"head"`
 	Base struct {
 		SHA  string `json:"sha"`
-		Ref  string `json:"ref"`
 		Repo *repo  `json:"repo"`
 	} `json:"base"`
 }
@@ -79,7 +72,6 @@ type commit struct {
 	Author    *user  `json:"author"`
 	Committer *user  `json:"committer"`
 	Commit    struct {
-		Message      string `json:"message"`
 		Verification struct {
 			Verified bool   `json:"verified"`
 			Reason   string `json:"reason"`
@@ -87,13 +79,11 @@ type commit struct {
 	} `json:"commit"`
 }
 
-type file struct {
-	Filename         string `json:"filename"`
-	PreviousFilename string `json:"previous_filename"`
-}
-
 // Options carries everything besides the event.
 type Options struct {
+	// TriggerPath is the caller's trigger workflow. Classify takes an
+	// event for the gate's only when it is that workflow's run; Pull does
+	// not look at it.
 	TriggerPath string
 	// ExpectRepo, if set (GITHUB_REPOSITORY), must equal the event's
 	// repository.
@@ -102,8 +92,8 @@ type Options struct {
 	// Sleep waits between activity-log reads (tests replace it).
 	Sleep func(ctx context.Context, d time.Duration) error
 	// IgnoreEcosystems (the ignore_ecosystems input, model.ParseEcosystems)
-	// turns a KindDependabot PR whose whole update set is in these
-	// ecosystems into KindIgnored.
+	// turns a KindDependabot PR in one of these ecosystems into
+	// KindIgnored.
 	IgnoreEcosystems map[model.Ecosystem]bool
 }
 
@@ -114,10 +104,6 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	logf := opt.Logf
 	if logf == nil {
 		logf = log.Printf
-	}
-	sleep := opt.Sleep
-	if sleep == nil {
-		sleep = sleepCtx
 	}
 	var ev Event
 	if err := json.Unmarshal(eventJSON, &ev); err != nil {
@@ -156,21 +142,38 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	if num == 0 {
 		return other("no single open same-repository pull request has this head")
 	}
+	return Pull(ctx, c, repoName, num, headSHA, opt)
+}
+
+// Pull is the identity proof for one pull request: whether pull request
+// num of repoName is Dependabot's alone at headSHA. Classify calls it
+// once the event has named the pull request; the scheduled job calls it
+// for each pull request it evaluates again, where no event names one.
+// Both get the same proof, so a pull request is never taken to be
+// Dependabot's on anything less.
+//
+// An error means the gate could not decide (the API failed, or the
+// arguments are not a repository, a number and a commit ID).
+func Pull(ctx context.Context, c *gh.Client, repoName string, num int, headSHA string, opt Options) (model.Classification, error) {
+	if !gh.ValidRepo(repoName) || num < 1 || !gh.ValidSHA(headSHA) {
+		return model.Classification{}, fmt.Errorf("classify: %.100q #%d at %.80q is not a repository, a pull request and a commit ID", repoName, num, headSHA)
+	}
+	logf := opt.Logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	sleep := opt.Sleep
+	if sleep == nil {
+		sleep = sleepCtx
+	}
 	var pr pull
 	if err := c.Get(ctx, fmt.Sprintf("repos/%s/pulls/%d", repoName, num), &pr); err != nil {
 		return model.Classification{}, err
 	}
-	cl := model.Classification{
-		Repo:        repoName,
-		Private:     ev.Repository.Private,
-		PR:          num,
-		HeadSHA:     headSHA,
-		TriggerPath: opt.TriggerPath,
-	}
+	cl := model.Classification{Repo: repoName, PR: num, HeadSHA: headSHA}
 	if gh.ValidSHA(pr.Base.SHA) {
 		cl.BaseSHA = pr.Base.SHA
 	}
-	cl.BaseRef = safeRef(pr.Base.Ref)
 	if pr.State != "open" {
 		cl.Kind, cl.Reason = model.KindStale, "the pull request is no longer open"
 		logf("kind=stale: %s", cl.Reason)
@@ -185,7 +188,9 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	byAuthor := pr.User != nil && pr.User.Login == dependabotLogin
 	byBranch := strings.HasPrefix(pr.Head.Ref, branchPrefix)
 	if !byAuthor && !byBranch {
-		return other("neither authored by dependabot[bot] nor on a dependabot/ branch")
+		const why = "neither authored by dependabot[bot] nor on a dependabot/ branch"
+		logf("kind=other: %s", why)
+		return model.Classification{Repo: repoName, Kind: model.KindOther, Reason: why}, nil
 	}
 	unverified := func(why string) (model.Classification, error) {
 		cl.Kind, cl.Reason = model.KindDependabotUnverified, why
@@ -199,8 +204,8 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 		return unverified("authored by dependabot[bot] but not on a dependabot/ branch")
 	case pr.Head.Repo == nil || !strings.EqualFold(pr.Head.Repo.FullName, repoName):
 		return unverified("head branch is not in this repository")
-	case cl.BaseSHA == "" || cl.BaseRef == "":
-		return unverified("base branch or commit is malformed")
+	case cl.BaseSHA == "":
+		return unverified("the base commit is malformed")
 	}
 
 	commits, err := gh.List[commit](ctx, c, fmt.Sprintf("repos/%s/pulls/%d/commits", repoName, num))
@@ -234,34 +239,43 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 	// The commits cannot tell Dependabot's own pushes from a person
 	// squash-merging another Dependabot PR into this branch: both are
 	// authored by dependabot[bot], committed by web-flow and signed by
-	// GitHub. The branch's activity log records who moved the ref.
-	// The activity log lags the push by a little; give it a moment, and if
-	// it still has not caught up, decide nothing (sweep reports it).
-	why, lag := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
-	for try := 0; lag && try < len(historyBackoff); try++ {
-		if err := sleep(ctx, historyBackoff[try]); err != nil {
+	// GitHub. Three reads make the rest of the proof. An answer that is
+	// not proof ends it at once. A read that leaves it open (a log that
+	// lags, GitHub not answering) does not: the reads after it are still
+	// made, because a "no" from any of them is an answer, and a person's
+	// now whatever else is still open.
+	reads := []func() (string, answer, error){
+		// The branch's activity log records who moved the ref. It lags the
+		// push by a little; give it a moment.
+		func() (string, answer, error) {
+			why, got, err := branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
+			for try := 0; err == nil && got == lagging && try < len(historyBackoff); try++ {
+				if err := sleep(ctx, historyBackoff[try]); err != nil {
+					return "", 0, err
+				}
+				why, got, err = branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
+			}
+			return why, got, err
+		},
+		// A PR retargeted to another base after Dependabot opened it is
+		// not the update Dependabot proposed.
+		func() (string, answer, error) { return timelineProblem(ctx, c, repoName, num) },
+		// The log shows who moved the branch; a ruleset makes sure nobody
+		// else could. Its bypass list (Dependabot only) is the owner's to
+		// maintain: a read-only token cannot see it.
+		func() (string, answer, error) { return rulesProblem(ctx, c, repoName, pr.Head.Ref) },
+	}
+	unfinished := "" // why the proof is still open: the first read that left it so
+	for _, read := range reads {
+		why, got, err := read()
+		switch {
+		case err != nil:
 			return model.Classification{}, err
+		case got == disproven:
+			return unverified(why)
+		case got != proven && unfinished == "":
+			unfinished = why
 		}
-		why, lag = branchHistoryProblem(ctx, c, repoName, pr.Head.Ref, headSHA)
-	}
-	switch {
-	case lag:
-		cl.Kind, cl.Reason = model.KindPending, why
-		logf("kind=dependabot-pending: %s", why)
-		return cl, nil
-	case why != "":
-		return unverified(why)
-	}
-	// A PR retargeted to another base after Dependabot opened it is not the
-	// update Dependabot proposed.
-	if why := timelineProblem(ctx, c, repoName, num); why != "" {
-		return unverified(why)
-	}
-	// The log shows who moved the branch; a ruleset makes sure nobody else
-	// could. Its bypass list (Dependabot only) is the owner's to maintain:
-	// a read-only token cannot see it.
-	if why := rulesetProblem(ctx, c, repoName); why != "" {
-		return unverified(why)
 	}
 
 	eco, ok := model.EcosystemFromBranch(pr.Head.Ref)
@@ -269,62 +283,28 @@ func Classify(ctx context.Context, c *gh.Client, eventJSON []byte, opt Options) 
 		return unverified("the branch name does not name a supported ecosystem")
 	}
 	cl.Ecosystem = eco
-
-	head := commits[len(commits)-1].Commit.Message
-	decl, err := ParseDeclared(head)
-	if err != nil {
-		logf("updated-dependencies: %v", err)
-		return unverified("Dependabot's commit metadata could not be read")
-	}
-	security, advisories := securityInfo(&pr)
-	dir := subjectDirectory(head)
-	for _, d := range decl {
-		cl.Declared = append(cl.Declared, model.Update{
-			Ecosystem: eco,
-			Directory: dir,
-			Name:      d.Name,
-			From:      d.From,
-			To:        d.Version,
-			FromRef:   d.FromRef,
-			ToRef:     d.ToRef,
-			Type:      updateType(d.UpdateType),
-			Direct:    strings.HasPrefix(d.DepType, "direct"),
-			Security:  security,
-			Advisory:  advisories,
-		})
-	}
-
-	files, err := gh.List[file](ctx, c, fmt.Sprintf("repos/%s/pulls/%d/files", repoName, num))
-	if err != nil {
-		return model.Classification{}, err
-	}
-	for _, f := range files {
-		for _, p := range []string{f.Filename, f.PreviousFilename} {
-			if p == "" {
-				continue
-			}
-			if !safePath(p) {
-				return unverified("the pull request changes a file with an unsafe path")
-			}
-			cl.Files = append(cl.Files, p)
-		}
-	}
-	if len(cl.Files) == 0 {
-		return unverified("the pull request changes no files")
+	if unfinished != "" {
+		// Not a verdict on the pull request (spec section 11, amendments 1
+		// and 51). The ecosystem is the branch's to name whatever becomes
+		// of the proof, and the fetch job needs it to gather the rest.
+		cl.Kind, cl.Reason = model.KindPending, unfinished
+		logf("kind=dependabot-pending: %s", unfinished)
+		return cl, nil
 	}
 
 	// Only a PR that passed every check above is ever ignored; anything
-	// else returned before this point and is handled as usual.
-	if why, ok := ignoredBy(opt.IgnoreEcosystems, eco, cl.Declared); ok {
-		cl.Kind, cl.Reason = model.KindIgnored, why
-		logf("kind=dependabot-ignored: %s #%d: %s", repoName, num, why)
+	// else returned before this point and is handled as usual. The
+	// ecosystem is the branch's, which the rules above keep Dependabot's
+	// to name.
+	if opt.IgnoreEcosystems[eco] {
+		cl.Kind = model.KindIgnored
+		cl.Reason = fmt.Sprintf("in ignored ecosystem %s (ignore_ecosystems): another process owns these pull requests", eco)
+		logf("kind=dependabot-ignored: %s #%d: %s", repoName, num, cl.Reason)
 		return cl, nil
-	} else if why != "" {
-		logf("not ignored: %s", why)
 	}
 	cl.Kind = model.KindDependabot
 	cl.Reason = "authored, committed and signed by Dependabot only"
-	logf("kind=dependabot: %s #%d %s (%d declared updates)", repoName, num, eco, len(cl.Declared))
+	logf("kind=dependabot: %s #%d %s", repoName, num, eco)
 	return cl, nil
 }
 
@@ -340,24 +320,62 @@ type activity struct {
 // all, inside the classify job's timeout.
 var historyBackoff = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 45 * time.Second}
 
+// answer is what one read of the proof came to.
+type answer int
+
+const (
+	// proven: nothing GitHub answered speaks against the pull request.
+	proven answer = iota
+	// disproven: GitHub answered, and the answer is not proof. That
+	// includes an answer that says nothing of what was asked for (a 404, a
+	// 403 that is no rate limit, a body that does not decode).
+	disproven
+	// lagging: the activity log is clean and does not reach the head yet.
+	// GitHub records activity shortly after a push, so it is read again.
+	lagging
+	// unanswered: GitHub was asked and did not answer (gh.Unavailable),
+	// after the client's own retries. That says nothing about the pull
+	// request, and it is not waited out here: the pull request waits and
+	// the scheduled job runs the proof again.
+	unanswered
+)
+
+// notRead is what a read of the proof that failed with err comes to.
+// what names the thing read. The context is looked at first: to
+// gh.Unavailable a deadline that ran out is a timeout like any other, and
+// classify running out of time is an error, not GitHub's silence.
+func notRead(ctx context.Context, what string, err error) (string, answer, error) {
+	if ctx.Err() != nil {
+		return "", 0, ctx.Err()
+	}
+	code := ""
+	if n := gh.StatusCode(err); n != 0 {
+		code = fmt.Sprintf(" (HTTP %d)", n)
+	}
+	if gh.Unavailable(err) {
+		return what + " could not be read: GitHub did not answer" + code, unanswered, nil
+	}
+	return what + " could not be read" + code, disproven, nil
+}
+
 // branchHistoryProblem reads the head branch's activity log (oldest first)
-// and returns why it does not prove that only Dependabot moved the branch
-// since it was last created, or "". Every entry from the last
+// and says whether it proves that only Dependabot moved the branch since
+// it was last created, and if not, why. Every entry from the last
 // branch_creation on must be Dependabot's creation, push or force push,
 // each starting where the previous one ended, and the last must end at
-// head. Anything else, including an unreadable or incomplete log, is not
+// head. Anything else GitHub answers, an incomplete log included, is not
 // proof.
 //
-// lag is set when the only problem is that the log, otherwise clean, does
-// not reach head yet: GitHub records activity shortly after the push.
-func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head string) (why string, lag bool) {
+// It is lagging when the only problem is that the log, otherwise clean,
+// does not reach head yet. The error is the context's.
+func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head string) (string, answer, error) {
 	q := url.Values{"ref": {"refs/heads/" + branch}, "direction": {"asc"}}
 	acts, err := gh.List[activity](ctx, c, fmt.Sprintf("repos/%s/activity?%s", repo, q.Encode()))
 	if err != nil {
-		return fmt.Sprintf("the branch's push history could not be read (HTTP %d)", gh.StatusCode(err)), false
+		return notRead(ctx, "the branch's push history", err)
 	}
 	if len(acts) == 0 {
-		return "the branch has no push history yet", true
+		return "the branch has no push history yet", lagging, nil
 	}
 	start := -1
 	for i, a := range acts {
@@ -366,143 +384,94 @@ func branchHistoryProblem(ctx context.Context, c *gh.Client, repo, branch, head 
 		}
 	}
 	if start < 0 {
-		return "the branch's push history does not include its creation", false
+		return "the branch's push history does not include its creation", disproven, nil
 	}
 	prev := ""
 	for i, a := range acts[start:] {
 		switch {
 		case a.Actor == nil || a.Actor.Login != dependabotLogin:
-			return "someone other than dependabot[bot] changed the branch (" + safeType(a.ActivityType) + ")", false
+			return "someone other than dependabot[bot] changed the branch (" + safeType(a.ActivityType) + ")", disproven, nil
 		case i == 0 && !zeroSHA(a.Before):
-			return "the branch's creation does not start from nothing", false
+			return "the branch's creation does not start from nothing", disproven, nil
 		case i > 0 && a.ActivityType != "push" && a.ActivityType != "force_push":
-			return "the branch was changed by a " + safeType(a.ActivityType), false
+			return "the branch was changed by a " + safeType(a.ActivityType), disproven, nil
 		case i > 0 && a.Before != prev:
-			return "the branch's push history has a gap", false
+			return "the branch's push history has a gap", disproven, nil
 		case !gh.ValidSHA(a.After):
-			return "the branch's push history has a malformed commit ID", false
+			return "the branch's push history has a malformed commit ID", disproven, nil
 		}
 		prev = a.After
 	}
 	if prev != head {
-		return "the branch's push history does not reach the head commit yet", true
+		return "the branch's push history does not reach the head commit yet", lagging, nil
 	}
-	return "", false
+	return "", proven, nil
 }
 
-// timelineProblem reads the PR's timeline and returns why it disqualifies
-// the PR (its base branch was changed), or "". An unreadable timeline is
-// not proof either.
-func timelineProblem(ctx context.Context, c *gh.Client, repo string, pr int) string {
+// timelineProblem reads the PR's timeline and says whether it disqualifies
+// the PR (its base branch was changed). The error is the context's.
+func timelineProblem(ctx context.Context, c *gh.Client, repo string, pr int) (string, answer, error) {
 	events, err := gh.List[struct {
 		Event string `json:"event"`
 	}](ctx, c, fmt.Sprintf("repos/%s/issues/%d/timeline", repo, pr))
 	if err != nil {
-		return fmt.Sprintf("the pull request's timeline could not be read (HTTP %d)", gh.StatusCode(err))
+		return notRead(ctx, "the pull request's timeline", err)
 	}
 	for _, e := range events {
 		if e.Event == "base_ref_changed" {
-			return "the pull request's base branch was changed after it was opened"
+			return "the pull request's base branch was changed after it was opened", disproven, nil
 		}
 	}
-	return ""
+	return "", proven, nil
 }
 
-type ruleset struct {
-	ID          int64  `json:"id"`
-	Target      string `json:"target"`
-	Enforcement string `json:"enforcement"`
-	Conditions  *struct {
-		RefName *struct {
-			Include []string `json:"include"`
-			Exclude []string `json:"exclude"`
-		} `json:"ref_name"`
-	} `json:"conditions"`
-	Rules []struct {
+// headRefRe is the shape of a Dependabot branch name the gate puts in a
+// request path: letters, digits and ._/- only. Dependabot's own names fit
+// it; a name that does not is not asked about, which is not proof.
+var headRefRe = regexp.MustCompile(`^dependabot/[A-Za-z0-9._/-]{1,240}$`)
+
+// rulesProblem says whether GitHub's rules for the pull request's head
+// branch restrict creating, updating and deleting it, and if not, why.
+//
+// GitHub is asked which rules apply to the branch (rules/branches), and
+// answers with every rule of every active ruleset whose conditions match
+// it, repository and organization rulesets alike; rulesets that are
+// disabled or only evaluated are left out. The gate matches no ref
+// pattern itself: a matcher of its own is a second reading of GitHub's
+// pattern rules, and v0.1.9's did not agree with them. The error is the
+// context's.
+func rulesProblem(ctx context.Context, c *gh.Client, repo, branch string) (string, answer, error) {
+	const badName = "the branch's name is not one the gate asks GitHub's rules about"
+	if !headRefRe.MatchString(branch) {
+		return badName, disproven, nil
+	}
+	for _, el := range strings.Split(branch, "/") {
+		if el == "" || el == "." || strings.Contains(el, "..") {
+			return badName, disproven, nil
+		}
+	}
+	rules, err := gh.List[struct {
 		Type       string `json:"type"`
 		Parameters struct {
 			UpdateAllowsFetchAndMerge bool `json:"update_allows_fetch_and_merge"`
 		} `json:"parameters"`
-	} `json:"rules"`
-}
-
-// rulesetProblem returns "" when the repository (or its owner) has an
-// active branch ruleset that restricts creating, updating and deleting
-// every refs/heads/dependabot/** branch, and otherwise why not. Names are
-// ignored; an unreadable ruleset is not proof.
-func rulesetProblem(ctx context.Context, c *gh.Client, repo string) string {
-	const missing = "no active ruleset restricts creating, updating and deleting dependabot/ branches"
-	list, err := gh.List[ruleset](ctx, c, fmt.Sprintf("repos/%s/rulesets?includes_parents=true", repo))
+	}](ctx, c, fmt.Sprintf("repos/%s/rules/branches/%s", repo, branch))
 	if err != nil {
-		return fmt.Sprintf("the repository's rulesets could not be read (HTTP %d)", gh.StatusCode(err))
+		return notRead(ctx, "the branch's rules", err)
 	}
-	for _, s := range list {
-		if s.Target != "branch" || s.Enforcement != "active" || s.ID <= 0 {
-			continue
-		}
-		var full ruleset
-		if err := c.Get(ctx, fmt.Sprintf("repos/%s/rulesets/%d?includes_parents=true", repo, s.ID), &full); err != nil {
-			return fmt.Sprintf("a ruleset could not be read (HTTP %d)", gh.StatusCode(err))
-		}
-		if full.Target == "branch" && full.Enforcement == "active" && full.coversDependabot() && full.restrictsAll() {
-			return ""
-		}
-	}
-	return missing
-}
-
-func (s *ruleset) restrictsAll() bool {
 	have := map[string]bool{}
-	for _, r := range s.Rules {
+	for _, r := range rules {
+		// An update rule that lets anyone pull the base branch in does
+		// not keep the branch Dependabot's alone.
 		if r.Type == "update" && r.Parameters.UpdateAllowsFetchAndMerge {
 			continue
 		}
 		have[r.Type] = true
 	}
-	return have["creation"] && have["update"] && have["deletion"]
-}
-
-// coversDependabot: some include pattern matches every branch under
-// refs/heads/dependabot/, and no exclude pattern can match one.
-func (s *ruleset) coversDependabot() bool {
-	if s.Conditions == nil || s.Conditions.RefName == nil {
-		return false
+	if !have["creation"] || !have["update"] || !have["deletion"] {
+		return "no active rule restricts creating, updating and deleting this dependabot/ branch", disproven, nil
 	}
-	covered := false
-	for _, p := range s.Conditions.RefName.Include {
-		covered = covered || coversAllDependabot(p)
-	}
-	for _, p := range s.Conditions.RefName.Exclude {
-		if !excludesNoDependabot(p) {
-			return false
-		}
-	}
-	return covered
-}
-
-const dependabotRefs = "refs/heads/" + branchPrefix
-
-// coversAllDependabot reports whether an fnmatch include pattern matches
-// every ref under refs/heads/dependabot/: ~ALL, or a literal directory
-// prefix of it followed by "**" (refs/heads/dependabot/**, refs/heads/**,
-// **). "*" does not cross "/", so refs/heads/dependabot/* does not.
-func coversAllDependabot(p string) bool {
-	if p == "~ALL" {
-		return true
-	}
-	prefix, ok := strings.CutSuffix(p, "**")
-	return ok && (prefix == "" || strings.HasSuffix(prefix, "/")) &&
-		!strings.ContainsAny(prefix, "*?[]{}\\!~") && strings.HasPrefix(dependabotRefs, prefix)
-}
-
-// excludesNoDependabot reports whether an exclude pattern certainly
-// matches no dependabot/ branch: the default branch, or a literal ref
-// outside refs/heads/dependabot/.
-func excludesNoDependabot(p string) bool {
-	if p == "~DEFAULT_BRANCH" {
-		return true
-	}
-	return !strings.ContainsAny(p, "*?[]{}\\!~") && !strings.HasPrefix(p, dependabotRefs)
+	return "", proven, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -555,99 +524,4 @@ func findPR(ctx context.Context, c *gh.Client, ev *Event) (int, error) {
 		return 0, nil
 	}
 	return nums[0], nil
-}
-
-// ignoredBy decides whether a verified Dependabot PR is left to another
-// process: its branch's ecosystem and every declared update's ecosystem
-// must agree and be in ignore. A mixed or disagreeing update set, or an
-// empty one, is not ignored (ok false; why says why, for the log).
-//
-// Dependabot's updated-dependencies block carries no ecosystem today, so
-// each declared update's ecosystem is the branch's; the check still runs
-// on Declared so that nothing classify records can widen what is ignored.
-func ignoredBy(ignore map[model.Ecosystem]bool, branch model.Ecosystem, declared []model.Update) (why string, ok bool) {
-	switch {
-	case len(ignore) == 0 || !ignore[branch]:
-		return "", false
-	case len(declared) == 0:
-		return "no declared updates", false
-	}
-	for _, d := range declared {
-		switch {
-		case d.Ecosystem != branch && ignore[d.Ecosystem]:
-			return fmt.Sprintf("a declared update's ecosystem %s disagrees with the branch's %s", safeEco(d.Ecosystem), branch), false
-		case d.Ecosystem != branch:
-			return fmt.Sprintf("the update set mixes %s with %s", branch, safeEco(d.Ecosystem)), false
-		}
-	}
-	return fmt.Sprintf("every declared update is in ignored ecosystem %s (ignore_ecosystems): another process owns these pull requests", branch), true
-}
-
-func safeEco(e model.Ecosystem) string {
-	if typeRe.MatchString(string(e)) {
-		return string(e)
-	}
-	return "unknown"
-}
-
-func updateType(s string) model.UpdateType {
-	switch s {
-	case "version-update:semver-patch":
-		return model.Patch
-	case "version-update:semver-minor":
-		return model.Minor
-	case "version-update:semver-major":
-		return model.Major
-	}
-	return model.Unknown
-}
-
-var ghsaRe = regexp.MustCompile(`\bGHSA(?:-[23456789cfghjmpqrvwx]{4}){3}\b`)
-
-// securityInfo: a `security` label or a GHSA ID in the body marks the
-// update as a security update. Only the IDs are kept from the body.
-func securityInfo(pr *pull) (bool, []string) {
-	sec := false
-	for _, l := range pr.Labels {
-		if l.Name == "security" {
-			sec = true
-		}
-	}
-	var ids []string
-	seen := map[string]bool{}
-	for _, id := range ghsaRe.FindAllString(pr.Body, 50) {
-		if !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
-	return sec || len(ids) > 0, ids
-}
-
-var refRe = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,255}$`)
-
-func safeRef(s string) string {
-	if !refRe.MatchString(s) || strings.Contains(s, "..") || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "/") {
-		return ""
-	}
-	return s
-}
-
-// safePath accepts a relative, clean, slash-separated path without
-// control characters.
-func safePath(p string) bool {
-	if p == "" || len(p) > 4096 || strings.HasPrefix(p, "/") || path.Clean(p) != p || p == "." {
-		return false
-	}
-	for _, el := range strings.Split(p, "/") {
-		if el == ".." {
-			return false
-		}
-	}
-	for _, r := range p {
-		if unicode.IsControl(r) || r == unicode.ReplacementChar {
-			return false
-		}
-	}
-	return true
 }

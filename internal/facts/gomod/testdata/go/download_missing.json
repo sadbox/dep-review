@@ -1,0 +1,15 @@
+{
+	"Path": "github.com/fsnotify/fsnotify",
+	"Version": "v1.5.4",
+	"Info": "/scratch/gopath/pkg/mod/cache/download/github.com/fsnotify/fsnotify/@v/v1.5.4.info",
+	"GoMod": "/scratch/gopath/pkg/mod/cache/download/github.com/fsnotify/fsnotify/@v/v1.5.4.mod",
+	"Zip": "/scratch/gopath/pkg/mod/cache/download/github.com/fsnotify/fsnotify/@v/v1.5.4.zip",
+	"Dir": "/scratch/gopath/pkg/mod/github.com/fsnotify/fsnotify@v1.5.4",
+	"Sum": "h1:jRbGcIw6P2Meqdwuo0H1p6JVLbL5DHKAKlYndzMwVZI=",
+	"GoModSum": "h1:OVB6XrOHzAwXMpEM7uPOzcehqUV2UqJxmVXmkdnm1bU="
+}
+{
+	"Path": "github.com/fsnotify/fsnotify",
+	"Version": "v1.5.99",
+	"Error": "github.com/fsnotify/fsnotify@v1.5.99: reading https://proxy.golang.org/github.com/fsnotify/fsnotify/@v/v1.5.99.info: 404 Not Found\n\tserver response: not found: github.com/fsnotify/fsnotify@v1.5.99: invalid version: unknown revision v1.5.99"
+}

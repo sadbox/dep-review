@@ -1,0 +1,53 @@
+{
+  "name": "tailwindcss",
+  "time": {
+    "4.3.4": "2026-11-02T21:30:42.446Z",
+    "4.3.5": "2026-11-06T15:16:02.164Z",
+    "created": "2017-10-06T15:05:20.621Z",
+    "modified": "2026-11-20T15:36:25.200Z"
+  },
+  "versions": {
+    "4.3.4": {
+      "dist": {
+        "attestations": {
+          "url": "https://registry.npmjs.org/-/npm/v1/attestations/tailwindcss@4.3.4",
+          "provenance": {
+            "predicateType": "https://slsa.dev/provenance/v1"
+          }
+        },
+        "integrity": "sha512-PCJZTFFdG+sL3gvnP1Do9o6GbkvH2q0p04xSs3f7cSvmAeK+sttG+/7ncK1fdRwKFfC7n+wDDJaOMBSefkI9ow==",
+        "tarball": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.4.tgz"
+      },
+      "license": "MIT",
+      "name": "tailwindcss",
+      "scripts": {
+        "dev": "tsup-node --env.NODE_ENV development --watch",
+        "lint": "tsc --noEmit",
+        "build": "tsup-node --env.NODE_ENV production",
+        "test:ui": "playwright test"
+      },
+      "version": "4.3.4"
+    },
+    "4.3.5": {
+      "dist": {
+        "attestations": {
+          "url": "https://registry.npmjs.org/-/npm/v1/attestations/tailwindcss@4.3.5",
+          "provenance": {
+            "predicateType": "https://slsa.dev/provenance/v1"
+          }
+        },
+        "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
+        "tarball": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz"
+      },
+      "license": "MIT",
+      "name": "tailwindcss",
+      "scripts": {
+        "dev": "tsup-node --env.NODE_ENV development --watch",
+        "lint": "tsc --noEmit",
+        "build": "tsup-node --env.NODE_ENV production",
+        "test:ui": "playwright test"
+      },
+      "version": "4.3.5"
+    }
+  }
+}

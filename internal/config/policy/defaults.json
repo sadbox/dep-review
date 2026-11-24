@@ -1,0 +1,30 @@
+{
+  "min_age_hours": 72,
+  "unread_age_days": 14,
+  "major_age_days": 14,
+  "new_name_age_days": 365,
+  "wait_deadline_days": 7,
+  "fast_path": true,
+  "fast_path_companions": "ride-along",
+  "listed": {
+    "go_modules": ["golang.org/x/", "google.golang.org/", "cloud.google.com/go",
+                   "github.com/aws/", "github.com/Azure/", "github.com/AzureAD/",
+                   "github.com/microsoft/", "github.com/microsoftgraph/",
+                   "go.opentelemetry.io/"],
+    "github_actions": ["actions/", "github/", "docker/", "astral-sh/"],
+    "docker": ["docker.io/library/", "gcr.io/distroless/"],
+    "npm": ["tailwindcss", "@tailwindcss/"]
+  },
+  "own_workflows": [
+    {"repository": "sadbox/ci", "repository_id": 1465779983, "owner_id": 2502941},
+    {"repository": "sadbox/dep-review", "repository_id": 1465738661, "owner_id": 2502941}
+  ],
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "context_tokens": 1000000,
+  "max_output_tokens": 16000,
+  "chunk_bytes": 400000,
+  "max_chunks": 12,
+  "request_timeout_seconds": 600,
+  "attempts": 3
+}

@@ -1,0 +1,9 @@
+{
+  "method": "HEAD",
+  "url": "https://gcr.io/v2/distroless/static-debian13/manifests/nonroot",
+  "status": 200,
+  "header": {
+    "Content-Type": "application/vnd.oci.image.index.v1+json",
+    "Docker-Content-Digest": "sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5"
+  }
+}

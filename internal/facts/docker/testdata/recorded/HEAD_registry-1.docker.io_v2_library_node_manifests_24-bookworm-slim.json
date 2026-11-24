@@ -1,0 +1,9 @@
+{
+  "method": "HEAD",
+  "url": "https://registry-1.docker.io/v2/library/node/manifests/24-bookworm-slim",
+  "status": 200,
+  "header": {
+    "Content-Type": "application/vnd.oci.image.index.v1+json",
+    "Docker-Content-Digest": "sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54"
+  }
+}
