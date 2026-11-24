@@ -143,7 +143,7 @@ const (
 // settings the API takes and that a chunk fits the model's window.
 //
 // How the chunk budget follows from the window (Anthropic's model table
-// as the claude-api skill carried it on 2026-11-03; whoever changes the
+// as read on 2026-11-03; whoever changes the
 // model sets context_tokens from that model's max_input_tokens in GET
 // /v1/models/{id}, not from memory):
 //
@@ -194,7 +194,7 @@ func TestEmbeddedSettings(t *testing.T) {
 	if c.ChunkBytes < 1 || c.ChunkBytes*2 > room {
 		t.Errorf("chunk_bytes %d is not under half of the worst-case room (%d)", c.ChunkBytes, room)
 	}
-	// The red team's example must fit the default budget.
+	// A read of 4.28 MB must fit the default budget.
 	if total := c.ChunkBytes * c.MaxChunks; c.MaxChunks < 1 || total < 4_280_000 {
 		t.Errorf("the default budget is %d bytes, less than the 4.28 MB setup-go diff", total)
 	}

@@ -18,7 +18,7 @@ import (
 //
 //	DEP_REVIEW_VETO_LIVE=1 ANTHROPIC_API_KEY=... go test ./internal/veto/ -run TestLive -v
 //
-// It was written without ever being run.
+// It has not been run yet.
 func TestLive(t *testing.T) {
 	if os.Getenv("DEP_REVIEW_VETO_LIVE") != "1" {
 		t.Skip("set DEP_REVIEW_VETO_LIVE=1 and " + APIKeyEnv + " to call the real API")
