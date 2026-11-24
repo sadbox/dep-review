@@ -57,7 +57,7 @@ func (r *replay) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		return response(req, c.status, []byte(c.body)), nil
 	}
-	file := filepath.Join("testdata", "github", filepath.FromSlash(path))
+	file := recording(path)
 	if body, err := os.ReadFile(file + ".json"); err == nil {
 		return response(req, http.StatusOK, body), nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -68,6 +68,19 @@ func (r *replay) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	r.t.Errorf("replay: no recording and no override for GET %s", path)
 	return nil, errors.New("replay: no recording")
+}
+
+// recording is the file of a request path, without its ending. GitHub
+// takes an owner and a repository name in any case, so those two elements
+// are folded to the lower case record.sh stored them in. Without that a
+// name spelled another way finds its recording only where the file system
+// ignores case.
+func recording(path string) string {
+	el := strings.Split(path, "/")
+	if len(el) >= 3 && el[0] == "repos" {
+		el[1], el[2] = strings.ToLower(el[1]), strings.ToLower(el[2])
+	}
+	return filepath.Join("testdata", "github", filepath.FromSlash(strings.Join(el, "/")))
 }
 
 func response(req *http.Request, status int, body []byte) *http.Response {
