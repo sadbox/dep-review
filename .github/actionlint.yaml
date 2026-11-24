@@ -1,0 +1,22 @@
+# actionlint's configuration for this repository. A caller's own file
+# replaces sadbox/ci's default entirely (lint.yml), so the runner labels
+# and the first ignore below repeat that file.
+
+# actionlint 1.7.12 doesn't know the ubuntu-26.04 runner labels yet.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
+
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # The job.workflow_* context properties (September 2026), which
+      # gate.yml uses to build the gate from its own commit; actionlint
+      # 1.7.12 predates them.
+      - 'property "workflow_(sha|repository)" is not defined in object type'
+      # `queue: max` in a concurrency block (GitHub, May 2026): up to 100
+      # jobs wait in the group where one did. gate.yml's publish job needs
+      # it, and actionlint 1.7.12 predates the key. Take both out once
+      # actionlint knows them.
+      - 'unexpected key "queue" for "concurrency" section'
