@@ -232,7 +232,7 @@ func TestClassify(t *testing.T) {
 		{"signature reason not valid", func(f *fixture) {
 			f.commits[0]["commit"].(map[string]any)["verification"] = map[string]any{"verified": true, "reason": "unknown_key"}
 		}, model.KindDependabotUnverified, "verified signature"},
-		// Review finding 1: who moved the branch, from its activity log.
+		// Who moved the branch, from its activity log.
 		{"rebased by dependabot", func(f *fixture) {
 			mid := strings.Repeat("5", 40)
 			f.activity = []map[string]any{act("branch_creation", "dependabot[bot]", zero, mid), act("force_push", "dependabot[bot]", mid, head)}

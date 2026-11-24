@@ -216,7 +216,7 @@ func TestAStatusIsSetWhenGitHubCannotSay(t *testing.T) {
 	}
 }
 
-// TestAStaleSuccessIsReplaced is the verifier's sequence turned around: a
+// TestAStaleSuccessIsReplaced is the sequence above turned around: a
 // wait, then a merge whose success is set and whose run then runs out of
 // its time in the merge call, so that nothing records the success, then
 // the same wait again. GitHub shows the success, so the wait's status is

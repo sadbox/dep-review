@@ -58,7 +58,7 @@ func TestContainerActionIsNotRead(t *testing.T) {
 		{"a bare value, and a comment after it", nil, with(map[string]string{"action.yml": "runs:\n  using: node20 # LTS\n  main: dist/index.js\n"}), []string{"."}, ""},
 		{"line ends of another system", nil, with(map[string]string{"action.yml": strings.ReplaceAll(nodeAction, "\n", "\r\n")}), []string{"."}, ""},
 
-		// The verifier's case: the release moves only the image's tag.
+		// The release moves only the image's tag.
 		{"an image by reference", with(map[string]string{"action.yml": fmt.Sprintf(imageAction, "2.3.0")}), with(map[string]string{"action.yml": fmt.Sprintf(imageAction, "2.3.1")}), []string{"."}, "docker://"},
 		{"an image by a reference of another form", nil, with(map[string]string{"action.yml": "runs:\n  using: docker\n  image: ghcr.io/someorg/scan-action:2.3.1\n"}), []string{"."}, "that is not `using: nodeNN`"},
 		{"an image built from a Dockerfile", with(map[string]string{"action.yml": dockerfile, "Dockerfile": "FROM alpine:3.20\n"}), with(map[string]string{"action.yml": dockerfile, "Dockerfile": "FROM alpine:3.21\n"}), []string{"."}, "that is not `using: nodeNN`"},
@@ -98,8 +98,8 @@ func TestContainerActionIsNotRead(t *testing.T) {
 		// at the same commit, which has no actions.lock entry of its own:
 		// `uses: $/dir`, or `uses: owner/repo/dir@<the same tag>`. Then
 		// every directory with a metadata file counts, as when the
-		// directory is not known (spec section 11, amendment 77). The
-		// verifier's two variants:
+		// directory is not known (spec section 11, amendment 77). Two
+		// variants:
 		{"a composite action that runs an image action of its repository", with(map[string]string{"action.yml": selfStep, "inner/action.yml": fmt.Sprintf(imageAction, "2.3.0")}),
 			with(map[string]string{"action.yml": selfStep, "inner/action.yml": fmt.Sprintf(imageAction, "2.3.1")}), []string{"."}, "inner/action.yml names a docker:// image"},
 		{"a composite action that runs a Dockerfile action of its repository", with(map[string]string{"action.yml": selfStep, "inner/action.yml": dockerfile, "inner/Dockerfile": "FROM alpine:3.20\n"}),
