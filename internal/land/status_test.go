@@ -25,10 +25,10 @@ func statusLimit(f *fakeGitHub, limit int) Config {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/o/r/statuses/") {
 			if seen[r.URL.Path] >= limit {
-				io.ReadAll(r.Body)
+				_, _ = io.ReadAll(r.Body) // read and dropped: the write is refused
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnprocessableEntity)
-				io.WriteString(w, `{"message":"Validation Failed","errors":[{"resource":"Status","code":"custom","message":"This SHA and context has reached the maximum number of statuses."}]}`)
+				_, _ = io.WriteString(w, `{"message":"Validation Failed","errors":[{"resource":"Status","code":"custom","message":"This SHA and context has reached the maximum number of statuses."}]}`)
 				return
 			}
 			seen[r.URL.Path]++
@@ -226,7 +226,8 @@ func TestAStaleSuccessIsReplaced(t *testing.T) {
 	f := newFake(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/merge") {
-			io.ReadAll(r.Body)
+			// Read and dropped: this merge never answers in time.
+			_, _ = io.ReadAll(r.Body)
 			select { // GitHub is slow, and the job's time ends
 			case <-r.Context().Done():
 			case <-time.After(3 * time.Second):
@@ -267,7 +268,9 @@ func TestAStaleSuccessIsReplaced(t *testing.T) {
 	if res, err := Act(ctx, cfg, ev); err == nil || res.Action != "" {
 		t.Fatalf("run 2: %+v, %v; want nothing written", res, err)
 	}
-	Asked(ctx, cfg, testPR, headA, ev.Vetoes()) // what publish does next, on the same context
+	// What publish does next, on the same context; publish only logs its
+	// error, and the status below is what this checks.
+	_ = Asked(ctx, cfg, testPR, headA, ev.Vetoes())
 	if s := f.statuses(headA); !strings.HasPrefix(s[len(s)-1], "success: ") {
 		t.Fatalf("run 2 left %q", s)
 	}

@@ -319,7 +319,7 @@ func TestUnknownFactIsPerson(t *testing.T) {
 		updateType := reflect.TypeOf(UpdateFacts{})
 		for i := 0; i < updateType.NumField(); i++ {
 			field := updateType.Field(i).Name
-			if exemptUpdate[field] != "" && !(field == "NameCreated" && name == "seasoned new name") {
+			if exemptUpdate[field] != "" && (field != "NameCreated" || name != "seasoned new name") {
 				continue
 			}
 			f := clonePR(base)
@@ -570,15 +570,15 @@ func TestMergeNeedsEveryFact(t *testing.T) {
 				t.Fatalf("merged without a first-seen time in the past: %+v", u)
 			case u.Veto != nil:
 				t.Fatalf("merged over a veto: %+v", u)
-			case u.Read != ReadFull && u.Read != ReadPartial && !(u.Read == ReadNotApplicable && f.Ecosystem == Docker):
+			case u.Read != ReadFull && u.Read != ReadPartial && (u.Read != ReadNotApplicable || f.Ecosystem != Docker):
 				t.Fatalf("merged unread: %+v", u)
 			case f.Ecosystem == Docker && u.Superseded.Holds():
 				t.Fatalf("merged a superseded pin: %+v", u)
-			case u.Major.Holds() && !u.Listed.Holds() && !(u.Indirect.Holds() && (f.Ecosystem == GoModules || f.Ecosystem == NPM)):
+			case u.Major.Holds() && !u.Listed.Holds() && (!u.Indirect.Holds() || (f.Ecosystem != GoModules && f.Ecosystem != NPM)):
 				t.Fatalf("merged an unlisted major of a dependency the repository declares: %+v", u)
 			case u.NewName.Holds() && !u.Listed.Holds() && (!u.NameCreated.Known() || u.Read != ReadFull):
 				t.Fatalf("merged an unlisted new name without its conditions: %+v", u)
-			case !u.Known.Holds() && !(u.NewName.Holds() && !u.Listed.Holds()):
+			case !u.Known.Holds() && (!u.NewName.Holds() || u.Listed.Holds()):
 				t.Fatalf("merged a name that is not known: %+v", u)
 			case f.Ecosystem == Docker && !u.Listed.Holds():
 				t.Fatalf("merged an image that is not listed: %+v", u)

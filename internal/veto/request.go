@@ -53,7 +53,7 @@ func fingerprint(parts ...string) string {
 	fmt.Fprintf(h, "dep-review veto question:%d:", len(parts))
 	for _, p := range parts {
 		fmt.Fprintf(h, "%d:", len(p))
-		io.WriteString(h, p)
+		_, _ = io.WriteString(h, p) // a hash.Hash's Write never fails
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

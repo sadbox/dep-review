@@ -258,7 +258,9 @@ func TestPushover(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("Pushover's form: %v", err)
+		}
 		form = r.PostForm
 		w.WriteHeader(code)
 	}))

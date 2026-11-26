@@ -183,10 +183,10 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	case r.URL.Path == "/repos/sadbox/linkclean/pulls/9":
 		w.WriteHeader(g.pullStatus)
-		w.Write([]byte(g.pull))
+		_, _ = w.Write([]byte(g.pull)) // a failed write is the client's to report
 	case r.URL.Path == g.rulesPath:
 		w.WriteHeader(g.rulesStatus)
-		w.Write([]byte(g.rules))
+		_, _ = w.Write([]byte(g.rules)) // a failed write is the client's to report
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

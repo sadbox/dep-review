@@ -129,8 +129,9 @@ func (ix *index) stored(ctx context.Context, path, version string) (time.Time, b
 	}
 	defer resp.Body.Close()
 	// The go.mod itself is not looked at; reading it leaves the
-	// connection fit for the next request.
-	io.Copy(io.Discard, io.LimitReader(resp.Body, maxModFile))
+	// connection fit for the next request, and a failed read costs only
+	// that.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxModFile))
 	if resp.StatusCode != http.StatusOK {
 		return time.Time{}, false
 	}
@@ -217,7 +218,7 @@ func (ix *index) page(ctx context.Context, since time.Time) ([]indexEntry, error
 	}
 	resp, err := ix.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errIndexDown, err)
+		return nil, fmt.Errorf("%w: %v", errIndexDown, err) //nolint:errorlint // errIndexDown is the only class; the transport's error is text
 	}
 	defer resp.Body.Close()
 	switch {
@@ -229,7 +230,7 @@ func (ix *index) page(ctx context.Context, since time.Time) ([]indexEntry, error
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxIndexPage+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errIndexDown, err)
+		return nil, fmt.Errorf("%w: %v", errIndexDown, err) //nolint:errorlint // errIndexDown is the only class; the transport's error is text
 	}
 	if len(body) > maxIndexPage {
 		return nil, fmt.Errorf("page larger than %d bytes", maxIndexPage)

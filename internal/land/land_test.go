@@ -756,7 +756,9 @@ func TestDefaultBranch(t *testing.T) {
 	if _, err := pr.defaultBranch(testRepo); err == nil {
 		t.Error("a pull request without a base repository has a default branch")
 	}
-	json.Unmarshal([]byte(pullJSON(testPR, "open", headA, "main", "clean", false)), &pr)
+	if err := json.Unmarshal([]byte(pullJSON(testPR, "open", headA, "main", "clean", false)), &pr); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pr.defaultBranch("o/other"); err == nil {
 		t.Error("a pull request of another repository was accepted")
 	}

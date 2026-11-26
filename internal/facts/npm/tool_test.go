@@ -231,7 +231,9 @@ func TestCappedWriter(t *testing.T) {
 		t.Errorf("kept %q, truncated %v", got, c.truncated)
 	}
 	exact := &capped{max: 3}
-	exact.Write([]byte("abc"))
+	if n, err := exact.Write([]byte("abc")); n != 3 || err != nil {
+		t.Errorf("Write = %d, %v", n, err)
+	}
 	if exact.truncated {
 		t.Error("output of exactly the limit counts as truncated")
 	}

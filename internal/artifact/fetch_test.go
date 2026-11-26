@@ -493,7 +493,7 @@ func TestDownloadFailures(t *testing.T) {
 			// Only a failure that was retried to the end is a wait. An
 			// answer that arrived (404, 403, a redirect, other bytes) must
 			// not be waited out.
-			if got := errors.Is(err, ErrUnavailable); got != (tt.wantErr == ErrUnavailable) {
+			if got := errors.Is(err, ErrUnavailable); got != errors.Is(tt.wantErr, ErrUnavailable) {
 				t.Errorf("error %v: unavailable is %v", err, got)
 			}
 			if got := len(rp.urls()); got != tt.requests {
@@ -551,7 +551,7 @@ func TestFetchError(t *testing.T) {
 	} {
 		got := fetchError(tc.err, tc.callerErr, tc.timedOut)
 		for _, class := range []error{ErrHashMismatch, ErrUnsafeArchive, ErrBadRef, ErrUnavailable, context.Canceled, context.DeadlineExceeded} {
-			if errors.Is(got, class) != (class == tc.want) {
+			if errors.Is(got, class) != errors.Is(tc.want, class) {
 				t.Errorf("%s: %v: errors.Is(%v) is %v", tc.name, got, class, errors.Is(got, class))
 			}
 		}

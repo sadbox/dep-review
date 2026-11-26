@@ -454,7 +454,7 @@ func TestReviewHTTPErrors(t *testing.T) {
 			if n := len(f.recordedRequests()); n != tc.wantReqs {
 				t.Errorf("%d requests, want %d", n, tc.wantReqs)
 			}
-			if mustJSON(*waits) != mustJSON(tc.wantWaits) && !(len(*waits) == 0 && len(tc.wantWaits) == 0) {
+			if mustJSON(*waits) != mustJSON(tc.wantWaits) && (len(*waits) != 0 || len(tc.wantWaits) != 0) {
 				t.Errorf("waits = %v, want %v", *waits, tc.wantWaits)
 			}
 		})

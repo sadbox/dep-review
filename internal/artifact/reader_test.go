@@ -328,8 +328,12 @@ func TestAttributesDoNotHideAFile(t *testing.T) {
 	// Whether the trap works is git's business, so it is only logged: with
 	// git 2.56 a plain diff of two files in this repository hides the
 	// change. The assertion below holds either way.
-	os.WriteFile(filepath.Join(scratch, "a.js"), []byte("line1\nline2\n"), 0o600)
-	os.WriteFile(filepath.Join(scratch, "b.js"), []byte("line1\nline2 evil()\n"), 0o600)
+	if err := os.WriteFile(filepath.Join(scratch, "a.js"), []byte("line1\nline2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "b.js"), []byte("line1\nline2 evil()\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	plain := exec.Command(git, "diff", "--no-index", "--", "a.js", "b.js")
 	plain.Dir = scratch
 	plain.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
@@ -361,10 +365,18 @@ func TestGitIgnoresTheEnvironment(t *testing.T) {
 
 	home := t.TempDir()
 	config := "[diff]\n\texternal = true\n\tnoprefix = true\n\tcontext = 0\n[core]\n\tattributesFile = " + filepath.Join(home, "attrs") + "\n"
-	os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(config), 0o600)
-	os.WriteFile(filepath.Join(home, "attrs"), []byte("* binary\n"), 0o600)
-	os.MkdirAll(filepath.Join(home, ".config", "git"), 0o700)
-	os.WriteFile(filepath.Join(home, ".config", "git", "attributes"), []byte("* binary\n"), 0o600)
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "attrs"), []byte("* binary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".config", "git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".config", "git", "attributes"), []byte("* binary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
