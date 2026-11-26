@@ -59,40 +59,45 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	call := r.Method + " " + strings.TrimPrefix(r.URL.Path, "/repos/o/r/")
 	f.calls = append(f.calls, call)
+	// A failed write to the client is the client's to report.
 	switch {
 	case f.proof && f.unruled && call == branchRules:
-		io.WriteString(w, "[]")
+		_, _ = io.WriteString(w, "[]")
 	case f.proof && proofAnswers[call] != "":
-		io.WriteString(w, proofAnswers[call])
+		_, _ = io.WriteString(w, proofAnswers[call])
 	case (call == "POST issues/7/comments" || call == "PATCH issues/comments/1") && f.commentFails > 0:
 		f.commentFails--
 		w.WriteHeader(http.StatusBadGateway)
-		io.WriteString(w, `{"message":"Server Error"}`)
+		_, _ = io.WriteString(w, `{"message":"Server Error"}`)
 	case call == "GET pulls/7" && f.pull != "":
-		io.WriteString(w, f.pull)
+		_, _ = io.WriteString(w, f.pull)
 	case call == "GET pulls":
-		io.WriteString(w, "["+f.open+"]")
+		_, _ = io.WriteString(w, "["+f.open+"]")
 	case call == "GET issues/7/comments" && f.comment != "":
 		b, _ := json.Marshal([]map[string]any{{"id": 1, "body": f.comment, "user": map[string]string{"login": "gate[bot]"}}})
-		w.Write(b)
+		_, _ = w.Write(b)
 	case call == "GET issues/7/comments":
-		io.WriteString(w, "[]")
+		_, _ = io.WriteString(w, "[]")
 	case call == "POST issues/7/comments" || call == "PATCH issues/comments/1":
 		var in struct {
 			Body string `json:"body"`
 		}
-		json.Unmarshal(body, &in)
+		if err := json.Unmarshal(body, &in); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"message":"Problems parsing JSON"}`)
+			return
+		}
 		f.comment = in.Body
 		f.bodies = append(f.bodies, string(body))
 		w.WriteHeader(http.StatusCreated)
-		io.WriteString(w, "{}")
+		_, _ = io.WriteString(w, "{}")
 	case strings.HasPrefix(call, "POST statuses/"):
 		f.bodies = append(f.bodies, string(body))
 		w.WriteHeader(http.StatusCreated)
-		io.WriteString(w, "{}")
+		_, _ = io.WriteString(w, "{}")
 	default:
 		w.WriteHeader(http.StatusNotFound)
-		io.WriteString(w, `{"message":"Not Found"}`)
+		_, _ = io.WriteString(w, `{"message":"Not Found"}`)
 	}
 }
 
@@ -348,14 +353,14 @@ func TestPublishReportsWhatCouldNotBeEvaluated(t *testing.T) {
 	})
 	t.Run("a closed pull request gets nothing", func(t *testing.T) {
 		api := &fakeAPI{pull: strings.Replace(open, `"state":"open"`, `"state":"closed"`, 1)}
-		publishRefreshed(context.Background(), api.config(t), tried(t), nil)
+		_ = publishRefreshed(context.Background(), api.config(t), tried(t), nil) // only what it writes is checked
 		if len(api.bodies) != 0 {
 			t.Errorf("wrote %v", api.bodies)
 		}
 	})
 	t.Run("somebody else's pull request gets nothing", func(t *testing.T) {
 		api := &fakeAPI{pull: pullJSON("open", "mallory", testHead)}
-		publishRefreshed(context.Background(), api.config(t), tried(t), nil)
+		_ = publishRefreshed(context.Background(), api.config(t), tried(t), nil) // only what it writes is checked
 		if len(api.bodies) != 0 {
 			t.Errorf("wrote %v", api.bodies)
 		}
@@ -691,7 +696,7 @@ func (f *fakeAPI) outOfTime(t *testing.T) land.Config {
 		held = held || hold
 		mu.Unlock()
 		if hold {
-			io.ReadAll(r.Body)
+			_, _ = io.ReadAll(r.Body) // read and dropped: this write is held, not answered
 			<-r.Context().Done()
 			return
 		}

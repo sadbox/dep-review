@@ -209,8 +209,9 @@ func (p *Pushover) Notify(ctx context.Context, m Message) error {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		resp, err := client.Do(req)
 		if err == nil {
-			// The status says enough; the body is drained and not kept.
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			// The status says enough; the body is drained and not kept
+			// (a failed drain costs only the connection's reuse).
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return nil

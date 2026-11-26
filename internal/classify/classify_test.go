@@ -108,7 +108,8 @@ func (f *fixture) client(t *testing.T) *gh.Client {
 	t.Helper()
 	mux := http.NewServeMux()
 	js := func(v any) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) { json.NewEncoder(w).Encode(v) }
+		// A failed write is the client's to report.
+		return func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(v) }
 	}
 	mux.Handle("GET /repos/o/r/pulls/7", js(f.pr))
 	mux.Handle("GET /repos/o/r/pulls/7/commits", js(f.commits))
@@ -130,7 +131,7 @@ func (f *fixture) client(t *testing.T) *gh.Client {
 		if acts == nil {
 			acts = []map[string]any{}
 		}
-		json.NewEncoder(w).Encode(acts)
+		_ = json.NewEncoder(w).Encode(acts) // a failed write is the client's to report
 	})
 	mux.HandleFunc("GET /repos/o/r/issues/7/timeline", func(w http.ResponseWriter, r *http.Request) {
 		if f.tlCode != 0 {
@@ -141,7 +142,7 @@ func (f *fixture) client(t *testing.T) *gh.Client {
 		if tl == nil {
 			tl = []map[string]any{}
 		}
-		json.NewEncoder(w).Encode(tl)
+		_ = json.NewEncoder(w).Encode(tl) // a failed write is the client's to report
 	})
 	mux.HandleFunc("GET /repos/o/r/rules/branches/{branch...}", func(w http.ResponseWriter, r *http.Request) {
 		// The whole branch name, slashes and all, and nothing else.
@@ -156,7 +157,7 @@ func (f *fixture) client(t *testing.T) *gh.Client {
 		if rules == nil {
 			rules = []map[string]any{}
 		}
-		json.NewEncoder(w).Encode(rules)
+		_ = json.NewEncoder(w).Encode(rules) // a failed write is the client's to report
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request %s %s", r.Method, r.URL)

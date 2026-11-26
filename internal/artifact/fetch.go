@@ -111,7 +111,9 @@ func fetchError(err, callerErr error, timedOut bool) error {
 		// into a wait, however late it arrived.
 		return err
 	case timedOut:
-		return fmt.Errorf("%w: no complete download within %s: %v", ErrUnavailable, downloadTimeout, err)
+		// ErrUnavailable is the class; the cause stays text so that a
+		// context or network error under it adds no class of its own.
+		return fmt.Errorf("%w: no complete download within %s: %v", ErrUnavailable, downloadTimeout, err) //nolint:errorlint // see above
 	}
 	return err
 }

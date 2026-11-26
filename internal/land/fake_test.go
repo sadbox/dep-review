@@ -178,7 +178,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	answer := func(code int, body string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(code)
-		io.WriteString(w, body)
+		_, _ = io.WriteString(w, body) // a failed write is the client's to report
 	}
 	unknown := func() {
 		if !f.lenient {
@@ -368,7 +368,9 @@ func (f *fakeGitHub) combined(sha string) string {
 	for _, c := range f.calls {
 		if c.method == "POST" && c.path == "/repos/o/r/statuses/"+sha {
 			var s status
-			json.Unmarshal([]byte(c.body), &s)
+			if err := json.Unmarshal([]byte(c.body), &s); err != nil {
+				f.t.Errorf("POST %s: %v", c.path, err)
+			}
 			gate = &s
 		}
 	}

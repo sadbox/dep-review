@@ -107,7 +107,7 @@ func TestGoCommandKillsItsGroup(t *testing.T) {
 		// Whatever the test found, leave nothing running.
 		if data, err := os.ReadFile(beat + ".pid"); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 1 {
-				syscall.Kill(pid, syscall.SIGKILL)
+				_ = syscall.Kill(pid, syscall.SIGKILL) // ESRCH: nothing is left running
 			}
 		}
 	})

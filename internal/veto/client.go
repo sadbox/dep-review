@@ -249,7 +249,7 @@ func (c *Client) send(ctx context.Context, path string, body []byte) (raw []byte
 			return raw, requestID, nil
 		}
 		if ctx.Err() != nil {
-			return nil, "", fmt.Errorf("%w (%v)", ctx.Err(), err)
+			return nil, "", fmt.Errorf("%w (%v)", ctx.Err(), err) //nolint:errorlint // the class is the context's error; the attempt's error is text
 		}
 
 		// How long to wait before the next attempt; negative for none.

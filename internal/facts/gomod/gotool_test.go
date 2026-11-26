@@ -403,8 +403,12 @@ func TestCappedBuffer(t *testing.T) {
 	}
 	// A write that straddles the cap keeps what fits.
 	c := &cappedBuffer{max: 5}
-	c.Write([]byte("abc"))
-	c.Write([]byte("defg"))
+	for _, p := range []string{"abc", "defg"} {
+		// It takes every write whole, so the go command never fails on it.
+		if n, err := c.Write([]byte(p)); n != len(p) || err != nil {
+			t.Errorf("Write(%q) = %d, %v", p, n, err)
+		}
+	}
 	if string(c.b) != "abcde" || !c.over {
 		t.Errorf("buffer = %q, over = %v", c.b, c.over)
 	}

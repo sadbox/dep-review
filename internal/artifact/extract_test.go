@@ -273,7 +273,8 @@ func TestExtractTarGzRefusesUnsafeArchives(t *testing.T) {
 					t.Errorf("%s was written beside the extraction directory", e.Name())
 				}
 			}
-			filepath.WalkDir(filepath.Join(parent, "out"), func(p string, d fs.DirEntry, err error) error {
+			// The callback returns nil whatever it meets, so WalkDir does too.
+			_ = filepath.WalkDir(filepath.Join(parent, "out"), func(p string, d fs.DirEntry, err error) error {
 				if err == nil && !d.IsDir() && !d.Type().IsRegular() {
 					t.Errorf("%s is a %v", p, d.Type())
 				}

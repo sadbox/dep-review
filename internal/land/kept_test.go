@@ -24,9 +24,9 @@ func failingWrites(f *fakeGitHub, n int, prefix string) Config {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" && strings.HasPrefix(r.URL.Path, prefix) && n > 0 {
 			n--
-			io.ReadAll(r.Body)
+			_, _ = io.ReadAll(r.Body) // read and dropped: the write fails
 			w.WriteHeader(http.StatusBadGateway)
-			io.WriteString(w, `{"message":"Server Error"}`)
+			_, _ = io.WriteString(w, `{"message":"Server Error"}`) // a failed write is the client's to report
 			return
 		}
 		f.ServeHTTP(w, r)

@@ -136,7 +136,7 @@ func apiError(w http.ResponseWriter, status int, errType, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Request-Id", "req_fake_error")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{ // a failed write is the client's to report
 		"type":       "error",
 		"error":      map[string]string{"type": errType, "message": message},
 		"request_id": "req_fake_error",
@@ -211,7 +211,7 @@ func (f *fakeAPI) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var keys map[string]json.RawMessage
-	json.Unmarshal(body, &keys)
+	_ = json.Unmarshal(body, &keys) // a body that is not JSON is reported by the strict decode below
 	var names []string
 	for k := range keys {
 		names = append(names, k)
@@ -281,7 +281,7 @@ func (f *fakeAPI) messages(w http.ResponseWriter, r *http.Request) {
 		rep.status = http.StatusOK
 	}
 	w.WriteHeader(rep.status)
-	io.WriteString(w, rep.body)
+	_, _ = io.WriteString(w, rep.body) // a failed write is the client's to report
 }
 
 // oidc is GitHub's token endpoint: a fresh JWT per call, for the one
@@ -302,7 +302,7 @@ func (f *fakeAPI) oidc(w http.ResponseWriter, r *http.Request) {
 		f.jwts++
 		jwt := fmt.Sprintf("jwt-%d", f.jwts)
 		f.mu.Unlock()
-		json.NewEncoder(w).Encode(map[string]string{"value": jwt})
+		_ = json.NewEncoder(w).Encode(map[string]string{"value": jwt}) // a failed write is the client's to report
 		return
 	}
 	http.Error(w, "bad request", http.StatusBadRequest)
@@ -351,7 +351,7 @@ func (f *fakeAPI) exchange(w http.ResponseWriter, r *http.Request) {
 			// message, as a careless server might.
 			w.Header().Set("Request-Id", "req_fake_exchange")
 			w.WriteHeader(status)
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{ // a failed write is the client's to report
 				"type":    "error",
 				"error":   map[string]string{"type": "api_error", "message": "exchange failed", "assertion": body["assertion"]},
 				"request": body,
@@ -368,7 +368,7 @@ func (f *fakeAPI) exchange(w http.ResponseWriter, r *http.Request) {
 	tok := fmt.Sprintf("tok-%d", len(f.tokens)+1)
 	f.tokens[tok] = true
 	f.mu.Unlock()
-	json.NewEncoder(w).Encode(map[string]any{"access_token": tok, "token_type": "Bearer", "expires_in": f.tokenTTL})
+	_ = json.NewEncoder(w).Encode(map[string]any{"access_token": tok, "token_type": "Bearer", "expires_in": f.tokenTTL}) // a failed write is the client's to report
 }
 
 // block is one content block of a response.

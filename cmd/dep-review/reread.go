@@ -84,7 +84,10 @@ func reread(ctx context.Context, reviewer veto.Reviewer, fingerprint, refreshed,
 			Answered:    answered,
 			Logf:        log.Printf,
 		}.Run(ctx, dir, filepath.Join(out, e.Name()))
-		if err != nil && !(errors.Is(err, context.DeadlineExceeded) && verdicts.Version != 0) {
+		// Out of time with the verdicts file written: it is good, and the
+		// reads without a verdict wait (as in review).
+		partial := errors.Is(err, context.DeadlineExceeded) && verdicts.Version != 0
+		if err != nil && !partial {
 			log.Printf("reread: #%d: %v; its reads wait", number, err)
 			continue
 		}

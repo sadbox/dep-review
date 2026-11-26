@@ -158,7 +158,7 @@ func (r *registry) get(ctx context.Context, url string, max int64) ([]byte, erro
 	req.Header.Set("Accept", "application/json")
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errUnreachable, err)
+		return nil, fmt.Errorf("%w: %v", errUnreachable, err) //nolint:errorlint // errUnreachable is the only class; the transport's error is text
 	}
 	defer resp.Body.Close()
 	// The registry answers these URLs itself. An answer that came from
@@ -176,7 +176,7 @@ func (r *registry) get(ctx context.Context, url string, max int64) ([]byte, erro
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errUnreachable, err)
+		return nil, fmt.Errorf("%w: %v", errUnreachable, err) //nolint:errorlint // errUnreachable is the only class; the transport's error is text
 	}
 	if int64(len(body)) > max {
 		return nil, fmt.Errorf("more than %d MB", max>>20)

@@ -269,7 +269,10 @@ func (d *differ) diff(ctx context.Context, before, after []byte) ([]string, erro
 	case err == nil:
 		return nil, errors.New("git diff reports no difference between two files that differ")
 	case !errors.As(err, &exit) || exit.ExitCode() != 1:
-		return nil, fmt.Errorf("git diff: %v: %s", err, clip(stderr.String()))
+		// The cause stays text: Prepare's caller classes errors with
+		// errors.Is (api.go), and an exec or context error under this one
+		// must not put it in a class.
+		return nil, fmt.Errorf("git diff: %v: %s", err, clip(stderr.String())) //nolint:errorlint // see above
 	}
 
 	// Everything before the first hunk is git's header.

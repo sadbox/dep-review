@@ -230,7 +230,7 @@ func TestRereadDeniedExchange(t *testing.T) {
 		exchanges++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"Authentication failed"}}`))
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"Authentication failed"}}`)) // a failed write is the client's to report
 	}))
 	defer api.Close()
 	settings, fingerprint := reviewerSettings(t)

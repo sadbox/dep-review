@@ -12,31 +12,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  GOTOOLCHAIN: local
-  CGO_ENABLED: "0"
-
 jobs:
-  test:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7.1.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - name: vet
-        run: go vet ./...
-      - name: test
-        # -race needs cgo.
-        env:
-          CGO_ENABLED: "1"
-        run: go test -race -timeout 20m ./...
+  # sadbox/ci's Go checks (gofmt, go vet, go test -race, golangci-lint,
+  # govulncheck) on linux/amd64 and linux/arm64, with go.mod's Go (there is
+  # no image). -timeout 20m: a package's tests under -race have passed go
+  # test's default 10-minute limit per test binary on the runner (#39). The
+  # job also builds the tools and lints, hence 30 minutes. -count=1: a go
+  # test pass from setup-go's cache never stands in for a run.
+  go:
+    uses: sadbox/ci/.github/workflows/go.yml@d22f8f95bcc884ba539ce3f53c552823cff3230d # v0.6.0
+    permissions:
+      contents: read
+    with:
+      go-versions: '["go.mod"]'
+      go-test-flags: -count=1 -timeout 20m
+      timeout-minutes: 30
 
   # sadbox/ci's linters (actionlint, zizmor, shellcheck, whichever apply)
   # and gh actions-lock --verify. testdata/ is left out: it holds recorded

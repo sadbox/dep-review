@@ -189,7 +189,7 @@ func publishRefreshed(ctx context.Context, cfg land.Config, in string, ignore ma
 	swept, err := sweep(ctx, cfg, ignore)
 	switch {
 	case failed > 0 && (err != nil || swept > 0):
-		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on, and the look at the others did not go through (%d failures; %v)", failed, total, swept, err)
+		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on, and the look at the others did not go through (%d failures; %v)", failed, total, swept, err) //nolint:errorlint // err is nil when only swept > 0
 	case failed > 0:
 		return fmt.Errorf("publish: %d of %d pull requests could not be decided or acted on", failed, total)
 	case err != nil:

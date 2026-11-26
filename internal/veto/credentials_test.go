@@ -309,7 +309,7 @@ func TestExchangeResponses(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte(tc.body))
+				_, _ = w.Write([]byte(tc.body)) // a failed write is the client's to report
 			}))
 			defer srv.Close()
 			creds, err := NewFederated(Federation{
@@ -387,14 +387,14 @@ func TestGitHubOIDCResponses(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/elsewhere" {
 					elsewhere = true
-					w.Write([]byte(`{"value":"jwt-from-elsewhere"}`))
+					_, _ = w.Write([]byte(`{"value":"jwt-from-elsewhere"}`)) // a failed write is the client's to report
 					return
 				}
 				for k, v := range tc.header {
 					w.Header().Set(k, v)
 				}
 				w.WriteHeader(tc.status)
-				w.Write([]byte(tc.body))
+				_, _ = w.Write([]byte(tc.body)) // a failed write is the client's to report
 			}))
 			defer srv.Close()
 			jwt, err := GitHubOIDC{RequestURL: srv.URL + "/token", RequestToken: "x"}.Token(context.Background())

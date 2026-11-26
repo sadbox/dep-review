@@ -101,7 +101,7 @@ func TestRetries(t *testing.T) {
 					w.Header().Set(k, v)
 				}
 				w.WriteHeader(tt.responses[i].status)
-				io.WriteString(w, tt.responses[i].body)
+				_, _ = io.WriteString(w, tt.responses[i].body) // a failed write is the client's to report
 			}))
 			defer srv.Close()
 			c, sleeps := testClient(srv)
@@ -131,7 +131,7 @@ func TestRetries(t *testing.T) {
 func TestErrorMessage(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(409)
-		io.WriteString(w, `{"message":"Head branch was modified"}`)
+		_, _ = io.WriteString(w, `{"message":"Head branch was modified"}`) // a failed write is the client's to report
 	}))
 	defer srv.Close()
 	c, _ := testClient(srv)
@@ -149,7 +149,7 @@ func TestErrorMessageCap(t *testing.T) {
 		message := strings.Repeat(line, lines)
 		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(405)
-			json.NewEncoder(w).Encode(map[string]string{"message": message})
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": message}) // a failed write is the client's to report
 		}))
 		c, _ := testClient(srv)
 		var e *Error
@@ -194,12 +194,12 @@ func TestPagination(t *testing.T) {
 		switch page {
 		case "", "1":
 			w.Header().Set("Link", fmt.Sprintf(`<%s/items?per_page=100&page=2>; rel="next", <%s/items?per_page=100&page=3>; rel="last"`, srv.URL, srv.URL))
-			io.WriteString(w, `[{"n":1},{"n":2}]`)
+			_, _ = io.WriteString(w, `[{"n":1},{"n":2}]`) // a failed write is the client's to report
 		case "2":
 			w.Header().Set("Link", fmt.Sprintf(`<%s/items?per_page=100&page=3>; rel="next"`, srv.URL))
-			io.WriteString(w, `[{"n":3}]`)
+			_, _ = io.WriteString(w, `[{"n":3}]`)
 		case "3":
-			io.WriteString(w, `[{"n":4}]`)
+			_, _ = io.WriteString(w, `[{"n":4}]`)
 		}
 	}))
 	defer srv.Close()
@@ -216,7 +216,7 @@ func TestPagination(t *testing.T) {
 func TestPaginationRefusesForeignHost(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Link", `<https://evil.example/items?page=2>; rel="next"`)
-		io.WriteString(w, `[]`)
+		_, _ = io.WriteString(w, `[]`) // a failed write is the client's to report
 	}))
 	defer srv.Close()
 	c, _ := testClient(srv)
@@ -275,7 +275,7 @@ func TestPaginationNeverCutsAListShort(t *testing.T) {
 			w.Header().Add("Link", `<https://docs.example/x>; rel="deprecation"`)
 			w.Header().Add("Link", fmt.Sprintf(`<%s/two?page=2>; rel="next"`, srv.URL))
 		}
-		io.WriteString(w, `[{"n":1}]`)
+		_, _ = io.WriteString(w, `[{"n":1}]`) // a failed write is the client's to report
 	}))
 	defer srv.Close()
 	c, _ = testClient(srv)
@@ -358,7 +358,7 @@ func TestUnavailable(t *testing.T) {
 					w.Header().Set(k, v)
 				}
 				w.WriteHeader(tc.resp.status)
-				io.WriteString(w, tc.resp.body)
+				_, _ = io.WriteString(w, tc.resp.body) // a failed write is the client's to report
 			}))
 			defer srv.Close()
 			c, _ := testClient(srv)

@@ -156,7 +156,7 @@ func resolveTag(ctx context.Context, c *gh.Client, name, tag string) (tagAnswer,
 			// tag's commit is unknown either way, a 404 included. It is
 			// worth asking again only when GitHub did not answer.
 			if t.answer = a; a.state == missing {
-				t.answer.state = failed
+				t.state = failed
 			}
 			return t, nil
 		}
